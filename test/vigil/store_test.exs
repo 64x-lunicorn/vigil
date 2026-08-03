@@ -137,6 +137,7 @@ defmodule Vigil.StoreTest do
                })
 
       assert msg =~ "Duplikate"
+      assert msg =~ "append"
 
       assert {:ok, _} =
                Store.create(%{
@@ -145,6 +146,44 @@ defmodule Vigil.StoreTest do
                  content: "# Terra Speed Tubeless\ntext",
                  force: true
                })
+    end
+
+    test "duplicate detection does not fire within the same project folder" do
+      assert {:ok, _} =
+               Store.create(%{
+                 path: "projects/vigil/vigil-notizen.md",
+                 type: "reference",
+                 content: "# vigil Notizen\nWeitere Notizen zu vigil."
+               })
+    end
+
+    test "duplicate detection still fires across different project folders" do
+      assert {:error, msg} =
+               Store.create(%{
+                 path: "projects/andere/vigil-kopie.md",
+                 type: "reference",
+                 content: "# vigil Kopie\nAndere Projektnote.",
+                 create_dirs: true
+               })
+
+      assert msg =~ "Duplikate"
+    end
+
+    test "create_dirs creates a missing project folder, absent flag rejects it" do
+      assert {:error, msg} =
+               Store.create(%{path: "projects/neu/x.md", type: "reference", content: "# X\nx"})
+
+      assert msg =~ "Projektordner existiert nicht"
+
+      assert {:ok, _} =
+               Store.create(%{
+                 path: "projects/neu/x.md",
+                 type: "reference",
+                 content: "# X\nx",
+                 create_dirs: true
+               })
+
+      assert {:ok, _} = Store.read("projects/neu/x.md", false)
     end
 
     test "unknown domain is rejected with a domain list" do
@@ -291,6 +330,145 @@ defmodule Vigil.StoreTest do
       assert {:error, "Ungültiger Pfad"} =
                Store.create(%{path: "skills/x.md", type: "reference", content: "# X\nx"})
     end
+
+    test "dot-prefixed path segments are rejected everywhere, not just the first (AP-7)" do
+      assert {:error, "Ungültiger Pfad"} =
+               Store.create(%{
+                 path: "projects/.evil/x.md",
+                 type: "reference",
+                 content: "# X\nx",
+                 create_dirs: true
+               })
+    end
+  end
+
+  describe "rewrite_note" do
+    test "replaces the body but keeps the frontmatter; requires confirm", %{vault: vault} do
+      assert {:error, msg} =
+               Store.rewrite_note(%{path: "bike/terra-speed.md", content: "# Neu\nKomplett neu."})
+
+      assert msg =~ "confirm: true"
+
+      assert {:ok, _} =
+               Store.rewrite_note(%{
+                 path: "bike/terra-speed.md",
+                 content: "# Neu\nKomplett neu.",
+                 confirm: true
+               })
+
+      raw = File.read!(Path.join(vault, "bike/terra-speed.md"))
+      assert raw =~ "type: reference"
+      assert raw =~ "Komplett neu."
+      refute raw =~ "Maße"
+
+      {:ok, result} = Store.read("bike/terra-speed.md", false)
+      assert result.type == :reference
+    end
+  end
+
+  describe "delete_section" do
+    test "removes heading and body; rest of the file stays intact", %{vault: vault} do
+      assert {:ok, _} = Store.delete_section("bike/via-carolina.md#gear")
+
+      raw = File.read!(Path.join(vault, "bike/via-carolina.md"))
+      refute raw =~ "## Gear"
+      refute raw =~ "Rahmentasche"
+      assert raw =~ "## Fueling"
+
+      assert {:error, _} = Store.read("bike/via-carolina.md#gear", false)
+    end
+
+    test "id without a fragment is rejected" do
+      assert {:error, _} = Store.delete_section("bike/via-carolina.md")
+    end
+  end
+
+  describe "update_frontmatter" do
+    test "changes type without touching the body, no confirm needed" do
+      assert {:ok, _} =
+               Store.update_frontmatter(%{path: "bike/terra-speed.md", type: "decision"})
+
+      {:ok, result} = Store.read("bike/terra-speed.md", false)
+      assert result.type == :decision
+      assert Store.search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
+    end
+
+    test "enforces the same starts/ends rules as create" do
+      assert {:error, _} =
+               Store.update_frontmatter(%{path: "bike/terra-speed.md", type: "event"})
+    end
+  end
+
+  describe "delete" do
+    test "removes the note from disk and the index; requires confirm", %{vault: vault} do
+      assert {:error, msg} = Store.delete(%{path: "bike/terra-speed.md"})
+      assert msg =~ "confirm: true"
+
+      assert {:ok, _} = Store.delete(%{path: "bike/terra-speed.md", confirm: true})
+
+      refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      refute Store.search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
+    end
+  end
+
+  describe "move" do
+    test "renames the note, updates the index; requires confirm", %{vault: vault} do
+      assert {:error, msg} = Store.move(%{from: "bike/terra-speed.md", to: "bike/terra-40c.md"})
+      assert msg =~ "confirm: true"
+
+      assert {:ok, _} =
+               Store.move(%{from: "bike/terra-speed.md", to: "bike/terra-40c.md", confirm: true})
+
+      refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+      assert File.exists?(Path.join(vault, "bike/terra-40c.md"))
+      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      {:ok, result} = Store.read("bike/terra-40c.md", false)
+      assert result.title == "WTB Terra Speed 40C"
+    end
+
+    test "rejects a destination that already exists" do
+      assert {:error, msg} =
+               Store.move(%{
+                 from: "bike/terra-speed.md",
+                 to: "bike/via-carolina.md",
+                 confirm: true
+               })
+
+      assert msg =~ "existiert bereits"
+    end
+
+    test "destination still runs through domain validation" do
+      assert {:error, _} =
+               Store.move(%{from: "bike/terra-speed.md", to: "unbekannt/x.md", confirm: true})
+    end
+  end
+
+  describe "lint" do
+    test "reports duplicate headings, sentence-like headings, and orphaned links" do
+      {:ok, _} =
+        Store.create(%{
+          path: "bike/messy.md",
+          type: "reference",
+          content:
+            "# Messy\n\n## Duplikat\nEins.\n\n## Duplikat\nZwei.\n\n" <>
+              "## Das ist eine ziemlich lange Ueberschrift mit Satzzeichen und einem Punkt.\nText.\n\n" <>
+              "## Verweis\nSiehe [[nichtvorhanden]].\n"
+        })
+
+      report = Store.lint()
+
+      assert Enum.any?(report.duplicate_headings, &(&1.path == "bike/messy.md"))
+      assert Enum.any?(report.sentence_headings, &String.starts_with?(&1.id, "bike/messy.md"))
+      assert "nichtvorhanden" in report.orphaned_links
+    end
+
+    test "flags decision notes as stale relative to an injected now" do
+      long_after = DateTime.add(~U[2026-01-01 10:00:00Z], 200 * 86_400, :second)
+      report = Store.lint(long_after)
+
+      assert Enum.any?(report.stale_decisions, &(&1.path == "projects/vigil/vigil-ranking.md"))
+    end
   end
 
   describe "skills isolation" do
@@ -329,9 +507,52 @@ defmodule Vigil.StoreTest do
   end
 
   describe "reload" do
-    test "reload re-reads the vault without error" do
-      assert :ok = Store.reload()
+    test "reload re-reads the vault and reports success" do
+      assert %{reloaded: true} = Store.reload()
       assert Store.search(%{query: "reifen"}) != []
+    end
+
+    test "reload with an unreachable remote reports pull_failed but still reparses", %{
+      vault: vault
+    } do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+
+      assert %{reloaded: true, pull_failed: reason} = Store.reload()
+      assert is_binary(reason)
+      assert Store.search(%{query: "reifen"}) != []
+    end
+  end
+
+  describe "write-path robustness" do
+    test "push failure is returned as an error; read and search keep working", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+
+      assert {:error, msg} =
+               Store.create(%{path: "bike/neu.md", type: "reference", content: "# Neu\ntext"})
+
+      assert msg =~ "Push fehlgeschlagen"
+      assert File.exists?(Path.join(vault, "bike/neu.md"))
+
+      assert Store.search(%{query: "reifen"}) != []
+      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+    end
+
+    test "writing into a read-only domain directory returns a precise error, store stays alive",
+         %{
+           vault: vault
+         } do
+      dir = Path.join(vault, "home")
+      File.chmod!(dir, 0o555)
+
+      result = Store.create(%{path: "home/neu.md", type: "reference", content: "# Neu\ntext"})
+
+      File.chmod!(dir, 0o755)
+
+      assert {:error, msg} = result
+      assert msg =~ "Datei konnte nicht geschrieben werden"
+      assert {:ok, _} = Store.read("home/böse-datei-ümläute.md", false)
     end
   end
 end

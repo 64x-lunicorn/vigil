@@ -45,4 +45,49 @@ defmodule Vigil.GitTest do
     {out, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: vault)
     assert String.trim(out) == "create: bike/neu2.md"
   end
+
+  test "pull/2 fast-forwards from the given remote name", %{vault: vault, remote: remote} do
+    other = vault <> "_other_clone"
+    {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
+    File.write!(Path.join(other, "note.md"), "---\ntype: reference\n---\n# Note\ntext\n")
+    {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+
+    {_out, 0} =
+      System.cmd(
+        "git",
+        ["-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m", "extern"],
+        cd: other
+      )
+
+    {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
+    File.rm_rf(other)
+
+    assert :ok = Git.pull(vault, "origin")
+    assert File.exists?(Path.join(vault, "note.md"))
+  end
+
+  test "pull/2 against a nonexistent remote returns an error", %{vault: vault} do
+    assert {:error, _reason} = Git.pull(vault, "nonexistent-remote")
+  end
+
+  test "remove_commit stages, commits, and removes the file", %{vault: vault} do
+    assert :ok = Git.remove_commit(vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
+    refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+
+    {out, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: vault)
+    assert String.trim(out) == "delete: bike/terra-speed.md"
+  end
+
+  test "move_commit renames the file and commits both paths", %{vault: vault} do
+    assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
+             Git.move_commit(
+               vault,
+               "bike/terra-speed.md",
+               "bike/terra-speed-neu.md",
+               "move: bike/terra-speed.md -> bike/terra-speed-neu.md"
+             )
+
+    refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+    assert File.exists?(Path.join(vault, "bike/terra-speed-neu.md"))
+  end
 end

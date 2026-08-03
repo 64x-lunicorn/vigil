@@ -3,9 +3,9 @@ defmodule Vigil.Git do
 
   require Logger
 
-  @doc "git pull --ff-only. Logs and returns :ok even on failure (caller decides)."
-  def pull(vault_path) do
-    case run(vault_path, ["pull", "--ff-only"]) do
+  @doc "git pull --ff-only <remote> main. Logs and returns {:error, reason} on failure (caller decides)."
+  def pull(vault_path, remote) do
+    case run(vault_path, ["pull", "--ff-only", remote, "main"]) do
       {:ok, _out} ->
         :ok
 
@@ -96,6 +96,48 @@ defmodule Vigil.Git do
     case run(vault_path, ["push", remote, "main"]) do
       {:ok, _} -> :ok
       {:error, out} -> {:error, out}
+    end
+  end
+
+  @doc "git rm -- path, then commit, authored as vigil. Returns :ok | {:error, reason}."
+  def remove_commit(vault_path, path, message) do
+    with {:ok, _} <- run(vault_path, ["rm", "--", path]),
+         {:ok, _} <-
+           run(vault_path, [
+             "-c",
+             "user.name=vigil",
+             "-c",
+             "user.email=vigil@local",
+             "commit",
+             "-m",
+             message,
+             "--",
+             path
+           ]) do
+      :ok
+    end
+  end
+
+  @doc """
+  `git mv from to`, then commit both paths, authored as vigil.
+  Returns `{:ok, %{updated_at:, last_author:}}` or `{:error, reason}`.
+  """
+  def move_commit(vault_path, from, to, message) do
+    with {:ok, _} <- run(vault_path, ["mv", "--", from, to]),
+         {:ok, _} <-
+           run(vault_path, [
+             "-c",
+             "user.name=vigil",
+             "-c",
+             "user.email=vigil@local",
+             "commit",
+             "-m",
+             message,
+             "--",
+             from,
+             to
+           ]) do
+      last_commit_meta(vault_path, to)
     end
   end
 

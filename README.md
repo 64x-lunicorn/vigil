@@ -70,6 +70,12 @@ und leitet `vault.<domain>` auf `localhost:4000`.
 Deploy-Trigger ist bewusst manuell: Git-Tag im Code-Repo → CI baut Release →
 SSH-Copy in den LXC → `systemctl restart vigil`. Kein Auto-Pull bei jedem Commit.
 
+`write_and_commit` pusht bei jedem Write selbst und meldet einen Fehler an den
+Client, wenn der Push scheitert. `deploy/vigil-push-safety-net.cron` ist ein
+zusätzliches Sicherheitsnetz für das Zeitfenster, in dem ein Push zur
+Schreibzeit scheiterte — kein Ersatz für den Push im Write-Pfad. Installation
+z. B. via `crontab -u vigil -e` oder als `/etc/cron.d/vigil-push-safety-net`.
+
 `VIGIL_STATE_DIR` muss zwischen Deploys erhalten bleiben (z. B. `/var/lib/vigil`,
 außerhalb des Release-Verzeichnisses) — sonst verliert Daniel bei jedem Deploy
 alle Access- und Refresh-Tokens und muss jeden Client neu autorisieren.

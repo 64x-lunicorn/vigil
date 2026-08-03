@@ -14,6 +14,7 @@ defmodule Vigil.Application do
            exclude: Application.fetch_env!(:vigil, :exclude),
            git_remote: Application.fetch_env!(:vigil, :git_remote)},
           Vigil.MCP.Envelope,
+          Vigil.MCP.RateLimit,
           {Vigil.OAuth.Store, state_dir: Application.fetch_env!(:vigil, :state_dir)},
           Vigil.OAuth.Janitor,
           {Bandit, plug: Vigil.MCP.Server, port: Application.fetch_env!(:vigil, :port)}

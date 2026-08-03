@@ -3,13 +3,17 @@ defmodule Vigil.Store do
   use GenServer
   require Logger
 
-  alias Vigil.{Parser, Git, Search}
+  alias Vigil.{Parser, Git, Search, SkillKey}
 
   @chunks_table :vigil_chunks
   @files_table :vigil_files
   @links_table :vigil_links
 
   @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
+
+  @overlong_note_chunk_threshold 40
+  @stale_decision_days 180
+  @sentence_heading_length_threshold 60
 
   ## Public API
 
@@ -22,6 +26,13 @@ defmodule Vigil.Store do
 
   def replace_section(id, content),
     do: GenServer.call(__MODULE__, {:replace_section, id, content})
+
+  def rewrite_note(params), do: GenServer.call(__MODULE__, {:rewrite_note, params})
+  def delete_section(id), do: GenServer.call(__MODULE__, {:delete_section, id})
+  def update_frontmatter(params), do: GenServer.call(__MODULE__, {:update_frontmatter, params})
+  def delete(params), do: GenServer.call(__MODULE__, {:delete, params})
+  def move(params), do: GenServer.call(__MODULE__, {:move, params})
+  def lint(now \\ nil), do: GenServer.call(__MODULE__, {:lint, now})
 
   def current(now \\ nil), do: GenServer.call(__MODULE__, {:current, now})
   def active_event_ids(now), do: GenServer.call(__MODULE__, {:active_event_ids, now})
@@ -49,7 +60,13 @@ defmodule Vigil.Store do
     ensure_tables()
 
     state = %{vault_path: vault_path, exclude: exclude, git_remote: git_remote, domains_desc: %{}}
-    state = do_full_load(state)
+    {state, pull_result} = do_full_load(state)
+
+    case pull_result do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("vigil: initialer git pull fehlgeschlagen: #{reason}")
+    end
+
     {:ok, state}
   end
 
@@ -82,6 +99,30 @@ defmodule Vigil.Store do
     {:reply, do_replace_section(id, content, state), state}
   end
 
+  def handle_call({:rewrite_note, params}, _from, state) do
+    {:reply, do_rewrite_note(params, state), state}
+  end
+
+  def handle_call({:delete_section, id}, _from, state) do
+    {:reply, do_delete_section(id, state), state}
+  end
+
+  def handle_call({:update_frontmatter, params}, _from, state) do
+    {:reply, do_update_frontmatter(params, state), state}
+  end
+
+  def handle_call({:delete, params}, _from, state) do
+    {:reply, do_delete(params, state), state}
+  end
+
+  def handle_call({:move, params}, _from, state) do
+    {:reply, do_move(params, state), state}
+  end
+
+  def handle_call({:lint, now}, _from, state) do
+    {:reply, do_lint(now || DateTime.now!(tz())), state}
+  end
+
   def handle_call({:current, now}, _from, state) do
     {:reply, do_current(now || DateTime.now!(tz())), state}
   end
@@ -105,8 +146,8 @@ defmodule Vigil.Store do
   end
 
   def handle_call(:reload, _from, state) do
-    state = do_full_load(state)
-    {:reply, :ok, state}
+    {state, pull_result} = do_full_load(state)
+    {:reply, reload_result(pull_result), state}
   end
 
   def handle_call(:domain_names, _from, state) do
@@ -131,10 +172,13 @@ defmodule Vigil.Store do
 
   defp tz, do: Application.get_env(:vigil, :tz, "Europe/Berlin")
 
+  defp reload_result(:ok), do: %{reloaded: true}
+  defp reload_result({:error, reason}), do: %{reloaded: true, pull_failed: reason}
+
   ## Loading
 
   defp do_full_load(state) do
-    Git.pull(state.vault_path)
+    pull_result = Git.pull(state.vault_path, state.git_remote)
 
     git_meta = Git.log_metadata(state.vault_path)
     domains_desc = load_domains_yml(state.vault_path)
@@ -162,7 +206,7 @@ defmodule Vigil.Store do
       "vigil: #{length(domain_dirs)} Domänen (#{Enum.join(domain_dirs, ", ")}), #{note_count} Notes, #{chunk_count} Chunks"
     )
 
-    %{state | domains_desc: domains_desc}
+    {%{state | domains_desc: domains_desc}, pull_result}
   end
 
   defp discover_domain_dirs(vault_path, exclude) do
@@ -417,11 +461,23 @@ defmodule Vigil.Store do
 
   defp basic_path_sanity(path) do
     cond do
-      String.contains?(path, "..") -> {:error, "Ungültiger Pfad"}
-      String.starts_with?(path, "/") -> {:error, "Ungültiger Pfad"}
-      String.contains?(path, "\\") -> {:error, "Ungültiger Pfad"}
-      String.contains?(path, <<0>>) -> {:error, "Ungültiger Pfad"}
-      true -> :ok
+      String.contains?(path, "..") ->
+        {:error, "Ungültiger Pfad"}
+
+      String.starts_with?(path, "/") ->
+        {:error, "Ungültiger Pfad"}
+
+      String.contains?(path, "\\") ->
+        {:error, "Ungültiger Pfad"}
+
+      String.contains?(path, <<0>>) ->
+        {:error, "Ungültiger Pfad"}
+
+      Enum.any?(String.split(path, "/"), &String.starts_with?(&1, ".")) ->
+        {:error, "Ungültiger Pfad"}
+
+      true ->
+        :ok
     end
   end
 
@@ -435,7 +491,7 @@ defmodule Vigil.Store do
     end
   end
 
-  defp validate_write_path(path, state) do
+  defp validate_write_path(path, state, create_dirs \\ false) do
     with :ok <- basic_path_sanity(path),
          {:ok, _abs} <- resolve_within_vault(state, path) do
       parts = String.split(path, "/")
@@ -456,10 +512,10 @@ defmodule Vigil.Store do
           {:error, "Ungültiger Pfad"}
 
         length(parts) == 2 ->
-          validate_domain(first, parts, state)
+          validate_domain(first, parts, state, create_dirs)
 
         length(parts) == 3 and first == "projects" ->
-          validate_domain(first, parts, state)
+          validate_domain(first, parts, state, create_dirs)
 
         true ->
           {:error, "Ungültiger Pfad"}
@@ -469,7 +525,7 @@ defmodule Vigil.Store do
     end
   end
 
-  defp validate_domain(first, parts, state) do
+  defp validate_domain(first, parts, state, create_dirs) do
     domains = list_domain_names(state)
 
     if first not in domains do
@@ -478,10 +534,18 @@ defmodule Vigil.Store do
       if length(parts) == 3 do
         project_dir = Path.join([state.vault_path, "projects", Enum.at(parts, 1)])
 
-        if File.dir?(project_dir) do
-          {:ok, first}
-        else
-          {:error, "Ungültiger Pfad. Projektordner existiert nicht: #{Enum.at(parts, 1)}"}
+        cond do
+          File.dir?(project_dir) ->
+            {:ok, first}
+
+          create_dirs ->
+            case safe_mkdir_p(project_dir) do
+              :ok -> {:ok, first}
+              {:error, msg} -> {:error, msg}
+            end
+
+          true ->
+            {:error, "Ungültiger Pfad. Projektordner existiert nicht: #{Enum.at(parts, 1)}"}
         end
       else
         {:ok, first}
@@ -498,8 +562,9 @@ defmodule Vigil.Store do
     starts = Map.get(params, :starts)
     ends = Map.get(params, :ends)
     force = Map.get(params, :force, false)
+    create_dirs = Map.get(params, :create_dirs, false)
 
-    with {:ok, domain} <- validate_write_path(path, state),
+    with {:ok, domain} <- validate_write_path(path, state, create_dirs),
          {:ok, abs_path} <- resolve_within_vault(state, path),
          :ok <- ensure_not_exists(abs_path, path),
          :ok <- validate_content_shape(content),
@@ -593,12 +658,29 @@ defmodule Vigil.Store do
       end)
       |> Enum.filter(fn r -> r.score >= 10 end)
       |> Enum.uniq_by(& &1.id)
+      |> Enum.reject(&same_project_folder?(&1.id, path, domain))
 
     if candidates == [] do
       :ok
     else
       ids = Enum.map(candidates, & &1.id) |> Enum.join(", ")
-      {:error, "Mögliche Duplikate gefunden: #{ids}"}
+
+      {:error,
+       "Mögliche Duplikate gefunden: #{ids}. Falls es dasselbe Thema ist, lieber dort mit append/replace_section ergänzen statt hier neu anzulegen — oder force: true für eine bewusst getrennte Note."}
+    end
+  end
+
+  defp same_project_folder?(candidate_id, path, "projects") do
+    candidate_path = candidate_id |> String.split("#") |> hd()
+    project_of(candidate_path) != nil and project_of(candidate_path) == project_of(path)
+  end
+
+  defp same_project_folder?(_candidate_id, _path, _domain), do: false
+
+  defp project_of(path) do
+    case String.split(path, "/") do
+      ["projects", project | _] -> project
+      _ -> nil
     end
   end
 
@@ -740,28 +822,257 @@ defmodule Vigil.Store do
     end
   end
 
+  ## rewrite_note
+
+  defp do_rewrite_note(params, state) do
+    path = Map.fetch!(params, :path)
+    content = Map.fetch!(params, :content)
+    confirm = Map.get(params, :confirm, false)
+
+    with :ok <- require_confirm(confirm, "ersetzt den gesamten Inhalt von #{path}"),
+         {:ok, abs_path} <- resolve_within_vault(state, path),
+         :ok <- basic_path_sanity(path),
+         :ok <- ensure_exists(abs_path, path),
+         :ok <- validate_content_shape(content) do
+      {:ok, original} = File.read(abs_path)
+
+      case split_frontmatter(original) do
+        {:ok, frontmatter, _old_body} ->
+          new_content = normalize_trailing_newline(frontmatter <> content)
+          write_and_commit(state, path, abs_path, new_content, "rewrite_note: #{path}")
+
+        {:error, msg} ->
+          {:error, msg}
+      end
+    else
+      {:error, msg} -> {:error, msg}
+    end
+  end
+
+  ## delete_section
+
+  defp do_delete_section(id, state) do
+    case String.split(id, "#", parts: 2) do
+      [path, _frag] ->
+        with :ok <- basic_path_sanity(path),
+             {:ok, abs_path} <- resolve_within_vault(state, path),
+             [{_, rec}] <- {:ets.lookup(@chunks_table, id)} |> unwrap_lookup(),
+             true <- rec.heading != nil do
+          {:ok, original} = File.read(abs_path)
+          orig_lines = split_lines(original)
+
+          prefix = Enum.slice(orig_lines, 0, rec.heading_line - 1)
+
+          suffix =
+            Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
+
+          new_lines = prefix ++ suffix
+          new_content = Enum.join(new_lines, "\n") <> "\n"
+
+          write_and_commit(state, path, abs_path, new_content, "delete_section: #{id}")
+        else
+          false -> {:error, "Kein Abschnitt ohne Überschrift kann gelöscht werden: #{id}"}
+          {:error, msg} -> {:error, msg}
+          :not_found -> {:error, "Nicht gefunden: #{id}"}
+        end
+
+      [_path] ->
+        {:error, "id muss ein Fragment enthalten: pfad#heading-slug"}
+    end
+  end
+
+  ## update_frontmatter
+
+  defp do_update_frontmatter(params, state) do
+    path = Map.fetch!(params, :path)
+    type = Map.fetch!(params, :type)
+    starts = Map.get(params, :starts)
+    ends = Map.get(params, :ends)
+
+    with {:ok, abs_path} <- resolve_within_vault(state, path),
+         :ok <- basic_path_sanity(path),
+         :ok <- ensure_exists(abs_path, path),
+         {:ok, type_atom, starts_dt, ends_dt} <- validate_type_and_times(type, starts, ends) do
+      {:ok, original} = File.read(abs_path)
+
+      case split_frontmatter(original) do
+        {:ok, _old_frontmatter, body} ->
+          new_frontmatter = build_frontmatter(type_atom, starts_dt, ends_dt)
+          new_content = normalize_trailing_newline(new_frontmatter <> body)
+          write_and_commit(state, path, abs_path, new_content, "update_frontmatter: #{path}")
+
+        {:error, msg} ->
+          {:error, msg}
+      end
+    else
+      {:error, msg} -> {:error, msg}
+    end
+  end
+
+  ## delete
+
+  defp do_delete(params, state) do
+    path = Map.fetch!(params, :path)
+    confirm = Map.get(params, :confirm, false)
+
+    with :ok <- require_confirm(confirm, "löscht #{path} unwiderruflich aus dem Vault"),
+         {:ok, abs_path} <- resolve_within_vault(state, path),
+         :ok <- basic_path_sanity(path),
+         :ok <- ensure_exists(abs_path, path) do
+      case Git.remove_commit(state.vault_path, path, "delete: #{path}") do
+        :ok ->
+          case Git.push(state.vault_path, state.git_remote) do
+            :ok ->
+              remove_file_from_index(path)
+              {:ok, %{path: path, deleted: true}}
+
+            {:error, out} ->
+              {:error, "Löschung lokal committed, aber Push fehlgeschlagen: #{out}"}
+          end
+
+        {:error, out} ->
+          {:error, "git rm/commit fehlgeschlagen: #{out}"}
+      end
+    else
+      {:error, msg} -> {:error, msg}
+    end
+  end
+
+  ## move / rename
+
+  defp do_move(params, state) do
+    from = Map.fetch!(params, :from)
+    to = Map.fetch!(params, :to)
+    confirm = Map.get(params, :confirm, false)
+
+    with :ok <- require_confirm(confirm, "verschiebt #{from} nach #{to}"),
+         {:ok, _domain} <- validate_write_path(to, state),
+         :ok <- basic_path_sanity(from),
+         {:ok, from_abs} <- resolve_within_vault(state, from),
+         :ok <- ensure_exists(from_abs, from),
+         {:ok, to_abs} <- resolve_within_vault(state, to),
+         :ok <- ensure_not_exists(to_abs, to) do
+      case Git.move_commit(state.vault_path, from, to, "move: #{from} -> #{to}") do
+        {:ok, commit_meta} ->
+          case Git.push(state.vault_path, state.git_remote) do
+            :ok ->
+              reparse_moved_file(state, from, to, commit_meta)
+              {:ok, %{from: from, to: to}}
+
+            {:error, out} ->
+              {:error, "Verschieben lokal committed, aber Push fehlgeschlagen: #{out}"}
+          end
+
+        {:error, out} ->
+          {:error, "git mv/commit fehlgeschlagen: #{out}"}
+      end
+    else
+      {:error, msg} -> {:error, msg}
+    end
+  end
+
+  defp reparse_moved_file(state, from, to, commit_meta) do
+    existing_created_at =
+      case :ets.lookup(@files_table, from) do
+        [{_, file}] -> file.created_at
+        [] -> nil
+      end
+
+    created_at = existing_created_at || commit_meta.updated_at
+
+    {:ok, content} = File.read(Path.join(state.vault_path, to))
+
+    meta = %{
+      created_at: created_at,
+      updated_at: commit_meta.updated_at,
+      last_author: commit_meta.last_author
+    }
+
+    {:ok, file} = Parser.parse(to, content, meta)
+
+    remove_file_from_index(from)
+    index_file(file)
+  end
+
+  defp require_confirm(true, _description), do: :ok
+
+  defp require_confirm(_confirm, description) do
+    {:error,
+     "Destruktive Operation: #{description}. Mit confirm: true erneut aufrufen, um sie auszuführen."}
+  end
+
+  defp split_frontmatter(content) do
+    lines = split_lines(content)
+
+    case lines do
+      ["---" | rest] ->
+        case Enum.find_index(rest, &(&1 == "---")) do
+          nil ->
+            {:error, "Frontmatter nicht geschlossen"}
+
+          idx ->
+            frontmatter_lines = Enum.take(rest, idx + 1)
+            body_lines = Enum.drop(rest, idx + 1)
+            frontmatter = Enum.join(["---" | frontmatter_lines], "\n") <> "\n"
+            body = Enum.join(body_lines, "\n") <> "\n"
+            {:ok, frontmatter, body}
+        end
+
+      _ ->
+        {:error, "Kein Frontmatter gefunden"}
+    end
+  end
+
   ## shared write path
 
   defp write_and_commit(state, rel_path, abs_path, full_content, message) do
-    File.mkdir_p!(Path.dirname(abs_path))
-    File.write!(abs_path, full_content)
+    with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
+         :ok <- safe_write(abs_path, full_content) do
+      case Git.add_commit(state.vault_path, rel_path, message) do
+        {:ok, commit_meta} ->
+          reparse_file(state, rel_path, commit_meta)
 
-    case Git.add_commit(state.vault_path, rel_path, message) do
-      {:ok, commit_meta} ->
-        reparse_file(state, rel_path, commit_meta)
+          case Git.push(state.vault_path, state.git_remote) do
+            :ok ->
+              {:ok, %{path: rel_path}}
 
-        case Git.push(state.vault_path, state.git_remote) do
-          :ok ->
-            {:ok, %{path: rel_path}}
+            {:error, out} ->
+              {:error,
+               "Änderung lokal gespeichert und committed, aber Push fehlgeschlagen: #{out}"}
+          end
 
-          {:error, out} ->
-            {:error, "Änderung lokal gespeichert und committed, aber Push fehlgeschlagen: #{out}"}
-        end
-
-      {:error, out} ->
-        {:error, "git commit fehlgeschlagen: #{out}"}
+        {:error, out} ->
+          {:error, "git commit fehlgeschlagen: #{out}"}
+      end
     end
   end
+
+  defp safe_mkdir_p(path) do
+    case File.mkdir_p(path) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Verzeichnis konnte nicht angelegt werden #{path}: #{fs_error(reason)}"}
+    end
+  end
+
+  defp safe_write(path, content) do
+    case File.write(path, content) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Datei konnte nicht geschrieben werden #{path}: #{fs_error(reason)}"}
+    end
+  end
+
+  defp fs_error(:eacces), do: "keine Schreibrechte"
+  defp fs_error(:enospc), do: "kein Speicherplatz mehr"
+  defp fs_error(:eisdir), do: "Zielpfad ist ein Verzeichnis"
+  defp fs_error(:enotdir), do: "ein Teil des Pfads ist kein Verzeichnis"
+  defp fs_error(:erofs), do: "Dateisystem ist schreibgeschützt"
+  defp fs_error(reason), do: inspect(reason)
 
   defp reparse_file(state, rel_path, commit_meta) do
     existing_created_at =
@@ -921,6 +1232,74 @@ defmodule Vigil.Store do
     |> MapSet.new()
   end
 
+  ## Lint (AP-5)
+
+  defp do_lint(now) do
+    files = :ets.tab2list(@files_table) |> Enum.map(fn {_path, file} -> file end)
+    chunks = :ets.tab2list(@chunks_table) |> Enum.map(fn {_id, rec} -> rec end)
+
+    %{
+      duplicate_headings: lint_duplicate_headings(chunks),
+      sentence_headings: lint_sentence_headings(chunks),
+      orphaned_links: lint_orphaned_links(),
+      overlong_notes: lint_overlong_notes(files),
+      stale_decisions: lint_stale_decisions(files, now)
+    }
+  end
+
+  defp lint_duplicate_headings(chunks) do
+    chunks
+    |> Enum.filter(& &1.heading)
+    |> Enum.group_by(&{&1.path, &1.heading_path})
+    |> Enum.filter(fn {_key, group} -> length(group) > 1 end)
+    |> Enum.map(fn {{path, heading_path}, group} ->
+      %{path: path, heading_path: heading_path, ids: Enum.map(group, & &1.id)}
+    end)
+  end
+
+  defp lint_sentence_headings(chunks) do
+    chunks
+    |> Enum.filter(fn c -> c.heading && sentence_heading?(c.heading) end)
+    |> Enum.map(fn c -> %{id: c.id, heading: c.heading} end)
+  end
+
+  # Grobe Heuristik: eine Überschrift, die wie ein Satz aussieht, ist entweder
+  # lang oder endet auf Satzzeichen. Beides ist ein Signal, kein Beweis.
+  defp sentence_heading?(heading) do
+    String.length(heading) > @sentence_heading_length_threshold or
+      String.ends_with?(heading, [".", "!", "?"])
+  end
+
+  defp lint_orphaned_links do
+    known_slugs =
+      :ets.tab2list(@files_table)
+      |> Enum.map(fn {path, _file} -> Parser.slug(Path.basename(path, ".md")) end)
+      |> MapSet.new()
+
+    @links_table
+    |> :ets.tab2list()
+    |> Enum.map(fn {target_slug, _source_id} -> target_slug end)
+    |> Enum.uniq()
+    |> Enum.reject(&MapSet.member?(known_slugs, &1))
+  end
+
+  defp lint_overlong_notes(files) do
+    files
+    |> Enum.filter(fn f -> length(f.chunk_ids) > @overlong_note_chunk_threshold end)
+    |> Enum.map(fn f -> %{path: f.path, chunk_count: length(f.chunk_ids)} end)
+  end
+
+  defp lint_stale_decisions(files, now) do
+    cutoff = DateTime.add(now, -@stale_decision_days * 86_400, :second)
+
+    files
+    |> Enum.filter(fn f ->
+      f.type == :decision and f.updated_at != nil and
+        DateTime.compare(f.updated_at, cutoff) == :lt
+    end)
+    |> Enum.map(fn f -> %{path: f.path, updated_at: iso(f.updated_at)} end)
+  end
+
   ## Skills
 
   defp do_skill_list(state) do
@@ -973,7 +1352,12 @@ defmodule Vigil.Store do
 
       case File.read(abs_path) do
         {:ok, content} ->
-          {:ok, %{name: normalized, content: content}}
+          token = SkillKey.current(SkillKey.secret())
+
+          prefixed =
+            "SkillKey: #{token} (gültig bis zur nächsten vollen Stunde)\n\n" <> content
+
+          {:ok, %{name: normalized, content: prefixed}}
 
         {:error, _} ->
           names = do_skill_list(state) |> Enum.map(& &1.name) |> Enum.join(", ")
@@ -992,18 +1376,21 @@ defmodule Vigil.Store do
       abs_path = Path.join([state.vault_path, "skills", "#{normalized}.md"])
       rel_path = "skills/#{normalized}.md"
 
-      File.mkdir_p!(Path.dirname(abs_path))
-      File.write!(abs_path, normalize_trailing_newline(content))
+      with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
+           :ok <- safe_write(abs_path, normalize_trailing_newline(content)) do
+        case Git.add_commit(state.vault_path, rel_path, "skill_write: #{rel_path}") do
+          {:ok, _commit_meta} ->
+            case Git.push(state.vault_path, state.git_remote) do
+              :ok ->
+                {:ok, %{name: normalized}}
 
-      case Git.add_commit(state.vault_path, rel_path, "skill_write: #{rel_path}") do
-        {:ok, _commit_meta} ->
-          case Git.push(state.vault_path, state.git_remote) do
-            :ok -> {:ok, %{name: normalized}}
-            {:error, out} -> {:error, "Skill lokal gespeichert, aber Push fehlgeschlagen: #{out}"}
-          end
+              {:error, out} ->
+                {:error, "Skill lokal gespeichert, aber Push fehlgeschlagen: #{out}"}
+            end
 
-        {:error, out} ->
-          {:error, "git commit fehlgeschlagen: #{out}"}
+          {:error, out} ->
+            {:error, "git commit fehlgeschlagen: #{out}"}
+        end
       end
     else
       false -> {:error, "Ungültiger Pfad"}

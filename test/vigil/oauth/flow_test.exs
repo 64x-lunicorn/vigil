@@ -15,6 +15,7 @@ defmodule Vigil.OAuth.FlowTest do
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
     start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
     start_supervised!(Vigil.MCP.Envelope)
+    start_supervised!(Vigil.MCP.RateLimit)
 
     oauth = Vigil.OAuthCase.setup!()
     %{vault: vault, state_dir: oauth.state_dir}

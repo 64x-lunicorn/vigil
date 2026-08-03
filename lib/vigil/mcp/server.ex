@@ -1,14 +1,16 @@
 defmodule Vigil.MCP.Server do
   @moduledoc false
   use Plug.Router
+  require Logger
 
-  alias Vigil.MCP.{Tools, Envelope}
+  alias Vigil.MCP.{Tools, Envelope, RateLimit}
   alias Vigil.Store
   alias Vigil.OAuth
   alias Vigil.OAuth.{Client, RedirectUri, ConsentPage, Token}
 
   @protocol_version "2025-11-25"
   @scope "vault"
+  @read_scope "vault:read"
 
   plug(:match)
   plug(:dispatch)
@@ -81,15 +83,28 @@ defmodule Vigil.MCP.Server do
 
   defp handle_mcp(conn) do
     case validate_access_token(conn) do
-      :ok -> handle_mcp_authenticated(conn)
-      {:error, :challenge} -> send_401_challenge(conn)
+      {:ok, scope, token} ->
+        if RateLimit.limited?(token) do
+          send_resp(conn, 429, "")
+        else
+          handle_mcp_authenticated(conn, scope)
+        end
+
+      {:error, :challenge} ->
+        send_401_challenge(conn)
     end
   end
 
   defp validate_access_token(conn) do
     case get_req_header(conn, "authorization") do
-      ["Bearer " <> token] -> check_access_token(token)
-      _ -> {:error, :challenge}
+      ["Bearer " <> token] ->
+        case check_access_token(token) do
+          {:ok, scope} -> {:ok, scope, token}
+          {:error, :challenge} -> {:error, :challenge}
+        end
+
+      _ ->
+        {:error, :challenge}
     end
   end
 
@@ -113,7 +128,7 @@ defmodule Vigil.MCP.Server do
             {:error, :challenge}
 
           true ->
-            :ok
+            {:ok, Map.get(record, :scope, @scope)}
         end
     end
   end
@@ -127,12 +142,12 @@ defmodule Vigil.MCP.Server do
     |> send_resp(401, "")
   end
 
-  defp handle_mcp_authenticated(conn) do
+  defp handle_mcp_authenticated(conn, scope) do
     with {:ok, protocol_version_ok?, conn} <- check_protocol_version(conn),
          true <- protocol_version_ok?,
          {:ok, body, conn} <- Plug.Conn.read_body(conn),
          {:ok, msg} <- Jason.decode(body) do
-      handle_message(conn, msg)
+      handle_message(conn, msg, scope)
     else
       false ->
         send_resp(conn, 400, "")
@@ -157,7 +172,7 @@ defmodule Vigil.MCP.Server do
     end
   end
 
-  defp handle_message(conn, %{"method" => "initialize"} = msg) do
+  defp handle_message(conn, %{"method" => "initialize"} = msg, _scope) do
     session_id = Vigil.Uuid.v4()
 
     result = %{
@@ -172,35 +187,43 @@ defmodule Vigil.MCP.Server do
     |> send_json(200, %{jsonrpc: "2.0", id: msg["id"], result: result})
   end
 
-  defp handle_message(conn, %{"method" => "notifications/initialized"}) do
+  defp handle_message(conn, %{"method" => "notifications/initialized"}, _scope) do
     send_resp(conn, 202, "")
   end
 
-  defp handle_message(conn, %{"method" => "ping"} = msg) do
+  defp handle_message(conn, %{"method" => "ping"} = msg, _scope) do
     with_session(conn, fn _session_id ->
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{}})
     end)
   end
 
-  defp handle_message(conn, %{"method" => "tools/list"} = msg) do
+  defp handle_message(conn, %{"method" => "tools/list"} = msg, _scope) do
     with_session(conn, fn _session_id ->
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{tools: Tools.definitions()}})
     end)
   end
 
-  defp handle_message(conn, %{"method" => "tools/call"} = msg) do
+  defp handle_message(conn, %{"method" => "tools/call"} = msg, scope) do
     with_session(conn, fn session_id ->
       params = msg["params"] || %{}
       name = params["name"]
       arguments = params["arguments"] || %{}
 
-      result = Tools.dispatch(name, arguments)
+      Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
+
+      result =
+        if scope == @read_scope and Tools.write_tool?(name) do
+          {:error, "Nur-Lese-Token: Schreibzugriff verweigert."}
+        else
+          Tools.dispatch(name, arguments)
+        end
+
       body = build_tool_call_result(name, result, session_id)
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: body})
     end)
   end
 
-  defp handle_message(conn, msg) do
+  defp handle_message(conn, msg, _scope) do
     if Map.has_key?(msg, "id") do
       send_json(conn, 200, %{
         jsonrpc: "2.0",
@@ -243,7 +266,7 @@ defmodule Vigil.MCP.Server do
     %{
       resource: resource(),
       authorization_servers: [issuer()],
-      scopes_supported: [@scope],
+      scopes_supported: [@scope, @read_scope],
       bearer_methods_supported: ["header"]
     }
   end
@@ -254,7 +277,7 @@ defmodule Vigil.MCP.Server do
       authorization_endpoint: issuer() <> "/oauth/authorize",
       token_endpoint: issuer() <> "/oauth/token",
       registration_endpoint: issuer() <> "/oauth/register",
-      scopes_supported: [@scope],
+      scopes_supported: [@scope, @read_scope],
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
@@ -367,13 +390,17 @@ defmodule Vigil.MCP.Server do
       not (is_nil(params["resource"]) or params["resource"] == resource()) ->
         {:error, {:redirect, redirect_uri, "invalid_target", state}}
 
+      params["scope"] not in [nil, "", @scope, @read_scope] ->
+        {:error, {:redirect, redirect_uri, "invalid_scope", state}}
+
       true ->
         {:ok,
          %{
            client: client,
            redirect_uri: redirect_uri,
            code_challenge: params["code_challenge"],
-           state: state
+           state: state,
+           scope: params["scope"] || @scope
          }}
     end
   end
@@ -386,7 +413,8 @@ defmodule Vigil.MCP.Server do
       "code_challenge" => ctx.code_challenge,
       "code_challenge_method" => "S256",
       "state" => ctx.state || "",
-      "resource" => resource()
+      "resource" => resource(),
+      "scope" => ctx.scope
     }
 
     html =
@@ -435,6 +463,7 @@ defmodule Vigil.MCP.Server do
       redirect_uri: ctx.redirect_uri,
       code_challenge: ctx.code_challenge,
       resource: resource(),
+      scope: ctx.scope,
       expires_at: now + 60
     })
 
@@ -503,7 +532,7 @@ defmodule Vigil.MCP.Server do
             oauth_error(conn, 400, "invalid_target")
 
           true ->
-            issue_tokens(conn, data.client_id, data.resource)
+            issue_tokens(conn, data.client_id, data.resource, Map.get(data, :scope, @scope))
         end
     end
   end
@@ -526,7 +555,7 @@ defmodule Vigil.MCP.Server do
 
           true ->
             OAuth.Store.delete_token(refresh_token)
-            issue_tokens(conn, data.client_id, data.aud)
+            issue_tokens(conn, data.client_id, data.aud, Map.get(data, :scope, @scope))
         end
 
       _ ->
@@ -534,17 +563,18 @@ defmodule Vigil.MCP.Server do
     end
   end
 
-  defp issue_tokens(conn, client_id, aud) do
+  defp issue_tokens(conn, client_id, aud, scope) do
     now = System.system_time(:second)
     access_token = Token.random()
     refresh_token = Token.random()
 
-    OAuth.Store.put_token(access_token, %{aud: aud, expires_at: now + 3600})
+    OAuth.Store.put_token(access_token, %{aud: aud, scope: scope, expires_at: now + 3600})
 
     OAuth.Store.put_token(refresh_token, %{
       type: :refresh,
       client_id: client_id,
       aud: aud,
+      scope: scope,
       expires_at: now + 30 * 86_400
     })
 
@@ -553,7 +583,7 @@ defmodule Vigil.MCP.Server do
       token_type: "Bearer",
       expires_in: 3600,
       refresh_token: refresh_token,
-      scope: @scope
+      scope: scope
     })
   end
 
