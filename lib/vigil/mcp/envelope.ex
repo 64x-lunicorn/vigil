@@ -105,14 +105,14 @@ defmodule Vigil.MCP.Envelope do
     cond do
       newly_active != [] ->
         path = List.first(newly_active)
-        "#{Vigil.Store.file_title(path)} jetzt aktiv"
+        "#{Vigil.Store.file_title(path)} now active"
 
       newly_inactive != [] ->
         path = List.first(newly_inactive)
-        "#{Vigil.Store.file_title(path)} jetzt beendet"
+        "#{Vigil.Store.file_title(path)} now finished"
 
       true ->
-        "Phase geändert"
+        "phase changed"
     end
   end
 end

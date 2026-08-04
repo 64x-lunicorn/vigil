@@ -1,15 +1,14 @@
-# Sicherheitsnetz für AP-2.1: vigil pusht bei jedem Write bereits selbst
-# (write_and_commit meldet einen Fehler an den Client, wenn der Push scheitert).
-# Dieser Cron fängt nur das Zeitfenster ab, in dem ein Push zur Schreibzeit
-# scheiterte (z. B. GitHub kurzzeitig nicht erreichbar) und der Commit seither
-# lokal auf ausstehenden Push wartet.
+# Safety net. vigil already pushes on every write (write_and_commit reports an
+# error to the client when the push fails). This cron job only covers the
+# window where a push failed at write time — say GitHub was briefly
+# unreachable — and the commit has been sitting locally ever since.
 #
-# Installation: in die crontab des vigil-Users eintragen (crontab -u vigil -e)
-# oder als Datei unter /etc/cron.d/vigil-push-safety-net (dann mit User-Feld:
+# Install into the vigil user's crontab (crontab -u vigil -e), or as a file at
+# /etc/cron.d/vigil-push-safety-net (then with a user field:
 # "*/15 * * * * vigil cd ...").
 #
-# Pusht nur bei ausstehenden Commits, nimmt ein Lock gegen gleichzeitiges
-# write_and_commit, schreibt Fehler ins Syslog statt ins Nichts.
+# Pushes only when commits are actually pending, takes a lock against a
+# concurrent write_and_commit, and sends errors to syslog rather than nowhere.
 
 */15 * * * * cd /var/lib/vigil/vault && \
   git rev-list --count github/main..main | grep -qv '^0$' && \

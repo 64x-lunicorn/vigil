@@ -52,7 +52,7 @@ defmodule Vigil.MCP.ServerTest do
     conn =
       conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
       |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer falsch#{token}")
+      |> put_req_header("authorization", "Bearer wrong#{token}")
 
     conn = Server.call(conn, Server.init([]))
     assert conn.status == 401
@@ -72,7 +72,7 @@ defmodule Vigil.MCP.ServerTest do
     assert session_id != ""
 
     body = Jason.decode!(conn.resp_body)
-    assert body["result"]["instructions"] =~ "Deutsch"
+    assert body["result"]["instructions"] =~ "Voice:"
     assert body["result"]["protocolVersion"] == "2025-11-25"
   end
 
@@ -84,12 +84,12 @@ defmodule Vigil.MCP.ServerTest do
     assert body["error"]["code"] == -32601
   end
 
-  test "tools/list contains exactly sixteen tools", %{token: token} do
+  test "tools/list contains exactly seventeen tools", %{token: token} do
     conn =
       post(token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [{"mcp-session-id", "abc"}])
 
     body = Jason.decode!(conn.resp_body)
-    assert length(body["result"]["tools"]) == 16
+    assert length(body["result"]["tools"]) == 17
   end
 
   test "tools/call search returns an envelope alongside the result", %{token: token} do
@@ -100,7 +100,7 @@ defmodule Vigil.MCP.ServerTest do
           jsonrpc: "2.0",
           id: 3,
           method: "tools/call",
-          params: %{name: "search", arguments: %{query: "reifen", domain: "bike"}}
+          params: %{name: "search", arguments: %{query: "tires", domain: "bike"}}
         },
         [{"mcp-session-id", "session-a"}]
       )
@@ -170,7 +170,7 @@ defmodule Vigil.MCP.ServerTest do
     refute Map.has_key?(payload2, "_")
   end
 
-  test "tool errors set isError and return a plain German message", %{token: token} do
+  test "tool errors set isError and return a plain-text message", %{token: token} do
     key = Vigil.SkillKey.current(Vigil.SkillKey.secret())
 
     conn =
@@ -196,10 +196,10 @@ defmodule Vigil.MCP.ServerTest do
     body = Jason.decode!(conn.resp_body)
     result = body["result"]
     assert result["isError"] == true
-    assert hd(result["content"])["text"] =~ "existiert bereits"
+    assert hd(result["content"])["text"] =~ "already exists"
   end
 
-  describe "SkillKey (AP-4)" do
+  describe "SkillKey" do
     test "a write tool without skill_key is rejected before reaching the Store", %{
       token: token,
       vault: vault
@@ -213,7 +213,7 @@ defmodule Vigil.MCP.ServerTest do
             method: "tools/call",
             params: %{
               name: "create",
-              arguments: %{path: "bike/neu.md", type: "reference", content: "# Neu\ntext"}
+              arguments: %{path: "bike/new.md", type: "reference", content: "# New\ntext"}
             }
           },
           [{"mcp-session-id", "session-e"}]
@@ -223,7 +223,7 @@ defmodule Vigil.MCP.ServerTest do
       result = body["result"]
       assert result["isError"] == true
       assert hd(result["content"])["text"] =~ "SkillKey"
-      refute File.exists?(Path.join(vault, "bike/neu.md"))
+      refute File.exists?(Path.join(vault, "bike/new.md"))
     end
 
     test "a write tool with a fresh skill_key succeeds", %{token: token, vault: vault} do
@@ -239,9 +239,9 @@ defmodule Vigil.MCP.ServerTest do
             params: %{
               name: "create",
               arguments: %{
-                path: "bike/neu.md",
+                path: "bike/new.md",
                 type: "reference",
-                content: "# Neu\ntext",
+                content: "# New\ntext",
                 skill_key: key
               }
             }
@@ -252,7 +252,7 @@ defmodule Vigil.MCP.ServerTest do
       body = Jason.decode!(conn.resp_body)
       result = body["result"]
       refute Map.get(result, "isError")
-      assert File.exists?(Path.join(vault, "bike/neu.md"))
+      assert File.exists?(Path.join(vault, "bike/new.md"))
     end
 
     test "a skill_key from two hours ago is rejected", %{token: token} do
@@ -269,9 +269,9 @@ defmodule Vigil.MCP.ServerTest do
             params: %{
               name: "create",
               arguments: %{
-                path: "bike/neu.md",
+                path: "bike/new.md",
                 type: "reference",
-                content: "# Neu\ntext",
+                content: "# New\ntext",
                 skill_key: stale_key
               }
             }
@@ -302,9 +302,183 @@ defmodule Vigil.MCP.ServerTest do
       payload = Jason.decode!(text)
       assert payload["result"]["content"] =~ "SkillKey: "
     end
+
+    test "delete_note and move_note (AP9a rename) are gated by skill_key, then work", %{
+      token: token,
+      vault: vault
+    } do
+      key = Vigil.SkillKey.current(Vigil.SkillKey.secret())
+
+      no_key =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 9,
+            method: "tools/call",
+            params: %{
+              name: "move_note",
+              arguments: %{from: "bike/terra-speed.md", to: "bike/x.md", confirm: true}
+            }
+          },
+          [{"mcp-session-id", "session-i"}]
+        )
+
+      assert Jason.decode!(no_key.resp_body)["result"]["isError"] == true
+
+      moved =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 10,
+            method: "tools/call",
+            params: %{
+              name: "move_note",
+              arguments: %{
+                from: "bike/terra-speed.md",
+                to: "bike/x.md",
+                confirm: true,
+                skill_key: key
+              }
+            }
+          },
+          [{"mcp-session-id", "session-j"}]
+        )
+
+      refute Map.get(Jason.decode!(moved.resp_body)["result"], "isError")
+      assert File.exists?(Path.join(vault, "bike/x.md"))
+
+      deleted =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 11,
+            method: "tools/call",
+            params: %{
+              name: "delete_note",
+              arguments: %{path: "bike/x.md", confirm: true, skill_key: key}
+            }
+          },
+          [{"mcp-session-id", "session-k"}]
+        )
+
+      refute Map.get(Jason.decode!(deleted.resp_body)["result"], "isError")
+      refute File.exists?(Path.join(vault, "bike/x.md"))
+    end
+
+    test "skill_write requires a skill_key; the bootstrap key from a failed skill_read works",
+         %{token: token} do
+      no_key =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 12,
+            method: "tools/call",
+            params: %{
+              name: "skill_write",
+              arguments: %{name: "neu", content: "---\nname: neu\ndescription: x\n---\n# X"}
+            }
+          },
+          [{"mcp-session-id", "session-l"}]
+        )
+
+      assert Jason.decode!(no_key.resp_body)["result"]["isError"] == true
+
+      bootstrap_lookup =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 13,
+            method: "tools/call",
+            params: %{name: "skill_read", arguments: %{name: "does-not-exist"}}
+          },
+          [{"mcp-session-id", "session-m"}]
+        )
+
+      bootstrap_body = Jason.decode!(bootstrap_lookup.resp_body)
+      assert bootstrap_body["result"]["isError"] == true
+      error_text = hd(bootstrap_body["result"]["content"])["text"]
+      assert error_text =~ "SkillKey:"
+      [_, bootstrap_key] = Regex.run(~r/SkillKey: ([0-9a-f]+)/, error_text)
+
+      written =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 14,
+            method: "tools/call",
+            params: %{
+              name: "skill_write",
+              arguments: %{
+                name: "neu",
+                content: "---\nname: neu\ndescription: x\n---\n# X",
+                skill_key: bootstrap_key
+              }
+            }
+          },
+          [{"mcp-session-id", "session-n"}]
+        )
+
+      refute Map.get(Jason.decode!(written.resp_body)["result"], "isError")
+    end
   end
 
-  describe "read-only scope (AP-6.1)" do
+  describe "links" do
+    test "a vault:read token can call links without a skill_key", %{oauth: oauth} do
+      read_token = OAuth.Token.random()
+
+      OAuth.Store.put_token(read_token, %{
+        aud: oauth.resource,
+        scope: "vault:read",
+        expires_at: System.system_time(:second) + 3600
+      })
+
+      conn =
+        post(
+          read_token,
+          %{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: %{name: "links", arguments: %{id: "bike/via-carolina.md"}}
+          },
+          [{"mcp-session-id", "session-links"}]
+        )
+
+      body = Jason.decode!(conn.resp_body)
+      refute Map.get(body["result"], "isError")
+      text = hd(body["result"]["content"])["text"]
+      payload = Jason.decode!(text)
+      assert payload["result"]["id"] == "bike/via-carolina.md"
+      assert is_list(payload["result"]["outgoing"])
+      assert is_list(payload["result"]["incoming"])
+    end
+
+    test "depth 3 is rejected with isError", %{token: token} do
+      conn =
+        post(
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: %{name: "links", arguments: %{id: "bike/via-carolina.md", depth: 3}}
+          },
+          [{"mcp-session-id", "session-links-depth"}]
+        )
+
+      body = Jason.decode!(conn.resp_body)
+      assert body["result"]["isError"] == true
+      assert hd(body["result"]["content"])["text"] =~ "depth"
+    end
+  end
+
+  describe "read-only scope" do
     test "a vault:read token can search/read/current but not create", %{oauth: oauth} do
       read_token = OAuth.Token.random()
 
@@ -321,7 +495,7 @@ defmodule Vigil.MCP.ServerTest do
             jsonrpc: "2.0",
             id: 1,
             method: "tools/call",
-            params: %{name: "search", arguments: %{query: "reifen", domain: "bike"}}
+            params: %{name: "search", arguments: %{query: "tires", domain: "bike"}}
           },
           [{"mcp-session-id", "session-r1"}]
         )
@@ -338,7 +512,7 @@ defmodule Vigil.MCP.ServerTest do
             method: "tools/call",
             params: %{
               name: "create",
-              arguments: %{path: "bike/neu.md", type: "reference", content: "# Neu\ntext"}
+              arguments: %{path: "bike/new.md", type: "reference", content: "# New\ntext"}
             }
           },
           [{"mcp-session-id", "session-r2"}]
@@ -346,7 +520,36 @@ defmodule Vigil.MCP.ServerTest do
 
       body2 = Jason.decode!(conn2.resp_body)
       assert body2["result"]["isError"] == true
-      assert hd(body2["result"]["content"])["text"] =~ "Nur-Lese-Token"
+      assert hd(body2["result"]["content"])["text"] =~ "Read-only token"
+    end
+
+    test "a vault:read token cannot call skill_write either", %{oauth: oauth} do
+      read_token = OAuth.Token.random()
+
+      OAuth.Store.put_token(read_token, %{
+        aud: oauth.resource,
+        scope: "vault:read",
+        expires_at: System.system_time(:second) + 3600
+      })
+
+      conn =
+        post(
+          read_token,
+          %{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: %{
+              name: "skill_write",
+              arguments: %{name: "neu", content: "---\nname: neu\ndescription: x\n---\n# X"}
+            }
+          },
+          [{"mcp-session-id", "session-r3"}]
+        )
+
+      body = Jason.decode!(conn.resp_body)
+      assert body["result"]["isError"] == true
+      assert hd(body["result"]["content"])["text"] =~ "Read-only token"
     end
   end
 

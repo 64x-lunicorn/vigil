@@ -5,13 +5,13 @@ ends: 2026-07-12T20:00:00+02:00
 ---
 # Via Carolina
 
-328 km Prag → Nürnberg. Reifen: [[terra-speed|Terra Speed]].
+328 km Prague to Nuremberg. Tires: [[terra-speed|Terra Speed]].
 
 ## Fueling
-Grundlast über den Tag.
+Steady baseline intake across the day.
 
-### Zweite Hälfte
-525mg Koffein, konzentriert.
+### Second Half
+525mg caffeine, concentrated.
 
 ## Gear
-Rahmentasche, keine Satteltasche.
+Frame bag, no saddle bag.

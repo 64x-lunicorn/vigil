@@ -3,4 +3,4 @@ type: reference
 ---
 # vigil
 
-Elixir-Server, der einen Markdown-Vault liest und über MCP als Gedächtnis-Backend dient. Details: [[vigil-ranking]].
+Elixir server that reads a Markdown vault and serves it over MCP as a memory backend. Details: [[vigil-ranking]].

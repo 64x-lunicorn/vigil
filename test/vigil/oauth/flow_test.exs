@@ -370,7 +370,7 @@ defmodule Vigil.OAuth.FlowTest do
 
     assert conn.status == 200
     assert get_resp_header(conn, "location") == []
-    assert conn.resp_body =~ "Falsches Passwort"
+    assert conn.resp_body =~ "Wrong password"
   end
 
   test "the sixth wrong-password attempt within 15 minutes gets 429" do

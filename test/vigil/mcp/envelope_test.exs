@@ -35,7 +35,7 @@ defmodule Vigil.MCP.EnvelopeTest do
     Store.reload()
 
     assert %{"_!" => text} = Envelope.for_call("session-3")
-    assert text =~ "jetzt aktiv"
+    assert text =~ "now active"
   end
 
   test "two parallel sessions have independent envelope state" do

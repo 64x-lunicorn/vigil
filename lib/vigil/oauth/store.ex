@@ -8,6 +8,7 @@ defmodule Vigil.OAuth.Store do
   on the `/mcp` hot path.
   """
   use GenServer
+  require Logger
 
   @clients :oauth_clients
   @codes :oauth_codes
@@ -24,25 +25,49 @@ defmodule Vigil.OAuth.Store do
   @impl true
   def init(opts) do
     state_dir = Keyword.fetch!(opts, :state_dir)
-    File.mkdir_p!(state_dir)
 
-    for {name, filename} <- [
-          {@clients, "oauth_clients.dets"},
-          {@codes, "oauth_codes.dets"},
-          {@tokens, "oauth_tokens.dets"}
-        ] do
-      path = Path.join(state_dir, filename)
-      {:ok, ^name} = :dets.open_file(name, file: String.to_charlist(path), type: :set)
-      File.chmod(path, 0o600)
-    end
-
-    for name <- [@rate_limits, @cimd_cache] do
-      if :ets.whereis(name) == :undefined do
-        :ets.new(name, [:set, :named_table, :public])
+    with :ok <- safe_mkdir_p(state_dir),
+         :ok <- open_dets_files(state_dir) do
+      for name <- [@rate_limits, @cimd_cache] do
+        if :ets.whereis(name) == :undefined do
+          :ets.new(name, [:set, :named_table, :public])
+        end
       end
-    end
 
-    {:ok, %{}}
+      {:ok, %{}}
+    else
+      {:error, reason} ->
+        Logger.error("Vigil.OAuth.Store failed to start: #{inspect(reason)}")
+        {:stop, {:oauth_store_init_failed, reason}}
+    end
+  end
+
+  defp safe_mkdir_p(path) do
+    case File.mkdir_p(path) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:mkdir_failed, path, reason}}
+    end
+  end
+
+  defp open_dets_files(state_dir) do
+    files = [
+      {@clients, "oauth_clients.dets"},
+      {@codes, "oauth_codes.dets"},
+      {@tokens, "oauth_tokens.dets"}
+    ]
+
+    Enum.reduce_while(files, :ok, fn {name, filename}, :ok ->
+      path = Path.join(state_dir, filename)
+
+      case :dets.open_file(name, file: String.to_charlist(path), type: :set) do
+        {:ok, ^name} ->
+          File.chmod(path, 0o600)
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, {:error, {:dets_open_failed, path, reason}}}
+      end
+    end)
   end
 
   @impl true

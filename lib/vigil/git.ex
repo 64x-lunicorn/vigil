@@ -3,6 +3,23 @@ defmodule Vigil.Git do
 
   require Logger
 
+  # Identity AND signing behaviour are forced per commit rather than trusting
+  # the ambient git configuration. The service user has no signing key and no
+  # agent; a `commit.gpgsign=true` inherited from somewhere (a rebuilt
+  # container, a hand-edited ~/.gitconfig, a desktop agent) would otherwise
+  # fail every single write with "gpg failed to sign the data".
+  # scripts/init.sh additionally sets `commit.gpgsign false` globally and in
+  # the vault repo; this is the safeguard that does not depend on
+  # configuration being right.
+  @commit_identity [
+    "-c",
+    "user.name=vigil",
+    "-c",
+    "user.email=vigil@local",
+    "-c",
+    "commit.gpgsign=false"
+  ]
+
   @doc "git pull --ff-only <remote> main. Logs and returns {:error, reason} on failure (caller decides)."
   def pull(vault_path, remote) do
     case run(vault_path, ["pull", "--ff-only", remote, "main"]) do
@@ -10,7 +27,7 @@ defmodule Vigil.Git do
         :ok
 
       {:error, out} ->
-        Logger.warning("git pull fehlgeschlagen: #{out}")
+        Logger.warning("git pull failed: #{out}")
         {:error, out}
     end
   end
@@ -76,17 +93,7 @@ defmodule Vigil.Git do
   def add_commit(vault_path, path, message) do
     with {:ok, _} <- run(vault_path, ["add", "--", path]),
          {:ok, _} <-
-           run(vault_path, [
-             "-c",
-             "user.name=vigil",
-             "-c",
-             "user.email=vigil@local",
-             "commit",
-             "-m",
-             message,
-             "--",
-             path
-           ]) do
+           run(vault_path, @commit_identity ++ ["commit", "-m", message, "--", path]) do
       last_commit_meta(vault_path, path)
     end
   end
@@ -103,17 +110,7 @@ defmodule Vigil.Git do
   def remove_commit(vault_path, path, message) do
     with {:ok, _} <- run(vault_path, ["rm", "--", path]),
          {:ok, _} <-
-           run(vault_path, [
-             "-c",
-             "user.name=vigil",
-             "-c",
-             "user.email=vigil@local",
-             "commit",
-             "-m",
-             message,
-             "--",
-             path
-           ]) do
+           run(vault_path, @commit_identity ++ ["commit", "-m", message, "--", path]) do
       :ok
     end
   end
@@ -125,18 +122,7 @@ defmodule Vigil.Git do
   def move_commit(vault_path, from, to, message) do
     with {:ok, _} <- run(vault_path, ["mv", "--", from, to]),
          {:ok, _} <-
-           run(vault_path, [
-             "-c",
-             "user.name=vigil",
-             "-c",
-             "user.email=vigil@local",
-             "commit",
-             "-m",
-             message,
-             "--",
-             from,
-             to
-           ]) do
+           run(vault_path, @commit_identity ++ ["commit", "-m", message, "--", from, to]) do
       last_commit_meta(vault_path, to)
     end
   end

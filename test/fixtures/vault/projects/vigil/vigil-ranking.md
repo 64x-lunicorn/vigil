@@ -3,4 +3,4 @@ type: decision
 ---
 # vigil — Ranking
 
-Einfacher additiver Score statt BM25, bewusst kein Machine-Learning-Ranking.
+A simple additive score instead of BM25, deliberately no machine-learning ranking.

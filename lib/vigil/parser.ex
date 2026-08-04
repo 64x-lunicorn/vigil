@@ -85,7 +85,7 @@ defmodule Vigil.Parser do
               %{}
 
             {:error, reason} ->
-              Logger.warning("unparsbares Frontmatter-YAML in #{path}: #{inspect(reason)}")
+              Logger.warning("unparsable frontmatter YAML in #{path}: #{inspect(reason)}")
               %{}
           end
 
@@ -96,13 +96,13 @@ defmodule Vigil.Parser do
         {frontmatter, {body_lines, offset}}
 
       :not_found ->
-        Logger.warning("Frontmatter in #{path} nicht geschlossen (kein abschließendes ---)")
+        Logger.warning("unterminated frontmatter in #{path} (no closing ---)")
         {%{}, {["---" | rest], 0}}
     end
   end
 
   defp extract_frontmatter(path, lines) do
-    Logger.warning("Kein Frontmatter in #{path}")
+    Logger.warning("no frontmatter in #{path}")
     {%{}, {lines, 0}}
   end
 
@@ -129,11 +129,11 @@ defmodule Vigil.Parser do
           :event
 
         nil ->
-          Logger.warning("Fehlendes 'type' Feld in #{path}, behandle als reference")
+          Logger.warning("missing 'type' field in #{path}, treating as reference")
           :reference
 
         other ->
-          Logger.warning("Ungültiges type '#{inspect(other)}' in #{path}, behandle als reference")
+          Logger.warning("invalid type '#{inspect(other)}' in #{path}, treating as reference")
           :reference
       end
 
@@ -144,9 +144,7 @@ defmodule Vigil.Parser do
         {:event, starts, ends}
       else
         _ ->
-          Logger.warning(
-            "event #{path} hat ungültige/fehlende starts/ends, behandle als reference"
-          )
+          Logger.warning("event #{path} has invalid/missing starts/ends, treating as reference")
 
           {:reference, nil, nil}
       end
@@ -176,7 +174,15 @@ defmodule Vigil.Parser do
 
   @h1_re ~r/^\#\s+(.+?)\s*$/
   @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
-  @wikilink_re ~r/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/
+  # Group 1: target (basename or path), group 2: optional #chunk fragment.
+  # An alias (after |) is matched but not captured — it carries no meaning.
+  @wikilink_re ~r/\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|[^\]]*)?\]\]/
+  # Only .md targets — markdown links to anything else (images, external
+  # URLs) are not note references. Group 1: path without extension,
+  # group 2: fragment.
+  @mdlink_re ~r/\[[^\]]*\]\(([^)#\s]+)\.md(?:#([^)]+))?\)/
+  @fenced_code_re ~r/```.*?```/s
+  @inline_code_re ~r/`[^`\n]*`/
 
   defp build_chunks(path, {lines, offset}, type, starts, ends, created_at, updated_at) do
     total = length(lines)
@@ -337,11 +343,52 @@ defmodule Vigil.Parser do
     end
   end
 
-  defp extract_links(body) do
-    @wikilink_re
-    |> Regex.scan(body)
-    |> Enum.map(fn [_, target] -> slug(String.trim(target)) end)
+  @doc """
+  Extracts **raw**, unresolved outgoing references.
+
+  Actual resolution (candidate lookup, ambiguous/broken classification)
+  happens in `Vigil.Store`, which needs to know about every note in the vault —
+  knowledge the parser, as a pure file-to-chunks function, does not have.
+
+  Recognises `[[target]]`, `[[target#fragment]]`, `[[target|alias]]` and
+  `[text](path.md)` / `[text](path.md#fragment)`. Links inside fenced code
+  blocks (` ``` `) and inline code (`` ` ``) are **not** extracted — otherwise
+  the parser would index example code as real references.
+  """
+  def extract_links(body) do
+    cleaned = strip_code(body)
+
+    wiki =
+      Regex.scan(@wikilink_re, cleaned)
+      |> Enum.map(fn
+        [_, target] -> {String.trim(target), nil}
+        [_, target, fragment] -> {String.trim(target), trim_or_nil(fragment)}
+      end)
+
+    markdown =
+      Regex.scan(@mdlink_re, cleaned)
+      |> Enum.map(fn
+        [_, target] -> {String.trim(target), nil}
+        [_, target, fragment] -> {String.trim(target), trim_or_nil(fragment)}
+      end)
+
+    (wiki ++ markdown)
+    |> Enum.reject(fn {target, _fragment} -> target == "" end)
     |> Enum.uniq()
+    |> Enum.map(fn {target, fragment} -> %{raw: target, fragment: fragment} end)
+  end
+
+  defp trim_or_nil(nil), do: nil
+  defp trim_or_nil(text), do: String.trim(text)
+
+  defp strip_code(text) do
+    text
+    |> blank_matches(@fenced_code_re)
+    |> blank_matches(@inline_code_re)
+  end
+
+  defp blank_matches(text, regex) do
+    Regex.replace(regex, text, fn match -> String.replace(match, ~r/[^\n]/, " ") end)
   end
 
   defp uniquify(base_slug, counts) do
@@ -356,19 +403,15 @@ defmodule Vigil.Parser do
   end
 
   @doc """
-  Slugifies text: lowercase, German umlaut transliteration, spaces to hyphens,
-  strips everything outside [a-z0-9-], collapses and trims hyphens.
+  Slugifies text via `Vigil.Slug.slugify/1` — the single slug implementation
+  in the project, so chunk IDs and normalized file/directory names never
+  diverge. An empty result (no alphanumeric characters at all, e.g. a heading
+  of just "---") falls back to "".
   """
   def slug(text) do
-    text
-    |> String.downcase()
-    |> String.replace("ä", "ae")
-    |> String.replace("ö", "oe")
-    |> String.replace("ü", "ue")
-    |> String.replace("ß", "ss")
-    |> String.replace(~r/\s+/, "-")
-    |> String.replace(~r/[^a-z0-9-]/, "")
-    |> String.replace(~r/-+/, "-")
-    |> String.trim("-")
+    case Vigil.Slug.slugify(text) do
+      {:ok, slug} -> slug
+      {:error, _reason} -> ""
+    end
   end
 end

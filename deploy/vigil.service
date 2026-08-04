@@ -1,5 +1,5 @@
 [Unit]
-Description=vigil - Markdown-Vault MCP-Server
+Description=vigil - Markdown vault MCP server
 After=network-online.target
 Wants=network-online.target
 
@@ -7,12 +7,28 @@ Wants=network-online.target
 Type=simple
 User=vigil
 Group=vigil
-EnvironmentFile=/etc/vigil/vigil.env
-WorkingDirectory=/opt/vigil
-ExecStart=/opt/vigil/bin/vigil start
-ExecStop=/opt/vigil/bin/vigil stop
+# Without a UTF-8 locale the BEAM treats filenames as raw bytes rather than
+# Unicode: a vault note with non-ASCII characters in its filename is listed by
+# File.ls, but File.read/cp then fails with "no such file or directory" on the
+# very path File.ls just returned. C.UTF-8 is built into glibc, so no
+# locale-gen is required. Found empirically on a fresh Debian 13 image.
+Environment=LANG=C.UTF-8
+Environment=LC_ALL=C.UTF-8
+EnvironmentFile=/etc/vigil/env
+WorkingDirectory=/var/lib/vigil
+ExecStart=/opt/vigil/current/bin/vigil start
+ExecStop=/opt/vigil/current/bin/vigil stop
 Restart=on-failure
 RestartSec=1
+
+# Hardening. ReadWritePaths is the critical one: without it the service can
+# write nowhere under ProtectSystem=strict, which produces exactly the
+# permission-denied scenario the crash-safe write path was built to survive.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/vigil
 
 [Install]
 WantedBy=multi-user.target

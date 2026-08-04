@@ -25,10 +25,10 @@ defmodule Vigil.GitTest do
   end
 
   test "add_commit authors as vigil and push succeeds", %{vault: vault} do
-    File.write!(Path.join(vault, "bike/neu.md"), "---\ntype: reference\n---\n# Neu\ntext\n")
+    File.write!(Path.join(vault, "bike/new.md"), "---\ntype: reference\n---\n# New\ntext\n")
 
     assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
-             Git.add_commit(vault, "bike/neu.md", "create: bike/neu.md")
+             Git.add_commit(vault, "bike/new.md", "create: bike/new.md")
 
     assert :ok = Git.push(vault, "origin")
 
@@ -36,14 +36,38 @@ defmodule Vigil.GitTest do
     assert String.trim(out) == "vigil <vigil@local>"
   end
 
+  test "commits succeed even when the repo config forces signing with a broken signer", %{
+    vault: vault
+  } do
+    # The service user has no signing key. A commit.gpgsign=true coming from
+    # outside (a rebuilt container, an edited ~/.gitconfig, a desktop agent)
+    # would, without the -c safeguard in Vigil.Git, abort every write with
+    # "failed to sign the data".
+    {_, 0} = System.cmd("git", ["config", "commit.gpgsign", "true"], cd: vault)
+    {_, 0} = System.cmd("git", ["config", "gpg.program", "/bin/false"], cd: vault)
+
+    File.write!(Path.join(vault, "bike/signed.md"), "---\ntype: reference\n---\n# S\ntext\n")
+
+    assert {:ok, %{last_author: "vigil"}} =
+             Git.add_commit(vault, "bike/signed.md", "create: bike/signed.md")
+
+    File.write!(Path.join(vault, "bike/signed2.md"), "---\ntype: reference\n---\n# S2\ntext\n")
+    {:ok, _} = Git.add_commit(vault, "bike/signed2.md", "create: bike/signed2.md")
+
+    assert {:ok, _} =
+             Git.move_commit(vault, "bike/signed2.md", "bike/signed3.md", "move: s2 -> s3")
+
+    assert :ok = Git.remove_commit(vault, "bike/signed3.md", "delete: bike/signed3.md")
+  end
+
   test "push failure is reported without losing the local commit", %{vault: vault} do
-    File.write!(Path.join(vault, "bike/neu2.md"), "---\ntype: reference\n---\n# Neu2\ntext\n")
-    {:ok, _} = Git.add_commit(vault, "bike/neu2.md", "create: bike/neu2.md")
+    File.write!(Path.join(vault, "bike/new2.md"), "---\ntype: reference\n---\n# New2\ntext\n")
+    {:ok, _} = Git.add_commit(vault, "bike/new2.md", "create: bike/new2.md")
 
     assert {:error, _reason} = Git.push(vault, "nonexistent-remote")
 
     {out, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: vault)
-    assert String.trim(out) == "create: bike/neu2.md"
+    assert String.trim(out) == "create: bike/new2.md"
   end
 
   test "pull/2 fast-forwards from the given remote name", %{vault: vault, remote: remote} do
@@ -55,7 +79,18 @@ defmodule Vigil.GitTest do
     {_out, 0} =
       System.cmd(
         "git",
-        ["-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m", "extern"],
+        [
+          "-c",
+          "user.name=x",
+          "-c",
+          "user.email=x@x",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "-q",
+          "-m",
+          "external"
+        ],
         cd: other
       )
 
@@ -83,11 +118,11 @@ defmodule Vigil.GitTest do
              Git.move_commit(
                vault,
                "bike/terra-speed.md",
-               "bike/terra-speed-neu.md",
-               "move: bike/terra-speed.md -> bike/terra-speed-neu.md"
+               "bike/terra-speed-new.md",
+               "move: bike/terra-speed.md -> bike/terra-speed-new.md"
              )
 
     refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
-    assert File.exists?(Path.join(vault, "bike/terra-speed-neu.md"))
+    assert File.exists?(Path.join(vault, "bike/terra-speed-new.md"))
   end
 end

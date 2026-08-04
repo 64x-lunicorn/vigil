@@ -34,8 +34,8 @@ defmodule Vigil.Application do
 
       _ ->
         raise """
-        VIGIL_AUTH_PASSWORD fehlt oder ist kürzer als 12 Zeichen.
-        Ein öffentlich erreichbarer Autorisierungsserver ohne starkes Passwort ist ein offenes Tor zum Vault.
+        VIGIL_AUTH_PASSWORD is missing or shorter than 12 characters.
+        A publicly reachable authorization server without a strong password is an open door to the vault.
         """
     end
   end

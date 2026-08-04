@@ -14,12 +14,12 @@ defmodule Vigil.StoreExcludeTest do
        %{
          vault: vault
        } do
-    assert File.exists?(Path.join(vault, "work/geheim.md"))
+    assert File.exists?(Path.join(vault, "work/secret.md"))
 
-    assert Store.search(%{query: "exkludiertsuchwort"}) == []
-    assert Store.search(%{query: "exkludiertsuchwort", domain: "work"}) == []
+    assert Store.search(%{query: "excludedsearchword"}) == []
+    assert Store.search(%{query: "excludedsearchword", domain: "work"}) == []
 
-    assert {:error, _} = Store.read("work/geheim.md", false)
+    assert {:error, _} = Store.read("work/secret.md", false)
     assert {:error, _} = Store.create(%{path: "work/y.md", type: "reference", content: "# Y\nx"})
   end
 end

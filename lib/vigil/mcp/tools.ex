@@ -10,79 +10,109 @@ defmodule Vigil.MCP.Tools do
     [
       %{
         name: "search",
-        description: "Durchsucht Chunk-Bodies und Überschriften nach einer Phrase.",
+        description: "Searches chunk bodies and headings for a phrase.",
         inputSchema: %{
           type: "object",
           properties: %{
-            query: %{type: "string", description: "Exakte Suchphrase."},
-            domain: %{type: "string", description: "Domäne, auf die gefiltert wird."},
-            type: %{type: "string", enum: @type_enum, description: "Filtert nach Chunk-Typ."},
+            query: %{type: "string", description: "Exact search phrase."},
+            domain: %{type: "string", description: "Restrict results to this domain."},
+            type: %{type: "string", enum: @type_enum, description: "Filter by chunk type."},
             prefer: %{
               type: "string",
               enum: @type_enum,
-              description: "Bevorzugt einen Typ im Ranking."
+              description: "Boost this type in the ranking."
             },
-            limit: %{type: "integer", description: "Maximale Trefferzahl (Default 10, Max 25)."}
+            limit: %{type: "integer", description: "Maximum number of hits (default 10, max 25)."}
           },
           required: ["query"]
         }
       },
       %{
         name: "read",
-        description: "Liest einen Chunk oder das Inhaltsverzeichnis einer Note.",
+        description:
+          "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
         inputSchema: %{
           type: "object",
           properties: %{
-            id: %{type: "string", description: "pfad#heading-slug oder pfad."},
-            backlinks: %{type: "boolean", description: "Hängt verlinkende Chunk-IDs an."}
+            id: %{type: "string", description: "path#heading-slug, or just path."},
+            backlinks: %{type: "boolean", description: "Append the chunk ids that link here."}
+          },
+          required: ["id"]
+        }
+      },
+      %{
+        name: "links",
+        description:
+          "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
+        inputSchema: %{
+          type: "object",
+          properties: %{
+            id: %{type: "string", description: "path, or path#heading-slug."},
+            direction: %{
+              type: "string",
+              enum: ["out", "in", "both"],
+              description: "Defaults to both."
+            },
+            depth: %{
+              type: "integer",
+              description: "1 (default) or 2; 2 adds neighbors. Higher values are an error."
+            }
           },
           required: ["id"]
         }
       },
       %{
         name: "create",
-        description: "Legt eine neue Note an.",
+        description:
+          "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
         inputSchema: %{
           type: "object",
           properties: %{
-            path: %{type: "string", description: "domäne/dateiname.md."},
-            type: %{type: "string", enum: @type_enum, description: "Frontmatter-Typ der Note."},
-            content: %{type: "string", description: "Markdown-Body, beginnend mit einer H1."},
-            starts: %{type: "string", description: "ISO-Zeit, nur bei type: event."},
-            ends: %{type: "string", description: "ISO-Zeit, nur bei type: event."},
-            force: %{type: "boolean", description: "Überspringt die Duplikat-Prüfung."},
+            path: %{type: "string", description: "domain/filename.md."},
+            type: %{
+              type: "string",
+              enum: @type_enum,
+              description: "Frontmatter type of the note."
+            },
+            content: %{type: "string", description: "Markdown body, starting with an H1."},
+            starts: %{type: "string", description: "ISO timestamp, only for type: event."},
+            ends: %{type: "string", description: "ISO timestamp, only for type: event."},
+            force: %{type: "boolean", description: "Skip the duplicate check."},
             create_dirs: %{
               type: "boolean",
-              description: "Legt einen fehlenden Projektordner unter projects/ an."
+              description: "Create a missing project directory under projects/."
             },
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["path", "type", "content", "skill_key"]
         }
       },
       %{
         name: "append",
-        description: "Hängt Inhalt an eine bestehende Note an.",
+        description: "Appends content to an existing note.",
         inputSchema: %{
           type: "object",
           properties: %{
-            path: %{type: "string", description: "domäne/dateiname.md."},
-            heading: %{type: "string", description: "Abschnittsname; ohne Angabe ans Dateiende."},
-            content: %{type: "string", description: "Anzuhängender Markdown-Text."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            path: %{type: "string", description: "domain/filename.md."},
+            heading: %{
+              type: "string",
+              description: "Section name; without it, appends at end of file."
+            },
+            content: %{type: "string", description: "Markdown text to append."},
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["path", "content", "skill_key"]
         }
       },
       %{
         name: "replace_section",
-        description: "Ersetzt den Body genau eines Chunks.",
+        description: "Replaces the body of exactly one chunk.",
         inputSchema: %{
           type: "object",
           properties: %{
-            id: %{type: "string", description: "pfad#heading-slug."},
-            content: %{type: "string", description: "Neuer Body ohne eigene Überschriften."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            id: %{type: "string", description: "path#heading-slug."},
+            content: %{type: "string", description: "New body, without headings of its own."},
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["id", "content", "skill_key"]
         }
@@ -90,26 +120,29 @@ defmodule Vigil.MCP.Tools do
       %{
         name: "rewrite_note",
         description:
-          "Ersetzt den gesamten Body einer Note, Frontmatter bleibt erhalten. Destruktiv — verlangt confirm: true.",
+          "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
         inputSchema: %{
           type: "object",
           properties: %{
-            path: %{type: "string", description: "domäne/dateiname.md."},
-            content: %{type: "string", description: "Neuer Body, beginnend mit einer H1."},
-            confirm: %{type: "boolean", description: "Muss true sein, sonst wird abgelehnt."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            path: %{type: "string", description: "domain/filename.md."},
+            content: %{type: "string", description: "New body, starting with an H1."},
+            confirm: %{
+              type: "boolean",
+              description: "Must be true, otherwise the call is rejected."
+            },
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["path", "content", "skill_key"]
         }
       },
       %{
         name: "delete_section",
-        description: "Entfernt einen Chunk inklusive Überschrift.",
+        description: "Removes a chunk including its heading.",
         inputSchema: %{
           type: "object",
           properties: %{
-            id: %{type: "string", description: "pfad#heading-slug."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            id: %{type: "string", description: "path#heading-slug."},
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["id", "skill_key"]
         }
@@ -117,42 +150,49 @@ defmodule Vigil.MCP.Tools do
       %{
         name: "update_frontmatter",
         description:
-          "Setzt type/starts/ends im Frontmatter einer bestehenden Note; Body bleibt unangetastet.",
+          "Sets type/starts/ends in the frontmatter of an existing note; the body is untouched.",
         inputSchema: %{
           type: "object",
           properties: %{
-            path: %{type: "string", description: "domäne/dateiname.md."},
-            type: %{type: "string", enum: @type_enum, description: "Neuer Frontmatter-Typ."},
-            starts: %{type: "string", description: "ISO-Zeit, nur bei type: event."},
-            ends: %{type: "string", description: "ISO-Zeit, nur bei type: event."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            path: %{type: "string", description: "domain/filename.md."},
+            type: %{type: "string", enum: @type_enum, description: "New frontmatter type."},
+            starts: %{type: "string", description: "ISO timestamp, only for type: event."},
+            ends: %{type: "string", description: "ISO timestamp, only for type: event."},
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["path", "type", "skill_key"]
         }
       },
       %{
-        name: "delete",
-        description: "Löscht eine Note unwiderruflich. Destruktiv — verlangt confirm: true.",
+        name: "delete_note",
+        description: "Permanently deletes a note. Destructive — requires confirm: true.",
         inputSchema: %{
           type: "object",
           properties: %{
-            path: %{type: "string", description: "domäne/dateiname.md."},
-            confirm: %{type: "boolean", description: "Muss true sein, sonst wird abgelehnt."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            path: %{type: "string", description: "domain/filename.md."},
+            confirm: %{
+              type: "boolean",
+              description: "Must be true, otherwise the call is rejected."
+            },
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["path", "skill_key"]
         }
       },
       %{
-        name: "move",
-        description: "Verschiebt/benennt eine Note um. Destruktiv — verlangt confirm: true.",
+        name: "move_note",
+        description:
+          "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
         inputSchema: %{
           type: "object",
           properties: %{
-            from: %{type: "string", description: "Bestehender Pfad."},
-            to: %{type: "string", description: "Neuer Pfad."},
-            confirm: %{type: "boolean", description: "Muss true sein, sonst wird abgelehnt."},
-            skill_key: %{type: "string", description: "Aktueller Key aus skill_read (AP-4)."}
+            from: %{type: "string", description: "Existing path."},
+            to: %{type: "string", description: "New path."},
+            confirm: %{
+              type: "boolean",
+              description: "Must be true, otherwise the call is rejected."
+            },
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
           required: ["from", "to", "skill_key"]
         }
@@ -160,54 +200,62 @@ defmodule Vigil.MCP.Tools do
       %{
         name: "lint",
         description:
-          "Meldet Duplikate, Satz-Überschriften, verwaiste Links, überlange Notes und veraltete decision-Notes.",
+          "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
         inputSchema: %{type: "object", properties: %{}}
       },
       %{
         name: "current",
-        description: "Gibt die aktuelle Zeit sowie aktive/nahe Events zurück.",
+        description: "Returns the current time plus active and nearby events.",
         inputSchema: %{type: "object", properties: %{}}
       },
       %{
         name: "reload",
-        description: "Führt git pull aus und parst den Vault neu.",
+        description: "Runs git pull and reparses the vault.",
         inputSchema: %{type: "object", properties: %{}}
       },
       %{
         name: "skill_list",
-        description: "Listet verfügbare Skills mit Description, ohne Body.",
+        description: "Lists available skills with their description, without bodies.",
         inputSchema: %{type: "object", properties: %{}}
       },
       %{
         name: "skill_read",
-        description: "Liest den vollständigen Inhalt eines Skills.",
+        description: "Reads the full content of a skill.",
         inputSchema: %{
           type: "object",
-          properties: %{name: %{type: "string", description: "Skill-Name, mit oder ohne .md."}},
+          properties: %{name: %{type: "string", description: "Skill name, with or without .md."}},
           required: ["name"]
         }
       },
       %{
         name: "skill_write",
-        description: "Legt einen Skill an oder ersetzt ihn; nur auf ausdrückliche Anweisung.",
+        description: "Creates or replaces a skill; only on explicit instruction.",
         inputSchema: %{
           type: "object",
           properties: %{
-            name: %{type: "string", description: "Skill-Name, mit oder ohne .md."},
+            name: %{type: "string", description: "Skill name, with or without .md."},
             content: %{
               type: "string",
-              description: "Vollständiger Dateiinhalt inkl. Frontmatter."
-            }
+              description: "Full file content including frontmatter."
+            },
+            skill_key: %{type: "string", description: "Current key from skill_read."}
           },
-          required: ["name", "content"]
+          required: ["name", "content", "skill_key"]
         }
       }
     ]
   end
 
-  @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete move)
+  @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete_note move_note skill_write)
 
-  @doc "True for tools that modify the vault and are gated by AP-4's SkillKey / AP-6's read-only scope."
+  @doc """
+  True for tools that write to the vault — gated by both AP-4's SkillKey and
+  AP-6's read-only (`vault:read`) scope. `skill_write` requires a SkillKey
+  same as any other write tool; the bootstrap deadlock this could cause on a
+  brand-new vault (no `vigil-vault-conventions` skill yet to read a key from)
+  is resolved in `Vigil.Store.skill_read/1`, which reveals the current key
+  even when the requested skill doesn't exist yet.
+  """
   def write_tool?(name), do: name in @write_tools
 
   @doc "Dispatches a `tools/call` to the Store. Returns `{:ok, result}` or `{:error, message}`."
@@ -237,7 +285,7 @@ defmodule Vigil.MCP.Tools do
 
   defp skill_key_error do
     {:error,
-     "Fehlender oder abgelaufener SkillKey. Zuerst skill_read('vigil-vault-conventions') aufrufen, um die Konventionen zu lesen und den aktuellen Key zu erhalten."}
+     "Missing or expired SkillKey. Call skill_read('vigil-vault-conventions') first to read the conventions and obtain the current key."}
   end
 
   defp dispatch_tool("search", args) do
@@ -256,6 +304,12 @@ defmodule Vigil.MCP.Tools do
   defp dispatch_tool("read", args) do
     with {:ok, id} <- require_string(args, "id") do
       Store.read(id, opt_bool(args, "backlinks", false))
+    end
+  end
+
+  defp dispatch_tool("links", args) do
+    with {:ok, id} <- require_string(args, "id") do
+      Store.links(id, opt_direction(args), opt_integer(args, "depth", 1))
     end
   end
 
@@ -318,16 +372,16 @@ defmodule Vigil.MCP.Tools do
     end
   end
 
-  defp dispatch_tool("delete", args) do
+  defp dispatch_tool("delete_note", args) do
     with {:ok, path} <- require_string(args, "path") do
-      Store.delete(%{path: path, confirm: opt_bool(args, "confirm", false)})
+      Store.delete_note(%{path: path, confirm: opt_bool(args, "confirm", false)})
     end
   end
 
-  defp dispatch_tool("move", args) do
+  defp dispatch_tool("move_note", args) do
     with {:ok, from} <- require_string(args, "from"),
          {:ok, to} <- require_string(args, "to") do
-      Store.move(%{from: from, to: to, confirm: opt_bool(args, "confirm", false)})
+      Store.move_note(%{from: from, to: to, confirm: opt_bool(args, "confirm", false)})
     end
   end
 
@@ -360,14 +414,14 @@ defmodule Vigil.MCP.Tools do
     end
   end
 
-  defp dispatch_tool(other, _args), do: {:error, "Unbekanntes Tool: #{other}"}
+  defp dispatch_tool(other, _args), do: {:error, "Unknown tool: #{other}"}
 
   defp ok(value), do: {:ok, value}
 
   defp require_string(args, key) do
     case Map.get(args, key) do
       v when is_binary(v) and v != "" -> {:ok, v}
-      _ -> {:error, "Fehlender oder ungültiger Parameter: #{key}"}
+      _ -> {:error, "Missing or invalid parameter: #{key}"}
     end
   end
 
@@ -387,6 +441,14 @@ defmodule Vigil.MCP.Tools do
       v when is_integer(v) -> v
       v when is_binary(v) -> String.to_integer(v)
       _ -> default
+    end
+  end
+
+  defp opt_direction(args) do
+    case Map.get(args, "direction") do
+      "out" -> :out
+      "in" -> :in
+      _ -> :both
     end
   end
 

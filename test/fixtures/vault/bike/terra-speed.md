@@ -3,8 +3,8 @@ type: reference
 ---
 # WTB Terra Speed 40C
 
-## Maße
-40mm Breite, ~450g, TCS tubeless.
+## Dimensions
+40mm wide, ~450g, TCS tubeless.
 
-## Erfahrung Schotter
-Läuft ruhig auf festem Schotter. Zitat Daniel: "auf Asphalt hat's genervt".
+## Gravel Experience
+Runs quietly on packed gravel. Quote: "on tarmac it got annoying".

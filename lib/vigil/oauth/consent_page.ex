@@ -3,10 +3,10 @@ defmodule Vigil.OAuth.ConsentPage do
 
   @template """
   <!DOCTYPE html>
-  <html lang="de">
+  <html lang="en">
   <head>
   <meta charset="utf-8">
-  <title>vigil — Zugriff erlauben?</title>
+  <title>vigil — grant access?</title>
   <style>
   body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; }
   .warn { color: #a33; font-weight: bold; }
@@ -16,11 +16,11 @@ defmodule Vigil.OAuth.ConsentPage do
   </style>
   </head>
   <body>
-  <h1>vigil — Zugriff erlauben?</h1>
-  <p><strong><%= client_name %></strong> möchte auf deinen Vault zugreifen.</p>
-  <p>Redirect-Host: <strong><%= redirect_host %></strong></p>
+  <h1>vigil — grant access?</h1>
+  <p><strong><%= client_name %></strong> wants to access your vault.</p>
+  <p>Redirect host: <strong><%= redirect_host %></strong></p>
   <%= if loopback do %>
-  <p class="warn">Achtung: lokale Redirect-Adresse (localhost/127.0.0.1) — jeder lokale Prozess auf diesem Rechner kann sich als dieser Client ausgeben.</p>
+  <p class="warn">Warning: loopback redirect address (localhost/127.0.0.1) — any local process on this machine can impersonate this client.</p>
   <% end %>
   <%= if error do %>
   <p class="err"><%= error %></p>
@@ -29,10 +29,10 @@ defmodule Vigil.OAuth.ConsentPage do
   <%= for {k, v} <- hidden_fields do %>
   <input type="hidden" name="<%= k %>" value="<%= v %>">
   <% end %>
-  <input type="password" name="password" placeholder="Passwort" autofocus required>
+  <input type="password" name="password" placeholder="Password" autofocus required>
   <p>
-  <button type="submit" name="decision" value="allow">Zulassen</button>
-  <button type="submit" name="decision" value="deny">Ablehnen</button>
+  <button type="submit" name="decision" value="allow">Allow</button>
+  <button type="submit" name="decision" value="deny">Deny</button>
   </p>
   </form>
   </body>

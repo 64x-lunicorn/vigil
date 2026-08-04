@@ -20,12 +20,17 @@ defmodule Vigil.SearchTest do
 
   test "title hit outranks body hit" do
     items = [
-      item(%{id: "x/a.md", file_title: "Terra Speed", body: "nichts", body_downcased: "nichts"}),
+      item(%{
+        id: "x/a.md",
+        file_title: "Terra Speed",
+        body: "nothing",
+        body_downcased: "nothing"
+      }),
       item(%{
         id: "x/b.md",
         file_title: "Anderes",
-        body: "erwähnt terra speed einmal",
-        body_downcased: "erwähnt terra speed einmal"
+        body: "mentions terra speed once",
+        body_downcased: "mentions terra speed once"
       })
     ]
 
@@ -57,11 +62,11 @@ defmodule Vigil.SearchTest do
 
   test "no match returns empty list, not an error" do
     items = [item(%{body_downcased: "irrelevant"})]
-    assert Search.run(items, "nichtvorhanden") == []
+    assert Search.run(items, "doesnotexist") == []
   end
 
   test "preview is capped at 120 characters" do
-    long_body = String.duplicate("wort ", 40)
+    long_body = String.duplicate("word ", 40)
     items = [item(%{file_title: "Treffer", body: long_body, body_downcased: long_body})]
     [result] = Search.run(items, "treffer")
     assert String.length(result.preview) <= 121
@@ -71,8 +76,8 @@ defmodule Vigil.SearchTest do
     items = [
       item(%{
         id: "x/together.md",
-        body: "terra speed ist gut",
-        body_downcased: "terra speed ist gut"
+        body: "terra speed is good",
+        body_downcased: "terra speed is good"
       }),
       item(%{
         id: "x/apart.md",

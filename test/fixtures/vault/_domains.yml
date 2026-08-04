@@ -1,4 +1,11 @@
-bike:      "Material: Rad, Komponenten, Ausrüstung, Wartung"
-training:  "Körper: Planung, Ernährung, Recovery, Metriken"
-projects:  "Software-Projekte. Ein Unterordner pro Projekt, Hauptnote = Projektname"
-phantom:   "Key ohne zugehörigen Ordner, zum Testen der Warnung"
+bike:      "Gear: bike, components, equipment, maintenance"
+training:  "Body: planning, nutrition, recovery, metrics"
+projects:  "Software projects. One subdirectory per project, main note = project name"
+phantom:   "Key without a matching directory, to exercise the drift warning"
+journal:
+  description: "Chronological, hidden from the default search"
+  naming:
+    pattern: '^\d{4}-\d{2}-\d{2}\.md$'
+    scope: filename
+    suggestion: date
+    hint: "Journal notes are named YYYY-MM-DD.md"

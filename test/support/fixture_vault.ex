@@ -18,6 +18,13 @@ defmodule Vigil.FixtureVault do
     git!(tmp, ["symbolic-ref", "HEAD", "refs/heads/main"])
     git!(tmp, ["config", "user.name", "Daniel"])
     git!(tmp, ["config", "user.email", "daniel@local"])
+    # Repo-level, not just for the initial commit: Vigil.Git's own
+    # add_commit/move_commit/remove_commit inherit the caller's global git
+    # config, and Daniel's global config signs commits via a 1Password
+    # SSH-agent. That agent is flaky/unavailable in a plain test run and has
+    # no bearing on what's under test here — production disables signing for
+    # the same reason (the vigil service user has no such agent either).
+    git!(tmp, ["config", "commit.gpgsign", "false"])
     git!(tmp, ["add", "-A"])
 
     git!(
@@ -31,7 +38,10 @@ defmodule Vigil.FixtureVault do
 
     if Keyword.get(opts, :remote, false) do
       remote = tmp <> "_remote.git"
-      git!(nil, ["init", "-q", "--bare", remote])
+      # -b main explicit: a bare init without it follows the machine's global
+      # init.defaultBranch, which isn't guaranteed to be "main" (e.g. plain
+      # Debian ships "master"). Vigil.Git always operates against "main".
+      git!(nil, ["init", "-q", "--bare", "-b", "main", remote])
       git!(tmp, ["remote", "add", "origin", remote])
       git!(tmp, ["push", "-q", "-u", "origin", "main"])
       {tmp, remote}

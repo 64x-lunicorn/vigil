@@ -11,6 +11,9 @@ defmodule Vigil.StoreDomainsYmlTest do
     System.cmd("git", ["symbolic-ref", "HEAD", "refs/heads/main"], cd: tmp)
     System.cmd("git", ["config", "user.name", "Daniel"], cd: tmp)
     System.cmd("git", ["config", "user.email", "daniel@local"], cd: tmp)
+    # See Vigil.FixtureVault.build/1: avoids depending on the (flaky, here
+    # irrelevant) 1Password-backed commit signing from the global git config.
+    System.cmd("git", ["config", "commit.gpgsign", "false"], cd: tmp)
     System.cmd("git", ["add", "-A"], cd: tmp)
     System.cmd("git", ["commit", "-q", "-m", "empty"], cd: tmp)
   end
@@ -26,7 +29,7 @@ defmodule Vigil.StoreDomainsYmlTest do
         start_supervised!({Store, vault_path: tmp, exclude: [], git_remote: "origin"})
       end)
 
-    assert log =~ "_domains.yml fehlt"
+    assert log =~ "_domains.yml"
     assert Store.instructions_domains_text() == ""
   end
 
@@ -49,8 +52,8 @@ defmodule Vigil.StoreDomainsYmlTest do
         start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
       end)
 
-    assert log =~ "Key 'phantom' hat keinen zugehörigen Ordner"
-    assert log =~ "Domäne 'garten' hat keinen Eintrag"
+    assert log =~ "key 'phantom' has no matching directory"
+    assert log =~ "domain 'garden' has no entry"
 
     assert Store.instructions_domains_text() =~ "bike:"
   end

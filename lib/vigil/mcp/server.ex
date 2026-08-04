@@ -15,20 +15,6 @@ defmodule Vigil.MCP.Server do
   plug(:match)
   plug(:dispatch)
 
-  @base_instructions """
-  Stimme: Daniels Formulierungen wörtlich übernehmen, nicht glätten. Was er gesagt hat, in seinen Worten — im Zweifel roher zitieren als eleganter zusammenfassen. Eigene Einordnungen und Vorschläge explizit als solche kennzeichnen ("Vorschlag von Claude: …"). Der Vault muss in fünf Jahren nach Daniel klingen, nicht nach Claude.
-
-  Sprache: Deutsch. Englische Fachbegriffe bleiben englisch, wie gesprochen. Keine Übersetzungen in eine Richtung.
-
-  Atomarität: Jeder Abschnitt muss für sich stehen können — er wird einzeln retrieved. Kein "wie oben erwähnt", keine Pronomen mit Bezug außerhalb des Abschnitts.
-
-  Sparsamkeit: Vor create immer search. Lieber append an Bestehendes als neue Note. Keine Zusammenfassungen von Dingen, die schon im Vault stehen.
-
-  type: reference = Fakt über die Welt (altert nicht). decision = Fakt über Daniel (altert). event = hat starts/ends. Im Zweifel decision.
-
-  Skills: skill_write nur auf ausdrückliche Anweisung. Niemals proaktiv Skills anlegen oder ändern — auch nicht, wenn es naheliegt. Skills sind Anweisungen an Claude; sie zu schreiben ist Daniels Entscheidung, nicht Claudes.
-  """
-
   ## Routes — MCP
 
   post "/mcp" do
@@ -213,7 +199,7 @@ defmodule Vigil.MCP.Server do
 
       result =
         if scope == @read_scope and Tools.write_tool?(name) do
-          {:error, "Nur-Lese-Token: Schreibzugriff verweigert."}
+          {:error, "Read-only token: write access denied."}
         else
           Tools.dispatch(name, arguments)
         end
@@ -255,9 +241,47 @@ defmodule Vigil.MCP.Server do
   defp envelope_for("current", session_id), do: Envelope.for_current(session_id)
   defp envelope_for(_name, session_id), do: Envelope.for_call(session_id)
 
+  # Sent to the client on `initialize`. These are writing rules for the vault,
+  # not rules for this server, which is why the two things they depend on —
+  # who the vault belongs to and which language it is written in — come from
+  # configuration rather than being hardcoded. `VIGIL_VAULT_LANGUAGE` governs
+  # the language of the *notes*; the server itself always speaks English.
+  defp base_instructions do
+    owner = Application.get_env(:vigil, :vault_owner, "the vault owner")
+    language = Application.get_env(:vigil, :vault_language, "English")
+
+    """
+    Voice: use #{owner}'s own phrasing verbatim, do not smooth it out. What they
+    said, in their words — when in doubt quote more rawly rather than summarize
+    more elegantly. Mark your own interpretations and suggestions explicitly as
+    such ("Suggestion from Claude: …"). In five years the vault must still sound
+    like #{owner}, not like Claude.
+
+    Language: write notes and headings in #{language}. Established technical
+    terms stay in the language they are normally used in; do not translate them
+    in either direction.
+
+    Atomicity: every section must stand on its own — it gets retrieved
+    individually. No "as mentioned above", no pronouns pointing outside the
+    section.
+
+    Frugality: always search before create. Prefer appending to something that
+    exists over adding a new note. Do not write summaries of things the vault
+    already contains.
+
+    type: reference = a fact about the world (does not age). decision = a fact
+    about #{owner} (ages). event = has starts/ends. When in doubt, decision.
+
+    Skills: call skill_write only when explicitly told to. Never create or
+    change skills on your own initiative, not even when it seems obvious.
+    Skills are instructions to Claude; writing them is #{owner}'s decision, not
+    Claude's.
+    """
+  end
+
   defp instructions_text do
-    @base_instructions <>
-      "\n\n## Domänen (_domains.yml)\n\n```yaml\n" <> Store.instructions_domains_text() <> "\n```"
+    base_instructions() <>
+      "\n\n## Domains (_domains.yml)\n\n```yaml\n" <> Store.instructions_domains_text() <> "\n```"
   end
 
   ## OAuth discovery documents
@@ -331,10 +355,10 @@ defmodule Vigil.MCP.Server do
         render_consent(conn, ctx, nil)
 
       {:error, :untrusted} ->
-        send_html(conn, 400, error_html("Ungültiger client_id oder redirect_uri."))
+        send_html(conn, 400, error_html("Invalid client_id or redirect_uri."))
 
       {:error, :bad_code_challenge_method} ->
-        send_html(conn, 400, error_html("code_challenge_method muss S256 sein."))
+        send_html(conn, 400, error_html("code_challenge_method must be S256."))
 
       {:error, {:redirect, redirect_uri, error_code, state}} ->
         redirect_with_error(conn, redirect_uri, error_code, state)
@@ -350,10 +374,10 @@ defmodule Vigil.MCP.Server do
         process_consent_decision(conn, ctx, params)
 
       {:error, :untrusted} ->
-        send_html(conn, 400, error_html("Ungültiger client_id oder redirect_uri."))
+        send_html(conn, 400, error_html("Invalid client_id or redirect_uri."))
 
       {:error, :bad_code_challenge_method} ->
-        send_html(conn, 400, error_html("code_challenge_method muss S256 sein."))
+        send_html(conn, 400, error_html("code_challenge_method must be S256."))
 
       {:error, {:redirect, redirect_uri, error_code, state}} ->
         redirect_with_error(conn, redirect_uri, error_code, state)
@@ -432,7 +456,7 @@ defmodule Vigil.MCP.Server do
     case params["decision"] do
       "deny" -> redirect_with_error(conn, ctx.redirect_uri, "access_denied", ctx.state)
       "allow" -> process_allow(conn, ctx, params)
-      _ -> send_html(conn, 400, error_html("Ungültige Anfrage."))
+      _ -> send_html(conn, 400, error_html("Invalid request."))
     end
   end
 
@@ -450,7 +474,7 @@ defmodule Vigil.MCP.Server do
         issue_authorization_code(conn, ctx, now)
       else
         OAuth.Store.record_failure(ip, now)
-        render_consent(conn, ctx, "Falsches Passwort.")
+        render_consent(conn, ctx, "Wrong password.")
       end
     end
   end
@@ -606,8 +630,8 @@ defmodule Vigil.MCP.Server do
   end
 
   defp error_html(message) do
-    "<!DOCTYPE html><html lang=\"de\"><head><meta charset=\"utf-8\"><title>vigil — Fehler</title></head>" <>
-      "<body><h1>Fehler</h1><p>#{Plug.HTML.html_escape(message)}</p></body></html>"
+    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>vigil — error</title></head>" <>
+      "<body><h1>Error</h1><p>#{Plug.HTML.html_escape(message)}</p></body></html>"
   end
 
   defp issuer, do: Application.fetch_env!(:vigil, :issuer)
