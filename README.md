@@ -480,6 +480,11 @@ config and would reach for `/var/lib/vigil`; `config/runtime.exs` pins fixed,
 safe paths for `MIX_ENV=test` regardless of what is in the environment, so a
 stray `VIGIL_VAULT_PATH` cannot make a green test run meaningless.
 
+`scripts/*.sh` are covered separately — outside `mix test` — by
+`bash scripts/test/check_only_test.sh`, which exercises `init.sh --check-only`
+against a throwaway fixture vault without needing root or a real
+`/opt/vigil/repo` install (see the `VIGIL_INIT_TEST_STUBS` seam in `init.sh`).
+
 ```
 lib/vigil/
 ├── application.ex       # supervisor

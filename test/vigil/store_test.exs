@@ -186,6 +186,28 @@ defmodule Vigil.StoreTest do
       assert {:ok, _} = Store.read("projects/new/x.md", false)
     end
 
+    test "create_dirs never creates directories outside projects/", %{vault: vault} do
+      assert {:error, _} =
+               Store.create(%{
+                 path: "gear/sub/x.md",
+                 type: "reference",
+                 content: "# X\nx",
+                 create_dirs: true
+               })
+
+      refute File.dir?(Path.join(vault, "gear/sub"))
+
+      assert {:error, _} =
+               Store.create(%{
+                 path: "unknown-domain/x.md",
+                 type: "reference",
+                 content: "# X\nx",
+                 create_dirs: true
+               })
+
+      refute File.dir?(Path.join(vault, "unknown-domain"))
+    end
+
     test "unknown domain is rejected with a domain list" do
       assert {:error, msg} =
                Store.create(%{path: "unknown-domain/x.md", type: "reference", content: "# X\nx"})

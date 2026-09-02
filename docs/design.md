@@ -50,6 +50,14 @@ is a namespace with a sharp boundary, not a topic. There are no borderline
 cases like "tires: gear or training?". Deeper nesting (`projects/vigil/docs/`)
 is rejected.
 
+**`projects/<name>/` is also the one exception to "the server never creates
+directories".** `create`'s `create_dirs` flag auto-creates exactly that one
+missing directory level — matching the "one directory per project" rule above
+— when writing the first note into a not-yet-existing project. No other
+domain, and no deeper level, gets this treatment: a two-level path outside
+`projects/` (or a third level inside it) is rejected before directory creation
+is even considered.
+
 The main note of a project is named after the project:
 `projects/vigil/vigil.md`. Deliberately **not** `readme.md` — several projects
 would then produce colliding wikilink slugs, since links resolve through the
@@ -71,8 +79,12 @@ belongs.
 - A key without a matching directory: warning, key ignored.
 - A directory without a key: still a domain. The file is a description, not a
   whitelist. Warning in the log.
-- **The server never writes this file.** No tool changes it. A new domain is a
-  human decision, not the assistant's.
+- **The running server never writes this file.** No MCP tool changes it. A new
+  domain is a human decision, not the assistant's. The one sanctioned, one-time
+  exception is `init.sh`'s vault-adoption phase (see
+  [`docs/history.md`](history.md#vault-adoption-and---check-only)): onboarding
+  a pre-existing vault appends entries for domains it finds missing from
+  `_domains.yml`, before the server ever runs against it.
 
 Optionally a domain carries naming rules — see [naming](#path-normalization-and-naming-rules).
 
