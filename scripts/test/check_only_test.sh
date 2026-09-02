@@ -8,12 +8,12 @@
 # "check", so --check-only silently fell through to apply-mode behavior and
 # could modify/commit the vault it was supposed to only inspect.
 #
-# Builds a throwaway git-backed fixture vault with one instance of each
-# automatically-fixable finding (missing .gitignore entry, wrong local git
-# identity, and a missing _domains.yml entry — permissions are also
-# exercised, best-effort, see below), runs
-# `init.sh --check-only --vault <fixture>` against it, and asserts the
-# fixture is byte-for-byte and commit-for-commit unchanged afterwards.
+# Builds a throwaway git-backed fixture vault with one instance of each of
+# the four automatically-fixable finding classes (missing .gitignore entry,
+# wrong local git identity, a missing _domains.yml entry, wrong permissions),
+# runs `init.sh --check-only --vault <fixture>` against it, and asserts the
+# fixture is byte-for-byte, commit-for-commit, and permissions-for-permissions
+# unchanged afterwards.
 #
 # init.sh normally requires root, a "vigil" system user, and a real
 # /opt/vigil/repo checkout. VIGIL_INIT_TEST_STUBS=1 (see init.sh) replaces
@@ -62,6 +62,12 @@ assert_contains() {
 VAULT="$(mktemp -d)"
 trap 'rm -rf "$VAULT"' EXIT
 
+# Wrong permissions on purpose — init.sh's fix wants owner vigil:vigil, mode
+# 0750. phase2b_fix_permissions falls back to "?:?"/"?" wherever `stat -c`
+# isn't GNU stat (e.g. macOS), which still mismatches "vigil:vigil"/"750", so
+# the pending fix fires on every host this test runs on either way.
+chmod 0700 "$VAULT"
+
 ## ── Build a fixture vault with one of each fixable finding ─────────────────
 
 mkdir -p "${VAULT}/bike" "${VAULT}/gear"
@@ -109,6 +115,7 @@ BEFORE_GITIGNORE="$([ -f "${VAULT}/.gitignore" ] && cat "${VAULT}/.gitignore" ||
 BEFORE_DOMAINS_YML="$(cat "${VAULT}/_domains.yml")"
 BEFORE_USER_NAME="$(git -C "$VAULT" config user.name)"
 BEFORE_USER_EMAIL="$(git -C "$VAULT" config user.email)"
+BEFORE_VAULT_LS="$(ls -ld "$VAULT")"
 
 ## ── Run init.sh --check-only against it, with test stubs in place ─────────
 
@@ -135,6 +142,7 @@ AFTER_GITIGNORE="$([ -f "${VAULT}/.gitignore" ] && cat "${VAULT}/.gitignore" || 
 AFTER_DOMAINS_YML="$(cat "${VAULT}/_domains.yml")"
 AFTER_USER_NAME="$(git -C "$VAULT" config user.name)"
 AFTER_USER_EMAIL="$(git -C "$VAULT" config user.email)"
+AFTER_VAULT_LS="$(ls -ld "$VAULT")"
 
 assert_eq "no new commit was created" "$BEFORE_HEAD" "$AFTER_HEAD"
 assert_eq "commit log is unchanged" "$BEFORE_LOG" "$AFTER_LOG"
@@ -143,12 +151,15 @@ assert_eq ".gitignore was not modified" "$BEFORE_GITIGNORE" "$AFTER_GITIGNORE"
 assert_eq "_domains.yml was not modified" "$BEFORE_DOMAINS_YML" "$AFTER_DOMAINS_YML"
 assert_eq "local git user.name was not changed" "$BEFORE_USER_NAME" "$AFTER_USER_NAME"
 assert_eq "local git user.email was not changed" "$BEFORE_USER_EMAIL" "$AFTER_USER_EMAIL"
+assert_eq "vault directory ownership/permissions were not touched" "$BEFORE_VAULT_LS" "$AFTER_VAULT_LS"
 assert_eq "exit code reports findings (3) rather than an error" "3" "$EXIT_CODE"
 
 assert_contains "reports the .gitignore fix as pending, not applied" "$OUTPUT" \
   "gitignore: add .obsidian/"
 assert_contains "reports the git identity fix as pending, not applied" "$OUTPUT" \
   "git config: set local user.name/user.email/commit.gpgsign"
+assert_contains "reports the permissions fix as pending, not applied" "$OUTPUT" \
+  "permissions: chown -R vigil:vigil, chmod 0750"
 # phase2b_fix_domains_yml itself needs GNU grep -P (PCRE), same as production
 # (Debian). BSD grep (macOS) can't run that extraction at all, so skip this
 # one assertion there rather than report a false failure unrelated to

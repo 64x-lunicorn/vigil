@@ -442,24 +442,26 @@ phase2b_run() {
 
 ## ── --check-only: standalone read-only mode, short-circuits everything ────
 
-# Test seam: with VIGIL_INIT_TEST_STUBS=1, replace the root/vigil-user checks
-# and the hardcoded /opt/vigil/repo checkout with a caller-supplied stand-in
-# (VIGIL_TEST_REPO_ROOT), so scripts/test/check_only_test.sh can exercise the
-# mode-string plumbing below without root, a "vigil" system user, or a real
-# /opt/vigil/repo install. Unset (the default), this changes nothing.
-if [ "${VIGIL_INIT_TEST_STUBS:-0}" = "1" ]; then
-  require_root() { :; }
-  require_command() { :; }
-  as_vigil() {
-    if [ "$1" = "bash" ] && [ "$2" = "-c" ] && [ -n "${VIGIL_TEST_REPO_ROOT:-}" ]; then
-      bash -c "${3//\/opt\/vigil\/repo/$VIGIL_TEST_REPO_ROOT}"
-    else
-      "$@"
-    fi
-  }
-fi
-
 if [ "$CHECK_ONLY" = "1" ]; then
+  # Test seam: with VIGIL_INIT_TEST_STUBS=1, replace the root/vigil-user
+  # checks and the hardcoded /opt/vigil/repo checkout with a caller-supplied
+  # stand-in (VIGIL_TEST_REPO_ROOT), so scripts/test/check_only_test.sh can
+  # exercise the mode-string plumbing below without root, a "vigil" system
+  # user, or a real /opt/vigil/repo install. Scoped to this branch — the rest
+  # of init.sh (Steps 1-9) always uses the real require_root/as_vigil. Unset
+  # (the default), this changes nothing.
+  if [ "${VIGIL_INIT_TEST_STUBS:-0}" = "1" ]; then
+    require_root() { :; }
+    require_command() { :; }
+    as_vigil() {
+      if [ "$1" = "bash" ] && [ "$2" = "-c" ] && [ -n "${VIGIL_TEST_REPO_ROOT:-}" ]; then
+        bash -c "${3//\/opt\/vigil\/repo/$VIGIL_TEST_REPO_ROOT}"
+      else
+        "$@"
+      fi
+    }
+  fi
+
   require_root "$@"
 
   if [ "${VIGIL_INIT_TEST_STUBS:-0}" != "1" ] && [ ! -d /opt/vigil/repo/.git ]; then
@@ -489,6 +491,7 @@ if [ "$CHECK_ONLY" = "1" ]; then
   fi
   exit 0
 fi
+
 
 ## ── Step 1 — preflight ───────────────────────────────────────────────────
 
