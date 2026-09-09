@@ -10,7 +10,7 @@ defmodule Vigil.StoreExcludeTest do
     %{vault: vault}
   end
 
-  test "VIGIL_EXCLUDE hides the folder from search, ETS, read, and create even though it exists on disk",
+  test "VIGIL_EXCLUDE hides the folder from search, the index, read, and create even though it exists on disk",
        %{
          vault: vault
        } do

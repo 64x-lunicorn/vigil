@@ -67,15 +67,16 @@ flowchart LR
     K --> T
     T --> S["Vigil.Store<br/>GenServer"]
     S -->|every write| V{"Vigil.Vault.Policy"}
-    S <--> E[("ETS index<br/>chunks · files · links")]
+    S <--> E[("Vigil.Index<br/>notes · chunks · links")]
     S --> G["Vigil.Git"]
     G <--> R[("Vault repo<br/>Markdown + Git")]
     R -.->|push / pull| U[("Upstream<br/>GitHub, Gitea, …")]
 ```
 
-The ETS index only exists in process memory and is rebuilt from the Git working
-tree at every start and on every `reload`. The single source of truth is the
-vault repository; restarting `Vigil.Store` never loses data, only a warm index.
+The index only exists in process memory — a plain value held in
+`Vigil.Store`'s state — and is rebuilt from the Git working tree at every
+start and on every `reload`. The single source of truth is the vault
+repository; restarting `Vigil.Store` never loses data, only a warm index.
 
 ### A note becomes chunks
 
@@ -487,7 +488,7 @@ against a throwaway fixture vault without needing root or a real
 ```
 lib/vigil/
 ├── application.ex       # supervisor
-├── store.ex             # GenServer — ETS index, search, writes, links, lint
+├── store.ex             # GenServer — loading, writes, mailbox around Vigil.Index
 ├── parser.ex            # file → frontmatter + chunks + raw links
 ├── slug.ex              # the single canonical slug implementation
 ├── search.ex            # pure ranking functions
@@ -508,9 +509,10 @@ lib/mix/tasks/
 └── vigil.vault_check.ex # JSON report used by init.sh
 ```
 
-All reads go through the `Vigil.Store` GenServer because the ETS tables are
-private to it. For a single-user knowledge base that serialization is a
-feature, not a bottleneck: it makes every write atomic with respect to reads.
+All reads go through the `Vigil.Store` GenServer because the index is a plain
+value held in its process state. For a single-user knowledge base that
+serialization is a feature, not a bottleneck: it makes every write atomic
+with respect to reads.
 
 ---
 

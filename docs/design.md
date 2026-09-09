@@ -91,8 +91,8 @@ Optionally a domain carries naming rules — see [naming](#path-normalization-an
 ### `VIGIL_EXCLUDE` is the hard boundary
 
 A comma-separated list of directory names that are **not parsed**. Not
-filtered — not read. No ETS entry, no chunk, no backlink, nothing a bug could
-accidentally return.
+filtered — not read. No note in the index, no chunk, no backlink, nothing a
+bug could accidentally return.
 
 The difference from a flag inside `_domains.yml` is essential: a process cannot
 change its own environment variable, but it can change a file in the vault.
@@ -270,7 +270,7 @@ Every write — `create`, `append`, `replace_section`, `rewrite_note`,
 write: path safety, path normalization, which domains are writable, the naming
 conventions from `_domains.yml`, frontmatter and type rules, duplicate
 detection, and the confirm gates. It is pure — it reads no file and touches no
-ETS table; `Vigil.Vault.Facts` carries what it needs, and where a decision
+index; `Vigil.Vault.Facts` carries what it needs, and where a decision
 authorises an effect it says so in its result rather than performing it.
 
 The point of one gate is that there is no second way in. The rules used to be
@@ -368,10 +368,11 @@ Not built, and not "prepared for" either:
 
 ## Known trade-offs
 
-**All reads serialize through one GenServer.** The ETS tables are private to
-`Vigil.Store`, so every read is a `GenServer.call`. For a single-user knowledge
-base this is a feature — it makes writes atomic with respect to reads — but it
-is a real ceiling if the workload ever becomes concurrent.
+**All reads serialize through one GenServer.** The index (`Vigil.Index`) is a
+plain value held in `Vigil.Store`'s process state, so every read is a
+`GenServer.call`. For a single-user knowledge base this is a feature — it
+makes writes atomic with respect to reads — but it is a real ceiling if the
+workload ever becomes concurrent.
 
 **The full index rebuild on every write is O(vault), not O(change).** Cheap at
 the sizes this targets, measured above. It would need revisiting an order of
