@@ -130,6 +130,77 @@ defmodule Vigil.ParserTest do
     assert file.type == :reference
   end
 
+  # Characterisation tests: what the boundary between two chunks does today.
+  # Nothing else in the suite pins `body` exactly or `body_end_line` at all —
+  # the tests above assert ids, slugs and links, the index tests match bodies
+  # with `=~`, and the Vigil.Vault.Edit tests hand-write their line numbers.
+  # Written before the boundary moves, so a change of intent is visible as a
+  # rewrite of these assertions rather than as a suite that stays green.
+  describe "chunk boundaries" do
+    #  4  # Notes
+    #  5
+    #  6  Text before the first heading.
+    #  7
+    #  8  ## First
+    #  9  First body.
+    # 10
+    # 11  ### Nested
+    # 12  Nested body.
+    # 13
+    # 14  ## Last
+    # 15  Last body.
+    @boundaries """
+    ---
+    type: reference
+    ---
+    # Notes
+
+    Text before the first heading.
+
+    ## First
+    First body.
+
+    ### Nested
+    Nested body.
+
+    ## Last
+    Last body.
+    """
+
+    defp boundary_chunk(id) do
+      {:ok, file} = Parser.parse("x/boundaries.md", @boundaries, %{})
+      Enum.find(file.chunks, &(&1.id == id))
+    end
+
+    test "a mid-file section's body runs to the blank line before the next heading" do
+      chunk = boundary_chunk("x/boundaries.md#first")
+
+      assert chunk.body == "First body.\n"
+      assert chunk.body_end_line == 10
+    end
+
+    test "a ### sibling under a ## ends the same way, at the blank line" do
+      chunk = boundary_chunk("x/boundaries.md#nested")
+
+      assert chunk.body == "Nested body.\n"
+      assert chunk.body_end_line == 13
+    end
+
+    test "the last section runs to EOF, which carries no trailing blank" do
+      chunk = boundary_chunk("x/boundaries.md#last")
+
+      assert chunk.body == "Last body."
+      assert chunk.body_end_line == 15
+    end
+
+    test "the fragmentless pre-H2 chunk keeps the blank line before the first heading" do
+      chunk = boundary_chunk("x/boundaries.md")
+
+      assert chunk.body == "\nText before the first heading.\n"
+      assert chunk.body_end_line == 7
+    end
+  end
+
   describe "extract_links/1" do
     test "links inside fenced code blocks and inline code are not extracted" do
       body = """
