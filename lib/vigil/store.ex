@@ -6,7 +6,7 @@ defmodule Vigil.Store do
   alias Vigil.{
     Clock,
     Events,
-    LinkIndex,
+    Index,
     Markdown,
     Parser,
     Git,
@@ -73,7 +73,14 @@ defmodule Vigil.Store do
 
     ensure_tables()
 
-    state = %{vault_path: vault_path, exclude: exclude, git_remote: git_remote, domains_desc: %{}}
+    state = %{
+      vault_path: vault_path,
+      exclude: exclude,
+      git_remote: git_remote,
+      domains_desc: %{},
+      index: %Index{}
+    }
+
     {state, pull_result} = do_full_load(state)
 
     case pull_result do
@@ -103,7 +110,7 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:read, id, backlinks?}, _from, state) do
-    {:reply, do_read(id, backlinks?, state), state}
+    {:reply, Index.read(state.index, id, backlinks?), state}
   end
 
   def handle_call({:links, id, direction, depth}, _from, state) do
@@ -111,35 +118,43 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:create, params}, _from, state) do
-    {:reply, do_create(params, state), state}
+    {result, new_state} = do_create(params, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:append, params}, _from, state) do
-    {:reply, do_append(params, state), state}
+    {result, new_state} = do_append(params, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:replace_section, id, content}, _from, state) do
-    {:reply, do_replace_section(id, content, state), state}
+    {result, new_state} = do_replace_section(id, content, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:rewrite_note, params}, _from, state) do
-    {:reply, do_rewrite_note(params, state), state}
+    {result, new_state} = do_rewrite_note(params, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:delete_section, id}, _from, state) do
-    {:reply, do_delete_section(id, state), state}
+    {result, new_state} = do_delete_section(id, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:update_frontmatter, params}, _from, state) do
-    {:reply, do_update_frontmatter(params, state), state}
+    {result, new_state} = do_update_frontmatter(params, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:delete_note, params}, _from, state) do
-    {:reply, do_delete_note(params, state), state}
+    {result, new_state} = do_delete_note(params, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:move_note, params}, _from, state) do
-    {:reply, do_move_note(params, state), state}
+    {result, new_state} = do_move_note(params, state)
+    {:reply, result, new_state}
   end
 
   def handle_call({:lint, now}, _from, state) do
@@ -201,20 +216,22 @@ defmodule Vigil.Store do
       domain_dirs
       |> Enum.flat_map(&VaultDiscovery.domain_files(state.vault_path, &1))
 
-    Enum.each(files, fn rel_path ->
-      load_file(state.vault_path, rel_path, git_meta)
-    end)
+    parsed_files =
+      files
+      |> Enum.map(&load_file(state.vault_path, &1, git_meta))
+      |> Enum.reject(&is_nil/1)
 
-    rebuild_links_index()
+    Enum.each(parsed_files, &index_file/1)
 
-    note_count = :ets.info(@files_table, :size)
-    chunk_count = :ets.info(@chunks_table, :size)
+    index = Index.build(parsed_files)
+    sync_links_ets(index)
+    sizes = Index.size(index)
 
     Logger.info(
-      "vigil: #{length(domain_dirs)} domains (#{Enum.join(domain_dirs, ", ")}), #{note_count} notes, #{chunk_count} chunks"
+      "vigil: #{length(domain_dirs)} domains (#{Enum.join(domain_dirs, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
-    {%{state | domains_desc: domains_desc}, pull_result}
+    {%{state | domains_desc: domains_desc, index: index}, pull_result}
   end
 
   defp warn_domain_mismatches(domain_dirs, domains_desc) do
@@ -234,10 +251,11 @@ defmodule Vigil.Store do
       {:ok, content} ->
         meta = Map.get(git_meta, rel_path, %{created_at: nil, updated_at: nil, last_author: nil})
         {:ok, file} = Parser.parse(rel_path, content, meta)
-        index_file(file)
+        file
 
       {:error, reason} ->
         Logger.warning("cannot read #{rel_path}: #{inspect(reason)}")
+        nil
     end
   end
 
@@ -279,7 +297,8 @@ defmodule Vigil.Store do
         body_downcased: chunk.body_downcased,
         # Raw and unresolved — Vigil.Parser.extract_links/1 only sees this
         # one file, not the rest of the vault. Resolution (same-folder →
-        # domain → vault-wide, ambiguous/broken) is rebuild_links_index/0's job.
+        # domain → vault-wide, ambiguous/broken) is Vigil.LinkIndex.build/2's
+        # job, via Vigil.Index.put/2, remove/2 and build/1.
         raw_links: chunk.links,
         created_at: chunk.created_at,
         updated_at: chunk.updated_at
@@ -298,20 +317,25 @@ defmodule Vigil.Store do
   # vigil targets this is cheap, and it structurally rules out the "ghost
   # entry after delete/rename" class of bug that incremental maintenance
   # across two tables would invite. Resolution itself lives in
-  # Vigil.LinkIndex, a pure module — this just supplies it the current
-  # files/chunks and bulk-inserts what comes back.
+  # Vigil.LinkIndex, a pure module — `Vigil.Index.put/2` and `remove/2`
+  # already run it, once, on every write; `sync_links_ets/1` below just
+  # mirrors that result into the ETS bag tables `do_links`/`do_lint` still
+  # read, rather than calling `Vigil.LinkIndex.build/2` a second time.
 
-  defp rebuild_links_index do
+  defp sync_links_ets(index) do
     :ets.delete_all_objects(@links_out_table)
     :ets.delete_all_objects(@links_in_table)
 
-    all_files = :ets.tab2list(@files_table) |> Enum.map(fn {_path, f} -> f end)
-    all_chunks = :ets.tab2list(@chunks_table) |> Enum.map(fn {_id, c} -> c end)
+    :ets.insert(@links_out_table, flatten_grouped(index.links_out))
+    :ets.insert(@links_in_table, flatten_grouped(index.links_in))
+  end
 
-    %{out: out, in: in_} = LinkIndex.build(all_files, all_chunks)
-
-    :ets.insert(@links_out_table, out)
-    :ets.insert(@links_in_table, in_)
+  # `Vigil.Index` groups out/in pairs by key (`%{key => [value, ...]}`) so
+  # `read/3` can look them up directly; the ETS bag tables want the pairs
+  # back out flat (`[{key, value}, ...]`), which is what `:ets.insert/2`
+  # expects for a bag.
+  defp flatten_grouped(grouped) do
+    Enum.flat_map(grouped, fn {key, values} -> Enum.map(values, &{key, &1}) end)
   end
 
   defp load_domains_yml(vault_path) do
@@ -472,42 +496,10 @@ defmodule Vigil.Store do
   end
 
   ## Read
-
-  defp do_read(id, backlinks?, state) do
-    path_part = id |> String.split("#", parts: 2) |> hd()
-
-    with :ok <- Policy.safe_path(path_part) do
-      if String.contains?(id, "#") do
-        [_, heading_slug] = String.split(id, "#", parts: 2)
-
-        lookup_lenient(@chunks_table, id, fn ->
-          with {:ok, normalized_path, true} <- Slug.normalize_path(path_part) do
-            "#{normalized_path}##{heading_slug}"
-          else
-            _ -> nil
-          end
-        end)
-        |> case do
-          {:ok, rec} -> {:ok, chunk_result(rec, backlinks?)}
-          :not_found -> {:error, "Not found: #{id}"}
-        end
-      else
-        lookup_lenient(@files_table, id, fn ->
-          with {:ok, normalized_path, true} <- Slug.normalize_path(id) do
-            normalized_path
-          else
-            _ -> nil
-          end
-        end)
-        |> case do
-          {:ok, file} -> {:ok, file_result(file, backlinks?, state)}
-          :not_found -> {:error, "Not found: #{id}"}
-        end
-      end
-    else
-      {:error, _} -> {:error, "Invalid path"}
-    end
-  end
+  #
+  # Answered from `Vigil.Index` (state.index) rather than ETS — see
+  # `handle_call({:read, ...})`. `do_links/3` below still reads ETS
+  # directly; only `read` has moved.
 
   # If the exact lookup misses, the path part is normalized via
   # Slug.normalize_path/1 and tried again. The record that comes back carries
@@ -659,74 +651,6 @@ defmodule Vigil.Store do
     end)
   end
 
-  defp chunk_result(rec, backlinks?) do
-    base = %{
-      id: rec.id,
-      heading: rec.heading,
-      heading_path: rec.heading_path,
-      type: rec.type,
-      starts: iso(rec.starts),
-      ends: iso(rec.ends),
-      body: rec.body,
-      created_at: iso(rec.created_at),
-      updated_at: iso(rec.updated_at)
-    }
-
-    if backlinks? do
-      Map.put(base, :backlinks, backlinks_for(rec.path))
-    else
-      base
-    end
-  end
-
-  defp file_result(file, backlinks?, _state) do
-    toc =
-      file.chunk_ids
-      |> Enum.map(fn cid -> :ets.lookup(@chunks_table, cid) end)
-      |> Enum.flat_map(fn
-        [{_, rec}] -> [rec]
-        [] -> []
-      end)
-      |> Enum.filter(& &1.heading)
-      |> Enum.map(fn rec ->
-        %{id: rec.id, heading: rec.heading, heading_path: rec.heading_path}
-      end)
-
-    base = %{
-      path: file.path,
-      title: file.title,
-      type: file.type,
-      starts: iso(file.starts),
-      ends: iso(file.ends),
-      created_at: iso(file.created_at),
-      updated_at: iso(file.updated_at),
-      toc: toc,
-      links: note_link_counts(file)
-    }
-
-    if backlinks? do
-      Map.put(base, :backlinks, backlinks_for(file.path))
-    else
-      base
-    end
-  end
-
-  # A compact counter field on every note `read` response. Details come from
-  # the `links` tool, not from `read` itself — otherwise every read response
-  # grows ballast.
-  defp note_link_counts(file) do
-    outgoing =
-      file.chunk_ids
-      |> Enum.flat_map(fn cid -> :ets.lookup(@links_out_table, cid) end)
-      |> Enum.map(fn {_cid, resolved} -> resolved end)
-
-    %{
-      out: Enum.count(outgoing, &(&1.status == :ok)),
-      in: length(backlinks_for(file.path)),
-      broken: Enum.count(outgoing, &(&1.status != :ok))
-    }
-  end
-
   defp backlinks_for(target_key) do
     @links_in_table
     |> :ets.lookup(target_key)
@@ -799,7 +723,7 @@ defmodule Vigil.Store do
       frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
       full_content = normalize_trailing_newline(frontmatter <> content)
 
-      result =
+      {result, new_state} =
         write_and_commit(
           state,
           resolved.path,
@@ -808,13 +732,16 @@ defmodule Vigil.Store do
           "create: #{resolved.path} — #{first_line(content)}"
         )
 
-      case {result, resolved.normalized_from} do
-        {{:ok, ok_map}, nil} -> {:ok, ok_map}
-        {{:ok, ok_map}, from} -> {:ok, Map.put(ok_map, :path_normalized_from, from)}
-        {other, _} -> other
-      end
+      result =
+        case {result, resolved.normalized_from} do
+          {{:ok, ok_map}, nil} -> {:ok, ok_map}
+          {{:ok, ok_map}, from} -> {:ok, Map.put(ok_map, :path_normalized_from, from)}
+          {other, _} -> other
+        end
+
+      {result, new_state}
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -865,7 +792,7 @@ defmodule Vigil.Store do
         "append: #{path} — #{first_line(content)}"
       )
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -920,6 +847,8 @@ defmodule Vigil.Store do
         Markdown.split_lines(content),
         "replace_section: #{id}"
       )
+    else
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -946,10 +875,10 @@ defmodule Vigil.Store do
           write_and_commit(state, path, abs_path, new_content, "rewrite_note: #{path}")
 
         {:error, msg} ->
-          {:error, msg}
+          {{:error, msg}, state}
       end
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -980,6 +909,8 @@ defmodule Vigil.Store do
            Policy.check(:delete_section, %{id: id}, facts(state, chunk: rec)) do
       # The heading line goes with the body it heads.
       splice_chunk(state, path, rec, rec.heading_line - 1, [], "delete_section: #{id}")
+    else
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -990,14 +921,18 @@ defmodule Vigil.Store do
   defp splice_chunk(state, path, rec, keep_lines, replacement, message) do
     abs_path = abs(state, path)
 
-    with {:ok, original} <- read_existing_file(abs_path) do
-      orig_lines = Markdown.split_lines(original)
+    case read_existing_file(abs_path) do
+      {:ok, original} ->
+        orig_lines = Markdown.split_lines(original)
 
-      prefix = Enum.slice(orig_lines, 0, keep_lines)
-      suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
+        prefix = Enum.slice(orig_lines, 0, keep_lines)
+        suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
 
-      new_content = Enum.join(prefix ++ replacement ++ suffix, "\n") <> "\n"
-      write_and_commit(state, path, abs_path, new_content, message)
+        new_content = Enum.join(prefix ++ replacement ++ suffix, "\n") <> "\n"
+        write_and_commit(state, path, abs_path, new_content, message)
+
+      {:error, msg} ->
+        {{:error, msg}, state}
     end
   end
 
@@ -1015,10 +950,10 @@ defmodule Vigil.Store do
           write_and_commit(state, path, abs_path, new_content, "update_frontmatter: #{path}")
 
         {:error, msg} ->
-          {:error, msg}
+          {{:error, msg}, state}
       end
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -1034,18 +969,24 @@ defmodule Vigil.Store do
           case Git.push(state.vault_path, state.git_remote) do
             :ok ->
               remove_file_from_index(path)
-              rebuild_links_index()
-              {:ok, %{path: path, deleted: true, pushed: true, broken_backlinks: backlinks}}
+              new_index = Index.remove(state.index, path)
+              sync_links_ets(new_index)
+              new_state = %{state | index: new_index}
+
+              result =
+                {:ok, %{path: path, deleted: true, pushed: true, broken_backlinks: backlinks}}
+
+              {result, new_state}
 
             {:error, out} ->
-              {:error, "Deletion committed locally, but push failed: #{out}"}
+              {{:error, "Deletion committed locally, but push failed: #{out}"}, state}
           end
 
         {:error, out} ->
-          {:error, "git rm/commit failed: #{out}"}
+          {{:error, "git rm/commit failed: #{out}"}, state}
       end
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -1055,7 +996,7 @@ defmodule Vigil.Store do
     with {:ok, resolved} <- Policy.check(:move_note, params, facts(state)) do
       do_move_note_to(state, resolved.from, resolved.to)
     else
-      {:error, msg} -> {:error, msg}
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -1067,7 +1008,8 @@ defmodule Vigil.Store do
       {:ok, commit_meta} ->
         case Git.push(state.vault_path, state.git_remote) do
           :ok ->
-            reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
+            new_index = reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
+            new_state = %{state | index: new_index}
             # Backlink report from :links_in — a diff of incoming references
             # before and after the move rather than an ad-hoc scan. A source
             # chunk that resolved before and no longer shows up in the
@@ -1076,44 +1018,54 @@ defmodule Vigil.Store do
             # basename.
             backlinks_after = backlinks_for(normalized_to)
 
-            {:ok,
-             %{
-               from: normalized_from,
-               to: normalized_to,
-               pushed: true,
-               broken_backlinks: backlinks_before -- backlinks_after
-             }}
+            result =
+              {:ok,
+               %{
+                 from: normalized_from,
+                 to: normalized_to,
+                 pushed: true,
+                 broken_backlinks: backlinks_before -- backlinks_after
+               }}
+
+            {result, new_state}
 
           {:error, out} ->
-            {:error, "Move committed locally, but push failed: #{out}"}
+            {{:error, "Move committed locally, but push failed: #{out}"}, state}
         end
 
       {:error, out} ->
-        {:error, "git mv/commit failed: #{out}"}
+        {{:error, "git mv/commit failed: #{out}"}, state}
     end
   end
 
   defp reparse_moved_file(state, from, to, commit_meta) do
     existing_created_at =
-      case :ets.lookup(@files_table, from) do
-        [{_, file}] -> file.created_at
-        [] -> nil
+      case Index.note(state.index, from) do
+        %Index.Note{created_at: created_at} -> created_at
+        nil -> nil
       end
 
     created_at = existing_created_at || commit_meta.updated_at
 
-    with {:ok, content} <- read_for_reparse(state.vault_path, to, "move") do
-      meta = %{
-        created_at: created_at,
-        updated_at: commit_meta.updated_at,
-        last_author: commit_meta.last_author
-      }
+    case read_for_reparse(state.vault_path, to, "move") do
+      {:ok, content} ->
+        meta = %{
+          created_at: created_at,
+          updated_at: commit_meta.updated_at,
+          last_author: commit_meta.last_author
+        }
 
-      {:ok, file} = Parser.parse(to, content, meta)
+        {:ok, file} = Parser.parse(to, content, meta)
 
-      remove_file_from_index(from)
-      index_file(file)
-      rebuild_links_index()
+        remove_file_from_index(from)
+        index_file(file)
+
+        new_index = state.index |> Index.remove(from) |> Index.put(file)
+        sync_links_ets(new_index)
+        new_index
+
+      :error ->
+        state.index
     end
   end
 
@@ -1124,19 +1076,21 @@ defmodule Vigil.Store do
          :ok <- safe_write(abs_path, full_content) do
       case Git.add_commit(state.vault_path, rel_path, message) do
         {:ok, commit_meta} ->
-          reparse_file(state, rel_path, commit_meta)
+          new_state = %{state | index: reparse_file(state, rel_path, commit_meta)}
 
-          case Git.push(state.vault_path, state.git_remote) do
+          case Git.push(new_state.vault_path, new_state.git_remote) do
             :ok ->
-              {:ok, %{path: rel_path, pushed: true}}
+              {{:ok, %{path: rel_path, pushed: true}}, new_state}
 
             {:error, out} ->
-              {:error, "Change saved and committed locally, but push failed: #{out}"}
+              {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
           end
 
         {:error, out} ->
-          {:error, "git commit failed: #{out}"}
+          {{:error, "git commit failed: #{out}"}, state}
       end
+    else
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -1197,31 +1151,38 @@ defmodule Vigil.Store do
 
   defp reparse_file(state, rel_path, commit_meta) do
     existing_created_at =
-      case :ets.lookup(@files_table, rel_path) do
-        [{_, file}] -> file.created_at
-        [] -> nil
+      case Index.note(state.index, rel_path) do
+        %Index.Note{created_at: created_at} -> created_at
+        nil -> nil
       end
 
     created_at = existing_created_at || commit_meta.updated_at
 
-    with {:ok, content} <- read_for_reparse(state.vault_path, rel_path, "write") do
-      meta = %{
-        created_at: created_at,
-        updated_at: commit_meta.updated_at,
-        last_author: commit_meta.last_author
-      }
+    case read_for_reparse(state.vault_path, rel_path, "write") do
+      {:ok, content} ->
+        meta = %{
+          created_at: created_at,
+          updated_at: commit_meta.updated_at,
+          last_author: commit_meta.last_author
+        }
 
-      {:ok, file} = Parser.parse(rel_path, content, meta)
+        {:ok, file} = Parser.parse(rel_path, content, meta)
 
-      remove_file_from_index(rel_path)
-      index_file(file)
-      rebuild_links_index()
+        remove_file_from_index(rel_path)
+        index_file(file)
+
+        new_index = Index.put(state.index, file)
+        sync_links_ets(new_index)
+        new_index
+
+      :error ->
+        state.index
     end
   end
 
-  # Removes chunks and files only. The link index is not maintained here but
-  # rebuilt by the caller via rebuild_links_index/0 — necessary anyway, since
-  # other notes may reference the one being removed.
+  # Removes chunks and files only. The link tables are not maintained here but
+  # synced by the caller via sync_links_ets/1 — necessary anyway, since other
+  # notes may reference the one being removed.
   defp remove_file_from_index(rel_path) do
     case :ets.lookup(@files_table, rel_path) do
       [{_, file}] ->
