@@ -33,7 +33,10 @@ Code.
 
 ## Endpoints
 
-All on the same router as `/mcp`.
+All served by `Vigil.OAuth.Endpoint`, which `Vigil.MCP.Server` forwards to for
+everything that is not `/mcp`. The decisions behind them — registration, the
+checks on an `/authorize` request, both grants — live in `Vigil.OAuth.Flow`
+and take no `Plug.Conn`.
 
 | Path | Method | Purpose |
 |---|---|---|

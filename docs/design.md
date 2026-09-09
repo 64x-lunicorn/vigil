@@ -264,6 +264,21 @@ one write including a complete index rebuild ~115 ms.
 
 ## The write path
 
+Every write — `create`, `append`, `replace_section`, `rewrite_note`,
+`delete_section`, `update_frontmatter`, `delete_note`, `move_note` — asks
+`Vigil.Vault.Policy` first. One function, `check/3`, holds every rule about a
+write: path safety, path normalization, which domains are writable, the naming
+conventions from `_domains.yml`, frontmatter and type rules, duplicate
+detection, and the confirm gates. It is pure — it reads no file and touches no
+ETS table; `Vigil.Vault.Facts` carries what it needs, and where a decision
+authorises an effect it says so in its result rather than performing it.
+
+The point of one gate is that there is no second way in. The rules used to be
+private helpers in `Vigil.Store` that only `create` and `move_note` called, so
+`append`, `rewrite_note`, `update_frontmatter` and `delete_note` checked
+traversal and nothing else — each of them could write into `skills/` and into
+an excluded domain, and the write was then indexed as a note.
+
 Order matters: write the file, commit, reparse into the index, then push. If
 the push fails the local commit stays and the tool returns an error saying the
 change is committed locally but not pushed. Nothing is rolled back.

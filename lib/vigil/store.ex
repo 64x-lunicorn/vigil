@@ -3,7 +3,8 @@ defmodule Vigil.Store do
   use GenServer
   require Logger
 
-  alias Vigil.{Parser, Git, Search, SkillKey, Slug}
+  alias Vigil.{Markdown, Parser, Git, Search, SkillKey, Slug, VaultDiscovery}
+  alias Vigil.Vault.{Facts, Policy, Rules}
 
   @chunks_table :vigil_chunks
   @files_table :vigil_files
@@ -14,11 +15,8 @@ defmodule Vigil.Store do
   @links_out_table :vigil_links_out
   @links_in_table :vigil_links_in
 
-  @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
-
   @overlong_note_chunk_threshold 40
   @stale_decision_days 180
-  @sentence_heading_length_threshold 60
 
   ## Public API
 
@@ -201,13 +199,13 @@ defmodule Vigil.Store do
     :ets.delete_all_objects(@chunks_table)
     :ets.delete_all_objects(@files_table)
 
-    domain_dirs = discover_domain_dirs(state.vault_path, state.exclude)
+    domain_dirs = VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
 
     warn_domain_mismatches(domain_dirs, domains_desc)
 
     files =
       domain_dirs
-      |> Enum.flat_map(&list_domain_files(state.vault_path, &1))
+      |> Enum.flat_map(&VaultDiscovery.domain_files(state.vault_path, &1))
 
     Enum.each(files, fn rel_path ->
       load_file(state.vault_path, rel_path, git_meta)
@@ -225,22 +223,6 @@ defmodule Vigil.Store do
     {%{state | domains_desc: domains_desc}, pull_result}
   end
 
-  defp discover_domain_dirs(vault_path, exclude) do
-    case File.ls(vault_path) do
-      {:ok, entries} ->
-        entries
-        |> Enum.filter(fn name -> File.dir?(Path.join(vault_path, name)) end)
-        |> Enum.reject(fn name ->
-          name == "skills" or name in exclude or String.starts_with?(name, ".") or
-            String.starts_with?(name, "_")
-        end)
-        |> Enum.sort()
-
-      {:error, _} ->
-        []
-    end
-  end
-
   defp warn_domain_mismatches(domain_dirs, domains_desc) do
     for key <- Map.keys(domains_desc), key not in domain_dirs do
       Logger.warning("_domains.yml: key '#{key}' has no matching directory")
@@ -249,16 +231,6 @@ defmodule Vigil.Store do
     for dir <- domain_dirs, not Map.has_key?(domains_desc, dir) do
       Logger.warning("domain '#{dir}' has no entry in _domains.yml")
     end
-  end
-
-  defp list_domain_files(vault_path, "projects" = domain) do
-    Path.wildcard(Path.join([vault_path, domain, "*", "*.md"]))
-    |> Enum.map(&Path.relative_to(&1, vault_path))
-  end
-
-  defp list_domain_files(vault_path, domain) do
-    Path.wildcard(Path.join([vault_path, domain, "*.md"]))
-    |> Enum.map(&Path.relative_to(&1, vault_path))
   end
 
   defp load_file(vault_path, rel_path, git_meta) do
@@ -555,18 +527,12 @@ defmodule Vigil.Store do
   defp parse_naming_suggestion("date"), do: :date
   defp parse_naming_suggestion(_), do: :slug
 
-  defp domain_naming(state, domain) do
-    state.domains_desc
-    |> Map.get(domain, %{})
-    |> Map.get(:naming)
-  end
-
   defp domains_yaml_raw(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
     if File.exists?(path), do: File.read!(path), else: ""
   end
 
-  defp list_domain_names(state), do: discover_domain_dirs(state.vault_path, state.exclude)
+  defp list_domain_names(state), do: VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
 
   ## Search
 
@@ -633,7 +599,7 @@ defmodule Vigil.Store do
   defp do_read(id, backlinks?, state) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- basic_path_sanity(path_part) do
+    with :ok <- Policy.safe_path(path_part) do
       if String.contains?(id, "#") do
         [_, heading_slug] = String.split(id, "#", parts: 2)
 
@@ -694,7 +660,7 @@ defmodule Vigil.Store do
   defp do_links(id, direction, depth) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- basic_path_sanity(path_part),
+    with :ok <- Policy.safe_path(path_part),
          :ok <- validate_depth(depth) do
       if String.contains?(id, "#") do
         lookup_lenient(@chunks_table, id, fn ->
@@ -894,338 +860,93 @@ defmodule Vigil.Store do
   defp iso(nil), do: nil
   defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
 
-  ## Path validation (section 5)
+  ## Vault facts for Vigil.Vault.Policy
 
-  defp basic_path_sanity(path) do
-    cond do
-      String.contains?(path, "..") ->
-        {:error, "Invalid path"}
-
-      String.starts_with?(path, "/") ->
-        {:error, "Invalid path"}
-
-      String.contains?(path, "\\") ->
-        {:error, "Invalid path"}
-
-      String.contains?(path, <<0>>) ->
-        {:error, "Invalid path"}
-
-      Enum.any?(String.split(path, "/"), &reserved_segment?/1) ->
-        {:error, "Invalid path"}
-
-      true ->
-        :ok
-    end
-  end
-
-  # A leading "." (hidden) or "_" (reserved, e.g. _domains.yml) is allowed in
-  # no path segment — checked both before and after normalization.
-  defp reserved_segment?(segment) do
-    String.starts_with?(segment, ".") or String.starts_with?(segment, "_")
-  end
-
-  defp resolve_within_vault(state, path) do
-    abs = Path.expand(path, state.vault_path)
-
-    if String.starts_with?(abs, state.vault_path <> "/") do
-      {:ok, abs}
-    else
-      {:error, "Invalid path"}
-    end
-  end
-
-  defp validate_write_path(path, state, create_dirs \\ false) do
-    with :ok <- basic_path_sanity(path),
-         {:ok, _abs} <- resolve_within_vault(state, path) do
-      parts = String.split(path, "/")
-      first = hd(parts)
-      last = List.last(parts)
-
-      cond do
-        not String.ends_with?(last, ".md") ->
-          {:error, "Invalid path"}
-
-        first == "skills" ->
-          {:error, "Invalid path"}
-
-        first in state.exclude ->
-          {:error, "Invalid path"}
-
-        String.starts_with?(first, ".") or String.starts_with?(first, "_") ->
-          {:error, "Invalid path"}
-
-        length(parts) == 2 ->
-          validate_domain(first, parts, state, create_dirs)
-
-        length(parts) == 3 and first == "projects" ->
-          validate_domain(first, parts, state, create_dirs)
-
-        true ->
-          {:error, "Invalid path"}
+  # Built fresh per write. The three function fields are the adapters at the
+  # policy's seam: in production they read the filesystem and the index, in
+  # Vigil.Vault.PolicyTest they are literals.
+  defp facts(state, opts \\ []) do
+    %Facts{
+      vault_path: state.vault_path,
+      domains: list_domain_names(state),
+      exclude: state.exclude,
+      project_dirs: project_dirs(state),
+      naming: naming_rules(state),
+      today: today(),
+      heading_count: Keyword.get(opts, :heading_count, 0),
+      backlinks: Keyword.get(opts, :backlinks, []),
+      chunk: Keyword.get(opts, :chunk),
+      path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
+      read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
+      find_similar: fn query, domain ->
+        do_search(%{query: query, domain: domain, limit: 25}, nil)
       end
-    else
-      {:error, msg} -> {:error, msg}
+    }
+  end
+
+  # Never DateTime.now!/1 here: this runs on every write, and README's
+  # "the write path is crash-safe by construction" must survive a bad :tz.
+  defp today do
+    case DateTime.now(tz()) do
+      {:ok, now} -> DateTime.to_date(now)
+      _ -> Date.utc_today()
     end
   end
 
-  defp validate_domain(first, parts, state, create_dirs) do
-    domains = list_domain_names(state)
+  defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
 
-    if first not in domains do
-      {:error, "Invalid path. Available domains: #{Enum.join(domains, ", ")}"}
-    else
-      if length(parts) == 3 do
-        project_dir = Path.join([state.vault_path, "projects", Enum.at(parts, 1)])
+  defp project_dirs(state) do
+    projects = Path.join(state.vault_path, "projects")
 
-        cond do
-          File.dir?(project_dir) ->
-            {:ok, first}
-
-          create_dirs ->
-            case safe_mkdir_p(project_dir) do
-              :ok -> {:ok, first}
-              {:error, msg} -> {:error, msg}
-            end
-
-          true ->
-            {:error, "Invalid path. Project directory does not exist: #{Enum.at(parts, 1)}"}
-        end
-      else
-        {:ok, first}
-      end
+    case File.ls(projects) do
+      {:ok, entries} -> Enum.filter(entries, &File.dir?(Path.join(projects, &1)))
+      {:error, _} -> []
     end
   end
 
-  ## naming convention (AP9a §4 — Schicht 3, aus _domains.yml)
-
-  defp check_naming_convention(path, domain, state, content) do
-    case domain_naming(state, domain) do
-      nil ->
-        :ok
-
-      naming ->
-        with :ok <- check_naming_pattern(path, domain, naming, content),
-             :ok <- check_naming_max_depth(path, domain, naming) do
-          :ok
-        end
-    end
+  defp naming_rules(state) do
+    for {domain, desc} <- state.domains_desc,
+        naming = Map.get(desc, :naming),
+        naming != nil,
+        into: %{},
+        do: {domain, naming}
   end
 
-  defp check_naming_pattern(path, domain, naming, content) do
-    scope_string = naming_scope_string(path, domain, naming.scope)
+  # The policy decides that a project directory may be created; creating it is
+  # this module's job. write_and_commit/5 would mkdir_p the parent anyway, but
+  # doing it here keeps a filesystem failure attributable to the directory.
+  defp create_project_dir(_state, nil), do: :ok
 
-    if Regex.match?(naming.pattern, scope_string) do
-      :ok
-    else
-      suggestion = naming_suggestion_path(path, domain, naming, content)
-
-      {:error,
-       "The name \"#{scope_string}\" does not match the schema for domain #{domain}.\n" <>
-         "#{naming.hint}\nSuggestion: #{suggestion}"}
-    end
-  end
-
-  defp check_naming_max_depth(_path, _domain, %{max_depth: nil}), do: :ok
-
-  defp check_naming_max_depth(path, domain, %{max_depth: max_depth}) do
-    depth_level = path |> naming_scope_string(domain, :relpath) |> String.split("/") |> length()
-
-    if depth_level <= max_depth do
-      :ok
-    else
-      {:error, "Invalid path. Domain #{domain} allows at most #{max_depth} nesting level(s)."}
-    end
-  end
-
-  defp naming_scope_string(path, _domain, :filename), do: Path.basename(path)
-
-  defp naming_scope_string(path, domain, :relpath) do
-    case String.split(path, "/") do
-      [^domain | rest] -> Enum.join(rest, "/")
-      _ -> path
-    end
-  end
-
-  defp naming_suggestion_path(_path, domain, %{suggestion: :date}, _content) do
-    heute = DateTime.now!(tz()) |> DateTime.to_date() |> Date.to_iso8601()
-    "#{domain}/#{heute}.md"
-  end
-
-  defp naming_suggestion_path(path, _domain, %{suggestion: :slug}, content) do
-    directory = Path.dirname(path)
-
-    case extract_h1(content) do
-      nil ->
-        path
-
-      h1 ->
-        case Slug.slugify(h1) do
-          {:ok, slug} -> "#{directory}/#{slug}.md"
-          {:error, _} -> path
-        end
-    end
-  end
-
-  defp extract_h1(content) do
-    content
-    |> split_lines()
-    |> Enum.find_value(fn line ->
-      case Regex.run(~r/^\#\s+(.+?)\s*$/, line) do
-        [_, text] -> String.trim(text)
-        _ -> nil
-      end
-    end)
+  defp create_project_dir(state, project) do
+    safe_mkdir_p(Path.join([state.vault_path, "projects", project]))
   end
 
   ## create
 
   defp do_create(params, state) do
-    path = Map.fetch!(params, :path)
-    type = Map.fetch!(params, :type)
     content = Map.fetch!(params, :content)
-    starts = Map.get(params, :starts)
-    ends = Map.get(params, :ends)
-    force = Map.get(params, :force, false)
-    create_dirs = Map.get(params, :create_dirs, false)
 
-    with :ok <- basic_path_sanity(path),
-         {:ok, normalized_path, changed?} <- normalize_path_or_error(path),
-         :ok <- basic_path_sanity(normalized_path),
-         {:ok, domain} <- validate_write_path(normalized_path, state, create_dirs),
-         :ok <- check_naming_convention(normalized_path, domain, state, content),
-         {:ok, abs_path} <- resolve_within_vault(state, normalized_path),
-         :ok <- ensure_not_exists(abs_path, normalized_path),
-         :ok <- validate_content_shape(content),
-         {:ok, type_atom, starts_dt, ends_dt} <- validate_type_and_times(type, starts, ends),
-         :ok <- check_duplicates(normalized_path, domain, force, state) do
-      frontmatter = build_frontmatter(type_atom, starts_dt, ends_dt)
+    with {:ok, resolved} <- Policy.check(:create, params, facts(state)),
+         :ok <- create_project_dir(state, resolved.create_project_dir) do
+      frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
       full_content = normalize_trailing_newline(frontmatter <> content)
 
       result =
         write_and_commit(
           state,
-          normalized_path,
-          abs_path,
+          resolved.path,
+          abs(state, resolved.path),
           full_content,
-          "create: #{normalized_path} — #{first_line(content)}"
+          "create: #{resolved.path} — #{first_line(content)}"
         )
 
-      case result do
-        {:ok, ok_map} when changed? -> {:ok, Map.put(ok_map, :path_normalized_from, path)}
-        other -> other
+      case {result, resolved.normalized_from} do
+        {{:ok, ok_map}, nil} -> {:ok, ok_map}
+        {{:ok, ok_map}, from} -> {:ok, Map.put(ok_map, :path_normalized_from, from)}
+        {other, _} -> other
       end
     else
       {:error, msg} -> {:error, msg}
-    end
-  end
-
-  defp normalize_path_or_error(path) do
-    case Slug.normalize_path(path) do
-      {:ok, normalized, changed?} ->
-        {:ok, normalized, changed?}
-
-      {:error, _reason} ->
-        {:error,
-         "No valid filename can be derived from \"#{path}\". Use a name containing letters or digits."}
-    end
-  end
-
-  defp ensure_not_exists(abs_path, path) do
-    if File.exists?(abs_path) do
-      {:error, "File already exists: #{path}"}
-    else
-      :ok
-    end
-  end
-
-  defp validate_content_shape(content) do
-    trimmed = String.trim_leading(content)
-
-    cond do
-      String.starts_with?(trimmed, "---") ->
-        {:error, "content must not contain its own frontmatter block"}
-
-      not Regex.match?(~r/^\#\s+.+/, trimmed) ->
-        {:error, "content must start with an H1 (# Title)"}
-
-      true ->
-        :ok
-    end
-  end
-
-  defp validate_type_and_times(type, starts, ends) do
-    type_atom =
-      case type do
-        "reference" -> :reference
-        "decision" -> :decision
-        "event" -> :event
-        t when is_atom(t) -> t
-        _ -> nil
-      end
-
-    cond do
-      type_atom == nil ->
-        {:error, "Invalid type"}
-
-      type_atom == :event and (is_nil(starts) or is_nil(ends)) ->
-        {:error, "starts/ends sind Pflicht bei type: event"}
-
-      type_atom != :event and (not is_nil(starts) or not is_nil(ends)) ->
-        {:error, "starts/ends sind nur bei type: event erlaubt"}
-
-      type_atom == :event ->
-        with {:ok, s, _} <- DateTime.from_iso8601(starts),
-             {:ok, e, _} <- DateTime.from_iso8601(ends) do
-          {:ok, type_atom, s, e}
-        else
-          _ -> {:error, "starts/ends must be valid ISO8601 timestamps with an offset"}
-        end
-
-      true ->
-        {:ok, type_atom, nil, nil}
-    end
-  end
-
-  defp check_duplicates(_path, _domain, true, _state), do: :ok
-
-  defp check_duplicates(path, domain, false, _state) do
-    stem = Path.basename(path, ".md")
-
-    tokens =
-      stem
-      |> String.split("-")
-      |> Enum.filter(fn t -> String.length(t) > 3 end)
-
-    candidates =
-      tokens
-      |> Enum.flat_map(fn token ->
-        do_search(%{query: token, domain: domain, limit: 25}, nil)
-      end)
-      |> Enum.filter(fn r -> r.score >= 10 end)
-      |> Enum.uniq_by(& &1.id)
-      |> Enum.reject(&same_project_folder?(&1.id, path, domain))
-
-    if candidates == [] do
-      :ok
-    else
-      ids = Enum.map(candidates, & &1.id) |> Enum.join(", ")
-
-      {:error,
-       "Possible duplicates found: #{ids}. If this is the same topic, extend one of those with append/replace_section instead of creating a new note — or pass force: true for a deliberately separate note."}
-    end
-  end
-
-  defp same_project_folder?(candidate_id, path, "projects") do
-    candidate_path = candidate_id |> String.split("#") |> hd()
-    project_of(candidate_path) != nil and project_of(candidate_path) == project_of(path)
-  end
-
-  defp same_project_folder?(_candidate_id, _path, _domain), do: false
-
-  defp project_of(path) do
-    case String.split(path, "/") do
-      ["projects", project | _] -> project
-      _ -> nil
     end
   end
 
@@ -1257,15 +978,13 @@ defmodule Vigil.Store do
   ## append
 
   defp do_append(params, state) do
-    path = Map.fetch!(params, :path)
     heading = Map.get(params, :heading)
     content = Map.fetch!(params, :content)
 
-    with {:ok, abs_path} <- resolve_within_vault(state, path),
-         :ok <- basic_path_sanity(path),
-         :ok <- ensure_exists(abs_path, path) do
+    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)) do
+      abs_path = abs(state, path)
       {:ok, original} = File.read(abs_path)
-      orig_lines = split_lines(original)
+      orig_lines = Markdown.split_lines(original)
 
       new_lines = insert_append(path, orig_lines, heading, content)
       new_content = Enum.join(new_lines, "\n") <> "\n"
@@ -1282,12 +1001,8 @@ defmodule Vigil.Store do
     end
   end
 
-  defp ensure_exists(abs_path, path) do
-    if File.exists?(abs_path), do: :ok, else: {:error, "File not found: #{path}"}
-  end
-
   defp insert_append(_path, orig_lines, nil, content) do
-    orig_lines ++ [""] ++ split_lines(content)
+    orig_lines ++ [""] ++ Markdown.split_lines(content)
   end
 
   defp insert_append(path, orig_lines, heading, content) do
@@ -1296,12 +1011,12 @@ defmodule Vigil.Store do
 
     case existing do
       nil ->
-        orig_lines ++ ["", "## #{heading}"] ++ split_lines(content)
+        orig_lines ++ ["", "## #{heading}"] ++ Markdown.split_lines(content)
 
       rec ->
         prefix = Enum.slice(orig_lines, 0, rec.body_end_line)
         suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
-        prefix ++ split_lines(content) ++ suffix
+        prefix ++ Markdown.split_lines(content) ++ suffix
     end
   end
 
@@ -1324,64 +1039,41 @@ defmodule Vigil.Store do
   ## replace_section
 
   defp do_replace_section(id, content, state) do
-    case String.split(id, "#", parts: 2) do
-      [path, _frag] ->
-        with :ok <- basic_path_sanity(path),
-             {:ok, abs_path} <- resolve_within_vault(state, path),
-             [{_, rec}] <- {:ets.lookup(@chunks_table, id)} |> unwrap_lookup(),
-             true <- rec.heading != nil,
-             :ok <- validate_replace_content(content) do
-          {:ok, original} = File.read(abs_path)
-          orig_lines = split_lines(original)
+    rec = lookup_chunk(id)
 
-          prefix = Enum.slice(orig_lines, 0, rec.heading_line)
-
-          suffix =
-            Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
-
-          new_lines = prefix ++ split_lines(content) ++ suffix
-          new_content = Enum.join(new_lines, "\n") <> "\n"
-
-          write_and_commit(state, path, abs_path, new_content, "replace_section: #{id}")
-        else
-          false -> {:error, "A section without a heading cannot be replaced: #{id}"}
-          {:error, msg} -> {:error, msg}
-          :not_found -> {:error, "Nicht gefunden: #{id}"}
-        end
-
-      [_path] ->
-        {:error, "id must contain a fragment: path#heading-slug"}
+    with {:ok, %{path: path}} <-
+           Policy.check(:replace_section, %{id: id, content: content}, facts(state, chunk: rec)) do
+      # The heading line stays; only the body under it is replaced.
+      splice_chunk(
+        state,
+        path,
+        rec,
+        rec.heading_line,
+        Markdown.split_lines(content),
+        "replace_section: #{id}"
+      )
     end
   end
 
-  defp unwrap_lookup({[{_, _rec}] = list}), do: list
-  defp unwrap_lookup({[]}), do: :not_found
-
-  defp validate_replace_content(content) do
-    lines = split_lines(content)
-
-    if Enum.any?(lines, &Regex.match?(@heading_re, &1)) do
-      {:error, "content must not contain headings (## through ####)"}
-    else
-      :ok
+  defp lookup_chunk(id) do
+    case :ets.lookup(@chunks_table, id) do
+      [{_, rec}] -> rec
+      [] -> nil
     end
   end
 
   ## rewrite_note
 
   defp do_rewrite_note(params, state) do
-    path = Map.fetch!(params, :path)
     content = Map.fetch!(params, :content)
-    confirm = Map.get(params, :confirm, false)
+    heading_count = count_existing_headings(Map.fetch!(params, :path))
 
-    with {:ok, abs_path} <- resolve_within_vault(state, path),
-         :ok <- basic_path_sanity(path),
-         :ok <- ensure_exists(abs_path, path),
-         :ok <- validate_content_shape(content),
-         :ok <- check_rewrite_shrink_threshold(path, content, confirm) do
+    with {:ok, %{path: path}} <-
+           Policy.check(:rewrite_note, params, facts(state, heading_count: heading_count)) do
+      abs_path = abs(state, path)
       {:ok, original} = File.read(abs_path)
 
-      case split_frontmatter(original) do
+      case Markdown.split_frontmatter(original) do
         {:ok, frontmatter, _old_body} ->
           new_content = normalize_trailing_newline(frontmatter <> content)
           write_and_commit(state, path, abs_path, new_content, "rewrite_note: #{path}")
@@ -1394,25 +1086,9 @@ defmodule Vigil.Store do
     end
   end
 
-  # confirm is only required when the new version removes more than half of
-  # the existing sections OR more than 20 headings; below that rewrite_note
-  # goes through without it. The baseline (old heading count) comes from the
-  # ETS record rather than the file, because that is the state vigil knows.
-  defp check_rewrite_shrink_threshold(path, content, confirm) do
-    old_count = count_existing_headings(path)
-    new_count = content |> split_lines() |> Enum.count(&Regex.match?(@heading_re, &1))
-    removed = old_count - new_count
-
-    if removed > 0 and (removed > div(old_count, 2) or removed > 20) do
-      require_confirm(
-        confirm,
-        "removes #{removed} of #{old_count} headings from #{path}"
-      )
-    else
-      :ok
-    end
-  end
-
+  # The rewrite_note shrink baseline: how many headings vigil currently has
+  # indexed for this note. Read from ETS rather than the file because that is
+  # the state vigil knows — Vigil.Vault.Policy decides what to do with it.
   defp count_existing_headings(path) do
     case :ets.lookup(@files_table, path) do
       [{_, file}] ->
@@ -1431,52 +1107,42 @@ defmodule Vigil.Store do
   ## delete_section
 
   defp do_delete_section(id, state) do
-    case String.split(id, "#", parts: 2) do
-      [path, _frag] ->
-        with :ok <- basic_path_sanity(path),
-             {:ok, abs_path} <- resolve_within_vault(state, path),
-             [{_, rec}] <- {:ets.lookup(@chunks_table, id)} |> unwrap_lookup(),
-             true <- rec.heading != nil do
-          {:ok, original} = File.read(abs_path)
-          orig_lines = split_lines(original)
+    rec = lookup_chunk(id)
 
-          prefix = Enum.slice(orig_lines, 0, rec.heading_line - 1)
-
-          suffix =
-            Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
-
-          new_lines = prefix ++ suffix
-          new_content = Enum.join(new_lines, "\n") <> "\n"
-
-          write_and_commit(state, path, abs_path, new_content, "delete_section: #{id}")
-        else
-          false -> {:error, "A section without a heading cannot be deleted: #{id}"}
-          {:error, msg} -> {:error, msg}
-          :not_found -> {:error, "Nicht gefunden: #{id}"}
-        end
-
-      [_path] ->
-        {:error, "id must contain a fragment: path#heading-slug"}
+    with {:ok, %{path: path}} <-
+           Policy.check(:delete_section, %{id: id}, facts(state, chunk: rec)) do
+      # The heading line goes with the body it heads.
+      splice_chunk(state, path, rec, rec.heading_line - 1, [], "delete_section: #{id}")
     end
+  end
+
+  # Rewrites the file around one chunk: every line before `keep_lines`, then
+  # `replacement`, then everything from the chunk's end onwards. The line
+  # numbers come from the index, which is authoritative because vigil is the
+  # only writer (docs/design.md, "One writer").
+  defp splice_chunk(state, path, rec, keep_lines, replacement, message) do
+    abs_path = abs(state, path)
+    {:ok, original} = File.read(abs_path)
+    orig_lines = Markdown.split_lines(original)
+
+    prefix = Enum.slice(orig_lines, 0, keep_lines)
+    suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
+
+    new_content = Enum.join(prefix ++ replacement ++ suffix, "\n") <> "\n"
+    write_and_commit(state, path, abs_path, new_content, message)
   end
 
   ## update_frontmatter
 
   defp do_update_frontmatter(params, state) do
-    path = Map.fetch!(params, :path)
-    type = Map.fetch!(params, :type)
-    starts = Map.get(params, :starts)
-    ends = Map.get(params, :ends)
-
-    with {:ok, abs_path} <- resolve_within_vault(state, path),
-         :ok <- basic_path_sanity(path),
-         :ok <- ensure_exists(abs_path, path),
-         {:ok, type_atom, starts_dt, ends_dt} <- validate_type_and_times(type, starts, ends) do
+    with {:ok, resolved} <- Policy.check(:update_frontmatter, params, facts(state)) do
+      path = resolved.path
+      abs_path = abs(state, path)
       {:ok, original} = File.read(abs_path)
 
-      case split_frontmatter(original) do
+      case Markdown.split_frontmatter(original) do
         {:ok, _old_frontmatter, body} ->
-          new_frontmatter = build_frontmatter(type_atom, starts_dt, ends_dt)
+          new_frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
           new_content = normalize_trailing_newline(new_frontmatter <> body)
           write_and_commit(state, path, abs_path, new_content, "update_frontmatter: #{path}")
 
@@ -1491,13 +1157,10 @@ defmodule Vigil.Store do
   ## delete
 
   defp do_delete_note(params, state) do
-    path = Map.fetch!(params, :path)
-    confirm = Map.get(params, :confirm, false)
+    backlinks = backlinks_for(Map.fetch!(params, :path))
 
-    with :ok <- require_confirm(confirm, delete_confirm_description(path)),
-         {:ok, abs_path} <- resolve_within_vault(state, path),
-         :ok <- basic_path_sanity(path),
-         :ok <- ensure_exists(abs_path, path) do
+    with {:ok, %{path: path}} <-
+           Policy.check(:delete_note, params, facts(state, backlinks: backlinks)) do
       case Git.remove_commit(state.vault_path, path, "delete: #{path}") do
         :ok ->
           case Git.push(state.vault_path, state.git_remote) do
@@ -1518,81 +1181,47 @@ defmodule Vigil.Store do
     end
   end
 
-  # The preview shown before confirm: true also names the incoming links, so
-  # it is visible what will break after the deletion.
-  defp delete_confirm_description(path) do
-    case backlinks_for(path) do
-      [] ->
-        "permanently deletes #{path} from the vault"
-
-      backlinks ->
-        "permanently deletes #{path} from the vault (#{length(backlinks)} incoming references: #{Enum.join(backlinks, ", ")})"
-    end
-  end
-
   ## move_note
 
   defp do_move_note(params, state) do
-    from = Map.fetch!(params, :from)
-    to = Map.fetch!(params, :to)
-    confirm = Map.get(params, :confirm, false)
-
-    with :ok <- require_confirm(confirm, "verschiebt #{from} nach #{to}"),
-         :ok <- basic_path_sanity(from),
-         {:ok, normalized_from, _changed?} <- normalize_path_or_error(from),
-         :ok <- basic_path_sanity(normalized_from),
-         {:ok, from_abs} <- resolve_within_vault(state, normalized_from),
-         :ok <- ensure_exists(from_abs, normalized_from) do
-      do_move_note_to(state, normalized_from, from_abs, to)
+    with {:ok, resolved} <- Policy.check(:move_note, params, facts(state)) do
+      do_move_note_to(state, resolved.from, resolved.to)
     else
       {:error, msg} -> {:error, msg}
     end
   end
 
-  defp do_move_note_to(state, normalized_from, from_abs, to) do
-    {:ok, existing_content} = File.read(from_abs)
+  defp do_move_note_to(state, normalized_from, normalized_to) do
     backlinks_before = backlinks_for(normalized_from)
+    commit_message = "move: #{normalized_from} -> #{normalized_to}"
 
-    with :ok <- basic_path_sanity(to),
-         {:ok, normalized_to, _changed?} <- normalize_path_or_error(to),
-         :ok <- basic_path_sanity(normalized_to),
-         {:ok, domain} <- validate_write_path(normalized_to, state),
-         :ok <- check_naming_convention(normalized_to, domain, state, existing_content),
-         {:ok, to_abs} <- resolve_within_vault(state, normalized_to),
-         :ok <- ensure_not_exists(to_abs, normalized_to) do
-      commit_message = "move: #{normalized_from} -> #{normalized_to}"
+    case Git.move_commit(state.vault_path, normalized_from, normalized_to, commit_message) do
+      {:ok, commit_meta} ->
+        case Git.push(state.vault_path, state.git_remote) do
+          :ok ->
+            reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
+            # Backlink report from :links_in — a diff of incoming references
+            # before and after the move rather than an ad-hoc scan. A source
+            # chunk that resolved before and no longer shows up in the
+            # (rebuilt) incoming references of the target now points nowhere —
+            # for example because it referenced an explicit path instead of a
+            # basename.
+            backlinks_after = backlinks_for(normalized_to)
 
-      case Git.move_commit(state.vault_path, normalized_from, normalized_to, commit_message) do
-        {:ok, commit_meta} ->
-          case Git.push(state.vault_path, state.git_remote) do
-            :ok ->
-              reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
-              # Backlink report from :links_in — a diff of incoming
-              # references before and after the move rather than an ad-hoc
-              # scan. A source chunk that resolved before and no longer shows
-              # up in the (rebuilt) incoming references of the target now
-              # points nowhere — for example because it referenced an
-              # explicit path instead of a basename.
-              backlinks_after = backlinks_for(normalized_to)
-              broken_backlinks = backlinks_before -- backlinks_after
+            {:ok,
+             %{
+               from: normalized_from,
+               to: normalized_to,
+               pushed: true,
+               broken_backlinks: backlinks_before -- backlinks_after
+             }}
 
-              {:ok,
-               %{
-                 from: normalized_from,
-                 to: normalized_to,
-                 pushed: true,
-                 broken_backlinks: broken_backlinks
-               }}
+          {:error, out} ->
+            {:error, "Verschieben lokal committed, aber Push fehlgeschlagen: #{out}"}
+        end
 
-            {:error, out} ->
-              {:error, "Verschieben lokal committed, aber Push fehlgeschlagen: #{out}"}
-          end
-
-        {:error, out} ->
-          {:error, "git mv/commit fehlgeschlagen: #{out}"}
-      end
-    else
-      {:error, msg} -> {:error, msg}
+      {:error, out} ->
+        {:error, "git mv/commit fehlgeschlagen: #{out}"}
     end
   end
 
@@ -1618,35 +1247,6 @@ defmodule Vigil.Store do
     remove_file_from_index(from)
     index_file(file)
     rebuild_links_index()
-  end
-
-  defp require_confirm(true, _description), do: :ok
-
-  defp require_confirm(_confirm, description) do
-    {:error,
-     "Destructive operation: #{description}. Call again with confirm: true to execute it."}
-  end
-
-  defp split_frontmatter(content) do
-    lines = split_lines(content)
-
-    case lines do
-      ["---" | rest] ->
-        case Enum.find_index(rest, &(&1 == "---")) do
-          nil ->
-            {:error, "Unterminated frontmatter"}
-
-          idx ->
-            frontmatter_lines = Enum.take(rest, idx + 1)
-            body_lines = Enum.drop(rest, idx + 1)
-            frontmatter = Enum.join(["---" | frontmatter_lines], "\n") <> "\n"
-            body = Enum.join(body_lines, "\n") <> "\n"
-            {:ok, frontmatter, body}
-        end
-
-      _ ->
-        {:error, "No frontmatter found"}
-    end
   end
 
   ## shared write path
@@ -1734,15 +1334,6 @@ defmodule Vigil.Store do
 
       [] ->
         :ok
-    end
-  end
-
-  defp split_lines(content) do
-    lines = String.split(content, "\n")
-
-    case List.last(lines) do
-      "" -> Enum.slice(lines, 0..-2//1)
-      _ -> lines
     end
   end
 
@@ -1875,15 +1466,8 @@ defmodule Vigil.Store do
 
   defp lint_sentence_headings(chunks) do
     chunks
-    |> Enum.filter(fn c -> c.heading && sentence_heading?(c.heading) end)
+    |> Enum.filter(fn c -> c.heading && Rules.sentence_heading?(c.heading) end)
     |> Enum.map(fn c -> %{id: c.id, heading: c.heading} end)
-  end
-
-  # Rough heuristic: a heading that reads like a sentence is either long or
-  # ends in punctuation. Both are signals, not proof.
-  defp sentence_heading?(heading) do
-    String.length(heading) > @sentence_heading_length_threshold or
-      String.ends_with?(heading, [".", "!", "?"])
   end
 
   defp lint_orphaned_links do
@@ -1932,19 +1516,12 @@ defmodule Vigil.Store do
 
   defp skill_description(abs_path) do
     with {:ok, content} <- File.read(abs_path),
-         ["---" | rest] <- String.split(content, "\n"),
-         {:ok, idx} <- find_closing_line(rest),
-         yaml_text = Enum.join(Enum.take(rest, idx), "\n"),
+         {:ok, yaml_text, _body, _offset} <- Markdown.frontmatter(content),
          {:ok, %{"description" => desc}} <- YamlElixir.read_from_string(yaml_text) do
       desc
     else
       _ -> nil
     end
-  end
-
-  defp find_closing_line(lines) do
-    idx = Enum.find_index(lines, &(&1 == "---"))
-    if idx, do: {:ok, idx}, else: :error
   end
 
   defp normalize_skill_name(name) do
@@ -2018,22 +1595,17 @@ defmodule Vigil.Store do
   end
 
   defp validate_skill_frontmatter(content) do
-    case String.split(content, "\n") do
-      ["---" | rest] ->
-        case find_closing_line(rest) do
-          {:ok, idx} ->
-            yaml_text = Enum.join(Enum.take(rest, idx), "\n")
-
-            case YamlElixir.read_from_string(yaml_text) do
-              {:ok, %{"name" => _, "description" => _}} -> :ok
-              _ -> {:error, "Frontmatter must contain 'name' and 'description'"}
-            end
-
-          :error ->
-            {:error, "Unterminated frontmatter"}
+    case Markdown.frontmatter(content) do
+      {:ok, yaml_text, _body, _offset} ->
+        case YamlElixir.read_from_string(yaml_text) do
+          {:ok, %{"name" => _, "description" => _}} -> :ok
+          _ -> {:error, "Frontmatter must contain 'name' and 'description'"}
         end
 
-      _ ->
+      :unterminated ->
+        {:error, "Unterminated frontmatter"}
+
+      :none ->
         {:error, "content must start with frontmatter"}
     end
   end

@@ -11,11 +11,9 @@ defmodule Vigil.VaultCheck do
   no knowledge of vault content and deliberately live in `scripts/init.sh`.
   """
 
-  alias Vigil.{Parser, Slug, VaultDiscovery}
+  alias Vigil.{Markdown, Parser, Slug, VaultDiscovery}
+  alias Vigil.Vault.Rules
 
-  @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
-  @h1_re ~r/^\#\s+(.+?)\s*$/
-  @sentence_heading_length_threshold 60
   @max_headings 30
   @max_words 2000
   @max_basisname_laenge 60
@@ -26,8 +24,12 @@ defmodule Vigil.VaultCheck do
       raise "Not a directory: #{vault_path}"
     end
 
-    domain_dirs = VaultDiscovery.domain_dirs(vault_path)
-    files = VaultDiscovery.discover_files(vault_path)
+    # The doctor honours VIGIL_EXCLUDE too: docs/design.md calls it the hard
+    # boundary — "not filtered — not read" — and a report that lists notes the
+    # server deliberately never reads would breach it.
+    exclude = Application.get_env(:vigil, :exclude, [])
+    domain_dirs = VaultDiscovery.domain_dirs!(vault_path, exclude)
+    files = VaultDiscovery.discover_files!(vault_path, exclude)
 
     entries =
       Enum.map(files, fn rel_path ->
@@ -106,23 +108,9 @@ defmodule Vigil.VaultCheck do
   end
 
   defp frontmatter_block(content) do
-    case String.split(content, "\n") do
-      ["---" | rest] ->
-        case find_closing(rest, 0) do
-          {:ok, yaml_lines, _idx} -> {:ok, Enum.join(yaml_lines, "\n")}
-          :not_found -> :missing
-        end
-
-      _ ->
-        :missing
-    end
-  end
-
-  defp find_closing(lines, idx) do
-    case Enum.at(lines, idx) do
-      nil -> :not_found
-      "---" -> {:ok, Enum.take(lines, idx), idx}
-      _ -> find_closing(lines, idx + 1)
+    case Markdown.frontmatter(content) do
+      {:ok, yaml_text, _body_lines, _offset} -> {:ok, yaml_text}
+      _ -> :missing
     end
   end
 
@@ -248,24 +236,9 @@ defmodule Vigil.VaultCheck do
 
   defp b3_heading_diffs(rel_path, content) do
     content
-    |> String.split("\n")
-    |> Enum.filter(fn line ->
-      Regex.match?(@heading_re, line) and not Regex.match?(@h1_re, line)
-    end)
-    |> Enum.flat_map(fn line ->
-      [_, _, text] = Regex.run(@heading_re, line)
-      text = String.trim(text)
-
-      case {Slug.legacy_slugify(text), Slug.slugify(text)} do
-        {old, {:ok, new}} when old != new ->
-          [%{kind: "heading", path: rel_path, old: old, new: new}]
-
-        {old, {:error, _}} ->
-          [%{kind: "heading", path: rel_path, old: old, new: nil}]
-
-        _ ->
-          []
-      end
+    |> Rules.slug_changes()
+    |> Enum.map(fn %{old: old, new: new} ->
+      %{kind: "heading", path: rel_path, old: old, new: new}
     end)
   end
 
@@ -316,7 +289,7 @@ defmodule Vigil.VaultCheck do
 
     sentence_headings =
       heading_chunks
-      |> Enum.filter(fn c -> sentence_heading?(c.heading) end)
+      |> Enum.filter(fn c -> Rules.sentence_heading?(c.heading) end)
       |> Enum.map(& &1.heading)
 
     if heading_count > @max_headings or word_count > @max_words or duplicates != [] or
@@ -335,10 +308,5 @@ defmodule Vigil.VaultCheck do
     else
       []
     end
-  end
-
-  defp sentence_heading?(heading) do
-    String.length(heading) > @sentence_heading_length_threshold or
-      String.ends_with?(heading, [".", "!", "?"])
   end
 end

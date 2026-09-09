@@ -15,9 +15,6 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
   """
   use Mix.Task
 
-  @h1_re ~r/^\#\s+(.+?)\s*$/
-  @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
-
   @impl true
   def run(args) do
     case args do
@@ -31,7 +28,9 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
       Mix.raise("Not a directory: #{vault_path}")
     end
 
-    files = discover_files(vault_path)
+    files =
+      Vigil.VaultDiscovery.discover_files!(vault_path, Application.get_env(:vigil, :exclude, []))
+
     differences = Enum.flat_map(files, &file_differences(vault_path, &1))
 
     if differences == [] do
@@ -72,21 +71,10 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
 
   defp heading_differences(rel_path, content) do
     content
-    |> String.split("\n")
-    |> Enum.filter(fn line ->
-      Regex.match?(@heading_re, line) and not Regex.match?(@h1_re, line)
-    end)
-    |> Enum.flat_map(fn line ->
-      [_, _, text] = Regex.run(@heading_re, line)
-      text = String.trim(text)
-
-      case {Vigil.Slug.legacy_slugify(text), Vigil.Slug.slugify(text)} do
-        {old, {:ok, new}} when old != new -> [{"heading #{rel_path}", text, old, new}]
-        {old, {:error, _}} -> [{"heading #{rel_path}", text, old, :error}]
-        _ -> []
-      end
+    |> Vigil.Vault.Rules.slug_changes()
+    |> Enum.map(fn
+      %{text: text, old: old, new: nil} -> {"heading #{rel_path}", text, old, :error}
+      %{text: text, old: old, new: new} -> {"heading #{rel_path}", text, old, new}
     end)
   end
-
-  defp discover_files(vault_path), do: Vigil.VaultDiscovery.discover_files(vault_path)
 end

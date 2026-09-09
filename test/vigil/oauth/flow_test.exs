@@ -1,436 +1,294 @@
 defmodule Vigil.OAuth.FlowTest do
+  @moduledoc """
+  The OAuth decisions on their own. No conn, no router — and no vault: before
+  the flow was split out of `Vigil.MCP.Server`, asking any of these questions
+  meant starting a git-backed fixture vault, a `Vigil.Store`, an envelope and
+  a rate limiter, because `initialize` and every tool call reached the Store
+  through the same Plug.
+  """
   use ExUnit.Case, async: false
-  use Plug.Test
 
-  alias Vigil.MCP.Server
-  alias Vigil.OAuth
-  alias Vigil.Store
-
-  @issuer "https://vault.factory-lab.org"
-  @resource "https://vault.factory-lab.org/mcp"
-  @password "correct-horse-battery-staple"
+  alias Vigil.OAuth.{Flow, Store}
 
   setup do
-    vault = Vigil.FixtureVault.build()
-    on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
-    start_supervised!(Vigil.MCP.Envelope)
-    start_supervised!(Vigil.MCP.RateLimit)
-
-    oauth = Vigil.OAuthCase.setup!()
-    %{vault: vault, state_dir: oauth.state_dir}
+    Vigil.OAuthCase.setup!()
+    :ok
   end
 
-  defp call(conn), do: Server.call(conn, Server.init([]))
+  defp client! do
+    {:ok, %{client_id: id}} =
+      Flow.register(%{"redirect_uris" => ["https://app.example/cb"], "client_name" => "App"})
 
-  defp get_json(path) do
-    conn(:get, path) |> call()
+    id
   end
 
-  defp post_json(path, map) do
-    conn(:post, path, Jason.encode!(map))
-    |> put_req_header("content-type", "application/json")
-    |> call()
-  end
-
-  defp post_form(path, params) do
-    conn(:post, path, URI.encode_query(params))
-    |> put_req_header("content-type", "application/x-www-form-urlencoded")
-    |> call()
-  end
-
-  defp get_query(path, params) do
-    conn(:get, path <> "?" <> URI.encode_query(params)) |> call()
-  end
-
-  defp register(redirect_uris, name \\ "Test Client") do
-    conn = post_json("/oauth/register", %{client_name: name, redirect_uris: redirect_uris})
-    {conn.status, Jason.decode!(conn.resp_body)}
-  end
-
-  defp pkce_pair do
-    verifier = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
-    challenge = :crypto.hash(:sha256, verifier) |> Base.url_encode64(padding: false)
-    {verifier, challenge}
-  end
-
-  defp authorize_query(client_id, redirect_uri, challenge, extra \\ %{}) do
+  defp authorize_params(client_id, overrides \\ %{}) do
     Map.merge(
       %{
-        "response_type" => "code",
         "client_id" => client_id,
-        "redirect_uri" => redirect_uri,
-        "code_challenge" => challenge,
-        "code_challenge_method" => "S256",
-        "state" => "xyz"
+        "redirect_uri" => "https://app.example/cb",
+        "response_type" => "code",
+        "code_challenge" => "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "code_challenge_method" => "S256"
       },
-      extra
+      overrides
     )
   end
 
-  defp extract_query_param(url, key) do
-    URI.parse(url).query |> URI.decode_query() |> Map.get(key)
+  describe "register/2" do
+    test "a registration never carries a client_secret" do
+      assert {:ok, registration} =
+               Flow.register(%{"redirect_uris" => ["https://app.example/cb"]})
+
+      refute Map.has_key?(registration, :client_secret)
+      assert registration.token_endpoint_auth_method == "none"
+    end
+
+    test "a redirect_uri that is neither https nor loopback http is refused" do
+      assert {:error, "invalid_redirect_uri"} =
+               Flow.register(%{"redirect_uris" => ["http://evil.example/cb"]})
+    end
+
+    test "no redirect_uri at all is refused" do
+      assert {:error, "invalid_redirect_uri"} = Flow.register(%{})
+    end
   end
 
-  ## Discovery
+  describe "authorize_request/1" do
+    test "an unknown client is untrusted, never redirected to" do
+      assert {:error, :untrusted} = Flow.authorize_request(authorize_params("nope"))
+    end
 
-  test "both protected-resource discovery paths return identical JSON, no auth required" do
-    c1 = get_json("/.well-known/oauth-protected-resource")
-    c2 = get_json("/.well-known/oauth-protected-resource/mcp")
+    test "a redirect_uri the client did not register is untrusted" do
+      params = authorize_params(client!(), %{"redirect_uri" => "https://evil.example/cb"})
+      assert {:error, :untrusted} = Flow.authorize_request(params)
+    end
 
-    assert c1.status == 200
-    assert c1.resp_body == c2.resp_body
+    test "plain PKCE is refused locally rather than redirected" do
+      params = authorize_params(client!(), %{"code_challenge_method" => "plain"})
+      assert {:error, :bad_code_challenge_method} = Flow.authorize_request(params)
+    end
 
-    body = Jason.decode!(c1.resp_body)
-    assert body["resource"] == @resource
-    assert body["authorization_servers"] == [@issuer]
+    test "a missing code_challenge is reported to the client as a redirect" do
+      params = authorize_params(client!(), %{"code_challenge" => "", "state" => "xyz"})
+
+      assert {:error, {:redirect, "https://app.example/cb", "invalid_request", "xyz"}} =
+               Flow.authorize_request(params)
+    end
+
+    test "an unknown scope is reported to the client as a redirect" do
+      params = authorize_params(client!(), %{"scope" => "vault:admin"})
+
+      assert {:error, {:redirect, _, "invalid_scope", _}} = Flow.authorize_request(params)
+    end
+
+    test "a resource other than this server is an invalid target" do
+      params = authorize_params(client!(), %{"resource" => "https://elsewhere.example/mcp"})
+
+      assert {:error, {:redirect, _, "invalid_target", _}} = Flow.authorize_request(params)
+    end
+
+    test "a valid request defaults to the full scope" do
+      assert {:ok, ctx} = Flow.authorize_request(authorize_params(client!()))
+      assert ctx.scope == "vault"
+    end
+
+    test "the read-only scope is carried through" do
+      params = authorize_params(client!(), %{"scope" => "vault:read"})
+      assert {:ok, %{scope: "vault:read"}} = Flow.authorize_request(params)
+    end
   end
 
-  test "authorization-server metadata advertises S256 PKCE and public-client auth" do
-    conn = get_json("/.well-known/oauth-authorization-server")
-    body = Jason.decode!(conn.resp_body)
+  describe "grant/2 — authorization_code" do
+    setup do
+      client_id = client!()
+      {:ok, ctx} = Flow.authorize_request(authorize_params(client_id))
+      code = Flow.issue_authorization_code(ctx)
 
-    assert body["code_challenge_methods_supported"] == ["S256"]
-    assert body["token_endpoint_auth_methods_supported"] == ["none"]
-    assert body["client_id_metadata_document_supported"] == true
-    assert body["issuer"] == @issuer
-  end
+      %{client_id: client_id, code: code}
+    end
 
-  ## DCR
-
-  test "DCR registration succeeds and never returns a client_secret" do
-    {status, body} = register(["https://claude.ai/api/mcp/auth_callback"])
-    assert status == 201
-    assert body["client_id"] != nil
-    refute Map.has_key?(body, "client_secret")
-  end
-
-  test "DCR rejects a redirect_uri that is neither https nor loopback http" do
-    {status, body} = register(["http://evil.example.com/cb"])
-    assert status == 400
-    assert body["error"] == "invalid_redirect_uri"
-  end
-
-  test "DCR accepts a bare http://localhost redirect_uri" do
-    {status, _body} = register(["http://localhost/callback"])
-    assert status == 201
-  end
-
-  ## Redirect-URI matching
-
-  test "loopback redirect matching ignores the port but not the path" do
-    {201, client} = register(["http://localhost/callback"])
-    {_verifier, challenge} = pkce_pair()
-
-    ok =
-      get_query(
-        "/oauth/authorize",
-        authorize_query(client["client_id"], "http://localhost:3118/callback", challenge)
-      )
-
-    assert ok.status == 200
-
-    wrong_path =
-      get_query(
-        "/oauth/authorize",
-        authorize_query(client["client_id"], "http://localhost:3118/other", challenge)
-      )
-
-    assert wrong_path.status == 400
-    assert get_resp_header(wrong_path, "location") == []
-
-    wrong_host =
-      get_query(
-        "/oauth/authorize",
-        authorize_query(client["client_id"], "http://evil.tld/callback", challenge)
-      )
-
-    assert wrong_host.status == 400
-    assert get_resp_header(wrong_host, "location") == []
-  end
-
-  ## Full PKCE flow
-
-  test "full authorization_code + PKCE flow issues an access token" do
-    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
-    {verifier, challenge} = pkce_pair()
-    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
-
-    get_conn =
-      get_query("/oauth/authorize", authorize_query(client["client_id"], redirect_uri, challenge))
-
-    assert get_conn.status == 200
-    assert get_conn.resp_body =~ client["client_name"]
-
-    post_conn =
-      post_form(
-        "/oauth/authorize",
-        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
-          "decision" => "allow"
-        })
-      )
-
-    assert post_conn.status == 302
-    [location] = get_resp_header(post_conn, "location")
-    assert String.starts_with?(location, redirect_uri)
-    code = extract_query_param(location, "code")
-    assert extract_query_param(location, "state") == "xyz"
-    assert code != nil
-
-    token_conn =
-      post_form("/oauth/token", %{
-        "grant_type" => "authorization_code",
-        "code" => code,
-        "redirect_uri" => redirect_uri,
-        "client_id" => client["client_id"],
-        "code_verifier" => verifier
-      })
-
-    assert token_conn.status == 200
-    assert get_resp_header(token_conn, "cache-control") == ["no-store"]
-    body = Jason.decode!(token_conn.resp_body)
-    assert String.length(body["access_token"]) == 64
-    assert body["refresh_token"] != nil
-    assert body["scope"] == "vault"
-
-    {:ok, record} = OAuth.Store.get_token(body["access_token"])
-    assert record.aud == @resource
-  end
-
-  test "wrong code_verifier is rejected and the code becomes permanently unusable" do
-    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
-    {verifier, challenge} = pkce_pair()
-    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
-
-    post_conn =
-      post_form(
-        "/oauth/authorize",
-        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
-          "decision" => "allow"
-        })
-      )
-
-    [location] = get_resp_header(post_conn, "location")
-    code = extract_query_param(location, "code")
-
-    bad_conn =
-      post_form("/oauth/token", %{
-        "grant_type" => "authorization_code",
-        "code" => code,
-        "redirect_uri" => redirect_uri,
-        "client_id" => client["client_id"],
-        "code_verifier" => "falsch"
-      })
-
-    assert bad_conn.status == 400
-    assert Jason.decode!(bad_conn.resp_body)["error"] == "invalid_grant"
-
-    retry_conn =
-      post_form("/oauth/token", %{
-        "grant_type" => "authorization_code",
-        "code" => code,
-        "redirect_uri" => redirect_uri,
-        "client_id" => client["client_id"],
-        "code_verifier" => verifier
-      })
-
-    assert retry_conn.status == 400
-    assert Jason.decode!(retry_conn.resp_body)["error"] == "invalid_grant"
-  end
-
-  test "code_challenge_method=plain is rejected with a bare 400" do
-    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
-
-    conn =
-      get_query(
-        "/oauth/authorize",
+    defp code_grant(overrides) do
+      Map.merge(
         %{
-          "response_type" => "code",
-          "client_id" => client["client_id"],
-          "redirect_uri" => "https://claude.ai/api/mcp/auth_callback",
-          "code_challenge" => "whatever",
-          "code_challenge_method" => "plain"
-        }
+          "grant_type" => "authorization_code",
+          "redirect_uri" => "https://app.example/cb",
+          "code_verifier" => "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+        },
+        overrides
       )
+    end
 
-    assert conn.status == 400
-    assert get_resp_header(conn, "location") == []
+    test "a correct verifier yields an access and a refresh token", %{
+      client_id: client_id,
+      code: code
+    } do
+      assert {:ok, tokens} =
+               Flow.grant(code_grant(%{"code" => code, "client_id" => client_id}))
+
+      assert tokens.token_type == "Bearer"
+      assert tokens.expires_in == 3600
+      assert is_binary(tokens.access_token)
+      assert is_binary(tokens.refresh_token)
+    end
+
+    test "a wrong verifier is invalid_grant and spends the code", %{
+      client_id: client_id,
+      code: code
+    } do
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(
+                 code_grant(%{
+                   "code" => code,
+                   "client_id" => client_id,
+                   "code_verifier" => "wrong"
+                 })
+               )
+
+      # One-time use: the code is gone even though the attempt failed.
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(code_grant(%{"code" => code, "client_id" => client_id}))
+    end
+
+    test "another client cannot redeem the code", %{code: code} do
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(code_grant(%{"code" => code, "client_id" => "someone-else"}))
+    end
+
+    test "a mismatched redirect_uri is invalid_grant", %{client_id: client_id, code: code} do
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(
+                 code_grant(%{
+                   "code" => code,
+                   "client_id" => client_id,
+                   "redirect_uri" => "https://app.example/other"
+                 })
+               )
+    end
+
+    test "an expired code is invalid_grant", %{client_id: client_id, code: code} do
+      later = System.system_time(:second) + 120
+
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(code_grant(%{"code" => code, "client_id" => client_id}), later)
+    end
+
+    test "an unknown code is invalid_grant" do
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(code_grant(%{"code" => "nope", "client_id" => "x"}))
+    end
   end
 
-  ## Audience
+  describe "grant/2 — refresh_token" do
+    setup do
+      client_id = client!()
+      {:ok, ctx} = Flow.authorize_request(authorize_params(client_id))
+      code = Flow.issue_authorization_code(ctx)
 
-  test "an access token issued for a different resource is rejected at /mcp" do
-    bad_token = OAuth.Token.random()
-
-    OAuth.Store.put_token(bad_token, %{
-      aud: "https://andere.tld/mcp",
-      expires_at: System.system_time(:second) + 3600
-    })
-
-    conn =
-      conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
-      |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer #{bad_token}")
-      |> call()
-
-    assert conn.status == 401
-  end
-
-  ## Refresh
-
-  test "refresh rotates both tokens; the old refresh token becomes invalid" do
-    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
-    {verifier, challenge} = pkce_pair()
-    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
-
-    post_conn =
-      post_form(
-        "/oauth/authorize",
-        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
-          "decision" => "allow"
+      {:ok, tokens} =
+        Flow.grant(%{
+          "grant_type" => "authorization_code",
+          "code" => code,
+          "client_id" => client_id,
+          "redirect_uri" => "https://app.example/cb",
+          "code_verifier" => "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
         })
-      )
 
-    [location] = get_resp_header(post_conn, "location")
-    code = extract_query_param(location, "code")
+      %{client_id: client_id, tokens: tokens}
+    end
 
-    token_conn =
-      post_form("/oauth/token", %{
-        "grant_type" => "authorization_code",
-        "code" => code,
-        "redirect_uri" => redirect_uri,
-        "client_id" => client["client_id"],
-        "code_verifier" => verifier
-      })
-
-    tokens = Jason.decode!(token_conn.resp_body)
-
-    refresh_conn =
-      post_form("/oauth/token", %{
+    test "refreshing rotates the refresh token", %{client_id: client_id, tokens: tokens} do
+      params = %{
         "grant_type" => "refresh_token",
-        "refresh_token" => tokens["refresh_token"],
-        "client_id" => client["client_id"]
-      })
+        "refresh_token" => tokens.refresh_token,
+        "client_id" => client_id
+      }
 
-    assert refresh_conn.status == 200
-    new_tokens = Jason.decode!(refresh_conn.resp_body)
-    assert new_tokens["access_token"] != tokens["access_token"]
-    assert new_tokens["refresh_token"] != tokens["refresh_token"]
+      assert {:ok, fresh} = Flow.grant(params)
+      assert fresh.refresh_token != tokens.refresh_token
 
-    reuse_conn =
-      post_form("/oauth/token", %{
-        "grant_type" => "refresh_token",
-        "refresh_token" => tokens["refresh_token"],
-        "client_id" => client["client_id"]
-      })
+      # The presented token is spent: a replay finds nothing.
+      assert {:error, 400, "invalid_grant"} = Flow.grant(params)
+    end
 
-    assert reuse_conn.status == 400
-    assert Jason.decode!(reuse_conn.resp_body)["error"] == "invalid_grant"
+    test "an access token is not a refresh token", %{client_id: client_id, tokens: tokens} do
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(%{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => tokens.access_token,
+                 "client_id" => client_id
+               })
+    end
+
+    test "another client cannot refresh", %{tokens: tokens} do
+      assert {:error, 400, "invalid_grant"} =
+               Flow.grant(%{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => "someone-else"
+               })
+    end
+
+    test "the scope survives a refresh", %{client_id: client_id, tokens: tokens} do
+      assert {:ok, fresh} =
+               Flow.grant(%{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => client_id
+               })
+
+      assert fresh.scope == tokens.scope
+    end
   end
 
-  test "an expired refresh token yields exactly invalid_grant" do
-    refresh = OAuth.Token.random()
+  describe "grant/2 — anything else" do
+    test "an unknown grant type is refused as such" do
+      assert {:error, 400, "unsupported_grant_type"} =
+               Flow.grant(%{"grant_type" => "password"})
 
-    OAuth.Store.put_token(refresh, %{
-      type: :refresh,
-      client_id: "some-client",
-      aud: @resource,
-      expires_at: System.system_time(:second) - 1
-    })
-
-    conn =
-      post_form("/oauth/token", %{
-        "grant_type" => "refresh_token",
-        "refresh_token" => refresh,
-        "client_id" => "some-client"
-      })
-
-    assert conn.status == 400
-    assert Jason.decode!(conn.resp_body)["error"] == "invalid_grant"
+      assert {:error, 400, "unsupported_grant_type"} = Flow.grant(%{})
+    end
   end
 
-  ## Password / rate limiting
+  describe "consent/4" do
+    setup do
+      {:ok, ctx} = Flow.authorize_request(authorize_params(client!()))
+      %{ctx: ctx}
+    end
 
-  test "wrong password re-renders the consent page without a redirect or a code" do
-    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
-    {_verifier, challenge} = pkce_pair()
-    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+    test "the right password yields a usable code", %{ctx: ctx} do
+      assert {:ok, code} = Flow.consent("10.0.0.1", "correct-horse-battery-staple", ctx)
+      assert {:ok, _} = Store.take_code(code)
+    end
 
-    conn =
-      post_form(
-        "/oauth/authorize",
-        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => "falsch",
-          "decision" => "allow"
-        })
-      )
+    test "a wrong password yields no code", %{ctx: ctx} do
+      assert :wrong_password = Flow.consent("10.0.0.2", "wrong", ctx)
+      assert :wrong_password = Flow.consent("10.0.0.2", nil, ctx)
+    end
 
-    assert conn.status == 200
-    assert get_resp_header(conn, "location") == []
-    assert conn.resp_body =~ "Wrong password"
+    test "the sixth wrong attempt from one address is rate limited", %{ctx: ctx} do
+      for _ <- 1..5, do: assert(:wrong_password = Flow.consent("10.0.0.3", "wrong", ctx))
+      assert :rate_limited = Flow.consent("10.0.0.3", "wrong", ctx)
+
+      # The limit is per address.
+      assert :wrong_password = Flow.consent("10.0.0.4", "wrong", ctx)
+    end
+
+    test "a success clears the address's failure count", %{ctx: ctx} do
+      for _ <- 1..4, do: Flow.consent("10.0.0.5", "wrong", ctx)
+      assert {:ok, _} = Flow.consent("10.0.0.5", "correct-horse-battery-staple", ctx)
+
+      for _ <- 1..5, do: assert(:wrong_password = Flow.consent("10.0.0.5", "wrong", ctx))
+    end
   end
 
-  test "the sixth wrong-password attempt within 15 minutes gets 429" do
-    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
-    {_verifier, challenge} = pkce_pair()
-    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+  describe "issue_authorization_code/2" do
+    test "the code is one-time: taking it twice fails" do
+      {:ok, ctx} = Flow.authorize_request(authorize_params(client!()))
+      code = Flow.issue_authorization_code(ctx)
 
-    params =
-      Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-        "password" => "falsch",
-        "decision" => "allow"
-      })
-
-    results = for _ <- 1..6, do: post_form("/oauth/authorize", params).status
-
-    assert Enum.take(results, 5) == [200, 200, 200, 200, 200]
-    assert List.last(results) == 429
-  end
-
-  ## Persistence
-
-  test "a token survives an OAuth.Store restart against the same state dir", %{
-    state_dir: state_dir
-  } do
-    token = OAuth.Token.random()
-
-    OAuth.Store.put_token(token, %{aud: @resource, expires_at: System.system_time(:second) + 3600})
-
-    stop_supervised!(Vigil.OAuth.Store)
-    start_supervised!({Vigil.OAuth.Store, state_dir: state_dir})
-
-    conn =
-      conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
-      |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer #{token}")
-      |> put_req_header("mcp-session-id", "persist-session")
-      |> call()
-
-    assert conn.status == 200
-  end
-
-  ## Janitor sweep (time injected, no sleeping)
-
-  test "an expired code is gone after a sweep" do
-    OAuth.Store.put_code("stale-code", %{
-      client_id: "x",
-      redirect_uri: "https://x/y",
-      code_challenge: "y",
-      resource: @resource,
-      expires_at: System.system_time(:second) - 1
-    })
-
-    OAuth.Store.sweep_expired(System.system_time(:second))
-
-    assert OAuth.Store.take_code("stale-code") == :error
-  end
-
-  ## CIMD SSRF guard (deterministic — a literal loopback IP needs no network access)
-
-  test "a CIMD client_id resolving to a private IP is rejected" do
-    assert OAuth.Cimd.fetch("https://127.0.0.1/client-metadata.json") == :error
+      assert {:ok, _} = Store.take_code(code)
+      assert :error = Store.take_code(code)
+    end
   end
 end

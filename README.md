@@ -64,6 +64,7 @@ flowchart LR
     O -->|vault| K{SkillKey gate}
     K --> T
     T --> S["Vigil.Store<br/>GenServer"]
+    S -->|every write| V{"Vigil.Vault.Policy"}
     S <--> E[("ETS index<br/>chunks · files · links")]
     S --> G["Vigil.Git"]
     G <--> R[("Vault repo<br/>Markdown + Git")]

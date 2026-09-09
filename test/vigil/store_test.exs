@@ -298,11 +298,24 @@ defmodule Vigil.StoreTest do
     end
 
     test "content with a heading of any covered rank is rejected" do
-      assert {:error, _} = Store.replace_section("bike/via-carolina.md#fueling", "## New\ntext")
+      assert {:error, msg} = Store.replace_section("bike/via-carolina.md#fueling", "## New\ntext")
+      assert msg == "content must not contain headings (## through ####)"
     end
 
     test "id without a fragment is rejected" do
-      assert {:error, _} = Store.replace_section("bike/via-carolina.md", "text")
+      assert {:error, msg} = Store.replace_section("bike/via-carolina.md", "text")
+      assert msg == "id must contain a fragment: path#heading-slug"
+    end
+
+    # The section is resolved through the index before the replacement content
+    # is judged, so an unknown id is reported as an unknown id — not as a
+    # content problem, and not as a missing file.
+    test "an unknown section id is reported as not found, whatever the content" do
+      assert {:error, "Nicht gefunden: bike/via-carolina.md#nope"} =
+               Store.replace_section("bike/via-carolina.md#nope", "## New\ntext")
+
+      assert {:error, "Nicht gefunden: bike/ghost.md#nope"} =
+               Store.replace_section("bike/ghost.md#nope", "text")
     end
   end
 
@@ -544,7 +557,13 @@ defmodule Vigil.StoreTest do
     end
 
     test "id without a fragment is rejected" do
-      assert {:error, _} = Store.delete_section("bike/via-carolina.md")
+      assert {:error, msg} = Store.delete_section("bike/via-carolina.md")
+      assert msg == "id must contain a fragment: path#heading-slug"
+    end
+
+    test "an unknown section id is reported as not found" do
+      assert {:error, "Nicht gefunden: bike/via-carolina.md#nope"} =
+               Store.delete_section("bike/via-carolina.md#nope")
     end
   end
 
@@ -1010,6 +1029,42 @@ defmodule Vigil.StoreTest do
       results2 = Store.search(%{query: "tubeless", domain: "bike"})
       hit2 = Enum.find(results2, &(&1.id =~ "terra-speed"))
       refute Map.has_key?(hit2, :hub)
+    end
+  end
+
+  # Regression: skills/ and notes are "one repository, two systems"
+  # (docs/design.md). Before Vigil.Vault.Policy the four write paths below
+  # applied no writable-path rule, so a caller could append to, rewrite,
+  # retype or delete a skill through a note tool — and the skill was then
+  # parsed and indexed as a searchable note.
+  describe "skills/ is not reachable through the note write tools" do
+    test "append cannot write into skills/", %{vault: vault} do
+      assert {:error, "Invalid path"} =
+               Store.append(%{path: "skills/tdd.md", content: "INJECTED"})
+
+      refute File.read!(Path.join(vault, "skills/tdd.md")) =~ "INJECTED"
+    end
+
+    test "rewrite_note cannot overwrite a skill" do
+      assert {:error, "Invalid path"} =
+               Store.rewrite_note(%{path: "skills/tdd.md", content: "# Pwned\n\nbody\n"})
+    end
+
+    test "update_frontmatter cannot retype a skill" do
+      assert {:error, "Invalid path"} =
+               Store.update_frontmatter(%{path: "skills/tdd.md", type: "decision"})
+    end
+
+    test "delete_note cannot delete a skill", %{vault: vault} do
+      assert {:error, "Invalid path"} =
+               Store.delete_note(%{path: "skills/tdd.md", confirm: true})
+
+      assert File.exists?(Path.join(vault, "skills/tdd.md"))
+    end
+
+    test "a skill never becomes searchable through a write" do
+      Store.append(%{path: "skills/tdd.md", content: "INJECTEDWORD"})
+      assert Store.search(%{query: "INJECTEDWORD"}) == []
     end
   end
 end

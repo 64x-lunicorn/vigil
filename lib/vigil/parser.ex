@@ -3,6 +3,8 @@ defmodule Vigil.Parser do
 
   require Logger
 
+  alias Vigil.Markdown
+
   defmodule Chunk do
     @moduledoc false
     defstruct [
@@ -39,9 +41,7 @@ defmodule Vigil.Parser do
     created_at = Map.get(git_meta, :created_at)
     updated_at = Map.get(git_meta, :updated_at)
 
-    lines = split_lines(content)
-
-    {frontmatter, body_lines_with_offset} = extract_frontmatter(path, lines)
+    {frontmatter, body_lines_with_offset} = extract_frontmatter(path, content)
 
     {type, starts, ends} = resolve_type(path, frontmatter)
 
@@ -62,55 +62,32 @@ defmodule Vigil.Parser do
     {:ok, file}
   end
 
-  defp split_lines(content) do
-    lines = String.split(content, "\n")
+  defp extract_frontmatter(path, content) do
+    case Markdown.frontmatter(content) do
+      {:ok, yaml_text, body_lines, offset} ->
+        {parse_yaml(path, yaml_text), {body_lines, offset}}
 
-    case List.last(lines) do
-      "" -> Enum.slice(lines, 0..-2//1)
-      _ -> lines
-    end
-  end
-
-  defp extract_frontmatter(path, ["---" | rest]) do
-    case find_closing(rest, 0) do
-      {:ok, yaml_lines, remaining_index} ->
-        yaml_text = Enum.join(yaml_lines, "\n")
-
-        frontmatter =
-          case YamlElixir.read_from_string(yaml_text) do
-            {:ok, map} when is_map(map) ->
-              map
-
-            {:ok, _other} ->
-              %{}
-
-            {:error, reason} ->
-              Logger.warning("unparsable frontmatter YAML in #{path}: #{inspect(reason)}")
-              %{}
-          end
-
-        # body starts after the closing "---" line. rest has 1 ("---") + yaml_lines
-        # + closing marker consumed by find_closing. offset counts lines already used.
-        offset = 1 + remaining_index + 1
-        body_lines = Enum.drop(rest, remaining_index + 1)
-        {frontmatter, {body_lines, offset}}
-
-      :not_found ->
+      :unterminated ->
         Logger.warning("unterminated frontmatter in #{path} (no closing ---)")
-        {%{}, {["---" | rest], 0}}
+        {%{}, {Markdown.split_lines(content), 0}}
+
+      :none ->
+        Logger.warning("no frontmatter in #{path}")
+        {%{}, {Markdown.split_lines(content), 0}}
     end
   end
 
-  defp extract_frontmatter(path, lines) do
-    Logger.warning("no frontmatter in #{path}")
-    {%{}, {lines, 0}}
-  end
+  defp parse_yaml(path, yaml_text) do
+    case YamlElixir.read_from_string(yaml_text) do
+      {:ok, map} when is_map(map) ->
+        map
 
-  defp find_closing(lines, idx) do
-    case Enum.at(lines, idx) do
-      nil -> :not_found
-      "---" -> {:ok, Enum.take(lines, idx), idx}
-      _ -> find_closing(lines, idx + 1)
+      {:ok, _other} ->
+        %{}
+
+      {:error, reason} ->
+        Logger.warning("unparsable frontmatter YAML in #{path}: #{inspect(reason)}")
+        %{}
     end
   end
 
@@ -172,8 +149,6 @@ defmodule Vigil.Parser do
     |> String.replace("-", " ")
   end
 
-  @h1_re ~r/^\#\s+(.+?)\s*$/
-  @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
   # Group 1: target (basename or path), group 2: optional #chunk fragment.
   # An alias (after |) is matched but not captured — it carries no meaning.
   @wikilink_re ~r/\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|[^\]]*)?\]\]/
@@ -204,14 +179,12 @@ defmodule Vigil.Parser do
     state =
       Enum.reduce(numbered, state, fn {line, line_no}, acc ->
         cond do
-          acc.title == nil and Regex.match?(@h1_re, line) ->
-            [_, text] = Regex.run(@h1_re, line)
-            %{acc | title: String.trim(text)}
+          # The first H1 is the note title and creates no chunk of its own.
+          first_h1 = is_nil(acc.title) && Markdown.h1(line) ->
+            %{acc | title: first_h1}
 
-          match = Regex.run(@heading_re, line) ->
-            [_, hashes, text] = match
-            level = String.length(hashes)
-            text = String.trim(text)
+          heading = Markdown.heading(line) ->
+            {level, text} = heading
 
             acc =
               close_current(acc, line_no - 1, path, type, starts, ends, created_at, updated_at)
