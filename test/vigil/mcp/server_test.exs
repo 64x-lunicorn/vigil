@@ -554,10 +554,24 @@ defmodule Vigil.MCP.ServerTest do
   end
 
   describe "rate limiting (AP-6.3)" do
-    test "the 61st tools/call within a minute is rejected with 429", %{token: token} do
-      for n <- 1..60 do
+    # A small explicit budget (rather than the default 60) keeps this an
+    # integration test of the wiring — Server.init/1 resolving the budget
+    # and handle_mcp/1 enforcing it — without needing dozens of requests;
+    # Vigil.MCP.RateLimitTest covers the limiter's own behavior directly.
+    defp post_with_budget(token, body, budget, headers) do
+      conn =
+        conn(:post, "/mcp", Jason.encode!(body))
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer #{token}")
+
+      conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+      Server.call(conn, Server.init(rate_limit_budget: budget))
+    end
+
+    test "the (budget+1)th tools/call within a minute is rejected with 429", %{token: token} do
+      for n <- 1..3 do
         conn =
-          post(
+          post_with_budget(
             token,
             %{
               jsonrpc: "2.0",
@@ -565,6 +579,7 @@ defmodule Vigil.MCP.ServerTest do
               method: "tools/call",
               params: %{name: "current", arguments: %{}}
             },
+            3,
             [{"mcp-session-id", "session-rl"}]
           )
 
@@ -572,14 +587,15 @@ defmodule Vigil.MCP.ServerTest do
       end
 
       conn =
-        post(
+        post_with_budget(
           token,
           %{
             jsonrpc: "2.0",
-            id: 61,
+            id: 4,
             method: "tools/call",
             params: %{name: "current", arguments: %{}}
           },
+          3,
           [{"mcp-session-id", "session-rl"}]
         )
 

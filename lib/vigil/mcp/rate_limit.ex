@@ -20,13 +20,13 @@ defmodule Vigil.MCP.RateLimit do
   end
 
   @doc """
-  True if `key` has exceeded the request budget for the current window;
-  otherwise records the request and returns false.
+  True if `key` has exceeded `budget` requests for the fixed window
+  containing `now`; otherwise records the request and returns false.
   """
-  def limited?(key, now \\ System.system_time(:second)) do
+  def limited?(key, budget, now) do
     case :ets.lookup(@table, key) do
       [{^key, count, window_start}] when now - window_start <= @window_seconds ->
-        if count >= max_requests() do
+        if count >= budget do
           true
         else
           :ets.insert(@table, {key, count + 1, window_start})
@@ -38,6 +38,4 @@ defmodule Vigil.MCP.RateLimit do
         false
     end
   end
-
-  defp max_requests, do: Application.get_env(:vigil, :rate_limit_rpm, 60)
 end

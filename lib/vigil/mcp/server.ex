@@ -12,6 +12,23 @@ defmodule Vigil.MCP.Server do
   plug(:match)
   plug(:dispatch)
 
+  # Resolves the rate limit budget once, when Bandit starts this plug (or a
+  # test calls init/1 directly — several do, with no options, and that must
+  # keep working), rather than reading application config on every request.
+  @impl true
+  def init(opts) do
+    Keyword.put_new_lazy(opts, :rate_limit_budget, fn ->
+      Application.get_env(:vigil, :rate_limit_rpm, 60)
+    end)
+  end
+
+  @impl true
+  def call(conn, opts) do
+    conn
+    |> put_private(:rate_limit_budget, opts[:rate_limit_budget])
+    |> super(opts)
+  end
+
   ## Routes — MCP
 
   post "/mcp" do
@@ -37,7 +54,10 @@ defmodule Vigil.MCP.Server do
   defp handle_mcp(conn) do
     case validate_access_token(conn) do
       {:ok, scope, token} ->
-        if RateLimit.limited?(token) do
+        budget = conn.private.rate_limit_budget
+        now = System.system_time(:second)
+
+        if RateLimit.limited?(token, budget, now) do
           send_resp(conn, 429, "")
         else
           handle_mcp_authenticated(conn, scope)
