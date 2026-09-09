@@ -1167,7 +1167,7 @@ defmodule Vigil.Store do
             :ok ->
               remove_file_from_index(path)
               rebuild_links_index()
-              {:ok, %{path: path, deleted: true, pushed: true}}
+              {:ok, %{path: path, deleted: true, pushed: true, broken_backlinks: backlinks}}
 
             {:error, out} ->
               {:error, "Deletion committed locally, but push failed: #{out}"}

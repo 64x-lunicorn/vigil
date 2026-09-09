@@ -245,7 +245,7 @@ token gets an explicit error. "Key" means the call must carry a current
 | `rewrite_note` | path, content, confirm? | `{path, pushed}` | RW | ✓ |
 | `delete_section` | id | `{path, pushed}` | RW | ✓ |
 | `update_frontmatter` | path, type, starts?, ends? | `{path, pushed}` | RW | ✓ |
-| `delete_note` | path, confirm | `{path, deleted, pushed}` | RW | ✓ |
+| `delete_note` | path, confirm | `{path, deleted, pushed, broken_backlinks}` | RW | ✓ |
 | `move_note` | from, to, confirm | `{from, to, pushed, broken_backlinks}` | RW | ✓ |
 | `lint` | – | duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
@@ -294,8 +294,9 @@ Beyond that:
   `move_note` always; `rewrite_note` only past a shrink threshold (removing
   more than half the sections, or more than 20 headings). The error says which
   threshold tripped and how many sections would go.
-- **`delete_note` previews the damage.** Without `confirm`, the error lists the
-  notes that currently link to the target.
+- **`delete_note` reports the damage.** Without `confirm`, the error lists the
+  notes that currently link to the target; a confirmed call returns the same
+  list as `broken_backlinks`.
 - **A failed write never takes the server down.** Permission errors, a full
   disk, a read-only filesystem — all become plain error messages while `read`
   and `search` keep answering.

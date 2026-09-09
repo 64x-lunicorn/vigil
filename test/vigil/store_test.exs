@@ -595,6 +595,13 @@ defmodule Vigil.StoreTest do
       assert {:error, _} = Store.read("bike/terra-speed.md", false)
       refute Store.search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
+
+    test "reports broken backlinks in the same call when confirm is passed up front" do
+      assert {:ok, %{broken_backlinks: broken_backlinks}} =
+               Store.delete_note(%{path: "bike/terra-speed.md", confirm: true})
+
+      assert "bike/via-carolina.md" in broken_backlinks
+    end
   end
 
   describe "move" do
