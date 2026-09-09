@@ -13,7 +13,6 @@ defmodule Vigil.Parser do
       :heading,
       :heading_path,
       :heading_line,
-      :body_start_line,
       :body_end_line,
       :body,
       :body_downcased,
@@ -203,7 +202,6 @@ defmodule Vigil.Parser do
                   heading: text,
                   heading_path: heading_path,
                   heading_line: line_no,
-                  body_start_line: line_no + 1,
                   lines: []
                 }
             }
@@ -247,8 +245,6 @@ defmodule Vigil.Parser do
     %{heading: heading, heading_path: heading_path, heading_line: heading_line, lines: rev_lines} =
       acc.current
 
-    body_start = heading_line + 1
-    body_end = end_line
     body_lines = Enum.reverse(rev_lines)
     body = Enum.join(body_lines, "\n")
 
@@ -262,8 +258,7 @@ defmodule Vigil.Parser do
       heading: heading,
       heading_path: heading_path,
       heading_line: heading_line,
-      body_start_line: body_start,
-      body_end_line: body_end,
+      body_end_line: end_line,
       body: body,
       body_downcased: String.downcase(body),
       links: extract_links(body),
@@ -302,7 +297,6 @@ defmodule Vigil.Parser do
         heading: nil,
         heading_path: [],
         heading_line: nil,
-        body_start_line: body_start,
         body_end_line: body_end,
         body: body,
         body_downcased: String.downcase(body),

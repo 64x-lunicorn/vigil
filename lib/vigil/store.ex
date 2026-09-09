@@ -13,7 +13,7 @@ defmodule Vigil.Store do
     VaultDiscovery
   }
 
-  alias Vigil.Vault.{Domains, Facts, Policy}
+  alias Vigil.Vault.{Domains, Edit, Facts, Policy}
 
   ## Public API
 
@@ -367,45 +367,28 @@ defmodule Vigil.Store do
     heading = Map.get(params, :heading)
     content = Map.fetch!(params, :content)
 
-    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)),
-         abs_path = abs(state, path),
-         {:ok, original} <- read_existing_file(abs_path) do
-      orig_lines = Markdown.split_lines(original)
+    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)) do
+      target = append_target(state.index, path, heading)
 
-      new_lines = insert_append(state.index, path, orig_lines, heading, content)
-      new_content = Enum.join(new_lines, "\n") <> "\n"
-
-      write_and_commit(
+      edit_and_commit(
         state,
         path,
-        abs_path,
-        new_content,
-        "append: #{path} — #{first_line(content)}"
+        "append: #{path} — #{first_line(content)}",
+        &Edit.append(&1, target, content)
       )
     else
       {:error, msg} -> {{:error, msg}, state}
     end
   end
 
-  defp insert_append(_index, _path, orig_lines, nil, content) do
-    orig_lines ++ [""] ++ Markdown.split_lines(content)
-  end
+  defp append_target(_index, _path, nil), do: :end
 
-  defp insert_append(index, path, orig_lines, heading, content) do
+  defp append_target(index, path, heading) do
     target_slug = Parser.slug(heading)
-    existing = Index.chunk_by_heading(index, path, target_slug)
 
-    case existing do
-      nil ->
-        orig_lines ++ ["", "## #{heading}"] ++ Markdown.split_lines(content)
-
-      chunk ->
-        prefix = Enum.slice(orig_lines, 0, chunk.body_end_line)
-
-        suffix =
-          Enum.slice(orig_lines, chunk.body_end_line, length(orig_lines) - chunk.body_end_line)
-
-        prefix ++ Markdown.split_lines(content) ++ suffix
+    case Index.chunk_by_heading(index, path, target_slug) do
+      nil -> {:new_section, heading}
+      chunk -> {:section, chunk}
     end
   end
 
@@ -416,15 +399,7 @@ defmodule Vigil.Store do
 
     with {:ok, %{path: path}} <-
            Policy.check(:replace_section, %{id: id, content: content}, facts(state, chunk: rec)) do
-      # The heading line stays; only the body under it is replaced.
-      splice_chunk(
-        state,
-        path,
-        rec,
-        rec.heading_line,
-        Markdown.split_lines(content),
-        "replace_section: #{id}"
-      )
+      edit_and_commit(state, path, "replace_section: #{id}", &Edit.replace_body(&1, rec, content))
     else
       {:error, msg} -> {{:error, msg}, state}
     end
@@ -460,32 +435,24 @@ defmodule Vigil.Store do
 
     with {:ok, %{path: path}} <-
            Policy.check(:delete_section, %{id: id}, facts(state, chunk: rec)) do
-      # The heading line goes with the body it heads.
-      splice_chunk(state, path, rec, rec.heading_line - 1, [], "delete_section: #{id}")
+      edit_and_commit(state, path, "delete_section: #{id}", &Edit.delete_section(&1, rec))
     else
       {:error, msg} -> {{:error, msg}, state}
     end
   end
 
-  # Rewrites the file around one chunk: every line before `keep_lines`, then
-  # `replacement`, then everything from the chunk's end onwards. The line
-  # numbers come from the index, which is authoritative because vigil is the
-  # only writer (docs/design.md, "One writer").
-  defp splice_chunk(state, path, rec, keep_lines, replacement, message) do
+  # Reads the note, hands its content to `Vigil.Vault.Edit` via `edit_fun`,
+  # and commits the result. The line arithmetic lives in `Edit`, which is
+  # authoritative for it because vigil is the only writer (docs/design.md,
+  # "One writer").
+  defp edit_and_commit(state, path, message, edit_fun) do
     abs_path = abs(state, path)
 
-    case read_existing_file(abs_path) do
-      {:ok, original} ->
-        orig_lines = Markdown.split_lines(original)
-
-        prefix = Enum.slice(orig_lines, 0, keep_lines)
-        suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
-
-        new_content = Enum.join(prefix ++ replacement ++ suffix, "\n") <> "\n"
-        write_and_commit(state, path, abs_path, new_content, message)
-
-      {:error, msg} ->
-        {{:error, msg}, state}
+    with {:ok, original} <- read_existing_file(abs_path),
+         {:ok, new_content} <- edit_fun.(original) do
+      write_and_commit(state, path, abs_path, new_content, message)
+    else
+      {:error, msg} -> {{:error, msg}, state}
     end
   end
 
@@ -668,7 +635,7 @@ defmodule Vigil.Store do
   defp fs_error(reason), do: inspect(reason)
 
   # Used by the write paths that read a note's current content before
-  # transforming it (append, rewrite_note, splice_chunk, update_frontmatter).
+  # transforming it (append, rewrite_note, edit_and_commit, update_frontmatter).
   # A read failure here happens before anything is written, so it is
   # reported back to the caller as an ordinary error tuple rather than
   # crashing the GenServer.
