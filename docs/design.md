@@ -70,9 +70,8 @@ notes in every result set.
 
 ### `_domains.yml` is a description, not configuration
 
-It lives at the vault root, is read at startup and on `reload`, and is appended
-to the MCP `instructions` so the assistant does not have to guess where a note
-belongs.
+It lives at the vault root and is appended to the MCP `instructions` so the
+assistant does not have to guess where a note belongs.
 
 - File missing: warning in the log, instructions without domain descriptions,
   everything else keeps working.
@@ -93,6 +92,39 @@ assistant verbatim — prose, comments, extra keys, any structure at all.
 is documentation for whoever opens it. That is why there is no schema to
 satisfy and no key to get wrong: a description is a description because it is
 in the file, not because the server parsed it into a field.
+
+**Three domain-shaped facts, three freshness policies.** Only the last of the
+three is read at startup and on `reload`:
+
+| Fact | Source | Fresh as of |
+|---|---|---|
+| Domain names | live directory listing under the vault root | every call |
+| The raw text of `_domains.yml` | `File.read` per `Vigil.Store.instructions_domains_text/0` | every MCP `initialize` |
+| The parsed `naming` rules | `Vigil.Store` state | startup and `reload` |
+
+Process state is therefore not the single source of truth for domains. Domain
+*identity* is a directory listing, taken fresh every time it is needed — the
+facts handed to the write policy carry one read per write — and state holds
+only the rules that policy enforces.
+
+The split between the last two rows is deliberate. An edited `_domains.yml`
+reaches the next session's instructions without a `reload`, while the rules
+that gate writes never shift underneath a write in flight. The price is a
+window in which the assistant has been told one thing and the policy enforces
+another, and that price is worth paying because the two failure modes are
+asymmetric:
+
+- **A `naming.pattern` is edited and not yet reloaded.** The assistant proposes
+  a path under the new rule and the write is rejected — with the domain whose
+  schema it violated, that domain's `hint`, and a concrete suggested path — so
+  it corrects itself in one turn. Loud, rare, recoverable.
+- **A description is edited and the text comes from state.** That is the far
+  more common edit, and it would not reach the assistant until someone
+  remembered to call `reload`, with nothing anywhere signalling that the file
+  had changed. Silent, common, and wrong until a human notices.
+
+Cheap freshness for the common edit, a self-announcing error for the rare one.
+The filesystem read per `initialize` is noise, and was never the argument.
 
 Optionally a domain carries naming rules — see [naming](#path-normalization-and-naming-rules).
 
