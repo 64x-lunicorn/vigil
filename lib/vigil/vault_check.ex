@@ -45,6 +45,8 @@ defmodule Vigil.VaultCheck do
       b2_filenames: b2_checks(files),
       b3_chunk_diff: b3_diff(files, vault_path),
       b4_domain_drift: b4_drift(vault_path, domain_dirs),
+      b5_separators:
+        Enum.flat_map(entries, fn {path, _content, parsed} -> b5_checks(path, parsed) end),
       b6_consolidation:
         Enum.flat_map(entries, fn {path, _content, parsed} -> b6_checks(path, parsed) end)
     }
@@ -266,6 +268,40 @@ defmodule Vigil.VaultCheck do
       end)
 
     dirs_without_config ++ config_without_dirs
+  end
+
+  ## Section separators
+
+  # A heading with no blank line above it. `replace_section` used to eat that
+  # line when it rewrote a mid-file section, and the fix (#36, #44) is not
+  # retroactive: every note damaged before it still reads that way, and nothing
+  # else in the codebase notices. A report, not a repair — principle 5 in
+  # docs/design.md.
+  #
+  # The parse result already answers this, so nothing here re-reads the note: a
+  # chunk's body ends at its last **non-blank** line, because the blank lines
+  # between two sections belong to neither (docs/design.md, "Chunking"). A
+  # heading that starts on the very next line after the previous chunk's body
+  # ended therefore has nothing at all between it and that body.
+  #
+  # Two consequences of taking the chunks as given, both wanted. The H1 title
+  # creates no chunk, so it is never checked — its own spacing is a separate
+  # question, and never what a section-shaped write could damage. And a heading
+  # with no chunk before it opens the note's body, where there was no separator
+  # to lose; `chunk_every/4` drops it for free.
+  defp b5_checks(path, parsed_file) do
+    parsed_file.chunks
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.filter(fn [previous, chunk] ->
+      chunk.heading != nil and chunk.heading_line == previous.body_end_line + 1
+    end)
+    |> Enum.map(fn [_previous, chunk] ->
+      %{
+        path: path,
+        heading: chunk.heading,
+        message: "heading '#{chunk.heading}' is not preceded by a blank line"
+      }
+    end)
   end
 
   ## Consolidation thresholds

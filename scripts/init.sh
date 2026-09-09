@@ -370,6 +370,8 @@ run_vault_adoption() {
         "  ! \(.path): \(.message)\n      Fix: choose a shorter filename (move_note)"'
       echo "$findings_json" | jq -r '.b4_domain_drift[] | select(.message | contains("is configured but does not exist in the vault")) |
         "  ! \(.message)"'
+      echo "$findings_json" | jq -r '.b5_separators[] |
+        "  ! \(.path): \(.message)\n      Fix: rewrite_note (or restore the blank line by hand)"'
       echo "$findings_json" | jq -r '.b6_consolidation[] |
         "  ! \(.path): \(.headings) headings, \(.words) words" +
         (if (.duplicate_headings | length) > 0 then ", \(.duplicate_headings | length) duplicate titles" else "" end) +
@@ -383,6 +385,7 @@ run_vault_adoption() {
       (.b1_frontmatter | length) +
       (.b2_filenames | length) +
       ([.b4_domain_drift[] | select(.message | contains("is configured but does not exist in the vault"))] | length) +
+      (.b5_separators | length) +
       (.b6_consolidation | length)
     '
   )"

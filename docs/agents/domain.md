@@ -4,48 +4,39 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists: it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`**: read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
-
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
+- **`docs/design.md`**: read the sections that touch the area you're about to work in. It carries both the architectural decisions and the vocabulary they are stated in.
+- **`docs/history.md`**: why some of those decisions look the way they do, when the reasoning outlived the change itself.
+- **`docs/README.md`** to find anything else: it indexes every document in the repo.
 
 ## File structure
 
-Single-context repo (most repos):
+Decisions and vocabulary live in one file. There is no `CONTEXT.md` and no `docs/adr/` here, and their absence is a choice, not a gap:
 
 ```
 /
-├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
+├── docs/
+│   ├── design.md   ← architectural decisions and domain vocabulary
+│   ├── history.md  ← the reasoning behind decisions already made
+│   ├── guide.md    ← the user guide
+│   ├── agents/     ← how this repo runs its own process
+│   └── …           ← see docs/README.md for the full index
+└── lib/
 ```
 
-Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
+Skills that offer to create a `CONTEXT.md` or an ADR directory — `/domain-modeling` among them — are describing their own default layout, not this repo's. Here that offer is declined; the decision goes into `docs/design.md` instead.
 
-```
-/
-├── CONTEXT-MAP.md
-├── docs/adr/                          ← system-wide decisions
-└── src/
-    ├── ordering/
-    │   ├── CONTEXT.md
-    │   └── docs/adr/                  ← context-specific decisions
-    └── billing/
-        ├── CONTEXT.md
-        └── docs/adr/
-```
+`docs/design.md` is where anyone looking for a decision already looks, and where every decision already is. Splitting it into one file per decision would move the search cost onto the reader for the sake of a directory listing. A new decision is a section in `design.md`, phrased as a claim about the system — the way the sections already there are.
 
-## Use the glossary's vocabulary
+## Use the design doc's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as `docs/design.md` uses it — *chunk*, *domain*, *note*, *vault*, *the write path*, and so on. Don't drift to synonyms it avoids.
 
-If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If the concept you need isn't there yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it).
 
-## Flag ADR conflicts
+## Flag design conflicts
 
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+If your output contradicts a decision in `docs/design.md`, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0007 (event-sourced orders), but worth reopening because…_
+> _Contradicts "One writer" in `docs/design.md`, but worth reopening because…_
+
+A decision that turns out to be wrong is corrected in `design.md` in the same change that breaks it — the doc and the code are expected to agree, and where they disagree the code is right and the document is a bug.
