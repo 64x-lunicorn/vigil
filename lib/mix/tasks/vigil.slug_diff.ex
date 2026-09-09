@@ -12,6 +12,13 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
 
   Exit 0 on an empty diff, exit 1 when there are differences, so it can be used
   from a script.
+
+  The vault to check is this task's argument, but the domains excluded from
+  the diff come from the `:vigil, :exclude` application config
+  (`VIGIL_EXCLUDE`) — the environment's exclusions, not necessarily the
+  target vault's. In practice this task always runs against the vault that
+  is (or is about to become) *the* configured vault, with the matching
+  environment, so the two never drift apart.
   """
   use Mix.Task
 

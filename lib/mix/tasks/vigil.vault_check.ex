@@ -11,6 +11,13 @@ defmodule Mix.Tasks.Vigil.VaultCheck do
   Exit 0 on a successful run — findings live in the JSON, not in the exit
   code; interpreting them is the caller's job. Exit 2 when the path is not a
   readable directory, matching `init.sh --check-only`.
+
+  The vault to check is this task's argument, but the domains excluded from
+  the check come from the `:vigil, :exclude` application config
+  (`VIGIL_EXCLUDE`) — the environment's exclusions, not necessarily the
+  target vault's. In practice this task always runs against the vault that
+  is (or is about to become) *the* configured vault, with the matching
+  environment, so the two never drift apart in `scripts/init.sh`.
   """
   use Mix.Task
 

@@ -336,6 +336,14 @@ fresh vault has no conventions skill to read one from. Resolved by having
 `skill_read` return the current key in its *error* response too — the key is a
 pure HMAC over secret and time and does not depend on any skill existing.
 
+`VIGIL_AUTH_PASSWORD` doubles as both the password the resource owner types on
+the OAuth consent page (layer 2) and the HMAC secret behind the SkillKey
+(layer 4) — one setting, two unrelated roles. Deliberate, reviewed, and left
+as-is: for a single-user server the blast radius is acceptable. But it means
+rotating the password because someone saw the consent page also invalidates
+every outstanding SkillKey, and an assistant mid-conversation loses write
+access until it calls `skill_read` again.
+
 ---
 
 ## Deliberate non-goals
