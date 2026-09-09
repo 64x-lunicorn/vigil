@@ -129,7 +129,7 @@ defmodule Vigil.Vault.Policy do
     from = Map.fetch!(request, :from)
     to = Map.fetch!(request, :to)
 
-    with :ok <- require_confirm(confirm?(request), "verschiebt #{from} nach #{to}"),
+    with :ok <- require_confirm(confirm?(request), "moves #{from} to #{to}"),
          :ok <- path_sanity(from),
          {:ok, from_candidate, _changed?} <- normalize(from),
          {:ok, normalized_from} <- existing_note(from_candidate, facts),
