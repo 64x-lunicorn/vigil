@@ -13,7 +13,7 @@ defmodule Vigil.Store do
     VaultDiscovery
   }
 
-  alias Vigil.Vault.{Facts, Policy}
+  alias Vigil.Vault.{Domains, Facts, Policy}
 
   ## Public API
 
@@ -60,7 +60,7 @@ defmodule Vigil.Store do
       vault_path: vault_path,
       exclude: exclude,
       git_remote: git_remote,
-      domains_desc: %{},
+      domains: %{},
       index: %Index{}
     }
 
@@ -173,11 +173,11 @@ defmodule Vigil.Store do
     pull_result = Git.pull(state.vault_path, state.git_remote)
 
     git_meta = Git.log_metadata(state.vault_path)
-    domains_desc = load_domains_yml(state.vault_path)
+    domains = load_domains(state.vault_path)
 
     domain_dirs = VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
 
-    warn_domain_mismatches(domain_dirs, domains_desc)
+    log_warnings(Domains.mismatches(domains, domain_dirs))
 
     files =
       domain_dirs
@@ -195,17 +195,7 @@ defmodule Vigil.Store do
       "vigil: #{length(domain_dirs)} domains (#{Enum.join(domain_dirs, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
-    {%{state | domains_desc: domains_desc, index: index}, pull_result}
-  end
-
-  defp warn_domain_mismatches(domain_dirs, domains_desc) do
-    for key <- Map.keys(domains_desc), key not in domain_dirs do
-      Logger.warning("_domains.yml: key '#{key}' has no matching directory")
-    end
-
-    for dir <- domain_dirs, not Map.has_key?(domains_desc, dir) do
-      Logger.warning("domain '#{dir}' has no entry in _domains.yml")
-    end
+    {%{state | domains: domains, index: index}, pull_result}
   end
 
   defp load_file(vault_path, rel_path, git_meta) do
@@ -223,84 +213,32 @@ defmodule Vigil.Store do
     end
   end
 
-  defp load_domains_yml(vault_path) do
+  # Reading the file is this module's job; understanding it is
+  # Vigil.Vault.Domains'. A broken or missing file costs at most the naming
+  # rules — the vault still loads (docs/design.md, "_domains.yml is a
+  # description, not configuration").
+  defp load_domains(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
-    if File.exists?(path) do
-      case YamlElixir.read_from_file(path) do
-        {:ok, map} when is_map(map) ->
-          Map.new(map, fn {domain, value} -> {domain, parse_domain_entry(domain, value)} end)
+    case File.read(path) do
+      {:ok, content} ->
+        {domains, warnings} = Domains.parse(content)
+        log_warnings(warnings)
+        domains
 
-        {:error, reason} ->
-          Logger.warning("_domains.yml unparsbar: #{inspect(reason)}")
-          %{}
-      end
-    else
-      Logger.warning("_domains.yml fehlt")
-      %{}
-    end
-  end
-
-  # A domain entry is either a plain description string (the common case)
-  # or a map with `description`/`naming`. Normalized internally to
-  # `%{description:, naming:}` either way.
-  defp parse_domain_entry(_domain, value) when is_binary(value) do
-    %{description: value, naming: nil}
-  end
-
-  defp parse_domain_entry(domain, value) when is_map(value) do
-    %{
-      description: Map.get(value, "beschreibung"),
-      naming: parse_naming(domain, Map.get(value, "naming"))
-    }
-  end
-
-  defp parse_domain_entry(_domain, _value), do: %{description: nil, naming: nil}
-
-  defp parse_naming(_domain, nil), do: nil
-
-  defp parse_naming(domain, naming) when is_map(naming) do
-    case compile_naming_pattern(domain, Map.get(naming, "pattern")) do
-      nil ->
-        nil
-
-      pattern ->
-        %{
-          pattern: pattern,
-          scope: parse_naming_scope(Map.get(naming, "scope")),
-          hint: Map.get(naming, "hint", Map.get(naming, "hinweis", "")),
-          suggestion:
-            parse_naming_suggestion(Map.get(naming, "suggestion", Map.get(naming, "vorschlag"))),
-          max_depth: Map.get(naming, "max_depth")
-        }
-    end
-  end
-
-  defp parse_naming(_domain, _value), do: nil
-
-  # A broken naming configuration must not block writing — the rule is
-  # ignored, the write is not.
-  defp compile_naming_pattern(_domain, nil), do: nil
-
-  defp compile_naming_pattern(domain, raw) do
-    case Regex.compile(raw, "u") do
-      {:ok, regex} ->
-        regex
+      {:error, :enoent} ->
+        Logger.warning("_domains.yml is missing")
+        %{}
 
       {:error, reason} ->
-        Logger.warning(
-          "_domains.yml: naming.pattern for '#{domain}' is not a valid regex (#{inspect(reason)}), ignoring it"
-        )
-
-        nil
+        Logger.warning("cannot read _domains.yml: #{fs_error(reason)}")
+        %{}
     end
   end
 
-  defp parse_naming_scope("relpath"), do: :relpath
-  defp parse_naming_scope(_), do: :filename
-
-  defp parse_naming_suggestion("date"), do: :date
-  defp parse_naming_suggestion(_), do: :slug
+  defp log_warnings(warnings) do
+    Enum.each(warnings, fn warning -> Logger.warning(Domains.format(warning)) end)
+  end
 
   defp domains_yaml_raw(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
@@ -355,13 +293,7 @@ defmodule Vigil.Store do
     end
   end
 
-  defp naming_rules(state) do
-    for {domain, desc} <- state.domains_desc,
-        naming = Map.get(desc, :naming),
-        naming != nil,
-        into: %{},
-        do: {domain, naming}
-  end
+  defp naming_rules(state), do: Domains.naming_rules(state.domains)
 
   # The policy decides that a project directory may be created; creating it is
   # this module's job. write_and_commit/5 would mkdir_p the parent anyway, but

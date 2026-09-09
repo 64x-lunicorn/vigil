@@ -86,6 +86,14 @@ belongs.
   a pre-existing vault appends entries for domains it finds missing from
   `_domains.yml`, before the server ever runs against it.
 
+**The file's text is passed through, not reassembled.** `instructions` carries
+the raw contents of `_domains.yml`, so whatever a human writes there reaches the
+assistant verbatim — prose, comments, extra keys, any structure at all.
+`naming` is the **only** key the server interprets; everything else in the file
+is documentation for whoever opens it. That is why there is no schema to
+satisfy and no key to get wrong: a description is a description because it is
+in the file, not because the server parsed it into a field.
+
 Optionally a domain carries naming rules — see [naming](#path-normalization-and-naming-rules).
 
 ### `VIGIL_EXCLUDE` is the hard boundary
@@ -221,11 +229,17 @@ journal:
     scope: filename        # or: relpath
     suggestion: date       # or: slug — shapes the error message
     hint: "Journal notes are named YYYY-MM-DD.md"
+    max_depth: 1           # optional — path segments allowed inside the domain
 ```
+
+`pattern` is the only required key: a `naming` block without one constrains
+nothing and is not a rule.
 
 A violation returns an error containing the rule *and* a concrete suggested
 path. An invalid regex in the config is logged and ignored — a broken
-configuration must never block writing.
+configuration must never block writing. The same holds for every other way the
+file can be wrong: `Vigil.Vault.Domains.parse/1` is total, and the worst a
+malformed `_domains.yml` costs is the naming rules it was trying to declare.
 
 Normalization means a messy path is *corrected*, not rejected. When the path
 changed, the response carries `path_normalized_from` so the caller knows where
