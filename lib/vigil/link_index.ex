@@ -3,10 +3,11 @@ defmodule Vigil.LinkIndex do
   Resolves `[[...]]`/path links across the vault into an out/in index.
 
   Pure: `build/2` takes `files` and `chunks` as plain data — the same
-  record shapes `Vigil.Store` builds during indexing — and returns the
-  resolved index as data, with no ETS reads or writes of its own. The two
-  returned lists are shaped so a caller can bulk-insert them straight into
-  `:bag`-type ETS tables (`:ets.insert(table, list)`).
+  record shapes `Vigil.Index` builds during indexing — and returns the
+  resolved index as data, with no reads or writes of its own. The two
+  returned lists are bag-shaped pairs (`[{key, value}, ...]`); `Vigil.Index`
+  groups each into a map keyed by chunk id / target key so its readers can
+  look values up directly.
   """
 
   alias Vigil.Slug

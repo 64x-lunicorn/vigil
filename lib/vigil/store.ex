@@ -15,15 +15,6 @@ defmodule Vigil.Store do
 
   alias Vigil.Vault.{Facts, Policy}
 
-  @chunks_table :vigil_chunks
-  @files_table :vigil_files
-  # Separate out/in tables rather than one. :links_out holds, per source
-  # chunk, the resolved (or ambiguous/broken) targets; :links_in holds, per
-  # target (note path AND, where present, full chunk id), the source chunk
-  # ids — only for links that resolved successfully.
-  @links_out_table :vigil_links_out
-  @links_in_table :vigil_links_in
-
   ## Public API
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -65,8 +56,6 @@ defmodule Vigil.Store do
       raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
     end
 
-    ensure_tables()
-
     state = %{
       vault_path: vault_path,
       exclude: exclude,
@@ -83,19 +72,6 @@ defmodule Vigil.Store do
     end
 
     {:ok, state}
-  end
-
-  defp ensure_tables do
-    for {name, type} <- [
-          {@chunks_table, :set},
-          {@files_table, :set},
-          {@links_out_table, :bag},
-          {@links_in_table, :bag}
-        ] do
-      if :ets.whereis(name) == :undefined do
-        :ets.new(name, [type, :named_table, :private])
-      end
-    end
   end
 
   @impl true
@@ -199,9 +175,6 @@ defmodule Vigil.Store do
     git_meta = Git.log_metadata(state.vault_path)
     domains_desc = load_domains_yml(state.vault_path)
 
-    :ets.delete_all_objects(@chunks_table)
-    :ets.delete_all_objects(@files_table)
-
     domain_dirs = VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
 
     warn_domain_mismatches(domain_dirs, domains_desc)
@@ -215,10 +188,7 @@ defmodule Vigil.Store do
       |> Enum.map(&load_file(state.vault_path, &1, git_meta))
       |> Enum.reject(&is_nil/1)
 
-    Enum.each(parsed_files, &index_file/1)
-
     index = Index.build(parsed_files)
-    sync_links_ets(index)
     sizes = Index.size(index)
 
     Logger.info(
@@ -251,86 +221,6 @@ defmodule Vigil.Store do
         Logger.warning("cannot read #{rel_path}: #{inspect(reason)}")
         nil
     end
-  end
-
-  defp index_file(file) do
-    domain = domain_of(file.path)
-    chunk_ids = Enum.map(file.chunks, & &1.id)
-
-    :ets.insert(
-      @files_table,
-      {file.path,
-       %{
-         path: file.path,
-         domain: domain,
-         title: file.title,
-         type: file.type,
-         starts: file.starts,
-         ends: file.ends,
-         created_at: file.created_at,
-         updated_at: file.updated_at,
-         chunk_ids: chunk_ids
-       }}
-    )
-
-    Enum.each(file.chunks, fn chunk ->
-      record = %{
-        id: chunk.id,
-        path: chunk.path,
-        domain: domain,
-        heading: chunk.heading,
-        heading_path: chunk.heading_path,
-        heading_line: chunk.heading_line,
-        body_start_line: chunk.body_start_line,
-        body_end_line: chunk.body_end_line,
-        file_title: file.title,
-        type: chunk.type,
-        starts: chunk.starts,
-        ends: chunk.ends,
-        body: chunk.body,
-        body_downcased: chunk.body_downcased,
-        # Raw and unresolved — Vigil.Parser.extract_links/1 only sees this
-        # one file, not the rest of the vault. Resolution (same-folder →
-        # domain → vault-wide, ambiguous/broken) is Vigil.LinkIndex.build/2's
-        # job, via Vigil.Index.put/2, remove/2 and build/1.
-        raw_links: chunk.links,
-        created_at: chunk.created_at,
-        updated_at: chunk.updated_at
-      }
-
-      :ets.insert(@chunks_table, {chunk.id, record})
-    end)
-  end
-
-  defp domain_of(path), do: path |> String.split("/") |> hd()
-
-  ## Link-Index (AP15)
-  #
-  # Rebuilt in full on every load and every single-file reparse (write, move,
-  # delete) instead of being maintained incrementally. At the vault sizes
-  # vigil targets this is cheap, and it structurally rules out the "ghost
-  # entry after delete/rename" class of bug that incremental maintenance
-  # across two tables would invite. Resolution itself lives in
-  # Vigil.LinkIndex, a pure module — `Vigil.Index.put/2` and `remove/2`
-  # already run it, once, on every write. Every read this project has (search,
-  # links, lint, the write path's backlinks question) now goes through
-  # `Vigil.Index` instead; `sync_links_ets/1` below just keeps the ETS bag
-  # tables in sync until they are retired for good (#32).
-
-  defp sync_links_ets(index) do
-    :ets.delete_all_objects(@links_out_table)
-    :ets.delete_all_objects(@links_in_table)
-
-    :ets.insert(@links_out_table, flatten_grouped(index.links_out))
-    :ets.insert(@links_in_table, flatten_grouped(index.links_in))
-  end
-
-  # `Vigil.Index` groups out/in pairs by key (`%{key => [value, ...]}`) so
-  # `read/3` can look them up directly; the ETS bag tables want the pairs
-  # back out flat (`[{key, value}, ...]`), which is what `:ets.insert/2`
-  # expects for a bag.
-  defp flatten_grouped(grouped) do
-    Enum.flat_map(grouped, fn {key, values} -> Enum.map(values, &{key, &1}) end)
   end
 
   defp load_domains_yml(vault_path) do
@@ -699,9 +589,7 @@ defmodule Vigil.Store do
         :ok ->
           case Git.push(state.vault_path, state.git_remote) do
             :ok ->
-              remove_file_from_index(path)
               new_index = Index.remove(state.index, path)
-              sync_links_ets(new_index)
               new_state = %{state | index: new_index}
 
               result =
@@ -788,12 +676,7 @@ defmodule Vigil.Store do
 
         {:ok, file} = Parser.parse(to, content, meta)
 
-        remove_file_from_index(from)
-        index_file(file)
-
-        new_index = state.index |> Index.remove(from) |> Index.put(file)
-        sync_links_ets(new_index)
-        new_index
+        state.index |> Index.remove(from) |> Index.put(file)
 
       :error ->
         state.index
@@ -899,29 +782,10 @@ defmodule Vigil.Store do
 
         {:ok, file} = Parser.parse(rel_path, content, meta)
 
-        remove_file_from_index(rel_path)
-        index_file(file)
-
-        new_index = Index.put(state.index, file)
-        sync_links_ets(new_index)
-        new_index
+        Index.put(state.index, file)
 
       :error ->
         state.index
-    end
-  end
-
-  # Removes chunks and files only. The link tables are not maintained here but
-  # synced by the caller via sync_links_ets/1 — necessary anyway, since other
-  # notes may reference the one being removed.
-  defp remove_file_from_index(rel_path) do
-    case :ets.lookup(@files_table, rel_path) do
-      [{_, file}] ->
-        Enum.each(file.chunk_ids, fn cid -> :ets.delete(@chunks_table, cid) end)
-        :ets.delete(@files_table, rel_path)
-
-      [] ->
-        :ok
     end
   end
 

@@ -10,6 +10,9 @@ defmodule Vigil.StoreTest do
     %{vault: vault, remote: remote}
   end
 
+  # Ranking, filtering, journal-hiding and hub-attachment are Vigil.Index's
+  # job now and are covered there (index_test.exs) without git. This is the
+  # wiring smoke test: Store.search/1 reaches the index and shapes the result.
   describe "search" do
     test "a term in domain bike returns ranked hits with previews, no bodies" do
       results = Store.search(%{query: "tires", domain: "bike"})
@@ -17,37 +20,11 @@ defmodule Vigil.StoreTest do
       refute Map.has_key?(hd(results), :body)
       assert Enum.all?(results, &(String.length(&1.preview) <= 121))
     end
-
-    test "domain filter is applied" do
-      results = Store.search(%{query: "raised bed", domain: "training"})
-      assert results == []
-      results2 = Store.search(%{query: "raised bed", domain: "garden"})
-      assert length(results2) == 1
-    end
-
-    test "prefer hint boosts type" do
-      results = Store.search(%{query: "vigil", prefer: :decision})
-      assert Enum.at(results, 0).type == :decision
-    end
-
-    test "empty result is an empty list, not an error" do
-      assert Store.search(%{query: "nowhereatall"}) == []
-    end
-
-    test "journal is hidden unless domain explicitly requested" do
-      assert Store.search(%{query: "terra speed"})
-             |> Enum.all?(&(not String.starts_with?(&1.id, "journal/")))
-
-      results = Store.search(%{query: "terra speed", domain: "journal"})
-      assert Enum.any?(results, &String.starts_with?(&1.id, "journal/"))
-    end
-
-    test "dynamic domain: garden is discovered without code changes" do
-      results = Store.search(%{query: "raised bed"})
-      assert Enum.any?(results, &(&1.id == "garden/raised-bed.md"))
-    end
   end
 
+  # The chunk/note shapes, backlinks opt-in, lenient path resolution, and
+  # invalid/not-found handling are Vigil.Index's job now and are covered
+  # there (index_test.exs) without git. This is the wiring smoke test.
   describe "read" do
     test "reading a fragment returns exactly that chunk" do
       {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
@@ -55,27 +32,10 @@ defmodule Vigil.StoreTest do
       assert result.body =~ "baseline"
       refute Map.has_key?(result, :backlinks)
     end
-
-    test "reading without a fragment returns TOC without body" do
-      {:ok, result} = Store.read("bike/via-carolina.md", false)
-      assert result.title == "Via Carolina"
-      refute Map.has_key?(result, :body)
-      headings = Enum.map(result.toc, & &1.heading)
-      assert headings == ["Fueling", "Second Half", "Gear"]
-    end
-
-    test "backlinks is opt-in" do
-      {:ok, result} = Store.read("bike/terra-speed.md", true)
-      assert "bike/via-carolina.md" in result.backlinks
-    end
-
-    test "unknown id returns isError-style tuple" do
-      assert {:error, _} = Store.read("bike/nope.md", false)
-    end
   end
 
   describe "create" do
-    test "creates file, commits as vigil, pushes, and updates ETS", %{vault: vault} do
+    test "creates file, commits as vigil, pushes, and updates the index", %{vault: vault} do
       assert {:ok, %{path: "bike/new.md", pushed: true}} =
                Store.create(%{
                  path: "bike/new.md",
@@ -359,7 +319,11 @@ defmodule Vigil.StoreTest do
       assert snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
     end
 
-    test "a vault with no events at all returns empty ids, near lists, and titles", %{
+    # Exercises the exclude boundary, not just the empty-snapshot shape
+    # (index_test.exs covers that directly): bike/via-carolina.md is the
+    # vault's only event, and excluding its domain must keep it out of the
+    # index entirely, not just out of this response.
+    test "excluding the only event's domain leaves snapshot empty", %{
       vault: vault
     } do
       :ok = stop_supervised(Store)
@@ -486,17 +450,6 @@ defmodule Vigil.StoreTest do
                  to: "journal/2026-03-03.md",
                  confirm: true
                })
-    end
-
-    test "read finds a note via a non-canonical path (lenient lookup)" do
-      {:ok, canonical} = Store.read("bike/via-carolina.md", false)
-      {:ok, lenient} = Store.read("bike/Via Carolina!!.md", false)
-      assert lenient.title == canonical.title
-    end
-
-    test "read finds a chunk via a non-canonical path with a fragment" do
-      assert {:ok, result} = Store.read("bike/Via Carolina!!.md#fueling", false)
-      assert result.heading == "Fueling"
     end
   end
 
@@ -667,6 +620,10 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # Each finding's rule (duplicate headings, sentence-like headings, orphaned
+  # links, overlong notes, stale decisions) is Vigil.Index's job now and is
+  # covered there (index_test.exs) without git. This is the wiring smoke
+  # test: a write lands in the report Store.lint/1 returns.
   describe "lint" do
     test "reports duplicate headings, sentence-like headings, and orphaned links" do
       {:ok, _} =
@@ -685,17 +642,10 @@ defmodule Vigil.StoreTest do
       assert Enum.any?(report.sentence_headings, &String.starts_with?(&1.id, "bike/messy.md"))
       assert "does-not-exist" in report.orphaned_links
     end
-
-    test "flags decision notes as stale relative to an injected now" do
-      long_after = DateTime.add(~U[2026-01-01 10:00:00Z], 200 * 86_400, :second)
-      report = Store.lint(long_after)
-
-      assert Enum.any?(report.stale_decisions, &(&1.path == "projects/vigil/vigil-ranking.md"))
-    end
   end
 
   describe "skills isolation" do
-    test "skills never appear in search, have no ETS chunk, no backlinks" do
+    test "skills never appear in search, have no index chunk, no backlinks" do
       assert Store.search(%{query: "TDD"}) == []
       assert Store.search(%{query: "Failing Test"}) == []
     end
@@ -863,98 +813,16 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # The out/in cascade, ambiguous/broken statuses, depth-2 neighbors, hub
+  # attachment and read's link counters are Vigil.Index's job now and are
+  # covered there (index_test.exs) without git. "links tool works via a
+  # lenient path" below is the wiring smoke test; the rest here exercise a
+  # write's effect on the index's link picture (move, delete, rewrite), not
+  # link resolution itself.
   describe "links" do
-    test "a link to an existing note with a nonexistent fragment names the fragment, not just the note" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/references-missing-section.md",
-                 type: "reference",
-                 content: "# References Missing Section\nSee [[via-carolina#does-not-exist]]."
-               })
-
-      {:ok, result} = Store.links("bike/references-missing-section.md", :out, 1)
-
-      assert [%{target: "via-carolina#does-not-exist", status: "broken"}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
-
-      # Otherwise the lint finding would read as "note via-carolina is
-      # missing" when only the section is missing.
-      assert "via-carolina#does-not-exist" in Store.lint().orphaned_links
-    end
-
-    test "a link to a nonexistent note is broken" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/points-nowhere.md",
-                 type: "reference",
-                 content: "# Points Nowhere\nSee [[does-not-exist]]."
-               })
-
-      {:ok, result} = Store.links("bike/points-nowhere.md", :out, 1)
-
-      assert [%{target: "does-not-exist", status: "broken"}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
-    end
-
-    test "same basename in two folders is ambiguous outside either folder" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/doppelganger.md",
-                 type: "reference",
-                 content: "# Doppelganger\nA."
-               })
-
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "training/doppelganger.md",
-                 type: "reference",
-                 content: "# Doppelganger\nB.",
-                 force: true
-               })
-
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "garden/verweist-mehrdeutig.md",
-                 type: "reference",
-                 content: "# References Ambiguously\nSee [[doppelganger]]."
-               })
-
-      {:ok, result} = Store.links("garden/verweist-mehrdeutig.md", :out, 1)
-
-      assert [%{status: "ambiguous", candidates: candidates}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:status, :candidates]))
-
-      assert Enum.sort(candidates) == ["bike/doppelganger.md", "training/doppelganger.md"]
-    end
-
-    test "incoming direction finds a link from another folder" do
-      {:ok, result} = Store.links("bike/via-carolina.md", :in, 1)
-      assert Enum.any?(result.incoming, &(&1.source == "training/note-without-anything.md"))
-    end
-
-    test "depth 2 includes neighbors, depth 3 is an error" do
-      {:ok, result} = Store.links("bike/via-carolina.md", :both, 2)
-      assert Map.has_key?(result.neighbors, "bike/terra-speed.md")
-
-      assert {:error, msg} = Store.links("bike/via-carolina.md", :both, 3)
-      assert msg =~ "depth"
-    end
-
     test "links tool works via a lenient (non-canonical) path" do
       {:ok, result} = Store.links("bike/Via Carolina!!.md", :out, 1)
       assert result.id == "bike/via-carolina.md"
-    end
-
-    test "read on a note carries links out/in/broken counts" do
-      {:ok, result} = Store.read("bike/via-carolina.md", false)
-      assert result.links.out == 1
-      assert result.links.in == 1
-      assert result.links.broken == 0
-    end
-
-    test "search attaches hub when the hit note has exactly one incoming link" do
-      results = Store.search(%{query: "tubeless", domain: "bike"})
-      assert Enum.any?(results, &(&1.id =~ "terra-speed" and &1.hub == "bike/via-carolina.md"))
     end
 
     test "move_note reports broken_backlinks for a link that no longer resolves, keeps a still-resolving one out" do
@@ -1002,31 +870,6 @@ defmodule Vigil.StoreTest do
 
       {:ok, after_} = Store.links("bike/terra-speed.md", :in, 1)
       refute Enum.any?(after_.incoming, &(&1.source == "bike/references-first.md"))
-    end
-
-    test "search omits hub when a note has zero or more than one incoming link" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/unlinked.md",
-                 type: "reference",
-                 content: "# Unlinked Tubeless\ntext"
-               })
-
-      results = Store.search(%{query: "unlinked tubeless"})
-      hit = Enum.find(results, &(&1.id =~ "unlinked"))
-      refute Map.has_key?(hit, :hub)
-
-      # more than one incoming note → no hub either
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "garden/verweist-auch.md",
-                 type: "reference",
-                 content: "# Also References\nSee [[terra-speed]]."
-               })
-
-      results2 = Store.search(%{query: "tubeless", domain: "bike"})
-      hit2 = Enum.find(results2, &(&1.id =~ "terra-speed"))
-      refute Map.has_key?(hit2, :hub)
     end
   end
 
