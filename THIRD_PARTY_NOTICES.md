@@ -31,9 +31,14 @@ This inventory reflects [`mix.lock`](mix.lock). Versions and declared licenses
 were checked against the locally installed Hex packages' metadata on
 2026-09-09. Optional dependencies absent from the lockfile are not included.
 
+### Runtime dependencies
+
+These are compiled into a production release and are the ones that matter when
+you redistribute a build.
+
 | Package | Locked version | Declared license |
 | :--- | :--- | :--- |
-| [bandit](https://hex.pm/packages/bandit/1.12.4) | 1.12.4 | MIT |
+| [bandit](https://hex.pm/packages/bandit/1.12.5) | 1.12.5 | MIT |
 | [hpax](https://hex.pm/packages/hpax/1.0.4) | 1.0.4 | Apache-2.0 |
 | [jason](https://hex.pm/packages/jason/1.4.5) | 1.4.5 | Apache-2.0 |
 | [mime](https://hex.pm/packages/mime/2.0.7) | 2.0.7 | Apache-2.0 |
@@ -48,6 +53,22 @@ were checked against the locally installed Hex packages' metadata on
 
 Hex lists yamerl's license as `BSD 2-Clause`; the table uses the SPDX identifier
 `BSD-2-Clause` for the same license.
+
+### Development and CI dependencies
+
+Declared `only: [:dev, :test], runtime: false` in [`mix.exs`](mix.exs). They run
+the quality gate (formatting, static analysis, dependency auditing) and are
+**not** part of a `MIX_ENV=prod` release, so they are outside the scope of the
+redistribution note below.
+
+| Package | Locked version | Declared license |
+| :--- | :--- | :--- |
+| [bunt](https://hex.pm/packages/bunt/1.0.0) | 1.0.0 | MIT |
+| [credo](https://hex.pm/packages/credo/1.7.19) | 1.7.19 | MIT |
+| [dialyxir](https://hex.pm/packages/dialyxir/1.4.8) | 1.4.8 | Apache-2.0 |
+| [erlex](https://hex.pm/packages/erlex/0.2.9) | 0.2.9 | Apache-2.0 |
+| [file_system](https://hex.pm/packages/file_system/1.1.1) | 1.1.1 | Apache-2.0 |
+| [mix_audit](https://hex.pm/packages/mix_audit/2.1.5) | 2.1.5 | BSD-3-Clause |
 
 Dependencies are fetched by Mix and are not vendored into the source
 repository. This table is an attribution inventory, not a replacement for

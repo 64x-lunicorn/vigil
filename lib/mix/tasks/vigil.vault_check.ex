@@ -20,7 +20,13 @@ defmodule Mix.Tasks.Vigil.VaultCheck do
     # like). They are deliberately irrelevant here — Vigil.VaultCheck reports
     # the same cases in structured form — and would otherwise pollute the JSON
     # on stdout.
-    Logger.configure(level: :none)
+    #
+    # Erlang's :logger rather than Logger.configure(level: :none): both set the
+    # same primary level, but :none is missing from Elixir's own
+    # `configure_opts()` typespec in some versions, so the Elixir call makes
+    # Dialyzer report a broken contract here and cascade it into no_return for
+    # run/1. Same effect, no spec gap, nothing to add to .dialyzer_ignore.exs.
+    :logger.set_primary_config(:level, :none)
 
     case args do
       [vault_path] -> check(Path.expand(vault_path))

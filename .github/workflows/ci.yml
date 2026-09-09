@@ -1,0 +1,337 @@
+# The quality gate. Every job here also runs before a release is published
+# (release.yml calls this workflow), so "green on main" and "green in the
+# release" are the same statement rather than two hopeful ones.
+#
+# Design notes:
+#   * Least privilege: no token permissions by default, each job grants the
+#     minimum it needs.
+#   * Third-party actions are pinned to a commit SHA. A tag is a moving
+#     pointer; a SHA is not. Dependabot keeps them current (dependabot.yml).
+#   * The Elixir/OTP pair comes from .tool-versions, so CI cannot drift away
+#     from what contributors and the server actually run.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_call:
+
+permissions: {}
+
+# A superseded push has nothing left to prove. Main and tags are never
+# cancelled: their result is the record of what was verified.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  MIX_ENV: test
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    continue-on-error: ${{ matrix.required == false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The pair the project pins and the server runs. Blocking.
+          - name: pinned
+            version-file: true
+            required: true
+          # Early warning for the next Elixir/OTP pair. Advisory: a failure
+          # here is a heads-up, not a reason to block an unrelated bugfix.
+          - name: next
+            elixir: "1.19"
+            otp: "28"
+            required: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - name: Set up BEAM (from .tool-versions)
+        if: matrix.version-file
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        id: beam-pinned
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Set up BEAM (next)
+        if: ${{ !matrix.version-file }}
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        id: beam-next
+        with:
+          elixir-version: ${{ matrix.elixir }}
+          otp-version: ${{ matrix.otp }}
+          version-type: loose
+
+      - name: Cache deps and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ matrix.name }}-${{ hashFiles('**/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-${{ matrix.name }}-
+
+      # --check-locked fails when mix.exs and mix.lock disagree, so a
+      # dependency can never be silently resolved to something the lock file
+      # does not name.
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      - name: Check for unused dependencies in mix.lock
+        run: mix deps.unlock --check-unused
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      # --force matters: with a warm _build cache an incremental compile skips
+      # unchanged files and would never re-emit their warnings.
+      - name: Compile with warnings as errors
+        run: mix compile --warnings-as-errors --force
+
+      - name: Audit dependencies for retired packages
+        run: mix hex.audit
+
+      # Checks the locked dependency set against the Elixir security advisory
+      # database. hex.audit only knows about *retired* packages; this is the
+      # one that fails the build on a published CVE.
+      - name: Audit dependencies for known vulnerabilities
+        run: mix deps.audit
+
+      - name: Test
+        run: mix test
+
+  static:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        id: beam
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-static-${{ hashFiles('**/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-static-
+
+      # The PLT is expensive (minutes) and depends only on the BEAM pair and
+      # the dependency set — never on our source. Restored and saved on its
+      # own key, and saved even when Dialyzer finds something, so a red run
+      # does not force the next one to rebuild it from scratch.
+      - name: Restore Dialyzer PLT
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: plt-restore
+        with:
+          path: priv/plts
+          key: plt-${{ runner.os }}-${{ steps.beam.outputs.otp-version }}-${{ steps.beam.outputs.elixir-version }}-${{ hashFiles('**/mix.lock') }}
+
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      - name: Compile
+        run: mix compile
+
+      - name: Credo
+        run: mix credo --strict
+
+      - name: Build PLT
+        if: steps.plt-restore.outputs.cache-hit != 'true'
+        run: mix dialyzer --plt
+
+      - name: Save Dialyzer PLT
+        if: always() && steps.plt-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: priv/plts
+          key: ${{ steps.plt-restore.outputs.cache-primary-key }}
+
+      # --format github turns findings into inline annotations on the diff.
+      - name: Dialyzer
+        run: mix dialyzer --format github
+
+  scripts:
+    name: Deployment scripts
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      # check_only_test.sh drives init.sh, which runs `mix` against the vault
+      # adoption check. Without a BEAM on PATH the script aborts before it
+      # reaches the assertions, and the failure looks like a regression in
+      # init.sh rather than a missing toolchain.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      # These scripts run as root on the vault host. A shell bug here is a
+      # production incident, not a lint warning — hence a blocking check.
+      - name: ShellCheck
+        run: shellcheck -x scripts/*.sh scripts/test/*.sh
+
+      - name: init.sh --check-only stays read-only
+        run: bash scripts/test/check_only_test.sh
+
+  release-smoke:
+    name: Release smoke test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-smoke-${{ hashFiles('**/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-smoke-
+
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      # Boots an actual MIX_ENV=prod release against a throwaway git-backed
+      # vault and drives it over HTTP: read path, scope enforcement, write,
+      # commit, push, reload, SIGTERM shutdown. See the script header for why
+      # mix test structurally cannot cover this.
+      - name: Build and exercise a production release
+        env:
+          MIX_ENV: prod
+          # The BEAM treats filenames as raw bytes without a UTF-8 locale,
+          # which is exactly what the smoke test's non-ASCII note guards
+          # against. Mirrors deploy/vigil.service.
+          LANG: C.UTF-8
+          LC_ALL: C.UTF-8
+        run: bash scripts/test/release_smoke.sh
+
+  workflows:
+    name: Workflow lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          set -euo pipefail
+          curl -sSfL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -color
+
+      # zizmor audits the workflows themselves: unpinned actions, injectable
+      # ${{ }} interpolation in run blocks, over-broad token permissions,
+      # dangerous triggers. CI is the one place that can push to main and cut
+      # releases, so its own configuration deserves a linter.
+      - name: zizmor
+        env:
+          ZIZMOR_VERSION: 1.30.1
+        run: |
+          set -euo pipefail
+          pipx install "zizmor==${ZIZMOR_VERSION}"
+          zizmor --persona=regular --min-severity=medium .github/workflows
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history: a credential that was committed and then "removed"
+          # in a later commit is still in the repository and still leaked.
+          fetch-depth: 0
+
+      # Downloaded and checksum-verified rather than pulled in as an action:
+      # one less third-party workflow with access to this repository.
+      - name: gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.1
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          curl -sSfL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --no-banner --redact --exit-code 1 .
+
+  # One job to require in the branch ruleset. Adding or renaming a job above
+  # never means editing branch protection again — and a job that is skipped or
+  # cancelled cannot pass as "green" either.
+  gate:
+    name: CI gate
+    if: always()
+    needs: [test, static, scripts, release-smoke, workflows, secrets]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Verify every job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "job results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [ "${result}" != "success" ]; then
+              echo "::error::A required CI job did not succeed (${RESULTS})."
+              exit 1
+            fi
+          done
+          echo "All required CI jobs succeeded."

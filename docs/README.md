@@ -7,6 +7,7 @@
 | [design.md](design.md) | Why it is built this way: principles, the vault model, chunking, search, the link index, the write path, deliberate non-goals and known trade-offs. |
 | [oauth.md](oauth.md) | The OAuth 2.1 implementation: endpoints, discovery documents, registration, redirect-URI matching, token handling, storage. |
 | [history.md](history.md) | What was built in each round and why, including the bugs found along the way. |
+| [ci-cd.md](ci-cd.md) | The pipeline: how to ship a version, what guards `main` and a release, and how the project is hardened against mistakes. |
 | [Contributing](../CONTRIBUTING.md) | Development setup, checks and contribution guidelines. |
 | [Security policy](../SECURITY.md) | Private vulnerability reporting and deployment precautions. |
 | [Third-party notices](../THIRD_PARTY_NOTICES.md) | Dependency licenses and attribution for bundled development skills. |
