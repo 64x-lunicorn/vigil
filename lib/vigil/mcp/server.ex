@@ -196,7 +196,9 @@ defmodule Vigil.MCP.Server do
   end
 
   defp build_tool_call_result(name, {:ok, value}, session_id) do
-    envelope = envelope_for(name, session_id)
+    now = Vigil.Clock.now()
+    snapshot = Store.snapshot(now)
+    envelope = envelope_for(name, session_id, now, snapshot)
     text = Jason.encode!(Map.merge(%{result: value}, envelope))
     %{content: [%{type: "text", text: text}]}
   end
@@ -205,8 +207,11 @@ defmodule Vigil.MCP.Server do
     %{content: [%{type: "text", text: message}], isError: true}
   end
 
-  defp envelope_for("current", session_id), do: Envelope.for_current(session_id)
-  defp envelope_for(_name, session_id), do: Envelope.for_call(session_id)
+  defp envelope_for("current", session_id, now, snapshot),
+    do: Envelope.for_current(session_id, now, snapshot)
+
+  defp envelope_for(_name, session_id, now, snapshot),
+    do: Envelope.for_call(session_id, now, snapshot)
 
   # Sent to the client on `initialize`. These are writing rules for the vault,
   # not rules for this server, which is why the two things they depend on —

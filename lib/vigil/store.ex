@@ -39,9 +39,6 @@ defmodule Vigil.Store do
   def lint(now \\ nil), do: GenServer.call(__MODULE__, {:lint, now})
 
   def current(now \\ nil), do: GenServer.call(__MODULE__, {:current, now})
-  def active_event_ids(now), do: GenServer.call(__MODULE__, {:active_event_ids, now})
-  def file_title(path), do: GenServer.call(__MODULE__, {:file_title, path})
-  def near_summary(now), do: GenServer.call(__MODULE__, {:near_summary, now})
   def snapshot(now), do: GenServer.call(__MODULE__, {:snapshot, now})
   def reload(), do: GenServer.call(__MODULE__, :reload)
   def domain_names(), do: GenServer.call(__MODULE__, :domain_names)
@@ -141,26 +138,8 @@ defmodule Vigil.Store do
     {:reply, do_current(now || Clock.now()), state}
   end
 
-  def handle_call({:active_event_ids, now}, _from, state) do
-    {:reply, do_active_event_ids(now), state}
-  end
-
-  def handle_call({:near_summary, now}, _from, state) do
-    {:reply, do_near_summary(now), state}
-  end
-
   def handle_call({:snapshot, now}, _from, state) do
     {:reply, do_snapshot(now), state}
-  end
-
-  def handle_call({:file_title, path}, _from, state) do
-    title =
-      case :ets.lookup(@files_table, path) do
-        [{_, file}] -> file.title
-        [] -> path
-      end
-
-    {:reply, title, state}
   end
 
   def handle_call(:reload, _from, state) do
@@ -1431,7 +1410,7 @@ defmodule Vigil.Store do
   @near_horizon_seconds 7 * 86_400
 
   # Events active at `now`, soonest-ending first — the shared basis for
-  # active_ids, near_summary's `active`, and snapshot's `active`/`active_ids`.
+  # near_summary_view's `active` and snapshot's `active`/`active_ids`.
   defp active_events(events, now) do
     events
     |> Enum.filter(fn e ->
@@ -1451,8 +1430,8 @@ defmodule Vigil.Store do
     |> Enum.sort_by(& &1.starts, DateTime)
   end
 
-  # %{active:, upcoming:} over the near horizon — shared by near_summary/1
-  # and snapshot/1 so the two can never drift apart.
+  # %{active:, upcoming:} over the near horizon — feeds snapshot/1, the time
+  # envelope's single query.
   defp near_summary_view(events, now) do
     active =
       active_events(events, now)
@@ -1473,15 +1452,9 @@ defmodule Vigil.Store do
     %{active: active, upcoming: upcoming}
   end
 
-  defp do_near_summary(now), do: near_summary_view(event_files(), now)
-
-  defp do_active_event_ids(now) do
-    event_files() |> active_events(now) |> Enum.map(& &1.path) |> MapSet.new()
-  end
-
   # The time envelope's single query: which events are active, what's near
-  # (active and upcoming, 7-day horizon — same as near_summary/2), and a
-  # title for every event note. The title map covers events outside the near
+  # (active and upcoming, 7-day horizon), and a title for every event note.
+  # The title map covers events outside the near
   # horizon too, so an event that has just dropped out of active_ids (and so
   # out of `near`) can still be named, e.g. "X now finished".
   defp do_snapshot(now) do

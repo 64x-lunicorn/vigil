@@ -356,13 +356,13 @@ defmodule Vigil.StoreTest do
   end
 
   describe "snapshot" do
-    test "active_ids and near mirror active_event_ids/near_summary for the same instant" do
+    test "active_ids matches the active event, and near carries the same event" do
       during_event = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
       snapshot = Store.snapshot(during_event)
 
-      assert snapshot.active_ids == Store.active_event_ids(during_event)
-      assert snapshot.near == Store.near_summary(during_event)
+      assert MapSet.member?(snapshot.active_ids, "bike/via-carolina.md")
+      assert Enum.any?(snapshot.near.active, &(&1.id == "bike/via-carolina.md"))
     end
 
     test "titles cover every event note, including one no longer active" do
