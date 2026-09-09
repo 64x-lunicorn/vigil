@@ -6,7 +6,8 @@ defmodule Vigil.Vault.Edit do
   *whether* a write is allowed, `Edit` produces *what* the file becomes. Both
   are pure — no process, no filesystem, no git. The caller hands this module
   the string it read from disk and gets a string back; `Edit` owns the split
-  into lines, the join, and the trailing newline.
+  into lines and the join. How a file ends is `Vigil.Markdown`'s rule, stated
+  once for every write path (docs/design.md, "How a file is written").
 
   The target of a splice is an `%Vigil.Index.Chunk{}` — the value `Store`
   already holds from the index. `Edit` depends on `Vigil.Index` for the
@@ -27,16 +28,25 @@ defmodule Vigil.Vault.Edit do
           {:ok, String.t()} | {:error, String.t()}
   def replace_body(content, chunk, new_body) do
     with :ok <- validate_chunk(chunk) do
-      splice(content, chunk.heading_line, chunk.body_end_line, Markdown.split_lines(new_body))
+      lines = Markdown.split_lines(content)
+      {:ok, splice(lines, chunk.heading_line, chunk.body_end_line, body_lines(new_body))}
     end
   end
 
-  @doc "The heading goes with the body it heads."
+  @doc """
+  The heading goes with the body it heads, and so does the one blank line
+  after it — the slot the section occupied, which belongs to no chunk
+  (docs/design.md, "How a file is written"). Only one: a wider gap someone
+  set on purpose survives, one line narrower.
+  """
   @spec delete_section(String.t(), Index.Chunk.t() | nil) ::
           {:ok, String.t()} | {:error, String.t()}
   def delete_section(content, chunk) do
     with :ok <- validate_chunk(chunk) do
-      splice(content, chunk.heading_line - 1, chunk.body_end_line, [])
+      lines = Markdown.split_lines(content)
+      resume = chunk.body_end_line + separator_after(lines, chunk.body_end_line)
+
+      {:ok, splice(lines, chunk.heading_line - 1, resume, [])}
     end
   end
 
@@ -48,39 +58,57 @@ defmodule Vigil.Vault.Edit do
   @spec append(String.t(), target, String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def append(content, {:section, chunk}, new_content) do
     with :ok <- validate_chunk(chunk) do
-      # Insert right at the chunk's end — no separator, since the chunk's
-      # body already carries the blank line before whatever follows it
-      # (docs/design.md, "Chunking").
-      splice(
-        content,
-        chunk.body_end_line,
-        chunk.body_end_line,
-        Markdown.split_lines(new_content)
-      )
+      # Insert right at the chunk's end — no separator needed, since the body
+      # ends at its last non-blank line and the blank line that follows it is
+      # still there, after the insert point (docs/design.md, "Chunking").
+      lines = Markdown.split_lines(content)
+
+      {:ok, splice(lines, chunk.body_end_line, chunk.body_end_line, body_lines(new_content))}
     end
   end
 
   def append(content, {:new_section, heading}, new_content) do
     lines = Markdown.split_lines(content)
-    {:ok, join(lines ++ ["", "## #{heading}"] ++ Markdown.split_lines(new_content))}
+    {:ok, join(lines ++ ["", "## #{heading}"] ++ body_lines(new_content))}
   end
 
   def append(content, :end, new_content) do
     lines = Markdown.split_lines(content)
-    {:ok, join(lines ++ [""] ++ Markdown.split_lines(new_content))}
+    {:ok, join(lines ++ [""] ++ body_lines(new_content))}
   end
 
   # Rewrites the file around one chunk: every line before `keep_lines`, then
-  # `replacement`, then everything from the chunk's `body_end_line` onwards.
-  defp splice(content, keep_lines, body_end_line, replacement) do
-    lines = Markdown.split_lines(content)
+  # `replacement`, then everything from `resume_line` onwards.
+  defp splice(lines, keep_lines, resume_line, replacement) do
     prefix = Enum.slice(lines, 0, keep_lines)
-    suffix = Enum.slice(lines, body_end_line, length(lines) - body_end_line)
+    suffix = Enum.drop(lines, resume_line)
 
-    {:ok, join(prefix ++ replacement ++ suffix)}
+    join(prefix ++ replacement ++ suffix)
   end
 
-  defp join(lines), do: Enum.join(lines, "\n") <> "\n"
+  # 1 when the line after a section's body is the blank one that separated it
+  # from what follows — the slot the section occupied. Never more than one: a
+  # wider gap someone set on purpose survives, one line narrower.
+  defp separator_after(lines, body_end_line) do
+    case Enum.at(lines, body_end_line) do
+      nil -> 0
+      line -> if String.trim(line) == "", do: 1, else: 0
+    end
+  end
+
+  # A body as the chunk model defines one: content lines, no trailing blanks.
+  # Content the caller ended with a blank line would otherwise put a second
+  # separator in front of the next heading — a body no parse would give back
+  # (docs/design.md, "How a file is written").
+  defp body_lines(content) do
+    content
+    |> Markdown.split_lines()
+    |> Enum.reverse()
+    |> Enum.drop_while(&(String.trim(&1) == ""))
+    |> Enum.reverse()
+  end
+
+  defp join(lines), do: lines |> Enum.join("\n") |> Markdown.normalize_trailing_newline()
 
   defp validate_chunk(nil), do: {:error, "no such section"}
 

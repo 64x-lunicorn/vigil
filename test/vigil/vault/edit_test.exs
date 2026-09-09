@@ -25,7 +25,11 @@ defmodule Vigil.Vault.EditTest do
   Third body.
   """
 
-  defp second, do: chunk("Second", 6, 8)
+  # Body-end lines are the parser's: the last non-blank line of the body, so
+  # the blank line before the next heading belongs to no chunk
+  # (docs/design.md, "How a file is written"). The last describe block below
+  # drives the parser itself, so these numbers cannot drift from it silently.
+  defp second, do: chunk("Second", 6, 7)
   defp third, do: chunk("Third", 9, 10)
 
   # ## First is followed directly by ### Nested — a deeper heading, but the
@@ -44,10 +48,10 @@ defmodule Vigil.Vault.EditTest do
   Second body.
   """
 
-  defp first_with_nested_sibling, do: chunk("First", 3, 5)
+  defp first_with_nested_sibling, do: chunk("First", 3, 4)
 
   describe "replace_body/3" do
-    test "replaces a mid-file section's body, heading and rest of file untouched" do
+    test "replaces a mid-file section's body, separator to the next heading intact" do
       assert {:ok, result} = Edit.replace_body(@three_sections, second(), "New second body.")
 
       assert result == """
@@ -58,6 +62,7 @@ defmodule Vigil.Vault.EditTest do
 
              ## Second
              New second body.
+
              ## Third
              Third body.
              """
@@ -105,7 +110,7 @@ defmodule Vigil.Vault.EditTest do
              """
     end
 
-    test "deletes the last section, running to EOF" do
+    test "deletes the last section, running to EOF, leaving one trailing newline" do
       assert {:ok, result} = Edit.delete_section(@three_sections, third())
 
       assert result == """
@@ -116,7 +121,29 @@ defmodule Vigil.Vault.EditTest do
 
              ## Second
              Second body.
+             """
+    end
 
+    test "takes exactly one blank line with it; a wider gap survives one line narrower" do
+      wide_gap = """
+      # Notes
+
+      ## First
+      First body.
+
+
+      ## Second
+      Second body.
+      """
+
+      assert {:ok, result} = Edit.delete_section(wide_gap, chunk("First", 3, 4))
+
+      assert result == """
+             # Notes
+
+
+             ## Second
+             Second body.
              """
     end
 
@@ -143,8 +170,8 @@ defmodule Vigil.Vault.EditTest do
 
              ## Second
              Second body.
-
              New line under second.
+
              ## Third
              Third body.
              """
@@ -211,6 +238,156 @@ defmodule Vigil.Vault.EditTest do
 
     test "{:section, chunk} refuses a nil chunk" do
       assert {:error, _} = Edit.append(@three_sections, {:section, nil}, "text")
+    end
+  end
+
+  # Every test above hands Edit a chunk with hand-written line numbers, which
+  # cannot catch the two modules disagreeing about where a body ends. These
+  # drive the real parser instead.
+  describe "against chunks the parser produced" do
+    @note """
+    ---
+    type: reference
+    ---
+    # Notes
+
+    ## First
+    First body.
+
+    ## Second
+    Second body.
+    """
+
+    defp parsed_chunk(content, id) do
+      {:ok, file} = Vigil.Parser.parse("x/notes.md", content, %{})
+      Index.chunk(Vigil.Index.build([file]), id)
+    end
+
+    test "replacing a mid-file body leaves exactly one blank line before the next heading" do
+      chunk = parsed_chunk(@note, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.replace_body(@note, chunk, "New first body.")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             # Notes
+
+             ## First
+             New first body.
+
+             ## Second
+             Second body.
+             """
+    end
+
+    test "replacing a section whose body is only blank lines works as an insert" do
+      content = """
+      ---
+      type: reference
+      ---
+      # Notes
+
+      ## Empty
+
+      ## Next
+      Next body.
+      """
+
+      chunk = parsed_chunk(content, "x/notes.md#empty")
+
+      assert {:ok, result} = Edit.replace_body(content, chunk, "Now it has a body.")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             # Notes
+
+             ## Empty
+             Now it has a body.
+
+             ## Next
+             Next body.
+             """
+    end
+
+    test "content that ends in a blank line does not add a second separator" do
+      chunk = parsed_chunk(@note, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.replace_body(@note, chunk, "Replaced.\n\n")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             # Notes
+
+             ## First
+             Replaced.
+
+             ## Second
+             Second body.
+             """
+    end
+
+    test "appending content that ends in a blank line does not add one either" do
+      chunk = parsed_chunk(@note, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.append(@note, {:section, chunk}, "More.\n\n")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             # Notes
+
+             ## First
+             First body.
+             More.
+
+             ## Second
+             Second body.
+             """
+    end
+
+    test "an H1 below the first heading does not shift the splice" do
+      content = """
+      ---
+      type: reference
+      ---
+      ## First
+      body one
+      # Late Title
+      body two
+
+      ## Second
+      Second body.
+      """
+
+      chunk = parsed_chunk(content, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.replace_body(content, chunk, "NEW.")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             ## First
+             NEW.
+
+             ## Second
+             Second body.
+             """
+    end
+
+    test "editing the last section of a note that ended in blank lines still ends in one newline" do
+      content = @note <> "\n\n"
+      chunk = parsed_chunk(content, "x/notes.md#second")
+
+      assert {:ok, result} = Edit.replace_body(content, chunk, "New second body.")
+      assert String.ends_with?(result, "New second body.\n")
     end
   end
 end

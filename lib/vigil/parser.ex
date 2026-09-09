@@ -159,8 +159,6 @@ defmodule Vigil.Parser do
   @inline_code_re ~r/`[^`\n]*`/
 
   defp build_chunks(path, {lines, offset}, type, starts, ends, created_at, updated_at) do
-    total = length(lines)
-
     numbered =
       lines
       |> Enum.with_index(1)
@@ -185,8 +183,7 @@ defmodule Vigil.Parser do
           heading = Markdown.heading(line) ->
             {level, text} = heading
 
-            acc =
-              close_current(acc, line_no - 1, path, type, starts, ends, created_at, updated_at)
+            acc = close_current(acc, path, type, starts, ends, created_at, updated_at)
 
             new_stack =
               acc.stack
@@ -207,7 +204,7 @@ defmodule Vigil.Parser do
             }
 
           acc.current != nil ->
-            %{acc | current: %{acc.current | lines: [line | acc.current.lines]}}
+            %{acc | current: %{acc.current | lines: [{line, line_no} | acc.current.lines]}}
 
           true ->
             current =
@@ -216,16 +213,15 @@ defmodule Vigil.Parser do
                   heading: nil,
                   heading_path: [],
                   heading_line: nil,
-                  body_start_line: line_no,
                   lines: []
                 }
 
-            %{acc | pre: %{current | lines: [line | current.lines]}}
+            %{acc | pre: %{current | lines: [{line, line_no} | current.lines]}}
         end
       end)
 
     # finalize trailing chunk (heading-based or none)
-    state = close_current(state, total + offset, path, type, starts, ends, created_at, updated_at)
+    state = close_current(state, path, type, starts, ends, created_at, updated_at)
 
     pre = Map.get(state, :pre)
     pre_chunk = build_pre_chunk(path, pre, type, starts, ends, created_at, updated_at)
@@ -239,14 +235,15 @@ defmodule Vigil.Parser do
     {state.title, chunks}
   end
 
-  defp close_current(%{current: nil} = acc, _end_line, _p, _t, _s, _e, _ca, _ua), do: acc
+  defp close_current(%{current: nil} = acc, _p, _t, _s, _e, _ca, _ua), do: acc
 
-  defp close_current(acc, end_line, path, type, starts, ends, created_at, updated_at) do
+  defp close_current(acc, path, type, starts, ends, created_at, updated_at) do
     %{heading: heading, heading_path: heading_path, heading_line: heading_line, lines: rev_lines} =
       acc.current
 
-    body_lines = Enum.reverse(rev_lines)
-    body = Enum.join(body_lines, "\n")
+    # A body of nothing but blank lines collapses onto its own heading line.
+    {body, end_line} = close_body(rev_lines)
+    end_line = end_line || heading_line
 
     base_slug = slug(heading)
     {final_slug, slug_counts} = uniquify(base_slug, acc.slug_counts)
@@ -272,25 +269,48 @@ defmodule Vigil.Parser do
     %{acc | current: nil, slug_counts: slug_counts, chunks: [chunk | acc.chunks]}
   end
 
+  # A chunk's body and the line it ends on, from the body's lines in reverse
+  # order. The body ends at its **last non-blank** line: the blank lines
+  # separating two sections belong to neither (docs/design.md, "Chunking").
+  # `nil` for a body that has no content line at all — the caller says what
+  # an empty body's end line is.
+  #
+  # The end line is the line's own number, not a count from the heading: the
+  # first H1 is consumed as the note title without joining any body, so a
+  # note whose H1 sits below its first `##` has a gap in the count.
+  defp close_body(rev_lines) do
+    numbered =
+      rev_lines
+      |> Enum.drop_while(fn {line, _no} -> String.trim(line) == "" end)
+      |> Enum.reverse()
+
+    body = numbered |> Enum.map(fn {line, _no} -> line end) |> Enum.join("\n")
+
+    case List.last(numbered) do
+      nil -> {body, nil}
+      {_line, line_no} -> {body, line_no}
+    end
+  end
+
   defp build_pre_chunk(_path, nil, _type, _starts, _ends, _ca, _ua), do: nil
 
   defp build_pre_chunk(
          path,
-         %{lines: rev_lines, body_start_line: body_start},
+         %{lines: rev_lines},
          type,
          starts,
          ends,
          created_at,
          updated_at
        ) do
-    body_lines = Enum.reverse(rev_lines)
-    body = Enum.join(body_lines, "\n")
+    # The same boundary as a heading chunk, through the same function — this
+    # chunk just has no heading to fall back on, so a body with no content
+    # line at all makes no chunk.
+    {body, body_end} = close_body(rev_lines)
 
-    if String.trim(body) == "" do
+    if body_end == nil do
       nil
     else
-      body_end = body_start + length(body_lines) - 1
-
       %Chunk{
         id: path,
         path: path,

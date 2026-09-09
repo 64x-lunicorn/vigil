@@ -130,6 +130,124 @@ defmodule Vigil.ParserTest do
     assert file.type == :reference
   end
 
+  # A chunk ends at its last non-blank line. The blank lines between two
+  # sections belong to neither — they are punctuation between chunks, so a
+  # write that replaces a body cannot eat them (docs/design.md, "How a file is
+  # written"). These assertions were written one commit earlier against the
+  # old boundary, where the separator sat inside the preceding body; the
+  # numbers below are the decision, not a patch.
+  describe "chunk boundaries" do
+    #  4  # Notes
+    #  5
+    #  6  Text before the first heading.
+    #  7
+    #  8  ## First
+    #  9  First body.
+    # 10
+    # 11  ### Nested
+    # 12  Nested body.
+    # 13
+    # 14  ## Last
+    # 15  Last body.
+    @boundaries """
+    ---
+    type: reference
+    ---
+    # Notes
+
+    Text before the first heading.
+
+    ## First
+    First body.
+
+    ### Nested
+    Nested body.
+
+    ## Last
+    Last body.
+    """
+
+    defp boundary_chunk(id) do
+      {:ok, file} = Parser.parse("x/boundaries.md", @boundaries, %{})
+      Enum.find(file.chunks, &(&1.id == id))
+    end
+
+    test "a mid-file section ends at its last content line, not at the separator" do
+      chunk = boundary_chunk("x/boundaries.md#first")
+
+      assert chunk.body == "First body."
+      assert chunk.body_end_line == 9
+    end
+
+    test "a ### sibling under a ## ends the same way" do
+      chunk = boundary_chunk("x/boundaries.md#nested")
+
+      assert chunk.body == "Nested body."
+      assert chunk.body_end_line == 12
+    end
+
+    test "the last section runs to EOF, which carries no trailing blank" do
+      chunk = boundary_chunk("x/boundaries.md#last")
+
+      assert chunk.body == "Last body."
+      assert chunk.body_end_line == 15
+    end
+
+    # The fragmentless chunk is built on its own code path, with its own
+    # body-end computation — the rule has to be stated there too.
+    test "the fragmentless pre-H2 chunk follows the same rule" do
+      chunk = boundary_chunk("x/boundaries.md")
+
+      assert chunk.body == "\nText before the first heading."
+      assert chunk.body_end_line == 6
+    end
+
+    # The first H1 is consumed as the note title and joins no body, so in a
+    # note whose H1 sits below its first ##, counting lines from the heading
+    # lands one short of the body's real last line.
+    test "an H1 inside a section is skipped without shifting the body's end line" do
+      content = """
+      ---
+      type: reference
+      ---
+      ## First
+      body one
+      # Late Title
+      body two
+
+      ## Second
+      Second body.
+      """
+
+      {:ok, file} = Parser.parse("x/late-title.md", content, %{})
+      first = Enum.find(file.chunks, &(&1.id == "x/late-title.md#first"))
+
+      assert first.body == "body one\nbody two"
+      assert first.body_end_line == 7
+    end
+
+    test "a section whose body is nothing but blank lines ends on its own heading line" do
+      content = """
+      ---
+      type: reference
+      ---
+      # Notes
+
+      ## Empty
+
+
+      ## Next
+      Next body.
+      """
+
+      {:ok, file} = Parser.parse("x/empty-body.md", content, %{})
+      empty = Enum.find(file.chunks, &(&1.id == "x/empty-body.md#empty"))
+
+      assert empty.body == ""
+      assert empty.body_end_line == empty.heading_line
+    end
+  end
+
   describe "extract_links/1" do
     test "links inside fenced code blocks and inline code are not extracted" do
       body = """
