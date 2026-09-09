@@ -426,7 +426,7 @@ defmodule Vigil.Vault.Policy do
   # confirm is only required when the new version removes more than half of
   # the existing sections OR more than 20 headings; below that rewrite_note
   # goes through without it. The baseline is facts.heading_count — what vigil
-  # has indexed for the note (see Vigil.Store.count_existing_headings/1).
+  # has indexed for the note (see Vigil.Index.heading_count/2).
   defp shrink_threshold(path, content, confirm, facts) do
     old_count = facts.heading_count
     removed = old_count - Markdown.count_headings(content)

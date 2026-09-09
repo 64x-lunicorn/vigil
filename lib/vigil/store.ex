@@ -5,18 +5,15 @@ defmodule Vigil.Store do
 
   alias Vigil.{
     Clock,
-    Events,
     Index,
     Markdown,
     Parser,
     Git,
-    Search,
     Skills,
-    Slug,
     VaultDiscovery
   }
 
-  alias Vigil.Vault.{Facts, Policy, Rules}
+  alias Vigil.Vault.{Facts, Policy}
 
   @chunks_table :vigil_chunks
   @files_table :vigil_files
@@ -26,9 +23,6 @@ defmodule Vigil.Store do
   # ids — only for links that resolved successfully.
   @links_out_table :vigil_links_out
   @links_in_table :vigil_links_in
-
-  @overlong_note_chunk_threshold 40
-  @stale_decision_days 180
 
   ## Public API
 
@@ -106,7 +100,7 @@ defmodule Vigil.Store do
 
   @impl true
   def handle_call({:search, params}, _from, state) do
-    {:reply, do_search(params, state), state}
+    {:reply, Index.search(state.index, params), state}
   end
 
   def handle_call({:read, id, backlinks?}, _from, state) do
@@ -114,7 +108,7 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:links, id, direction, depth}, _from, state) do
-    {:reply, do_links(id, direction, depth), state}
+    {:reply, Index.links(state.index, id, direction, depth), state}
   end
 
   def handle_call({:create, params}, _from, state) do
@@ -158,15 +152,15 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:lint, now}, _from, state) do
-    {:reply, do_lint(now || Clock.now()), state}
+    {:reply, Index.lint(state.index, now || Clock.now()), state}
   end
 
   def handle_call({:current, now}, _from, state) do
-    {:reply, do_current(now || Clock.now()), state}
+    {:reply, Index.current(state.index, now || Clock.now()), state}
   end
 
   def handle_call({:snapshot, now}, _from, state) do
-    {:reply, do_snapshot(now), state}
+    {:reply, Index.snapshot(state.index, now), state}
   end
 
   def handle_call(:reload, _from, state) do
@@ -318,9 +312,10 @@ defmodule Vigil.Store do
   # entry after delete/rename" class of bug that incremental maintenance
   # across two tables would invite. Resolution itself lives in
   # Vigil.LinkIndex, a pure module — `Vigil.Index.put/2` and `remove/2`
-  # already run it, once, on every write; `sync_links_ets/1` below just
-  # mirrors that result into the ETS bag tables `do_links`/`do_lint` still
-  # read, rather than calling `Vigil.LinkIndex.build/2` a second time.
+  # already run it, once, on every write. Every read this project has (search,
+  # links, lint, the write path's backlinks question) now goes through
+  # `Vigil.Index` instead; `sync_links_ets/1` below just keeps the ETS bag
+  # tables in sync until they are retired for good (#32).
 
   defp sync_links_ets(index) do
     :ets.delete_all_objects(@links_out_table)
@@ -435,232 +430,6 @@ defmodule Vigil.Store do
 
   defp list_domain_names(state), do: VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
 
-  ## Search
-
-  defp do_search(params, _state) do
-    query = Map.fetch!(params, :query)
-    domain = Map.get(params, :domain)
-    type_filter = Map.get(params, :type)
-    prefer = Map.get(params, :prefer)
-    limit = Map.get(params, :limit, 10)
-
-    items =
-      :ets.tab2list(@chunks_table)
-      |> Enum.map(fn {_id, rec} -> rec end)
-      |> Enum.filter(fn rec ->
-        domain_ok =
-          case domain do
-            nil -> rec.domain != "journal"
-            d -> rec.domain == d
-          end
-
-        type_ok = type_filter == nil or rec.type == type_filter
-        domain_ok and type_ok
-      end)
-      |> Enum.map(fn rec ->
-        %{
-          id: rec.id,
-          file_title: rec.file_title,
-          heading_path: rec.heading_path,
-          type: rec.type,
-          body: rec.body,
-          body_downcased: rec.body_downcased,
-          updated_at: rec.updated_at
-        }
-      end)
-
-    items
-    |> Search.run(query, %{limit: limit, prefer: prefer})
-    |> Enum.map(&attach_hub/1)
-  end
-
-  # The hub of a note, when exactly one other note links to it. Linked from
-  # several notes means the hub is ambiguous, and the field is omitted rather
-  # than guessed.
-  defp attach_hub(result) do
-    note_path = result.id |> String.split("#", parts: 2) |> hd()
-
-    source_notes =
-      note_path
-      |> backlinks_for()
-      |> Enum.map(fn source_chunk_id ->
-        source_chunk_id |> String.split("#", parts: 2) |> hd()
-      end)
-      |> Enum.uniq()
-      |> Enum.reject(&(&1 == note_path))
-
-    case source_notes do
-      [hub] -> Map.put(result, :hub, hub)
-      _ -> result
-    end
-  end
-
-  ## Read
-  #
-  # Answered from `Vigil.Index` (state.index) rather than ETS — see
-  # `handle_call({:read, ...})`. `do_links/3` below still reads ETS
-  # directly; only `read` has moved.
-
-  # If the exact lookup misses, the path part is normalized via
-  # Slug.normalize_path/1 and tried again. The record that comes back carries
-  # the canonical stored path anyway, so no extra field is needed on the
-  # response.
-  defp lookup_lenient(table, exact_key, fallback_key_fun) do
-    case :ets.lookup(table, exact_key) do
-      [{_, rec}] ->
-        {:ok, rec}
-
-      [] ->
-        case fallback_key_fun.() do
-          nil ->
-            :not_found
-
-          fallback_key ->
-            case :ets.lookup(table, fallback_key) do
-              [{_, rec}] -> {:ok, rec}
-              [] -> :not_found
-            end
-        end
-    end
-  end
-
-  ## Links (AP15 §5.4)
-
-  defp do_links(id, direction, depth) do
-    path_part = id |> String.split("#", parts: 2) |> hd()
-
-    with :ok <- Policy.safe_path(path_part),
-         :ok <- validate_depth(depth) do
-      if String.contains?(id, "#") do
-        lookup_lenient(@chunks_table, id, fn ->
-          with {:ok, normalized_path, true} <- Slug.normalize_path(path_part) do
-            [_, fragment] = String.split(id, "#", parts: 2)
-            "#{normalized_path}##{fragment}"
-          else
-            _ -> nil
-          end
-        end)
-        |> case do
-          {:ok, rec} -> {:ok, build_links_result(rec.id, [rec.id], direction, depth)}
-          :not_found -> {:error, "Not found: #{id}"}
-        end
-      else
-        lookup_lenient(@files_table, id, fn ->
-          with {:ok, normalized_path, true} <- Slug.normalize_path(id) do
-            normalized_path
-          else
-            _ -> nil
-          end
-        end)
-        |> case do
-          {:ok, file} -> {:ok, build_links_result(file.path, file.chunk_ids, direction, depth)}
-          :not_found -> {:error, "Not found: #{id}"}
-        end
-      end
-    else
-      {:error, msg} -> {:error, msg}
-    end
-  end
-
-  defp validate_depth(d) when d in [1, 2], do: :ok
-  defp validate_depth(_), do: {:error, "depth must be 1 or 2 (no deeper value allowed)"}
-
-  defp build_links_result(id, chunk_ids, direction, depth) do
-    base = %{id: id}
-
-    base =
-      if direction in [:out, :both],
-        do: Map.put(base, :outgoing, outgoing_for(chunk_ids)),
-        else: base
-
-    base =
-      if direction in [:in, :both], do: Map.put(base, :incoming, incoming_for(id)), else: base
-
-    if depth == 2, do: Map.put(base, :neighbors, neighbors_for(base, id)), else: base
-  end
-
-  defp outgoing_for(chunk_ids) do
-    Enum.flat_map(chunk_ids, fn cid ->
-      @links_out_table
-      |> :ets.lookup(cid)
-      |> Enum.map(fn {_cid, resolved} -> format_outgoing(cid, resolved) end)
-    end)
-  end
-
-  defp format_outgoing(from_chunk, %{status: :ok, target_chunk: nil, target_note: note}) do
-    %{target: note, from_chunk: from_chunk, status: "ok"}
-  end
-
-  defp format_outgoing(from_chunk, %{status: :ok, target_chunk: chunk_id}) do
-    %{target: chunk_id, from_chunk: from_chunk, status: "ok"}
-  end
-
-  defp format_outgoing(from_chunk, %{status: :ambiguous, candidates: candidates} = resolved) do
-    %{
-      target: link_label(resolved),
-      from_chunk: from_chunk,
-      status: "ambiguous",
-      candidates: candidates
-    }
-  end
-
-  defp format_outgoing(from_chunk, %{status: :broken} = resolved) do
-    %{target: link_label(resolved), from_chunk: from_chunk, status: "broken"}
-  end
-
-  # A link to an existing note with a non-existent fragment is `broken` too.
-  # Without the fragment in the label the finding would read as "note
-  # missing" when only the section is missing.
-  defp link_label(%{raw: raw, fragment: nil}), do: raw
-  defp link_label(%{raw: raw, fragment: fragment}), do: "#{raw}##{fragment}"
-
-  defp incoming_for(id) do
-    id
-    |> backlinks_for()
-    |> Enum.map(fn source -> %{source: source, status: "ok"} end)
-  end
-
-  # depth: 2 — for each directly connected note its own depth-1 out/in, with
-  # no further recursion. Beyond that the value drops off fast while the
-  # response size does not.
-  defp neighbors_for(base, own_id) do
-    own_note = own_id |> String.split("#", parts: 2) |> hd()
-
-    outgoing_notes =
-      base
-      |> Map.get(:outgoing, [])
-      |> Enum.filter(&(&1.status == "ok"))
-      |> Enum.map(fn %{target: t} -> t |> String.split("#", parts: 2) |> hd() end)
-
-    incoming_notes =
-      base
-      |> Map.get(:incoming, [])
-      |> Enum.map(fn %{source: s} -> s |> String.split("#", parts: 2) |> hd() end)
-
-    (outgoing_notes ++ incoming_notes)
-    |> Enum.uniq()
-    |> Enum.reject(&(&1 == own_note))
-    |> Map.new(fn note_path ->
-      chunk_ids =
-        case :ets.lookup(@files_table, note_path) do
-          [{_, file}] -> file.chunk_ids
-          [] -> []
-        end
-
-      {note_path, %{outgoing: outgoing_for(chunk_ids), incoming: incoming_for(note_path)}}
-    end)
-  end
-
-  defp backlinks_for(target_key) do
-    @links_in_table
-    |> :ets.lookup(target_key)
-    |> Enum.map(fn {_target, source_id} -> source_id end)
-    |> Enum.uniq()
-  end
-
-  defp iso(nil), do: nil
-  defp iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
-
   ## Vault facts for Vigil.Vault.Policy
 
   # Built fresh per write. The three function fields are the adapters at the
@@ -680,7 +449,7 @@ defmodule Vigil.Store do
       path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
       read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
       find_similar: fn query, domain ->
-        do_search(%{query: query, domain: domain, limit: 25}, nil)
+        Index.search(state.index, %{query: query, domain: domain, limit: 25})
       end
     }
   end
@@ -781,7 +550,7 @@ defmodule Vigil.Store do
          {:ok, original} <- read_existing_file(abs_path) do
       orig_lines = Markdown.split_lines(original)
 
-      new_lines = insert_append(path, orig_lines, heading, content)
+      new_lines = insert_append(state.index, path, orig_lines, heading, content)
       new_content = Enum.join(new_lines, "\n") <> "\n"
 
       write_and_commit(
@@ -796,45 +565,32 @@ defmodule Vigil.Store do
     end
   end
 
-  defp insert_append(_path, orig_lines, nil, content) do
+  defp insert_append(_index, _path, orig_lines, nil, content) do
     orig_lines ++ [""] ++ Markdown.split_lines(content)
   end
 
-  defp insert_append(path, orig_lines, heading, content) do
+  defp insert_append(index, path, orig_lines, heading, content) do
     target_slug = Parser.slug(heading)
-    existing = find_chunk_by_heading_slug(path, target_slug)
+    existing = Index.chunk_by_heading(index, path, target_slug)
 
     case existing do
       nil ->
         orig_lines ++ ["", "## #{heading}"] ++ Markdown.split_lines(content)
 
-      rec ->
-        prefix = Enum.slice(orig_lines, 0, rec.body_end_line)
-        suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
+      chunk ->
+        prefix = Enum.slice(orig_lines, 0, chunk.body_end_line)
+
+        suffix =
+          Enum.slice(orig_lines, chunk.body_end_line, length(orig_lines) - chunk.body_end_line)
+
         prefix ++ Markdown.split_lines(content) ++ suffix
-    end
-  end
-
-  defp find_chunk_by_heading_slug(path, target_slug) do
-    case :ets.lookup(@files_table, path) do
-      [{_, file}] ->
-        file.chunk_ids
-        |> Enum.map(fn cid -> :ets.lookup(@chunks_table, cid) end)
-        |> Enum.flat_map(fn
-          [{_, rec}] -> [rec]
-          [] -> []
-        end)
-        |> Enum.find(fn rec -> rec.heading && Parser.slug(rec.heading) == target_slug end)
-
-      [] ->
-        nil
     end
   end
 
   ## replace_section
 
   defp do_replace_section(id, content, state) do
-    rec = lookup_chunk(id)
+    rec = Index.chunk(state.index, id)
 
     with {:ok, %{path: path}} <-
            Policy.check(:replace_section, %{id: id, content: content}, facts(state, chunk: rec)) do
@@ -852,18 +608,11 @@ defmodule Vigil.Store do
     end
   end
 
-  defp lookup_chunk(id) do
-    case :ets.lookup(@chunks_table, id) do
-      [{_, rec}] -> rec
-      [] -> nil
-    end
-  end
-
   ## rewrite_note
 
   defp do_rewrite_note(params, state) do
     content = Map.fetch!(params, :content)
-    heading_count = count_existing_headings(Map.fetch!(params, :path))
+    heading_count = Index.heading_count(state.index, Map.fetch!(params, :path))
 
     with {:ok, %{path: path}} <-
            Policy.check(:rewrite_note, params, facts(state, heading_count: heading_count)),
@@ -882,28 +631,10 @@ defmodule Vigil.Store do
     end
   end
 
-  # The rewrite_note shrink baseline: how many headings vigil currently has
-  # indexed for this note. Read from ETS rather than the file because that is
-  # the state vigil knows — Vigil.Vault.Policy decides what to do with it.
-  defp count_existing_headings(path) do
-    case :ets.lookup(@files_table, path) do
-      [{_, file}] ->
-        file.chunk_ids
-        |> Enum.map(fn cid -> :ets.lookup(@chunks_table, cid) end)
-        |> Enum.count(fn
-          [{_, rec}] -> rec.heading != nil
-          [] -> false
-        end)
-
-      [] ->
-        0
-    end
-  end
-
   ## delete_section
 
   defp do_delete_section(id, state) do
-    rec = lookup_chunk(id)
+    rec = Index.chunk(state.index, id)
 
     with {:ok, %{path: path}} <-
            Policy.check(:delete_section, %{id: id}, facts(state, chunk: rec)) do
@@ -960,7 +691,7 @@ defmodule Vigil.Store do
   ## delete
 
   defp do_delete_note(params, state) do
-    backlinks = backlinks_for(Map.fetch!(params, :path))
+    backlinks = Index.backlinks(state.index, Map.fetch!(params, :path))
 
     with {:ok, %{path: path}} <-
            Policy.check(:delete_note, params, facts(state, backlinks: backlinks)) do
@@ -1001,7 +732,7 @@ defmodule Vigil.Store do
   end
 
   defp do_move_note_to(state, normalized_from, normalized_to) do
-    backlinks_before = backlinks_for(normalized_from)
+    backlinks_before = Index.backlinks(state.index, normalized_from)
     commit_message = "move: #{normalized_from} -> #{normalized_to}"
 
     case Git.move_commit(state.vault_path, normalized_from, normalized_to, commit_message) do
@@ -1010,13 +741,13 @@ defmodule Vigil.Store do
           :ok ->
             new_index = reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
             new_state = %{state | index: new_index}
-            # Backlink report from :links_in — a diff of incoming references
-            # before and after the move rather than an ad-hoc scan. A source
-            # chunk that resolved before and no longer shows up in the
-            # (rebuilt) incoming references of the target now points nowhere —
-            # for example because it referenced an explicit path instead of a
+            # Backlink report — a diff of incoming references before and
+            # after the move rather than an ad-hoc scan. A source chunk that
+            # resolved before and no longer shows up in the (rebuilt)
+            # incoming references of the target now points nowhere — for
+            # example because it referenced an explicit path instead of a
             # basename.
-            backlinks_after = backlinks_for(normalized_to)
+            backlinks_after = Index.backlinks(new_index, normalized_to)
 
             result =
               {:ok,
@@ -1192,77 +923,6 @@ defmodule Vigil.Store do
       [] ->
         :ok
     end
-  end
-
-  ## current() / snapshot()
-  #
-  # Window computation itself lives in Vigil.Events, a pure module — this
-  # just supplies it the current event files and the resolved `now`.
-
-  defp event_files do
-    :ets.tab2list(@files_table)
-    |> Enum.map(fn {_path, file} -> file end)
-    |> Enum.filter(&(&1.type == :event))
-  end
-
-  defp do_current(now), do: Events.current(event_files(), now)
-
-  defp do_snapshot(now), do: Events.snapshot(event_files(), now)
-
-  ## Lint (AP-5)
-
-  defp do_lint(now) do
-    files = :ets.tab2list(@files_table) |> Enum.map(fn {_path, file} -> file end)
-    chunks = :ets.tab2list(@chunks_table) |> Enum.map(fn {_id, rec} -> rec end)
-
-    %{
-      duplicate_headings: lint_duplicate_headings(chunks),
-      sentence_headings: lint_sentence_headings(chunks),
-      orphaned_links: lint_orphaned_links(),
-      overlong_notes: lint_overlong_notes(files),
-      stale_decisions: lint_stale_decisions(files, now)
-    }
-  end
-
-  defp lint_duplicate_headings(chunks) do
-    chunks
-    |> Enum.filter(& &1.heading)
-    |> Enum.group_by(&{&1.path, &1.heading_path})
-    |> Enum.filter(fn {_key, group} -> length(group) > 1 end)
-    |> Enum.map(fn {{path, heading_path}, group} ->
-      %{path: path, heading_path: heading_path, ids: Enum.map(group, & &1.id)}
-    end)
-  end
-
-  defp lint_sentence_headings(chunks) do
-    chunks
-    |> Enum.filter(fn c -> c.heading && Rules.sentence_heading?(c.heading) end)
-    |> Enum.map(fn c -> %{id: c.id, heading: c.heading} end)
-  end
-
-  defp lint_orphaned_links do
-    @links_out_table
-    |> :ets.tab2list()
-    |> Enum.filter(fn {_source_id, resolved} -> resolved.status == :broken end)
-    |> Enum.map(fn {_source_id, resolved} -> link_label(resolved) end)
-    |> Enum.uniq()
-  end
-
-  defp lint_overlong_notes(files) do
-    files
-    |> Enum.filter(fn f -> length(f.chunk_ids) > @overlong_note_chunk_threshold end)
-    |> Enum.map(fn f -> %{path: f.path, chunk_count: length(f.chunk_ids)} end)
-  end
-
-  defp lint_stale_decisions(files, now) do
-    cutoff = DateTime.add(now, -@stale_decision_days * 86_400, :second)
-
-    files
-    |> Enum.filter(fn f ->
-      f.type == :decision and f.updated_at != nil and
-        DateTime.compare(f.updated_at, cutoff) == :lt
-    end)
-    |> Enum.map(fn f -> %{path: f.path, updated_at: iso(f.updated_at)} end)
   end
 
   ## Skills

@@ -3,9 +3,9 @@ defmodule Vigil.Events do
   Computes `current`/`snapshot` event windows over an already-filtered list
   of event-typed file records.
 
-  Pure: takes `events` (a plain list, the `type == :event` file records
-  `Vigil.Store.event_files/0` already filters) and a resolved `now`, returns
-  data — no ETS access of its own.
+  Pure: takes `events` (a plain list, the `type == :event` notes
+  `Vigil.Index` already filters) and a resolved `now`, returns data — no
+  ETS access of its own.
 
   Not named after "the time envelope" — that term is reserved in
   `docs/design.md` for the `_`/`_t`/`_!` field mechanism
