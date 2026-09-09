@@ -140,10 +140,10 @@ ENV_FILE="/etc/vigil/env"
 # Runs on --existing-vault (before the secrets step) and standalone under
 # --check-only, which is strictly read-only. Skipped for --new-vault.
 
-PHASE2B_APPLIED=()
-PHASE2B_PENDING_AUTO=()
+ADOPTION_FIXES_APPLIED=()
+ADOPTION_FIXES_PENDING=()
 
-phase2b_fix_gitignore() {
+fix_vault_gitignore() {
   local vault="$1" mode="$2"
   local gitignore="${vault}/.gitignore"
   local needs_append=1 is_tracked=0
@@ -162,7 +162,7 @@ phase2b_fix_gitignore() {
   fi
 
   if [ "$mode" = "check" ]; then
-    PHASE2B_PENDING_AUTO+=("$description")
+    ADOPTION_FIXES_PENDING+=("$description")
     return 0
   fi
 
@@ -179,12 +179,12 @@ phase2b_fix_gitignore() {
   if [ "$is_tracked" = "1" ]; then
     as_vigil git -C "$vault" rm -r --cached -- .obsidian >/dev/null
   fi
-  PHASE2B_APPLIED+=("added .obsidian/ to .gitignore$(
+  ADOPTION_FIXES_APPLIED+=("added .obsidian/ to .gitignore$(
     [ "$is_tracked" = "1" ] && echo " (and removed the already-tracked .obsidian directory from the index)"
   )")
 }
 
-phase2b_fix_git_config() {
+fix_vault_git_config() {
   local vault="$1" mode="$2"
   local name email
   name="$(as_vigil git -C "$vault" config --local user.name 2>/dev/null || true)"
@@ -197,17 +197,17 @@ phase2b_fix_git_config() {
   fi
 
   if [ "$mode" = "check" ]; then
-    PHASE2B_PENDING_AUTO+=("git config: set local user.name/user.email/commit.gpgsign")
+    ADOPTION_FIXES_PENDING+=("git config: set local user.name/user.email/commit.gpgsign")
     return 0
   fi
 
   as_vigil git -C "$vault" config user.name vigil
   as_vigil git -C "$vault" config user.email "vigil@$(hostname)"
   as_vigil git -C "$vault" config commit.gpgsign false
-  PHASE2B_APPLIED+=("set local git configuration in the vault")
+  ADOPTION_FIXES_APPLIED+=("set local git configuration in the vault")
 }
 
-phase2b_fix_upstream() {
+fix_vault_upstream() {
   local vault="$1" mode="$2"
   local upstream
   upstream="$(as_vigil git -C "$vault" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
@@ -220,7 +220,7 @@ phase2b_fix_upstream() {
   [ "$github_remote" = "no" ] && description="${description} (remote 'github' missing; will be renamed from 'origin', or must be added by hand)"
 
   if [ "$mode" = "check" ]; then
-    PHASE2B_PENDING_AUTO+=("$description")
+    ADOPTION_FIXES_PENDING+=("$description")
     return 0
   fi
 
@@ -233,10 +233,10 @@ phase2b_fix_upstream() {
     fi
   fi
   as_vigil git -C "$vault" branch --set-upstream-to=github/main main
-  PHASE2B_APPLIED+=("pointed upstream of main at github/main")
+  ADOPTION_FIXES_APPLIED+=("pointed upstream of main at github/main")
 }
 
-phase2b_fix_domains_yml() {
+fix_vault_domains_yml() {
   local vault="$1" mode="$2" findings_json="$3"
   local missing_domains
   missing_domains="$(
@@ -250,16 +250,16 @@ phase2b_fix_domains_yml() {
   while IFS= read -r domain; do
     [ -z "$domain" ] && continue
     if [ "$mode" = "check" ]; then
-      PHASE2B_PENDING_AUTO+=("_domains.yml: add entry '${domain}: \"\"'")
+      ADOPTION_FIXES_PENDING+=("_domains.yml: add entry '${domain}: \"\"'")
     else
       # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
       as_vigil bash -c 'printf "%s: \"\"\n" "$1" >>"$2"' _ "$domain" "${vault}/_domains.yml"
-      PHASE2B_APPLIED+=("added a _domains.yml entry for domain '${domain}'")
+      ADOPTION_FIXES_APPLIED+=("added a _domains.yml entry for domain '${domain}'")
     fi
   done <<<"$missing_domains"
 }
 
-phase2b_fix_permissions() {
+fix_vault_permissions() {
   local vault="$1" mode="$2"
   local owner
   owner="$(stat -c '%U:%G' "$vault" 2>/dev/null || echo '?:?')"
@@ -272,23 +272,23 @@ phase2b_fix_permissions() {
   [ "$wrong_owner" = "0" ] && [ "$wrong_permissions" = "0" ] && return 0
 
   if [ "$mode" = "check" ]; then
-    PHASE2B_PENDING_AUTO+=("permissions: chown -R vigil:vigil, chmod 0750 on ${vault}")
+    ADOPTION_FIXES_PENDING+=("permissions: chown -R vigil:vigil, chmod 0750 on ${vault}")
     return 0
   fi
 
   chown -R vigil:vigil "$vault"
   chmod 0750 "$vault"
-  PHASE2B_APPLIED+=("fixed permissions on ${vault} (vigil:vigil, 0750)")
+  ADOPTION_FIXES_APPLIED+=("fixed permissions on ${vault} (vigil:vigil, 0750)")
 }
 
-# phase2b_run <vault> <mode>  — mode: "apply" | "check"
-# Sets PHASE2B_APPLIED/PHASE2B_PENDING_AUTO and returns the total number of
-# (pending or reported) findings through the global PHASE2B_TOTAL_FINDINGS.
-phase2b_run() {
+# run_vault_adoption <vault> <mode>  — mode: "apply" | "check"
+# Sets ADOPTION_FIXES_APPLIED/ADOPTION_FIXES_PENDING and returns the total number of
+# (pending or reported) findings through the global ADOPTION_TOTAL_FINDINGS.
+run_vault_adoption() {
   local vault="$1" mode="$2"
-  PHASE2B_APPLIED=()
-  PHASE2B_PENDING_AUTO=()
-  PHASE2B_TOTAL_FINDINGS=0
+  ADOPTION_FIXES_APPLIED=()
+  ADOPTION_FIXES_PENDING=()
+  ADOPTION_TOTAL_FINDINGS=0
 
   echo
   if [ "$mode" = "check" ]; then
@@ -314,11 +314,11 @@ phase2b_run() {
   fi
 
   # ── Automatic fixes ───────────────────────────────────────────────────
-  phase2b_fix_gitignore "$vault" "$mode"
-  phase2b_fix_git_config "$vault" "$mode"
-  phase2b_fix_upstream "$vault" "$mode"
-  phase2b_fix_domains_yml "$vault" "$mode" "$findings_json"
-  phase2b_fix_permissions "$vault" "$mode"
+  fix_vault_gitignore "$vault" "$mode"
+  fix_vault_git_config "$vault" "$mode"
+  fix_vault_upstream "$vault" "$mode"
+  fix_vault_domains_yml "$vault" "$mode" "$findings_json"
+  fix_vault_permissions "$vault" "$mode"
 
   # The gitignore and _domains.yml fixes change tracked content. Without this
   # step those changes would sit in the index (staged, never committed),
@@ -338,7 +338,7 @@ phase2b_run() {
         "vault adoption: automatic fixes"; then
         if as_vigil git -C "$vault" remote | grep -qx github &&
           as_vigil git -C "$vault" push github main >/dev/null 2>&1; then
-          PHASE2B_APPLIED+=("committed automatic fixes and pushed them to github")
+          ADOPTION_FIXES_APPLIED+=("committed automatic fixes and pushed them to github")
         else
           warn "automatic fixes committed, but push failed or no 'github' remote — please push manually."
         fi
@@ -346,14 +346,14 @@ phase2b_run() {
     fi
   fi
 
-  if [ "${#PHASE2B_APPLIED[@]}" -gt 0 ]; then
-    echo "Applied automatically (${#PHASE2B_APPLIED[@]}):"
-    for e in "${PHASE2B_APPLIED[@]}"; do echo "  ✓ ${e}"; done
+  if [ "${#ADOPTION_FIXES_APPLIED[@]}" -gt 0 ]; then
+    echo "Applied automatically (${#ADOPTION_FIXES_APPLIED[@]}):"
+    for e in "${ADOPTION_FIXES_APPLIED[@]}"; do echo "  ✓ ${e}"; done
   fi
-  if [ "${#PHASE2B_PENDING_AUTO[@]}" -gt 0 ]; then
-    echo "Would be applied (${#PHASE2B_PENDING_AUTO[@]}):"
-    for e in "${PHASE2B_PENDING_AUTO[@]}"; do echo "  ✓ ${e}"; done
-    PHASE2B_TOTAL_FINDINGS=$((PHASE2B_TOTAL_FINDINGS + ${#PHASE2B_PENDING_AUTO[@]}))
+  if [ "${#ADOPTION_FIXES_PENDING[@]}" -gt 0 ]; then
+    echo "Would be applied (${#ADOPTION_FIXES_PENDING[@]}):"
+    for e in "${ADOPTION_FIXES_PENDING[@]}"; do echo "  ✓ ${e}"; done
+    ADOPTION_TOTAL_FINDINGS=$((ADOPTION_TOTAL_FINDINGS + ${#ADOPTION_FIXES_PENDING[@]}))
   fi
 
   # ── Report-only findings (content, from mix vigil.vault_check) ─────────
@@ -409,7 +409,7 @@ phase2b_run() {
   if [ "$b_count" -gt 0 ]; then
     echo "Findings (${b_count}):"
     echo "$b_lines"
-    PHASE2B_TOTAL_FINDINGS=$((PHASE2B_TOTAL_FINDINGS + b_count))
+    ADOPTION_TOTAL_FINDINGS=$((ADOPTION_TOTAL_FINDINGS + b_count))
   fi
 
   # Chunk-id diff, always printed (even when empty)
@@ -479,14 +479,14 @@ if [ "$CHECK_ONLY" = "1" ]; then
   fi
 
   set +e
-  phase2b_run "$CHECK_VAULT" "check"
+  run_vault_adoption "$CHECK_VAULT" "check"
   RUN_RC=$?
   set -e
 
   if [ "$RUN_RC" -ne 0 ]; then
     exit 2
   fi
-  if [ "$PHASE2B_TOTAL_FINDINGS" -gt 0 ]; then
+  if [ "$ADOPTION_TOTAL_FINDINGS" -gt 0 ]; then
     exit 3
   fi
   exit 0
@@ -602,18 +602,18 @@ record_done "vault ready at ${VAULT} (remote: github)"
 if [ -n "$EXISTING_VAULT_URL" ]; then
   step "2b   Vault adoption"
 
-  PHASE2B_MODE="apply"
-  [ "$DRY_RUN" = "1" ] && PHASE2B_MODE="check"
+  ADOPTION_MODE="apply"
+  [ "$DRY_RUN" = "1" ] && ADOPTION_MODE="check"
 
-  if ! phase2b_run "$VAULT" "$PHASE2B_MODE"; then
+  if ! run_vault_adoption "$VAULT" "$ADOPTION_MODE"; then
     err "Vault adoption check failed."
     exit 2
   fi
 
-  if [ "${#PHASE2B_APPLIED[@]}" -gt 0 ]; then
-    record_done "vault adoption: applied ${#PHASE2B_APPLIED[@]} fix(es)"
+  if [ "${#ADOPTION_FIXES_APPLIED[@]}" -gt 0 ]; then
+    record_done "vault adoption: applied ${#ADOPTION_FIXES_APPLIED[@]} fix(es)"
   fi
-  if [ "${#PHASE2B_PENDING_AUTO[@]}" -gt 0 ] || [ "$PHASE2B_TOTAL_FINDINGS" -gt "${#PHASE2B_APPLIED[@]}" ]; then
+  if [ "${#ADOPTION_FIXES_PENDING[@]}" -gt 0 ] || [ "$ADOPTION_TOTAL_FINDINGS" -gt "${#ADOPTION_FIXES_APPLIED[@]}" ]; then
     record_next_step "review the vault adoption findings above — they do not block init.sh, but should be looked at before going live"
   fi
 fi

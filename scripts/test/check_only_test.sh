@@ -3,8 +3,8 @@
 # must be strictly read-only.
 #
 # Root cause it guards against: init.sh called
-# `phase2b_run "$CHECK_VAULT" "pruefen"` (German for "check"), but every
-# phase2b_fix_* function gates on the literal string "check". "pruefen" !=
+# `run_vault_adoption "$CHECK_VAULT" "pruefen"` (German for "check"), but every
+# fix_vault_* function gates on the literal string "check". "pruefen" !=
 # "check", so --check-only silently fell through to apply-mode behavior and
 # could modify/commit the vault it was supposed to only inspect.
 #
@@ -63,7 +63,7 @@ VAULT="$(mktemp -d)"
 trap 'rm -rf "$VAULT"' EXIT
 
 # Wrong permissions on purpose — init.sh's fix wants owner vigil:vigil, mode
-# 0750. phase2b_fix_permissions falls back to "?:?"/"?" wherever `stat -c`
+# 0750. fix_vault_permissions falls back to "?:?"/"?" wherever `stat -c`
 # isn't GNU stat (e.g. macOS), which still mismatches "vigil:vigil"/"750", so
 # the pending fix fires on every host this test runs on either way.
 chmod 0700 "$VAULT"
@@ -82,7 +82,7 @@ Text.
 EOF
 
 # "gear" has no matching key in _domains.yml — findings_json flags it with
-# "is unknown to the runtime", which phase2b_fix_domains_yml turns into a
+# "is unknown to the runtime", which fix_vault_domains_yml turns into a
 # pending/applied fix.
 cat >"${VAULT}/_domains.yml" <<'EOF'
 bike: ""
@@ -160,7 +160,7 @@ assert_contains "reports the git identity fix as pending, not applied" "$OUTPUT"
   "git config: set local user.name/user.email/commit.gpgsign"
 assert_contains "reports the permissions fix as pending, not applied" "$OUTPUT" \
   "permissions: chown -R vigil:vigil, chmod 0750"
-# phase2b_fix_domains_yml itself needs GNU grep -P (PCRE), same as production
+# fix_vault_domains_yml itself needs GNU grep -P (PCRE), same as production
 # (Debian). BSD grep (macOS) can't run that extraction at all, so skip this
 # one assertion there rather than report a false failure unrelated to
 # --check-only's read-only guarantee, which the other assertions already
