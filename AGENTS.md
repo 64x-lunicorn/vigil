@@ -10,4 +10,4 @@ Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `read
 
 ### Domain docs
 
-Single-context layout (`CONTEXT.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.
+Decisions and vocabulary live in `docs/design.md` — no `CONTEXT.md`, no `docs/adr/`. See `docs/agents/domain.md`.

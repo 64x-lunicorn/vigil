@@ -435,8 +435,9 @@ directory permissions.
 
 **Reported only** (never repaired automatically, never blocking): frontmatter
 problems, non-canonical filenames with a suggested `move_note`, the chunk-id
-migration risk, domains that exist only in the config, unpushed commits, notes
-past the consolidation threshold, an extra remote with unclear purpose.
+migration risk, domains that exist only in the config, unpushed commits,
+headings that have lost the blank line above them, notes past the
+consolidation threshold, an extra remote with unclear purpose.
 
 The same check runs standalone and strictly read-only:
 

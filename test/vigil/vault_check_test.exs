@@ -149,6 +149,74 @@ defmodule Vigil.VaultCheckTest do
     Text.
     """)
 
+    # One heading of three has lost the blank line above it — the shape a
+    # replace_section write left behind before the chunk boundary was fixed.
+    write.("domaina/missing-separator.md", """
+    ---
+    type: reference
+    ---
+    # Missing Separator
+
+    ## First
+    Text.
+    ## Second
+    More text.
+
+    ## Third
+    Fine.
+    """)
+
+    # The H1 sits directly under the frontmatter, with no blank line above it.
+    # The title creates no chunk and is never checked; its sections are intact.
+    write.("domaina/h1-without-separator.md", """
+    ---
+    type: reference
+    ---
+    # H1 Without Separator
+
+    ## Section
+    Text.
+
+    ## Another
+    More.
+    """)
+
+    # A title and nothing else: one heading, so nothing to separate.
+    write.("domaina/single-heading.md", """
+    ---
+    type: reference
+    ---
+    # Single Heading
+    Text without any section.
+    """)
+
+    # Title plus one section — two headings, so the gate opens and the missing
+    # blank line above the section is reported.
+    write.("domaina/one-section-no-separator.md", """
+    ---
+    type: reference
+    ---
+    # One Section
+    Intro.
+    ## Only Section
+    Text.
+    """)
+
+    # A section opening directly under the title, with no prose between them.
+    # Nothing precedes it but the H1, which creates no chunk — so the check has
+    # nothing to measure against and stays quiet.
+    write.("domaina/heading-under-title.md", """
+    ---
+    type: reference
+    ---
+    # Heading Under Title
+    ## First
+    Text.
+
+    ## Second
+    More.
+    """)
+
     on_exit(fn -> File.rm_rf!(tmp) end)
 
     %{vault: tmp}
@@ -160,7 +228,7 @@ defmodule Vigil.VaultCheckTest do
     assert report.overview.domains == 2
     assert "domaina" in report.overview.domain_names
     assert "domainb" in report.overview.domain_names
-    assert report.overview.notes == 15
+    assert report.overview.notes == 20
   end
 
   test "B1: missing frontmatter, missing/unknown type, event rules, oversized frontmatter", %{
@@ -217,7 +285,7 @@ defmodule Vigil.VaultCheckTest do
     vault: vault
   } do
     diff = VaultCheck.run(vault).b3_chunk_diff
-    assert diff.checked == 15
+    assert diff.checked == 20
 
     assert [
              %{
@@ -277,5 +345,44 @@ defmodule Vigil.VaultCheckTest do
     assert "This is a whole sentence." in by_path["domaina/sentence-heading.md"].sentence_headings
 
     refute Map.has_key?(by_path, "domaina/no-frontmatter.md")
+  end
+
+  test "B5: one finding per heading that lost the blank line above it", %{vault: vault} do
+    findings = VaultCheck.run(vault).b5_separators
+
+    assert [%{path: "domaina/missing-separator.md", heading: "Second", message: message}] =
+             Enum.filter(findings, &(&1.path == "domaina/missing-separator.md"))
+
+    assert message =~ "Second"
+    assert message =~ "blank line"
+  end
+
+  test "B5: the H1 title is never checked, and one heading is never reported", %{vault: vault} do
+    paths = VaultCheck.run(vault).b5_separators |> Enum.map(& &1.path)
+
+    refute "domaina/h1-without-separator.md" in paths
+    refute "domaina/single-heading.md" in paths
+  end
+
+  test "B5: a title plus one section is two headings, so the section is checked", %{vault: vault} do
+    findings = VaultCheck.run(vault).b5_separators
+
+    assert %{heading: "Only Section"} =
+             Enum.find(findings, &(&1.path == "domaina/one-section-no-separator.md"))
+  end
+
+  test "B5: a heading directly under the title has no chunk before it", %{vault: vault} do
+    paths = VaultCheck.run(vault).b5_separators |> Enum.map(& &1.path)
+
+    refute "domaina/heading-under-title.md" in paths
+  end
+
+  test "B5: notes whose separators are all in place produce nothing", %{vault: vault} do
+    paths = VaultCheck.run(vault).b5_separators |> Enum.map(& &1.path) |> Enum.uniq()
+
+    assert Enum.sort(paths) == [
+             "domaina/missing-separator.md",
+             "domaina/one-section-no-separator.md"
+           ]
   end
 end
