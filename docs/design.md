@@ -1,6 +1,6 @@
 # Design
 
-Why vigil is built the way it is. The [README](../README.md) covers what it
+Why vigil is built the way it is. The [user guide](guide.md) covers what it
 does and how to run it; this document covers the reasoning, the vault model,
 and the decisions that were deliberately *not* taken.
 
