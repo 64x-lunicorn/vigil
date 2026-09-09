@@ -1,0 +1,13 @@
+# Every file needs a reviewer. With "Require review from Code Owners" enabled
+# in the branch ruleset, this is what makes the review requirement real rather
+# than advisory.
+* @64x-lunicorn
+
+# The paths where a mistake is expensive and silent: these run as root on the
+# vault host, decide what reaches production, or define the quality gate
+# itself. Called out separately so a change here is never skimmed.
+/scripts/            @64x-lunicorn
+/deploy/             @64x-lunicorn
+/.github/workflows/  @64x-lunicorn
+/mix.exs             @64x-lunicorn
+/mix.lock            @64x-lunicorn

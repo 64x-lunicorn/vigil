@@ -26,3 +26,6 @@ vigil-*.tar
 *.env
 .tool-versions.local
 
+
+# Dialyzer PLTs (cached in CI, rebuilt locally on demand)
+/priv/plts/

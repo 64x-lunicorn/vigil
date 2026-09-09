@@ -1,0 +1,42 @@
+# Dependency updates arrive as pull requests, which means they arrive through
+# the same gate as everything else: tests, Dialyzer, the release smoke test.
+# An update that breaks the boot path is caught before it is merged instead of
+# during a deploy.
+#
+# The GitHub Actions ecosystem matters as much as Hex here: CI pins its actions
+# to commit SHAs, and without Dependabot those pins would quietly rot.
+version: 2
+
+updates:
+  - package-ecosystem: mix
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ready-for-agent
+    groups:
+      # One PR for the tooling that never ships to production, so review
+      # attention goes to the runtime dependencies.
+      dev-tooling:
+        dependency-type: development
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ready-for-agent
+    groups:
+      actions:
+        patterns:
+          - "*"

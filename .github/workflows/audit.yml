@@ -1,0 +1,85 @@
+# Green on main has an expiry date. Nothing in this repository has to change
+# for `main` to become vulnerable — a CVE published today does that on its
+# own, against code that passed every check last week.
+#
+# So the dependency audit runs on a schedule as well as on every PR, and files
+# an issue when it turns red, because a scheduled workflow failing quietly in
+# the Actions tab is indistinguishable from nobody looking.
+name: Scheduled audit
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      - name: Audit
+        id: audit
+        run: |
+          set -euo pipefail
+          {
+            echo "### mix hex.audit"
+            echo '```'
+            mix hex.audit 2>&1 || echo "hex.audit reported findings"
+            echo '```'
+            echo "### mix deps.audit"
+            echo '```'
+            mix deps.audit 2>&1 || echo "deps.audit reported findings"
+            echo '```'
+          } > audit.md
+          cat audit.md >> "$GITHUB_STEP_SUMMARY"
+          mix hex.audit
+          mix deps.audit
+
+      - name: Open an issue when the audit is red
+        if: failure() && steps.audit.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Dependency audit is failing on main"
+          # One open issue per problem, not one per night.
+          existing="$(gh issue list --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "Still failing as of ${RUN_URL}"
+            exit 0
+          fi
+          {
+            echo "The scheduled dependency audit failed against \`main\`."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            cat audit.md
+            echo
+            echo "Reproduce locally with \`mix hex.audit && mix deps.audit\`."
+          } > body.md
+          # Self-healing: a workflow that fails because a label is missing
+          # reports nothing at all, which is the one outcome worse than a CVE.
+          gh label create needs-triage \
+            --color BFD4F2 --description "Not yet triaged" --force >/dev/null 2>&1 || true
+          gh issue create --title "${title}" --body-file body.md --label needs-triage

@@ -52,22 +52,46 @@ Check formatting on changed Elixir files with
 `mix format --check-formatted path/to/changed_file.ex`.
 Replace the example paths with the actual files in your change.
 
+Before pushing, run the whole gate in one command:
+
+```bash
+mix ci
+```
+
+This is exactly what CI runs, in the same order: unused lock entries,
+formatting, compilation with warnings as errors, Credo, the dependency audits,
+the test suite and Dialyzer. The first Dialyzer run builds a PLT and takes a
+few minutes; later runs reuse it from `priv/plts/`.
+
 Tests run in `MIX_ENV=test`; do not run them with `MIX_ENV=prod` or source
 production environment files first. Test configuration pins vault and OAuth
 state paths independently of deployment environment variables.
 
-For changes to the deployment scripts, also run the existing shell tests:
+For changes to the deployment scripts, also run ShellCheck and the existing
+shell tests:
 
 ```bash
+shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
 ```
 
-These checks use a throwaway fixture vault and do not require root or a
+For changes to `mix.exs`, `config/`, the release or anything on the boot path,
+run the release smoke test. It builds a production release, boots it against a
+throwaway git-backed vault and exercises the read path, scope enforcement, the
+write-commit-push path and shutdown:
+
+```bash
+bash scripts/test/release_smoke.sh
+```
+
+These checks use throwaway fixture vaults and do not require root or a
 production installation. Do not run the root-level deployment workflow just
 to validate a contribution.
 
 Documentation-only changes do not need an application build or test run.
 Verify links, examples and documented behavior instead.
+
+The pipeline itself is described in [docs/ci-cd.md](docs/ci-cd.md).
 
 ## Writing a useful issue
 

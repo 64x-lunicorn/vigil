@@ -167,15 +167,19 @@ The repository includes a **Debian 13 + systemd** deployment path:
   [`init.sh`](scripts/init.sh).
 - **Configure:** use [`vigil.env.example`](deploy/vigil.env.example) for vault
   location, public OAuth URLs, timezone, language and access settings.
+- **Ship:** push a `vX.Y.Z` tag. CI re-runs the full gate against that commit
+  and publishes a checked, checksummed release with build provenance.
 - **Update:** [`update.sh`](scripts/update.sh) builds a release, checks it and
-  rolls back automatically if acceptance fails.
+  rolls back automatically if acceptance fails:
+  `sudo ./scripts/update.sh --to vX.Y.Z`.
 - **Inspect:** `sudo ./scripts/init.sh --check-only` checks an existing vault
   without modifying it.
 
 Start with the [deployment guide](docs/guide.md#deploy-on-a-server), then read
 [configuration](docs/guide.md#configuration),
-[operations](docs/guide.md#operations) and
-[troubleshooting](docs/guide.md#troubleshooting).
+[operations](docs/guide.md#operations),
+[troubleshooting](docs/guide.md#troubleshooting) and the
+[CI/CD pipeline](docs/ci-cd.md).
 
 ## Documentation
 
@@ -183,6 +187,7 @@ Start with the [deployment guide](docs/guide.md#deploy-on-a-server), then read
 | :--- | :--- |
 | [User guide](docs/guide.md) | Understand vault structure, tools, safe writes and day-to-day operations. |
 | [Design](docs/design.md) | Explore the architecture, trade-offs and deliberate non-goals. |
+| [CI/CD](docs/ci-cd.md) | Ship a version, see what guards `main` and releases, and run the same gate locally. |
 | [OAuth](docs/oauth.md) | Integrate a client or inspect the authentication flow. |
 | [Project history](docs/history.md) | Follow implementation decisions and lessons learned. |
 | [Contributing](CONTRIBUTING.md) | Set up development, run checks and submit a focused change. |
@@ -200,7 +205,8 @@ mix test
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for formatting, targeted tests and the
-separate shell-script checks. Please use synthetic vault data in reports and
+separate shell-script checks, and [docs/ci-cd.md](docs/ci-cd.md) for the full
+gate — `mix ci` runs it locally. Please use synthetic vault data in reports and
 tests, never personal notes or credentials.
 
 ## License and credits

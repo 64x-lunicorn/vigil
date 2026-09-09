@@ -1,0 +1,187 @@
+# Shipping, in one step: push a `v*` tag.
+#
+# The whole quality gate runs again against the tagged commit (not against
+# whatever was green on main a week ago), and only then is a release published
+# with a reproducible tarball, its checksums, the locked dependency inventory
+# and a signed build-provenance attestation.
+#
+# Deployment stays a deliberate operator action on the vault host:
+#
+#     sudo ./scripts/update.sh --to vX.Y.Z
+#
+# update.sh audits dependencies, runs the tests, builds, switches the symlink,
+# runs verify() and rolls back automatically if acceptance fails. Giving CI an
+# SSH key with root on the vault host would make a compromised workflow a
+# compromised vault; the one-line operator command is both simpler and safer.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # A tag is only worth publishing if it passes exactly the same gate as main.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish release
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # sign the provenance attestation
+      attestations: write # record it
+    steps:
+      - name: Refuse to run on anything but a tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${REF_TYPE}" != "tag" ]; then
+            echo "::error::Releases are cut from tags. Got ${REF_TYPE} '${REF_NAME}'."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        id: beam
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Fetch dependencies
+        env:
+          MIX_ENV: prod
+        run: mix deps.get --check-locked --only prod
+
+      # A tag that disagrees with mix.exs produces a release whose reported
+      # version is a lie, and `bin/vigil eval` on the server would then print
+      # something other than the tag the operator deployed.
+      - name: Verify the tag matches the version in mix.exs
+        id: version
+        env:
+          MIX_ENV: prod
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          project_version="$(mix run --no-start --no-deps-check -e 'IO.puts(Mix.Project.config()[:version])' | tail -1)"
+          tag_version="${REF_NAME#v}"
+          echo "mix.exs: ${project_version} / tag: ${tag_version}"
+          if [ "${project_version}" != "${tag_version}" ]; then
+            echo "::error::Tag ${REF_NAME} does not match mix.exs version ${project_version}. Bump mix.exs or retag."
+            exit 1
+          fi
+          echo "version=${project_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the production release
+        env:
+          MIX_ENV: prod
+        run: mix release --overwrite --path _release/vigil
+
+      - name: Package artifacts
+        id: package
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          OTP: ${{ steps.beam.outputs.otp-version }}
+        run: |
+          set -euo pipefail
+          name="vigil-${VERSION}-otp${OTP}-linux-x86_64"
+          mkdir -p dist
+          tar -czf "dist/${name}.tar.gz" -C _release/vigil .
+          # The locked dependency inventory travels with the artifact, so the
+          # exact third-party set of a shipped build can be reconstructed
+          # later without checking out the tag.
+          cp mix.lock "dist/${name}-mix.lock"
+          ( cd dist && sha256sum ./*.tar.gz ./*-mix.lock > "${name}-SHA256SUMS" )
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+          echo "tarball=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Proves the archive is complete and its ERTS runs: `eval` boots the VM
+      # and evaluates runtime.exs without starting the supervision tree, so it
+      # needs no vault and no credentials.
+      - name: Verify the packaged artifact
+        env:
+          TARBALL: ${{ steps.package.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/verify
+          tar -xzf "${TARBALL}" -C /tmp/verify
+          reported="$(/tmp/verify/bin/vigil eval 'IO.puts(Application.spec(:vigil, :vsn))' | tail -1)"
+          echo "release reports version: ${reported}"
+          test "${reported}" = "${{ steps.version.outputs.version }}"
+
+      # Cryptographic provenance: which workflow, from which commit, built
+      # this exact file. Verifiable with `gh attestation verify`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.package.outputs.tarball }}
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          NAME: ${{ steps.package.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Anything with a pre-release suffix (v1.2.0-rc.1) is published as a
+          # pre-release, so `update.sh --to` never picks it up by accident.
+          prerelease=""
+          case "${REF_NAME}" in
+            *-*) prerelease="--prerelease" ;;
+          esac
+
+          cat > notes.md <<EOF
+          ## Deploy
+
+          On the vault host:
+
+          \`\`\`bash
+          sudo ./scripts/update.sh --to ${REF_NAME}
+          \`\`\`
+
+          \`update.sh\` audits dependencies, runs the tests, builds the release,
+          switches over and runs \`verify()\` — rolling back automatically if
+          acceptance fails. Roll back manually at any time with
+          \`sudo ./scripts/update.sh --rollback\`.
+
+          ## Artifacts
+
+          The attached tarball is a prebuilt OTP release for linux-x86_64 on
+          OTP ${{ steps.beam.outputs.otp-version }}, for hosts without a build
+          toolchain. Verify it before use:
+
+          \`\`\`bash
+          sha256sum -c ${NAME}-SHA256SUMS
+          gh attestation verify ${NAME}.tar.gz --repo ${{ github.repository }}
+          \`\`\`
+
+          \`${NAME}-mix.lock\` is the exact dependency set this build was made from.
+
+          ---
+          EOF
+
+          gh release create "${REF_NAME}" \
+            --title "${REF_NAME}" \
+            --notes-file notes.md \
+            --generate-notes \
+            ${prerelease} \
+            dist/*
