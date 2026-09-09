@@ -44,7 +44,6 @@ defmodule Vigil.Index do
       :heading,
       :heading_path,
       :heading_line,
-      :body_start_line,
       :body_end_line,
       :file_title,
       :type,
@@ -56,6 +55,8 @@ defmodule Vigil.Index do
       :created_at,
       :updated_at
     ]
+
+    @type t :: %__MODULE__{}
   end
 
   defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}
@@ -565,7 +566,6 @@ defmodule Vigil.Index do
            heading: chunk.heading,
            heading_path: chunk.heading_path,
            heading_line: chunk.heading_line,
-           body_start_line: chunk.body_start_line,
            body_end_line: chunk.body_end_line,
            file_title: file.title,
            type: chunk.type,

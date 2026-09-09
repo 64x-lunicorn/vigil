@@ -204,10 +204,13 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # The line arithmetic behind each target — mid-file, at EOF, under an
+  # existing vs. a new heading — is Vigil.Vault.Edit's job now and is
+  # covered there (edit_test.exs) without git. Store still owns picking the
+  # target (append_target/3, via Index.chunk_by_heading), so one case per
+  # target stays here as the wiring smoke test.
   describe "append" do
-    test "appends under an existing heading, at the end of that section, not at EOF", %{
-      vault: vault
-    } do
+    test "appends under an existing heading, at the end of that section" do
       assert {:ok, _} =
                Store.append(%{
                  path: "bike/via-carolina.md",
@@ -215,8 +218,8 @@ defmodule Vigil.StoreTest do
                  content: "Extra: repair kit."
                })
 
-      raw = File.read!(Path.join(vault, "bike/via-carolina.md"))
-      assert raw =~ "Frame bag, no saddle bag.\nExtra: repair kit."
+      {:ok, result} = Store.read("bike/via-carolina.md#gear", false)
+      assert result.body =~ "Extra: repair kit."
     end
 
     test "appends a new section when the heading does not exist yet" do
@@ -238,44 +241,16 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # Which lines move, and content-shape validation, are Vigil.Vault.Edit's
+  # and Vigil.Vault.Policy's jobs now and are covered there (edit_test.exs,
+  # policy_test.exs) without git. This is the wiring smoke test.
   describe "replace_section" do
-    test "replaces only the target chunk's body; rest of file is byte-identical", %{vault: vault} do
-      before_content = File.read!(Path.join(vault, "bike/via-carolina.md"))
-
+    test "replaces the target chunk's body and the index picks it up" do
       assert {:ok, _} =
                Store.replace_section("bike/via-carolina.md#fueling", "New fueling strategy.")
 
-      after_content = File.read!(Path.join(vault, "bike/via-carolina.md"))
-
-      assert after_content =~ "New fueling strategy."
-      assert after_content =~ "### Second Half"
-      assert after_content =~ "525mg caffeine, concentrated."
-      assert after_content =~ "## Gear"
-
-      before_lines = String.split(before_content, "\n")
-      after_lines = String.split(after_content, "\n")
-      assert Enum.take(before_lines, 5) == Enum.take(after_lines, 5)
-    end
-
-    test "content with a heading of any covered rank is rejected" do
-      assert {:error, msg} = Store.replace_section("bike/via-carolina.md#fueling", "## New\ntext")
-      assert msg == "content must not contain headings (## through ####)"
-    end
-
-    test "id without a fragment is rejected" do
-      assert {:error, msg} = Store.replace_section("bike/via-carolina.md", "text")
-      assert msg == "id must contain a fragment: path#heading-slug"
-    end
-
-    # The section is resolved through the index before the replacement content
-    # is judged, so an unknown id is reported as an unknown id — not as a
-    # content problem, and not as a missing file.
-    test "an unknown section id is reported as not found, whatever the content" do
-      assert {:error, "Not found: bike/via-carolina.md#nope"} =
-               Store.replace_section("bike/via-carolina.md#nope", "## New\ntext")
-
-      assert {:error, "Not found: bike/ghost.md#nope"} =
-               Store.replace_section("bike/ghost.md#nope", "text")
+      {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
+      assert result.body =~ "New fueling strategy."
     end
   end
 
@@ -518,26 +493,12 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # Which lines are dropped is Vigil.Vault.Edit's job now and is covered
+  # there (edit_test.exs) without git. This is the wiring smoke test.
   describe "delete_section" do
-    test "removes heading and body; rest of the file stays intact", %{vault: vault} do
+    test "removes the section; the index no longer resolves it" do
       assert {:ok, _} = Store.delete_section("bike/via-carolina.md#gear")
-
-      raw = File.read!(Path.join(vault, "bike/via-carolina.md"))
-      refute raw =~ "## Gear"
-      refute raw =~ "Frame bag"
-      assert raw =~ "## Fueling"
-
       assert {:error, _} = Store.read("bike/via-carolina.md#gear", false)
-    end
-
-    test "id without a fragment is rejected" do
-      assert {:error, msg} = Store.delete_section("bike/via-carolina.md")
-      assert msg == "id must contain a fragment: path#heading-slug"
-    end
-
-    test "an unknown section id is reported as not found" do
-      assert {:error, "Not found: bike/via-carolina.md#nope"} =
-               Store.delete_section("bike/via-carolina.md#nope")
     end
   end
 

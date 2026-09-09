@@ -162,7 +162,8 @@ during a search or a read.
 A chunk starts at every heading of level `##` to `####` and ends before the
 next heading of equal or higher rank. A `###` heading inside a `##` section is
 its **own** chunk, not a nested inclusion. Every body line belongs to exactly
-one chunk.
+one chunk — including the blank separator line before a following heading,
+which belongs to the *preceding* chunk's body, not the one it introduces.
 
 **The H1 creates no chunk** — it is the title of the file. Text between the H1
 and the first `##` (or text in a file with no headings at all) becomes a chunk
