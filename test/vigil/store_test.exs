@@ -355,6 +355,47 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  describe "snapshot" do
+    test "active_ids and near mirror active_event_ids/near_summary for the same instant" do
+      during_event = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+
+      snapshot = Store.snapshot(during_event)
+
+      assert snapshot.active_ids == Store.active_event_ids(during_event)
+      assert snapshot.near == Store.near_summary(during_event)
+    end
+
+    test "titles cover every event note, including one no longer active" do
+      before_event = ~U[2026-07-09 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+      after_event = ~U[2026-07-13 12:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+
+      before_snapshot = Store.snapshot(before_event)
+      assert before_snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
+      refute MapSet.member?(before_snapshot.active_ids, "bike/via-carolina.md")
+
+      after_snapshot = Store.snapshot(after_event)
+      refute MapSet.member?(after_snapshot.active_ids, "bike/via-carolina.md")
+      refute Enum.any?(after_snapshot.near.active, &(&1.id == "bike/via-carolina.md"))
+      assert after_snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
+    end
+
+    test "a vault with no events at all returns empty ids, near lists, and titles", %{
+      vault: vault
+    } do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: ["bike"], git_remote: "origin"})
+
+      now = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+      snapshot = Store.snapshot(now)
+
+      assert snapshot == %{
+               active_ids: MapSet.new(),
+               near: %{active: [], upcoming: []},
+               titles: %{}
+             }
+    end
+  end
+
   describe "path security" do
     test "path traversal and absolute paths are rejected without touching disk" do
       for bad_path <- ["../../etc/passwd", "/etc/passwd", "bike/../../x.md"] do

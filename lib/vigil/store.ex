@@ -42,6 +42,7 @@ defmodule Vigil.Store do
   def active_event_ids(now), do: GenServer.call(__MODULE__, {:active_event_ids, now})
   def file_title(path), do: GenServer.call(__MODULE__, {:file_title, path})
   def near_summary(now), do: GenServer.call(__MODULE__, {:near_summary, now})
+  def snapshot(now), do: GenServer.call(__MODULE__, {:snapshot, now})
   def reload(), do: GenServer.call(__MODULE__, :reload)
   def domain_names(), do: GenServer.call(__MODULE__, :domain_names)
   def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
@@ -146,6 +147,10 @@ defmodule Vigil.Store do
 
   def handle_call({:near_summary, now}, _from, state) do
     {:reply, do_near_summary(now), state}
+  end
+
+  def handle_call({:snapshot, now}, _from, state) do
+    {:reply, do_snapshot(now), state}
   end
 
   def handle_call({:file_title, path}, _from, state) do
@@ -1365,13 +1370,16 @@ defmodule Vigil.Store do
     end
   end
 
-  ## current()
+  ## current() / snapshot()
+
+  defp event_files do
+    :ets.tab2list(@files_table)
+    |> Enum.map(fn {_path, file} -> file end)
+    |> Enum.filter(&(&1.type == :event))
+  end
 
   defp do_current(now) do
-    events =
-      :ets.tab2list(@files_table)
-      |> Enum.map(fn {_path, file} -> file end)
-      |> Enum.filter(&(&1.type == :event))
+    events = event_files()
 
     active =
       events
@@ -1420,31 +1428,40 @@ defmodule Vigil.Store do
     }
   end
 
-  defp do_near_summary(now) do
-    events =
-      :ets.tab2list(@files_table)
-      |> Enum.map(fn {_path, file} -> file end)
-      |> Enum.filter(&(&1.type == :event))
+  @near_horizon_seconds 7 * 86_400
 
+  # Events active at `now`, soonest-ending first — the shared basis for
+  # active_ids, near_summary's `active`, and snapshot's `active`/`active_ids`.
+  defp active_events(events, now) do
+    events
+    |> Enum.filter(fn e ->
+      DateTime.compare(now, e.starts) != :lt and DateTime.compare(now, e.ends) != :gt
+    end)
+    |> Enum.sort_by(& &1.ends, DateTime)
+  end
+
+  # Events starting within `horizon_seconds` of `now`, soonest-first.
+  defp upcoming_events(events, now, horizon_seconds) do
+    cutoff = DateTime.add(now, horizon_seconds, :second)
+
+    events
+    |> Enum.filter(fn e ->
+      DateTime.compare(e.starts, now) == :gt and DateTime.compare(e.starts, cutoff) != :gt
+    end)
+    |> Enum.sort_by(& &1.starts, DateTime)
+  end
+
+  # %{active:, upcoming:} over the near horizon — shared by near_summary/1
+  # and snapshot/1 so the two can never drift apart.
+  defp near_summary_view(events, now) do
     active =
-      events
-      |> Enum.filter(fn e ->
-        DateTime.compare(now, e.starts) != :lt and DateTime.compare(now, e.ends) != :gt
-      end)
-      |> Enum.sort_by(& &1.ends, DateTime)
+      active_events(events, now)
       |> Enum.map(fn e ->
         %{id: e.path, title: e.title, ends_in: Vigil.TimeFmt.duration(DateTime.diff(e.ends, now))}
       end)
 
-    horizon_cutoff = DateTime.add(now, 7 * 86_400, :second)
-
     upcoming =
-      events
-      |> Enum.filter(fn e ->
-        DateTime.compare(e.starts, now) == :gt and
-          DateTime.compare(e.starts, horizon_cutoff) != :gt
-      end)
-      |> Enum.sort_by(& &1.starts, DateTime)
+      upcoming_events(events, now, @near_horizon_seconds)
       |> Enum.map(fn e ->
         %{
           id: e.path,
@@ -1456,15 +1473,25 @@ defmodule Vigil.Store do
     %{active: active, upcoming: upcoming}
   end
 
+  defp do_near_summary(now), do: near_summary_view(event_files(), now)
+
   defp do_active_event_ids(now) do
-    :ets.tab2list(@files_table)
-    |> Enum.map(fn {_path, file} -> file end)
-    |> Enum.filter(fn f ->
-      f.type == :event and DateTime.compare(now, f.starts) != :lt and
-        DateTime.compare(now, f.ends) != :gt
-    end)
-    |> Enum.map(& &1.path)
-    |> MapSet.new()
+    event_files() |> active_events(now) |> Enum.map(& &1.path) |> MapSet.new()
+  end
+
+  # The time envelope's single query: which events are active, what's near
+  # (active and upcoming, 7-day horizon — same as near_summary/2), and a
+  # title for every event note. The title map covers events outside the near
+  # horizon too, so an event that has just dropped out of active_ids (and so
+  # out of `near`) can still be named, e.g. "X now finished".
+  defp do_snapshot(now) do
+    events = event_files()
+
+    active_ids = events |> active_events(now) |> Enum.map(& &1.path) |> MapSet.new()
+    near = near_summary_view(events, now)
+    titles = Map.new(events, &{&1.path, &1.title})
+
+    %{active_ids: active_ids, near: near, titles: titles}
   end
 
   ## Lint (AP-5)
