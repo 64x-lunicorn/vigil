@@ -9,7 +9,7 @@ defmodule Vigil.MCP.Envelope.Decision do
 
   @stale_after 24 * 3600
 
-  @weekdays {"Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"}
+  @weekdays {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 
   @doc """
   Envelope for the `current` tool: always `_t`, but counts as the session's
@@ -66,13 +66,11 @@ defmodule Vigil.MCP.Envelope.Decision do
     cond do
       near.active != [] ->
         event = List.first(near.active)
-        title = Path.basename(event.id, ".md")
-        "#{title} noch #{event.ends_in}"
+        "#{event.title} #{event.ends_in} left"
 
       near.upcoming != [] ->
         event = List.first(near.upcoming)
-        title = Path.basename(event.id, ".md")
-        "#{title} in #{event.starts_in}"
+        "#{event.title} in #{event.starts_in}"
 
       true ->
         nil

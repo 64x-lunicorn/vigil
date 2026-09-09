@@ -24,7 +24,7 @@ defmodule Vigil.MCP.EnvelopeTest do
 
   test "first call gets '_', second unchanged call gets '_t'" do
     assert %{"_" => line} = Envelope.for_call("session-1", @now, snapshot())
-    assert line =~ ~r/^(Mo|Di|Mi|Do|Fr|Sa|So) \d{2}\.\d{2}\. \d{2}:\d{2}/
+    assert line =~ ~r/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}\.\d{2}\. \d{2}:\d{2}/
 
     assert %{"_t" => time} = Envelope.for_call("session-1", @later, snapshot())
     assert time =~ ~r/^\d{2}:\d{2}$/

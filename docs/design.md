@@ -304,9 +304,10 @@ Every tool response carries exactly one of these fields:
 
 | Field | When | Content |
 |---|---|---|
-| `_` | first response of the session | `"Thu 09.07. 11:20 \| via-carolina in 28h"` |
-| `_t` | every later response, nothing changed | `"11:47"` |
-| `_!` | an event changed phase during the session | `"via-carolina now active"` |
+| `_` | first response of the session, a near event is active | `"Wed 09.09. 07:12 \| Via Carolina 28h left"` |
+| `_` | first response of the session, a near event is upcoming | `"Wed 09.09. 07:12 \| Via Carolina in 28h"` |
+| `_t` | every later response, nothing changed | `"07:12"` |
+| `_!` | an event changed phase during the session | `"Via Carolina now active"` |
 
 It sits at the top level of the JSON the assistant reads — not in `_meta`, not
 as a separate content block. The target is under 10 tokens per response.

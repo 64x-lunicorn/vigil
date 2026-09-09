@@ -27,23 +27,31 @@ defmodule Vigil.MCP.Envelope.DecisionTest do
       {result, _state} = Decision.for_call(nil, @now, snapshot())
 
       assert %{"_" => line} = result
-      assert line =~ ~r/^(Mo|Di|Mi|Do|Fr|Sa|So) \d{2}\.\d{2}\. \d{2}:\d{2}$/
+      assert line =~ ~r/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}\.\d{2}\. \d{2}:\d{2}$/
     end
 
-    test "an active near event is summarized in German with the filename stem" do
-      near = %{active: [%{id: "bike/via-carolina.md", ends_in: "28h"}], upcoming: []}
+    test "an active near event is summarized in English with its note title, ends_in 'left'" do
+      near = %{
+        active: [%{id: "bike/via-carolina.md", title: "Via Carolina", ends_in: "28h"}],
+        upcoming: []
+      }
+
       {result, _state} = Decision.for_call(nil, @now, snapshot(near: near))
 
       assert %{"_" => line} = result
-      assert line =~ "| via-carolina noch 28h"
+      assert line =~ "| Via Carolina 28h left"
     end
 
-    test "an upcoming near event is summarized with 'in'" do
-      near = %{active: [], upcoming: [%{id: "bike/via-carolina.md", starts_in: "28h"}]}
+    test "an upcoming near event is summarized with its note title and 'in'" do
+      near = %{
+        active: [],
+        upcoming: [%{id: "bike/via-carolina.md", title: "Via Carolina", starts_in: "28h"}]
+      }
+
       {result, _state} = Decision.for_call(nil, @now, snapshot(near: near))
 
       assert %{"_" => line} = result
-      assert line =~ "| via-carolina in 28h"
+      assert line =~ "| Via Carolina in 28h"
     end
 
     test "new state reflects the snapshot's active_ids and now" do
