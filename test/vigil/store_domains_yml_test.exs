@@ -63,7 +63,11 @@ defmodule Vigil.StoreDomainsYmlTest do
     assert Store.search(%{query: "tires"}) != []
   end
 
-  test "key without folder and folder without key both log warnings, and content reaches instructions" do
+  # Which mismatches are reported, and how they are worded, is Vigil.Vault.Domains'
+  # job now and is covered there (domains_test.exs) without a vault or a process.
+  # This is the wiring smoke test: the Store reaches the parser, logs what comes
+  # back, and serves the file's text to the instructions.
+  test "drift between _domains.yml and the vault reaches the log, and the file's text reaches the instructions" do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
@@ -73,7 +77,6 @@ defmodule Vigil.StoreDomainsYmlTest do
       end)
 
     assert log =~ "key 'phantom' has no matching directory"
-    assert log =~ "domain 'garden' has no entry"
 
     assert Store.instructions_domains_text() =~ "bike:"
   end
