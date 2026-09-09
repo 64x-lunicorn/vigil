@@ -320,19 +320,12 @@ defmodule Vigil.StoreTest do
   end
 
   describe "current" do
-    test "classifies active/upcoming/recently_past relative to an injected now" do
-      before_event = ~U[2026-07-09 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+    test "returns the window Vigil.Events computes from the indexed event files" do
       during_event = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
-      after_event = ~U[2026-07-13 12:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
-      r1 = Store.current(before_event)
-      assert Enum.any?(r1.upcoming, &(&1.id == "bike/via-carolina.md"))
+      result = Store.current(during_event)
 
-      r2 = Store.current(during_event)
-      assert Enum.any?(r2.active, &(&1.id == "bike/via-carolina.md"))
-
-      r3 = Store.current(after_event)
-      assert Enum.any?(r3.recently_past, &(&1.id == "bike/via-carolina.md"))
+      assert Enum.any?(result.active, &(&1.id == "bike/via-carolina.md"))
     end
 
     test "invalid event (ends < starts) never appears in current" do
@@ -356,27 +349,14 @@ defmodule Vigil.StoreTest do
   end
 
   describe "snapshot" do
-    test "active_ids matches the active event, and near carries the same event" do
+    test "returns the window Vigil.Events computes from the indexed event files" do
       during_event = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
       snapshot = Store.snapshot(during_event)
 
       assert MapSet.member?(snapshot.active_ids, "bike/via-carolina.md")
       assert Enum.any?(snapshot.near.active, &(&1.id == "bike/via-carolina.md"))
-    end
-
-    test "titles cover every event note, including one no longer active" do
-      before_event = ~U[2026-07-09 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
-      after_event = ~U[2026-07-13 12:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
-
-      before_snapshot = Store.snapshot(before_event)
-      assert before_snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
-      refute MapSet.member?(before_snapshot.active_ids, "bike/via-carolina.md")
-
-      after_snapshot = Store.snapshot(after_event)
-      refute MapSet.member?(after_snapshot.active_ids, "bike/via-carolina.md")
-      refute Enum.any?(after_snapshot.near.active, &(&1.id == "bike/via-carolina.md"))
-      assert after_snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
+      assert snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
     end
 
     test "a vault with no events at all returns empty ids, near lists, and titles", %{
@@ -720,29 +700,22 @@ defmodule Vigil.StoreTest do
       assert Store.search(%{query: "Failing Test"}) == []
     end
 
-    test "skill_list, skill_read with/without .md, and error case" do
+    # Thin end-to-end wiring check: skill_list/skill_read/skill_write reach
+    # Vigil.Skills through the GenServer and the write still serializes
+    # through Store's single mailbox. Full behavioral coverage (name
+    # validation, frontmatter validation, SkillKey token) lives in
+    # test/vigil/skills_test.exs.
+    test "skill_list, skill_read, and skill_write work end-to-end through the GenServer" do
       [skill] = Store.skill_list()
       assert skill.name == "tdd"
-      assert skill.description =~ "test coverage"
 
       {:ok, %{content: c1}} = Store.skill_read("tdd")
       {:ok, %{content: c2}} = Store.skill_read("tdd.md")
       assert c1 == c2
+      assert c1 =~ "SkillKey:"
 
       assert {:error, msg} = Store.skill_read("does-not-exist")
       assert msg =~ "tdd"
-    end
-
-    test "skill_read's error case reveals the current SkillKey (AP9a §9.2 bootstrap fix)" do
-      assert {:error, msg} = Store.skill_read("does-not-exist")
-      assert msg =~ "SkillKey:"
-
-      [_, token] = Regex.run(~r/SkillKey: ([0-9a-f]+)/, msg)
-      assert token == Vigil.SkillKey.current(Vigil.SkillKey.config())
-    end
-
-    test "skill_write requires name and description in frontmatter, commits but does not reparse" do
-      assert {:error, _} = Store.skill_write("broken", "---\nname: broken\n---\n# x")
 
       assert {:ok, %{name: "new", pushed: true}} =
                Store.skill_write(
@@ -752,7 +725,6 @@ defmodule Vigil.StoreTest do
 
       {:ok, %{content: content}} = Store.skill_read("new")
       assert content =~ "1. one"
-
       assert Store.search(%{query: "one"}) == []
     end
   end
@@ -892,22 +864,6 @@ defmodule Vigil.StoreTest do
   end
 
   describe "links" do
-    test "resolves a same-folder basename link" do
-      {:ok, result} = Store.links("bike/via-carolina.md", :out, 1)
-
-      assert Enum.any?(
-               result.outgoing,
-               &(&1.target == "bike/terra-speed.md" and &1.status == "ok")
-             )
-    end
-
-    test "resolves a cross-domain basename link via vault-wide fallback" do
-      {:ok, result} = Store.links("training/note-without-anything.md", :out, 1)
-
-      assert [%{target: "bike/via-carolina.md", status: "ok"}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
-    end
-
     test "a link to an existing note with a nonexistent fragment names the fragment, not just the note" do
       assert {:ok, _} =
                Store.create(%{
@@ -971,41 +927,6 @@ defmodule Vigil.StoreTest do
       assert Enum.sort(candidates) == ["bike/doppelganger.md", "training/doppelganger.md"]
     end
 
-    test "an explicit path link resolves independent of ambiguity" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/doppelganger.md",
-                 type: "reference",
-                 content: "# Doppelganger\nA."
-               })
-
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "garden/references-by-path.md",
-                 type: "reference",
-                 content: "# References By Path\nSee [Doppelganger](bike/doppelganger.md)."
-               })
-
-      {:ok, result} = Store.links("garden/references-by-path.md", :out, 1)
-
-      assert [%{target: "bike/doppelganger.md", status: "ok"}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
-    end
-
-    test "a fragment link resolves to the specific chunk" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "garden/references-a-section.md",
-                 type: "reference",
-                 content: "# References A Section\nSee [[via-carolina#fueling]]."
-               })
-
-      {:ok, result} = Store.links("garden/references-a-section.md", :out, 1)
-
-      assert [%{target: "bike/via-carolina.md#fueling", status: "ok"}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
-    end
-
     test "incoming direction finds a link from another folder" do
       {:ok, result} = Store.links("bike/via-carolina.md", :in, 1)
       assert Enum.any?(result.incoming, &(&1.source == "training/note-without-anything.md"))
@@ -1059,61 +980,6 @@ defmodule Vigil.StoreTest do
       assert {:error, msg} = Store.delete_note(%{path: "bike/terra-speed.md"})
       assert msg =~ "incoming references"
       assert msg =~ "bike/via-carolina.md"
-    end
-
-    test "[[Painpoints]], [[painpoints]] and [[PAINPOINTS]] all resolve to the same note" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/painpoints.md",
-                 type: "reference",
-                 content: "# Painpoints\ntext"
-               })
-
-      for {target, n} <- Enum.with_index(["Painpoints", "painpoints", "PAINPOINTS"]) do
-        path = "garden/verweist-#{n}.md"
-
-        assert {:ok, _} =
-                 Store.create(%{
-                   path: path,
-                   type: "reference",
-                   content: "# References #{n}\nSee [[#{target}]].",
-                   force: true
-                 })
-
-        {:ok, result} = Store.links(path, :out, 1)
-
-        assert [%{target: "bike/painpoints.md", status: "ok"}] =
-                 Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
-      end
-    end
-
-    test "same-folder match wins even when an ambiguous sibling exists elsewhere" do
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/doppelganger.md",
-                 type: "reference",
-                 content: "# Doppelganger\nA."
-               })
-
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "training/doppelganger.md",
-                 type: "reference",
-                 content: "# Doppelganger\nB.",
-                 force: true
-               })
-
-      assert {:ok, _} =
-               Store.create(%{
-                 path: "bike/references-same-folder.md",
-                 type: "reference",
-                 content: "# References Same Folder\nSee [[doppelganger]]."
-               })
-
-      {:ok, result} = Store.links("bike/references-same-folder.md", :out, 1)
-
-      assert [%{target: "bike/doppelganger.md", status: "ok"}] =
-               Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
     end
 
     test "removing a link from a note's content clears it from the target's incoming links (no ghost entry)" do

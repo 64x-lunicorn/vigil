@@ -3,7 +3,19 @@ defmodule Vigil.Store do
   use GenServer
   require Logger
 
-  alias Vigil.{Clock, Markdown, Parser, Git, Search, SkillKey, Slug, VaultDiscovery}
+  alias Vigil.{
+    Clock,
+    Events,
+    LinkIndex,
+    Markdown,
+    Parser,
+    Git,
+    Search,
+    Skills,
+    Slug,
+    VaultDiscovery
+  }
+
   alias Vigil.Vault.{Facts, Policy, Rules}
 
   @chunks_table :vigil_chunks
@@ -285,7 +297,9 @@ defmodule Vigil.Store do
   # delete) instead of being maintained incrementally. At the vault sizes
   # vigil targets this is cheap, and it structurally rules out the "ghost
   # entry after delete/rename" class of bug that incremental maintenance
-  # across two tables would invite.
+  # across two tables would invite. Resolution itself lives in
+  # Vigil.LinkIndex, a pure module — this just supplies it the current
+  # files/chunks and bulk-inserts what comes back.
 
   defp rebuild_links_index do
     :ets.delete_all_objects(@links_out_table)
@@ -293,141 +307,11 @@ defmodule Vigil.Store do
 
     all_files = :ets.tab2list(@files_table) |> Enum.map(fn {_path, f} -> f end)
     all_chunks = :ets.tab2list(@chunks_table) |> Enum.map(fn {_id, c} -> c end)
-    index = build_resolution_index(all_files)
 
-    Enum.each(all_chunks, fn chunk ->
-      Enum.each(chunk.raw_links, fn raw_link ->
-        resolved = resolve_link(raw_link, chunk.path, index)
-        :ets.insert(@links_out_table, {chunk.id, resolved})
-        record_incoming(chunk.id, resolved)
-      end)
-    end)
-  end
+    %{out: out, in: in_} = LinkIndex.build(all_files, all_chunks)
 
-  # Built once per rebuild rather than once per link. `slugify/1` is
-  # expensive (NFC, transliteration, several regex passes). Without this
-  # index every link would re-slugify every filename — O(links × files) — and
-  # since the index is rebuilt on EVERY write, that would be the hottest path
-  # in the server. Measured: ~14 ms per link at 1000 files, i.e. ~14 s per
-  # write at 1000 links, far beyond GenServer.call's 5 s timeout. With the
-  # index: one O(files) slugify pass, then map lookups.
-  defp build_resolution_index(all_files) do
-    %{
-      paths: MapSet.new(all_files, & &1.path),
-      by_slug:
-        Enum.group_by(all_files, fn f ->
-          case Slug.slugify(Path.basename(f.path, ".md")) do
-            {:ok, s} -> s
-            {:error, _} -> nil
-          end
-        end)
-        |> Map.delete(nil)
-    }
-  end
-
-  defp record_incoming(source_chunk_id, %{status: :ok, target_note: note, target_chunk: nil}) do
-    :ets.insert(@links_in_table, {note, source_chunk_id})
-  end
-
-  defp record_incoming(source_chunk_id, %{status: :ok, target_note: note, target_chunk: chunk_id}) do
-    :ets.insert(@links_in_table, {note, source_chunk_id})
-    :ets.insert(@links_in_table, {chunk_id, source_chunk_id})
-  end
-
-  defp record_incoming(_source_chunk_id, _resolved), do: :ok
-
-  # resolve_link(%{raw:, fragment:}, quell_pfad, alle_dateien)
-  #   → %{raw:, fragment:, status: :ok | :ambiguous | :broken, target_note:,
-  #        target_chunk:, candidates:}
-  # If raw contains a "/" it is treated as a vault-relative path, otherwise
-  # as a basename resolved through the cascade same folder → same domain →
-  # vault-wide.
-  defp resolve_link(%{raw: raw, fragment: fragment}, source_path, index) do
-    base = %{raw: raw, fragment: fragment, candidates: []}
-
-    case resolve_target_note(raw, source_path, index) do
-      {:ok, note_path} ->
-        resolve_fragment(base, note_path, fragment)
-
-      {:ambiguous, candidates} ->
-        Map.merge(base, %{
-          status: :ambiguous,
-          target_note: nil,
-          target_chunk: nil,
-          candidates: candidates
-        })
-
-      :broken ->
-        Map.merge(base, %{status: :broken, target_note: nil, target_chunk: nil})
-    end
-  end
-
-  defp resolve_target_note(raw, source_path, index) do
-    if String.contains?(raw, "/") do
-      target_path = ensure_md_extension(raw)
-
-      if MapSet.member?(index.paths, target_path) do
-        {:ok, target_path}
-      else
-        :broken
-      end
-    else
-      resolve_basename(raw, source_path, index)
-    end
-  end
-
-  # Same folder first, then same domain, then vault-wide — each stage only
-  # if the previous one came up empty. If a stage finds more than one match
-  # the result is ambiguous with exactly those candidates, not with those of
-  # later stages.
-  defp resolve_basename(raw, source_path, index) do
-    case Slug.slugify(raw) do
-      {:ok, target_slug} ->
-        candidates = Map.get(index.by_slug, target_slug, [])
-
-        source_dir = Path.dirname(source_path)
-        source_domain = domain_of(source_path)
-
-        same_folder = Enum.filter(candidates, &(Path.dirname(&1.path) == source_dir))
-        same_domain = Enum.filter(candidates, &(&1.domain == source_domain))
-
-        cond do
-          same_folder != [] -> pick_candidate(same_folder)
-          same_domain != [] -> pick_candidate(same_domain)
-          true -> pick_candidate(candidates)
-        end
-
-      {:error, _} ->
-        :broken
-    end
-  end
-
-  defp pick_candidate([]), do: :broken
-  defp pick_candidate([one]), do: {:ok, one.path}
-  defp pick_candidate(many), do: {:ambiguous, Enum.map(many, & &1.path)}
-
-  defp ensure_md_extension(path) do
-    if String.ends_with?(path, ".md"), do: path, else: path <> ".md"
-  end
-
-  defp resolve_fragment(base, note_path, nil) do
-    Map.merge(base, %{status: :ok, target_note: note_path, target_chunk: nil})
-  end
-
-  defp resolve_fragment(base, note_path, fragment) do
-    case Slug.slugify(fragment) do
-      {:ok, fragment_slug} ->
-        chunk_id = "#{note_path}##{fragment_slug}"
-
-        if :ets.member(@chunks_table, chunk_id) do
-          Map.merge(base, %{status: :ok, target_note: note_path, target_chunk: chunk_id})
-        else
-          Map.merge(base, %{status: :broken, target_note: nil, target_chunk: nil})
-        end
-
-      {:error, _} ->
-        Map.merge(base, %{status: :broken, target_note: nil, target_chunk: nil})
-    end
+    :ets.insert(@links_out_table, out)
+    :ets.insert(@links_in_table, in_)
   end
 
   defp load_domains_yml(vault_path) do
@@ -1350,6 +1234,9 @@ defmodule Vigil.Store do
   end
 
   ## current() / snapshot()
+  #
+  # Window computation itself lives in Vigil.Events, a pure module — this
+  # just supplies it the current event files and the resolved `now`.
 
   defp event_files do
     :ets.tab2list(@files_table)
@@ -1357,115 +1244,9 @@ defmodule Vigil.Store do
     |> Enum.filter(&(&1.type == :event))
   end
 
-  defp do_current(now) do
-    events = event_files()
+  defp do_current(now), do: Events.current(event_files(), now)
 
-    active =
-      events
-      |> Enum.filter(fn e ->
-        DateTime.compare(now, e.starts) != :lt and DateTime.compare(now, e.ends) != :gt
-      end)
-      |> Enum.sort_by(& &1.ends, DateTime)
-      |> Enum.map(fn e ->
-        %{id: e.path, title: e.title, ends_in: Vigil.TimeFmt.duration(DateTime.diff(e.ends, now))}
-      end)
-
-    upcoming_cutoff = DateTime.add(now, 30 * 86_400, :second)
-
-    upcoming =
-      events
-      |> Enum.filter(fn e ->
-        DateTime.compare(e.starts, now) == :gt and
-          DateTime.compare(e.starts, upcoming_cutoff) != :gt
-      end)
-      |> Enum.sort_by(& &1.starts, DateTime)
-      |> Enum.map(fn e ->
-        %{
-          id: e.path,
-          title: e.title,
-          starts_in: Vigil.TimeFmt.duration(DateTime.diff(e.starts, now))
-        }
-      end)
-
-    past_cutoff = DateTime.add(now, -7 * 86_400, :second)
-
-    recently_past =
-      events
-      |> Enum.filter(fn e ->
-        DateTime.compare(e.ends, now) == :lt and DateTime.compare(e.ends, past_cutoff) != :lt
-      end)
-      |> Enum.sort_by(& &1.ends, {:desc, DateTime})
-      |> Enum.map(fn e ->
-        %{id: e.path, title: e.title, ended: Vigil.TimeFmt.ago(DateTime.diff(now, e.ends))}
-      end)
-
-    %{
-      now: DateTime.to_iso8601(now),
-      active: active,
-      upcoming: upcoming,
-      recently_past: recently_past
-    }
-  end
-
-  @near_horizon_seconds 7 * 86_400
-
-  # Events active at `now`, soonest-ending first — the shared basis for
-  # near_summary_view's `active` and snapshot's `active`/`active_ids`.
-  defp active_events(events, now) do
-    events
-    |> Enum.filter(fn e ->
-      DateTime.compare(now, e.starts) != :lt and DateTime.compare(now, e.ends) != :gt
-    end)
-    |> Enum.sort_by(& &1.ends, DateTime)
-  end
-
-  # Events starting within `horizon_seconds` of `now`, soonest-first.
-  defp upcoming_events(events, now, horizon_seconds) do
-    cutoff = DateTime.add(now, horizon_seconds, :second)
-
-    events
-    |> Enum.filter(fn e ->
-      DateTime.compare(e.starts, now) == :gt and DateTime.compare(e.starts, cutoff) != :gt
-    end)
-    |> Enum.sort_by(& &1.starts, DateTime)
-  end
-
-  # %{active:, upcoming:} over the near horizon — feeds snapshot/1, the time
-  # envelope's single query.
-  defp near_summary_view(events, now) do
-    active =
-      active_events(events, now)
-      |> Enum.map(fn e ->
-        %{id: e.path, title: e.title, ends_in: Vigil.TimeFmt.duration(DateTime.diff(e.ends, now))}
-      end)
-
-    upcoming =
-      upcoming_events(events, now, @near_horizon_seconds)
-      |> Enum.map(fn e ->
-        %{
-          id: e.path,
-          title: e.title,
-          starts_in: Vigil.TimeFmt.duration(DateTime.diff(e.starts, now))
-        }
-      end)
-
-    %{active: active, upcoming: upcoming}
-  end
-
-  # The time envelope's single query: which events are active, what's near
-  # (active and upcoming, 7-day horizon), and a title for every event note.
-  # The title map covers events outside the near
-  # horizon too, so an event that has just dropped out of active_ids (and so
-  # out of `near`) can still be named, e.g. "X now finished".
-  defp do_snapshot(now) do
-    events = event_files()
-
-    active_ids = events |> active_events(now) |> Enum.map(& &1.path) |> MapSet.new()
-    near = near_summary_view(events, now)
-    titles = Map.new(events, &{&1.path, &1.title})
-
-    %{active_ids: active_ids, near: near, titles: titles}
-  end
+  defp do_snapshot(now), do: Events.snapshot(event_files(), now)
 
   ## Lint (AP-5)
 
@@ -1524,117 +1305,19 @@ defmodule Vigil.Store do
   end
 
   ## Skills
+  #
+  # skills/ is a separate concern from notes (docs/design.md, "skills/ — one
+  # repository, two systems"); the subsystem itself lives in Vigil.Skills, a
+  # standalone module. Store.skill_list/0, skill_read/1, skill_write/2 stay
+  # public GenServer calls, not delegated directly — skill writes must
+  # still commit and push through the same single-writer mailbox as note
+  # writes (docs/design.md, "One writer").
 
-  defp do_skill_list(state) do
-    dir = Path.join(state.vault_path, "skills")
+  defp do_skill_list(state), do: Skills.list(state.vault_path)
 
-    if File.dir?(dir) do
-      dir
-      |> File.ls!()
-      |> Enum.filter(&String.ends_with?(&1, ".md"))
-      |> Enum.map(fn filename ->
-        name = Path.basename(filename, ".md")
-        description = skill_description(Path.join(dir, filename))
-        %{name: name, description: description}
-      end)
-    else
-      []
-    end
-  end
-
-  defp skill_description(abs_path) do
-    with {:ok, content} <- File.read(abs_path),
-         {:ok, yaml_text, _body, _offset} <- Markdown.frontmatter(content),
-         {:ok, %{"description" => desc}} <- YamlElixir.read_from_string(yaml_text) do
-      desc
-    else
-      _ -> nil
-    end
-  end
-
-  defp normalize_skill_name(name) do
-    name
-    |> String.trim()
-    |> String.replace_suffix(".md", "")
-  end
-
-  defp valid_skill_name?(name), do: Regex.match?(~r/^[a-z0-9_-]+$/, name)
-
-  defp do_skill_read(name, state) do
-    normalized = normalize_skill_name(name)
-
-    if valid_skill_name?(normalized) do
-      abs_path = Path.join([state.vault_path, "skills", "#{normalized}.md"])
-
-      case File.read(abs_path) do
-        {:ok, content} ->
-          token = SkillKey.current(SkillKey.config())
-
-          prefixed =
-            "SkillKey: #{token} (valid until the next full hour)\n\n" <> content
-
-          {:ok, %{name: normalized, content: prefixed}}
-
-        {:error, _} ->
-          # The key is a pure HMAC over secret + time and does not depend on
-          # any skill existing, so it is handed out in the not-found case too.
-          # Otherwise this deadlocks bootstrapping: skill_write itself
-          # requires a SkillKey, but a fresh vault has no conventions skill to
-          # read one from.
-          names = do_skill_list(state) |> Enum.map(& &1.name) |> Enum.join(", ")
-          token = SkillKey.current(SkillKey.config())
-
-          {:error,
-           "Skill not found: #{normalized}. Available: #{names}. SkillKey: #{token} (valid until the next full hour)."}
-      end
-    else
-      {:error, "Invalid path"}
-    end
-  end
+  defp do_skill_read(name, state), do: Skills.read(name, state.vault_path)
 
   defp do_skill_write(name, content, state) do
-    normalized = normalize_skill_name(name)
-
-    with true <- valid_skill_name?(normalized),
-         :ok <- validate_skill_frontmatter(content) do
-      abs_path = Path.join([state.vault_path, "skills", "#{normalized}.md"])
-      rel_path = "skills/#{normalized}.md"
-
-      with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
-           :ok <- safe_write(abs_path, normalize_trailing_newline(content)) do
-        case Git.add_commit(state.vault_path, rel_path, "skill_write: #{rel_path}") do
-          {:ok, _commit_meta} ->
-            case Git.push(state.vault_path, state.git_remote) do
-              :ok ->
-                {:ok, %{name: normalized, pushed: true}}
-
-              {:error, out} ->
-                {:error, "Skill saved locally, but push failed: #{out}"}
-            end
-
-          {:error, out} ->
-            {:error, "git commit failed: #{out}"}
-        end
-      end
-    else
-      false -> {:error, "Invalid path"}
-      {:error, msg} -> {:error, msg}
-    end
-  end
-
-  defp validate_skill_frontmatter(content) do
-    case Markdown.frontmatter(content) do
-      {:ok, yaml_text, _body, _offset} ->
-        case YamlElixir.read_from_string(yaml_text) do
-          {:ok, %{"name" => _, "description" => _}} -> :ok
-          _ -> {:error, "Frontmatter must contain 'name' and 'description'"}
-        end
-
-      :unterminated ->
-        {:error, "Unterminated frontmatter"}
-
-      :none ->
-        {:error, "content must start with frontmatter"}
-    end
+    Skills.write(name, content, %{vault_path: state.vault_path, git_remote: state.git_remote})
   end
 end
