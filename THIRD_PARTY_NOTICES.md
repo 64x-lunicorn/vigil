@@ -38,7 +38,7 @@ you redistribute a build.
 
 | Package | Locked version | Declared license |
 | :--- | :--- | :--- |
-| [bandit](https://hex.pm/packages/bandit/1.12.4) | 1.12.4 | MIT |
+| [bandit](https://hex.pm/packages/bandit/1.12.5) | 1.12.5 | MIT |
 | [hpax](https://hex.pm/packages/hpax/1.0.4) | 1.0.4 | Apache-2.0 |
 | [jason](https://hex.pm/packages/jason/1.4.5) | 1.4.5 | Apache-2.0 |
 | [mime](https://hex.pm/packages/mime/2.0.7) | 2.0.7 | Apache-2.0 |

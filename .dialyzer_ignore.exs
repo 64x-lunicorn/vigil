@@ -13,14 +13,5 @@
   # never returns `:nomatch`. The branch is dead defensive code, not a
   # behavioural bug: the live branch returns `length([]) == 0` for "no match",
   # which is the same answer. Harmless to keep, worth removing in a cleanup PR.
-  {"lib/vigil/search.ex", :pattern_match},
-
-  # `Logger.configure(level: :none)` is valid and documented at runtime
-  # (verified: it returns :ok and `Logger.level()` reports `:none` afterwards),
-  # but `:none` is missing from Elixir's own `configure_opts()` typespec.
-  # Dialyzer therefore calls the contract broken and cascades that into
-  # `no_return` for run/1 and `unused_fun` for check/1. Upstream spec gap.
-  {"lib/mix/tasks/vigil.vault_check.ex", :call},
-  {"lib/mix/tasks/vigil.vault_check.ex", :no_return},
-  {"lib/mix/tasks/vigil.vault_check.ex", :unused_fun}
+  {"lib/vigil/search.ex", :pattern_match}
 ]

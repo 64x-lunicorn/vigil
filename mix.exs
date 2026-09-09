@@ -28,7 +28,7 @@ defmodule Vigil.MixProject do
 
   defp deps do
     [
-      {:bandit, "~> 1.5"},
+      {:bandit, "~> 1.12.5"},
       {:jason, "~> 1.4"},
       {:yaml_elixir, "~> 2.9"},
       {:tz, "~> 0.28"},

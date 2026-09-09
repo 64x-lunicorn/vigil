@@ -189,6 +189,15 @@ jobs:
           # over git.
           persist-credentials: false
 
+      # check_only_test.sh drives init.sh, which runs `mix` against the vault
+      # adoption check. Without a BEAM on PATH the script aborts before it
+      # reaches the assertions, and the failure looks like a regression in
+      # init.sh rather than a missing toolchain.
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
       # These scripts run as root on the vault host. A shell bug here is a
       # production incident, not a lint warning — hence a blocking check.
       - name: ShellCheck
