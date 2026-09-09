@@ -43,6 +43,26 @@ defmodule Vigil.StoreDomainsYmlTest do
     assert Store.domain_names() == []
   end
 
+  test "unreadable _domains.yml logs a warning and instructions_domains_text falls back to empty" do
+    vault = Vigil.FixtureVault.build()
+    on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+
+    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+
+    path = Path.join(vault, "_domains.yml")
+    File.chmod!(path, 0o000)
+
+    log =
+      capture_log(fn ->
+        assert Store.instructions_domains_text() == ""
+      end)
+
+    File.chmod!(path, 0o644)
+
+    assert log =~ "cannot read _domains.yml"
+    assert Store.search(%{query: "tires"}) != []
+  end
+
   test "key without folder and folder without key both log warnings, and content reaches instructions" do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
