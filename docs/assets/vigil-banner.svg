@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">vigil - memory you can own</title>
+  <desc id="desc">A dark violet banner with a connected network of notes. Plain Markdown, thoughtful context, and Git-backed history.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1200" y2="340" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101321"/>
+      <stop offset="1" stop-color="#26203F"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="776" y1="80" x2="1090" y2="270" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B8A4FF"/>
+      <stop offset="1" stop-color="#7DE5CB"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#8C82AE" opacity=".18"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="340" rx="24" fill="url(#background)"/>
+  <rect width="1200" height="340" rx="24" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1198" height="338" rx="23" stroke="#625582" stroke-opacity=".35"/>
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <rect x="60" y="48" width="215" height="28" rx="14" fill="#B8A4FF" fill-opacity=".12" stroke="#B8A4FF" stroke-opacity=".3"/>
+    <circle cx="78" cy="62" r="4" fill="#7DE5CB"/>
+    <text x="91" y="67" fill="#D8CEFF" font-size="12" font-weight="600" letter-spacing="1.5">SELF-HOSTED MEMORY</text>
+    <text x="57" y="171" fill="#F8F7FF" font-size="88" font-weight="700" letter-spacing="-5">vigil<tspan fill="#7DE5CB">.</tspan></text>
+    <text x="60" y="218" fill="#DAD5E9" font-size="27" font-weight="400">Memory you can own.</text>
+    <text x="60" y="271" fill="#B6AEC9" font-size="15" letter-spacing=".5">PLAIN MARKDOWN / PRECISE CONTEXT / GIT HISTORY</text>
+  </g>
+  <g stroke="url(#accent)" stroke-width="2" stroke-linecap="round">
+    <path d="M856 165L1010 94M856 165L1040 249M856 165L750 262" opacity=".65"/>
+    <path d="M1010 94L1040 249" stroke-dasharray="4 8" opacity=".35"/>
+    <circle cx="856" cy="165" r="77" stroke-opacity=".13"/>
+    <circle cx="856" cy="165" r="110" stroke-opacity=".08"/>
+  </g>
+  <g fill="#211D35" stroke="#9681D0" stroke-width="1.5">
+    <rect x="811" y="116" width="90" height="98" rx="16"/>
+    <rect x="982" y="62" width="56" height="64" rx="12"/>
+    <rect x="1012" y="217" width="56" height="64" rx="12"/>
+    <rect x="722" y="230" width="56" height="64" rx="12"/>
+  </g>
+  <g stroke="#D4C7FF" stroke-width="4" stroke-linecap="round">
+    <path d="M832 145H863M832 163H880M832 181H871"/>
+  </g>
+  <g stroke="#B5A2E3" stroke-width="3" stroke-linecap="round">
+    <path d="M996 84H1023M996 96H1014M1026 239H1053M1026 251H1045M736 252H763M736 264H755"/>
+  </g>
+  <circle cx="901" cy="116" r="8" fill="#7DE5CB"/>
+  <circle cx="778" cy="294" r="4" fill="#B8A4FF"/>
+  <circle cx="1096" cy="171" r="4" fill="#7DE5CB" opacity=".6"/>
+</svg>
