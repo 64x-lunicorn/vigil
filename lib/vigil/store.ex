@@ -3,7 +3,7 @@ defmodule Vigil.Store do
   use GenServer
   require Logger
 
-  alias Vigil.{Markdown, Parser, Git, Search, SkillKey, Slug, VaultDiscovery}
+  alias Vigil.{Clock, Markdown, Parser, Git, Search, SkillKey, Slug, VaultDiscovery}
   alias Vigil.Vault.{Facts, Policy, Rules}
 
   @chunks_table :vigil_chunks
@@ -133,11 +133,11 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:lint, now}, _from, state) do
-    {:reply, do_lint(now || DateTime.now!(tz())), state}
+    {:reply, do_lint(now || Clock.now()), state}
   end
 
   def handle_call({:current, now}, _from, state) do
-    {:reply, do_current(now || DateTime.now!(tz())), state}
+    {:reply, do_current(now || Clock.now()), state}
   end
 
   def handle_call({:active_event_ids, now}, _from, state) do
@@ -182,8 +182,6 @@ defmodule Vigil.Store do
   def handle_call({:skill_write, name, content}, _from, state) do
     {:reply, do_skill_write(name, content, state), state}
   end
-
-  defp tz, do: Application.get_env(:vigil, :tz, "Europe/Berlin")
 
   defp reload_result(:ok), do: %{reloaded: true}
   defp reload_result({:error, reason}), do: %{reloaded: true, pull_failed: reason}
@@ -883,7 +881,7 @@ defmodule Vigil.Store do
       exclude: state.exclude,
       project_dirs: project_dirs(state),
       naming: naming_rules(state),
-      today: today(),
+      today: Clock.today(),
       heading_count: Keyword.get(opts, :heading_count, 0),
       backlinks: Keyword.get(opts, :backlinks, []),
       chunk: Keyword.get(opts, :chunk),
@@ -893,15 +891,6 @@ defmodule Vigil.Store do
         do_search(%{query: query, domain: domain, limit: 25}, nil)
       end
     }
-  end
-
-  # Never DateTime.now!/1 here: this runs on every write, and README's
-  # "the write path is crash-safe by construction" must survive a bad :tz.
-  defp today do
-    case DateTime.now(tz()) do
-      {:ok, now} -> DateTime.to_date(now)
-      _ -> Date.utc_today()
-    end
   end
 
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
