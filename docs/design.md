@@ -277,6 +277,25 @@ one write including a complete index rebuild ~115 ms.
 
 ---
 
+## MCP tool schemas are authoritative
+
+`Vigil.MCP.Tools` declares each tool once — name, description, the `write`
+flag, and its parameters' names, types and required-ness — in a single table.
+The JSON schema published on `tools/list` and the argument validation
+`dispatch/2` runs on `tools/call` are both generated from that table, so they
+cannot drift out of agreement the way hand-written twins do.
+
+Every declared parameter is validated against the schema the server itself
+publishes. A violation — a wrong type, an off-enum value, a missing or empty
+required parameter — is a tool error naming what was expected, not a
+substituted default. A caller who claims `type: "bogus"` gets told so, rather
+than receiving unfiltered results it believes were filtered. Undeclared
+parameters are ignored: the schemas do not set `additionalProperties: false`,
+and rejecting extras a client legitimately sent would fail callers over
+something the server never declared.
+
+---
+
 ## The write path
 
 Every write — `create`, `append`, `replace_section`, `rewrite_note`,
