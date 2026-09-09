@@ -738,7 +738,7 @@ defmodule Vigil.StoreTest do
       assert msg =~ "SkillKey:"
 
       [_, token] = Regex.run(~r/SkillKey: ([0-9a-f]+)/, msg)
-      assert token == Vigil.SkillKey.current(Vigil.SkillKey.secret())
+      assert token == Vigil.SkillKey.current(Vigil.SkillKey.config())
     end
 
     test "skill_write requires name and description in frontmatter, commits but does not reparse" do

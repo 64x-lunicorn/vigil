@@ -272,7 +272,7 @@ defmodule Vigil.MCP.Tools do
   defp require_skill_key(args) do
     case Map.get(args, "skill_key") do
       key when is_binary(key) and key != "" ->
-        if Vigil.SkillKey.valid?(key, Vigil.SkillKey.secret()) do
+        if Vigil.SkillKey.valid?(key, Vigil.SkillKey.config()) do
           :ok
         else
           skill_key_error()

@@ -171,7 +171,7 @@ defmodule Vigil.MCP.ServerTest do
   end
 
   test "tool errors set isError and return a plain-text message", %{token: token} do
-    key = Vigil.SkillKey.current(Vigil.SkillKey.secret())
+    key = Vigil.SkillKey.current(Vigil.SkillKey.config())
 
     conn =
       post(
@@ -227,7 +227,7 @@ defmodule Vigil.MCP.ServerTest do
     end
 
     test "a write tool with a fresh skill_key succeeds", %{token: token, vault: vault} do
-      key = Vigil.SkillKey.current(Vigil.SkillKey.secret())
+      key = Vigil.SkillKey.current(Vigil.SkillKey.config())
 
       conn =
         post(
@@ -257,7 +257,7 @@ defmodule Vigil.MCP.ServerTest do
 
     test "a skill_key from two hours ago is rejected", %{token: token} do
       stale_key =
-        Vigil.SkillKey.current(Vigil.SkillKey.secret(), System.system_time(:second) - 7200)
+        Vigil.SkillKey.current(Vigil.SkillKey.config(), System.system_time(:second) - 7200)
 
       conn =
         post(
@@ -307,7 +307,7 @@ defmodule Vigil.MCP.ServerTest do
       token: token,
       vault: vault
     } do
-      key = Vigil.SkillKey.current(Vigil.SkillKey.secret())
+      key = Vigil.SkillKey.current(Vigil.SkillKey.config())
 
       no_key =
         post(

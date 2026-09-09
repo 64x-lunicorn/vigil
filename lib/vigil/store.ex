@@ -1568,7 +1568,7 @@ defmodule Vigil.Store do
 
       case File.read(abs_path) do
         {:ok, content} ->
-          token = SkillKey.current(SkillKey.secret())
+          token = SkillKey.current(SkillKey.config())
 
           prefixed =
             "SkillKey: #{token} (valid until the next full hour)\n\n" <> content
@@ -1582,7 +1582,7 @@ defmodule Vigil.Store do
           # requires a SkillKey, but a fresh vault has no conventions skill to
           # read one from.
           names = do_skill_list(state) |> Enum.map(& &1.name) |> Enum.join(", ")
-          token = SkillKey.current(SkillKey.secret())
+          token = SkillKey.current(SkillKey.config())
 
           {:error,
            "Skill not found: #{normalized}. Available: #{names}. SkillKey: #{token} (valid until the next full hour)."}
