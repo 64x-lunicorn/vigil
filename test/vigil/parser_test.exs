@@ -202,6 +202,30 @@ defmodule Vigil.ParserTest do
       assert chunk.body_end_line == 6
     end
 
+    # The first H1 is consumed as the note title and joins no body, so in a
+    # note whose H1 sits below its first ##, counting lines from the heading
+    # lands one short of the body's real last line.
+    test "an H1 inside a section is skipped without shifting the body's end line" do
+      content = """
+      ---
+      type: reference
+      ---
+      ## First
+      body one
+      # Late Title
+      body two
+
+      ## Second
+      Second body.
+      """
+
+      {:ok, file} = Parser.parse("x/late-title.md", content, %{})
+      first = Enum.find(file.chunks, &(&1.id == "x/late-title.md#first"))
+
+      assert first.body == "body one\nbody two"
+      assert first.body_end_line == 7
+    end
+
     test "a section whose body is nothing but blank lines ends on its own heading line" do
       content = """
       ---

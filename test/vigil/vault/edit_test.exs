@@ -313,6 +313,75 @@ defmodule Vigil.Vault.EditTest do
              """
     end
 
+    test "content that ends in a blank line does not add a second separator" do
+      chunk = parsed_chunk(@note, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.replace_body(@note, chunk, "Replaced.\n\n")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             # Notes
+
+             ## First
+             Replaced.
+
+             ## Second
+             Second body.
+             """
+    end
+
+    test "appending content that ends in a blank line does not add one either" do
+      chunk = parsed_chunk(@note, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.append(@note, {:section, chunk}, "More.\n\n")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             # Notes
+
+             ## First
+             First body.
+             More.
+
+             ## Second
+             Second body.
+             """
+    end
+
+    test "an H1 below the first heading does not shift the splice" do
+      content = """
+      ---
+      type: reference
+      ---
+      ## First
+      body one
+      # Late Title
+      body two
+
+      ## Second
+      Second body.
+      """
+
+      chunk = parsed_chunk(content, "x/notes.md#first")
+
+      assert {:ok, result} = Edit.replace_body(content, chunk, "NEW.")
+
+      assert result == """
+             ---
+             type: reference
+             ---
+             ## First
+             NEW.
+
+             ## Second
+             Second body.
+             """
+    end
+
     test "editing the last section of a note that ended in blank lines still ends in one newline" do
       content = @note <> "\n\n"
       chunk = parsed_chunk(content, "x/notes.md#second")

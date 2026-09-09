@@ -361,6 +361,12 @@ lines its caller never named, to repair damage the chunk model itself caused.
 Moving the boundary removes the cause instead, and it stops shipping a stray
 blank line to the assistant on every mid-file `read` (principle 4).
 
+The same rule binds the body a write *puts in*: content the caller ended with
+a blank line loses it, because a body is content lines only. This is not the
+rejected normalisation — nothing already in the file is rewritten. It is
+`Vigil.Vault.Edit` writing a body the next parse will give back unchanged
+instead of one with a second separator in front of the following heading.
+
 **Deleting a section takes its separator with it.** `delete_section` removes the
 heading, the body, and exactly one following blank line — the slot the section
 occupied. Not every following blank line: a wider gap someone set deliberately
