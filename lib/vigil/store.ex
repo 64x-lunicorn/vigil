@@ -217,6 +217,13 @@ defmodule Vigil.Store do
   # Vigil.Vault.Domains'. A broken or missing file costs at most the naming
   # rules — the vault still loads (docs/design.md, "_domains.yml is a
   # description, not configuration").
+  #
+  # First of two readers of _domains.yml, and deliberately the slower one: what
+  # this parses feeds the write policy, so it is refreshed at startup and on
+  # `reload` only and never shifts underneath a write. domains_yaml_raw/1 reads
+  # the same file per MCP `initialize`; that divergence is the decision recorded
+  # in docs/design.md, "_domains.yml is a description, not configuration", not
+  # an oversight.
   defp load_domains(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
@@ -240,6 +247,12 @@ defmodule Vigil.Store do
     Enum.each(warnings, fn warning -> Logger.warning(Domains.format(warning)) end)
   end
 
+  # Second reader of _domains.yml, with its own freshness policy on purpose: the
+  # raw text goes into the MCP `instructions` and is re-read from disk on every
+  # `initialize`, so an edited file reaches the next session without a `reload`
+  # (docs/design.md, "_domains.yml is a description, not configuration"). An
+  # absent file is already warned about at load, so only a file that exists and
+  # still cannot be read is worth a warning here.
   defp domains_yaml_raw(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
