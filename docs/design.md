@@ -159,11 +159,13 @@ during a search or a read.
 
 ## Chunking
 
-A chunk starts at every heading of level `##` to `####` and ends before the
-next heading of equal or higher rank. A `###` heading inside a `##` section is
-its **own** chunk, not a nested inclusion. Every body line belongs to exactly
-one chunk — including the blank separator line before a following heading,
-which belongs to the *preceding* chunk's body, not the one it introduces.
+A chunk starts at every heading of level `##` to `####` and ends at the last
+non-blank line before the next heading of equal or higher rank. A `###` heading
+inside a `##` section is its **own** chunk, not a nested inclusion. Every
+*content* line belongs to exactly one chunk; the blank lines separating two
+sections belong to **neither**. They are punctuation between chunks, not the
+tail of the body above them — see "How a file is written" for why the boundary
+sits there.
 
 **The H1 creates no chunk** — it is the title of the file. Text between the H1
 and the first `##` (or text in a file with no headings at all) becomes a chunk
@@ -329,6 +331,44 @@ write.
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
 write must not cost read access to everything else.
+
+---
+
+## How a file is written
+
+Vigil is the only writer (principle 2), so the shape of a file on disk is
+vigil's to define. Three rules, and they hold on every write path.
+
+**A file ends with exactly one newline.** `Vigil.Markdown` owns this rule and is
+the only place that states it. The whole-file writes (`create`, `rewrite_note`,
+`update_frontmatter`) and the chunk-shaped writes in `Vigil.Vault.Edit` both go
+through it, and so does `Vigil.Skills` — skills are never notes, which is
+precisely why the rule cannot live in a chunk-editing module. A rule needed by a
+path that must not depend on the owning module does not belong to that module.
+One consequence, and it is intended: editing the last section of an imported
+note that ended in blank lines drops them. There is no second writer whose
+intent those lines could encode.
+
+**The separator between two sections belongs to no chunk.** A write that
+replaces a section's body cannot delete the blank line before the next heading,
+because that line was never inside the range it was handed. This is why the
+chunk boundary stops at the last non-blank line rather than at the line before
+the next heading: under the earlier boundary every `replace_section` on a
+mid-file section silently ate one blank line, and with a single writer nothing
+would ever have put it back. The alternative — have `Vigil.Vault.Edit`
+normalise the file afterwards — was rejected. It would make `Edit` rewrite
+lines its caller never named, to repair damage the chunk model itself caused.
+Moving the boundary removes the cause instead, and it stops shipping a stray
+blank line to the assistant on every mid-file `read` (principle 4).
+
+**Deleting a section takes its separator with it.** `delete_section` removes the
+heading, the body, and exactly one following blank line — the slot the section
+occupied. Not every following blank line: a wider gap someone set deliberately
+survives, one line narrower.
+
+These rules say nothing about repairing notes written before them. Files that
+already lost a separator stay as they are; principle 5 says the server reports
+and does not fix on its own initiative.
 
 ---
 

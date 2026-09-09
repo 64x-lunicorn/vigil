@@ -99,7 +99,7 @@ defmodule Vigil.Skills do
       rel_path = "skills/#{normalized}.md"
 
       with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
-           :ok <- safe_write(abs_path, normalize_trailing_newline(content)) do
+           :ok <- safe_write(abs_path, Markdown.normalize_trailing_newline(content)) do
         case Git.add_commit(vault_path, rel_path, "skill_write: #{rel_path}") do
           {:ok, _commit_meta} ->
             case Git.push(vault_path, git_remote) do
@@ -134,10 +134,6 @@ defmodule Vigil.Skills do
       :none ->
         {:error, "content must start with frontmatter"}
     end
-  end
-
-  defp normalize_trailing_newline(content) do
-    String.trim_trailing(content, "\n") <> "\n"
   end
 
   defp safe_mkdir_p(path) do

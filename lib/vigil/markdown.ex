@@ -17,6 +17,15 @@ defmodule Vigil.Markdown do
 
   @frontmatter_marker "---"
 
+  @doc """
+  `content` ending in exactly one `\\n` — the shape of every file vigil writes.
+
+  The rule lives here rather than in the module that writes notes because the
+  path that writes *skills* must not depend on note editing: skills are never
+  notes (docs/design.md, "How a file is written").
+  """
+  def normalize_trailing_newline(content), do: String.trim_trailing(content, "\n") <> "\n"
+
   @doc "Splits content into lines, dropping the single trailing empty line a file ends with."
   def split_lines(content) do
     lines = String.split(content, "\n")

@@ -312,7 +312,7 @@ defmodule Vigil.Store do
     with {:ok, resolved} <- Policy.check(:create, params, facts(state)),
          :ok <- create_project_dir(state, resolved.create_project_dir) do
       frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
-      full_content = normalize_trailing_newline(frontmatter <> content)
+      full_content = Markdown.normalize_trailing_newline(frontmatter <> content)
 
       {result, new_state} =
         write_and_commit(
@@ -355,10 +355,6 @@ defmodule Vigil.Store do
     |> Enum.find(&(String.trim(&1) != ""))
     |> to_string()
     |> String.slice(0, 50)
-  end
-
-  defp normalize_trailing_newline(content) do
-    String.trim_trailing(content, "\n") <> "\n"
   end
 
   ## append
@@ -417,7 +413,7 @@ defmodule Vigil.Store do
          {:ok, original} <- read_existing_file(abs_path) do
       case Markdown.split_frontmatter(original) do
         {:ok, frontmatter, _old_body} ->
-          new_content = normalize_trailing_newline(frontmatter <> content)
+          new_content = Markdown.normalize_trailing_newline(frontmatter <> content)
           write_and_commit(state, path, abs_path, new_content, "rewrite_note: #{path}")
 
         {:error, msg} ->
@@ -466,7 +462,7 @@ defmodule Vigil.Store do
       case Markdown.split_frontmatter(original) do
         {:ok, _old_frontmatter, body} ->
           new_frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
-          new_content = normalize_trailing_newline(new_frontmatter <> body)
+          new_content = Markdown.normalize_trailing_newline(new_frontmatter <> body)
           write_and_commit(state, path, abs_path, new_content, "update_frontmatter: #{path}")
 
         {:error, msg} ->

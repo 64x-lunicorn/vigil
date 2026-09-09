@@ -159,8 +159,6 @@ defmodule Vigil.Parser do
   @inline_code_re ~r/`[^`\n]*`/
 
   defp build_chunks(path, {lines, offset}, type, starts, ends, created_at, updated_at) do
-    total = length(lines)
-
     numbered =
       lines
       |> Enum.with_index(1)
@@ -185,8 +183,7 @@ defmodule Vigil.Parser do
           heading = Markdown.heading(line) ->
             {level, text} = heading
 
-            acc =
-              close_current(acc, line_no - 1, path, type, starts, ends, created_at, updated_at)
+            acc = close_current(acc, path, type, starts, ends, created_at, updated_at)
 
             new_stack =
               acc.stack
@@ -225,7 +222,7 @@ defmodule Vigil.Parser do
       end)
 
     # finalize trailing chunk (heading-based or none)
-    state = close_current(state, total + offset, path, type, starts, ends, created_at, updated_at)
+    state = close_current(state, path, type, starts, ends, created_at, updated_at)
 
     pre = Map.get(state, :pre)
     pre_chunk = build_pre_chunk(path, pre, type, starts, ends, created_at, updated_at)
@@ -239,14 +236,19 @@ defmodule Vigil.Parser do
     {state.title, chunks}
   end
 
-  defp close_current(%{current: nil} = acc, _end_line, _p, _t, _s, _e, _ca, _ua), do: acc
+  defp close_current(%{current: nil} = acc, _p, _t, _s, _e, _ca, _ua), do: acc
 
-  defp close_current(acc, end_line, path, type, starts, ends, created_at, updated_at) do
+  defp close_current(acc, path, type, starts, ends, created_at, updated_at) do
     %{heading: heading, heading_path: heading_path, heading_line: heading_line, lines: rev_lines} =
       acc.current
 
-    body_lines = Enum.reverse(rev_lines)
+    body_lines = rev_lines |> Enum.reverse() |> drop_trailing_blanks()
     body = Enum.join(body_lines, "\n")
+
+    # The body ends at its last non-blank line; the blank lines separating two
+    # sections belong to neither (docs/design.md, "Chunking"). A body of
+    # nothing but blank lines collapses onto its own heading line.
+    end_line = heading_line + length(body_lines)
 
     base_slug = slug(heading)
     {final_slug, slug_counts} = uniquify(base_slug, acc.slug_counts)
@@ -272,6 +274,13 @@ defmodule Vigil.Parser do
     %{acc | current: nil, slug_counts: slug_counts, chunks: [chunk | acc.chunks]}
   end
 
+  defp drop_trailing_blanks(lines) do
+    lines
+    |> Enum.reverse()
+    |> Enum.drop_while(&(String.trim(&1) == ""))
+    |> Enum.reverse()
+  end
+
   defp build_pre_chunk(_path, nil, _type, _starts, _ends, _ca, _ua), do: nil
 
   defp build_pre_chunk(
@@ -283,7 +292,9 @@ defmodule Vigil.Parser do
          created_at,
          updated_at
        ) do
-    body_lines = Enum.reverse(rev_lines)
+    # Same boundary as a heading chunk, stated a second time because this
+    # chunk has no heading to close and computes its own body end.
+    body_lines = rev_lines |> Enum.reverse() |> drop_trailing_blanks()
     body = Enum.join(body_lines, "\n")
 
     if String.trim(body) == "" do

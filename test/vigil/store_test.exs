@@ -502,6 +502,48 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # `Vigil.Markdown` states the trailing-newline rule once, for the whole-file
+  # writes and the chunk-shaped ones alike (docs/design.md, "How a file is
+  # written"). This is the wiring check that every path actually reaches it,
+  # including with content that ends in blank lines.
+  describe "how a written file ends" do
+    test "every write path leaves exactly one trailing newline", %{vault: vault} do
+      path = "bike/shape.md"
+      abs_path = Path.join(vault, path)
+
+      assert {:ok, _} =
+               Store.create(%{
+                 path: path,
+                 type: "reference",
+                 content: "# Shape\n\n## First\nFirst body.\n\n## Second\nSecond body.\n\n\n"
+               })
+
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} = Store.append(%{path: path, heading: "First", content: "More.\n\n"})
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} = Store.replace_section("#{path}#second", "Replaced.\n\n")
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} = Store.delete_section("#{path}#second")
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} = Store.update_frontmatter(%{path: path, type: "decision"})
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} =
+               Store.rewrite_note(%{path: path, content: "# Shape\n\n## Only\nBody.\n\n\n"})
+
+      assert one_trailing_newline?(abs_path)
+    end
+  end
+
+  defp one_trailing_newline?(abs_path) do
+    raw = File.read!(abs_path)
+    String.ends_with?(raw, "\n") and not String.ends_with?(raw, "\n\n")
+  end
+
   describe "update_frontmatter" do
     test "changes type without touching the body, no confirm needed" do
       assert {:ok, _} =

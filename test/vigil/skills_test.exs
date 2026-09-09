@@ -77,6 +77,23 @@ defmodule Vigil.SkillsTest do
       assert content =~ "1. one"
     end
 
+    # Skills are never notes, which is why the trailing-newline rule lives in
+    # Vigil.Markdown rather than in the note-editing module (docs/design.md,
+    # "How a file is written").
+    test "content ending in blank lines is written with exactly one trailing newline" do
+      {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+
+      assert {:ok, _} =
+               Skills.write(
+                 "trailing",
+                 "---\nname: trailing\ndescription: test skill\n---\n# Trailing\n1. one\n\n\n",
+                 %{vault_path: vault, git_remote: "origin"}
+               )
+
+      assert File.read!(Path.join(vault, "skills/trailing.md")) |> String.ends_with?("1. one\n")
+    end
+
     test "rejects content missing required frontmatter fields, without touching git" do
       {vault, _remote} = Vigil.FixtureVault.build(remote: true)
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)

@@ -130,12 +130,12 @@ defmodule Vigil.ParserTest do
     assert file.type == :reference
   end
 
-  # Characterisation tests: what the boundary between two chunks does today.
-  # Nothing else in the suite pins `body` exactly or `body_end_line` at all —
-  # the tests above assert ids, slugs and links, the index tests match bodies
-  # with `=~`, and the Vigil.Vault.Edit tests hand-write their line numbers.
-  # Written before the boundary moves, so a change of intent is visible as a
-  # rewrite of these assertions rather than as a suite that stays green.
+  # A chunk ends at its last non-blank line. The blank lines between two
+  # sections belong to neither — they are punctuation between chunks, so a
+  # write that replaces a body cannot eat them (docs/design.md, "How a file is
+  # written"). These assertions were written one commit earlier against the
+  # old boundary, where the separator sat inside the preceding body; the
+  # numbers below are the decision, not a patch.
   describe "chunk boundaries" do
     #  4  # Notes
     #  5
@@ -172,18 +172,18 @@ defmodule Vigil.ParserTest do
       Enum.find(file.chunks, &(&1.id == id))
     end
 
-    test "a mid-file section's body runs to the blank line before the next heading" do
+    test "a mid-file section ends at its last content line, not at the separator" do
       chunk = boundary_chunk("x/boundaries.md#first")
 
-      assert chunk.body == "First body.\n"
-      assert chunk.body_end_line == 10
+      assert chunk.body == "First body."
+      assert chunk.body_end_line == 9
     end
 
-    test "a ### sibling under a ## ends the same way, at the blank line" do
+    test "a ### sibling under a ## ends the same way" do
       chunk = boundary_chunk("x/boundaries.md#nested")
 
-      assert chunk.body == "Nested body.\n"
-      assert chunk.body_end_line == 13
+      assert chunk.body == "Nested body."
+      assert chunk.body_end_line == 12
     end
 
     test "the last section runs to EOF, which carries no trailing blank" do
@@ -193,11 +193,34 @@ defmodule Vigil.ParserTest do
       assert chunk.body_end_line == 15
     end
 
-    test "the fragmentless pre-H2 chunk keeps the blank line before the first heading" do
+    # The fragmentless chunk is built on its own code path, with its own
+    # body-end computation — the rule has to be stated there too.
+    test "the fragmentless pre-H2 chunk follows the same rule" do
       chunk = boundary_chunk("x/boundaries.md")
 
-      assert chunk.body == "\nText before the first heading.\n"
-      assert chunk.body_end_line == 7
+      assert chunk.body == "\nText before the first heading."
+      assert chunk.body_end_line == 6
+    end
+
+    test "a section whose body is nothing but blank lines ends on its own heading line" do
+      content = """
+      ---
+      type: reference
+      ---
+      # Notes
+
+      ## Empty
+
+
+      ## Next
+      Next body.
+      """
+
+      {:ok, file} = Parser.parse("x/empty-body.md", content, %{})
+      empty = Enum.find(file.chunks, &(&1.id == "x/empty-body.md#empty"))
+
+      assert empty.body == ""
+      assert empty.body_end_line == empty.heading_line
     end
   end
 
