@@ -311,10 +311,10 @@ defmodule Vigil.StoreTest do
     # is judged, so an unknown id is reported as an unknown id — not as a
     # content problem, and not as a missing file.
     test "an unknown section id is reported as not found, whatever the content" do
-      assert {:error, "Nicht gefunden: bike/via-carolina.md#nope"} =
+      assert {:error, "Not found: bike/via-carolina.md#nope"} =
                Store.replace_section("bike/via-carolina.md#nope", "## New\ntext")
 
-      assert {:error, "Nicht gefunden: bike/ghost.md#nope"} =
+      assert {:error, "Not found: bike/ghost.md#nope"} =
                Store.replace_section("bike/ghost.md#nope", "text")
     end
   end
@@ -562,7 +562,7 @@ defmodule Vigil.StoreTest do
     end
 
     test "an unknown section id is reported as not found" do
-      assert {:error, "Nicht gefunden: bike/via-carolina.md#nope"} =
+      assert {:error, "Not found: bike/via-carolina.md#nope"} =
                Store.delete_section("bike/via-carolina.md#nope")
     end
   end

@@ -259,7 +259,7 @@ defmodule Vigil.Vault.Policy do
 
   defp section_present(id, facts, verb) do
     case facts.chunk do
-      nil -> {:error, "Nicht gefunden: #{id}"}
+      nil -> {:error, "Not found: #{id}"}
       %{heading: nil} -> {:error, "A section without a heading cannot be #{verb}: #{id}"}
       _ -> :ok
     end

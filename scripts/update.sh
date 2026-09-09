@@ -3,14 +3,14 @@
 # number of times, idempotent. Does not touch secrets, vault content or
 # the systemd unit only with --update-unit.
 #
-# Nutzung: sudo ./scripts/update.sh [--to <ref>] [--skip-tests --force]
+# Usage: sudo ./scripts/update.sh [--to <ref>] [--skip-tests --force]
 #            [--update-unit] [--rollback]
 #            [--dry-run] [--non-interactive] [--verbose] [--help]
 
 # shellcheck source=scripts/lib.sh
 source "$(dirname "$0")/lib.sh"
 
-ZIEL_REF="origin/main"
+TARGET_REF="origin/main"
 SKIP_TESTS=0
 FORCE=0
 UPDATE_UNIT=0
@@ -21,17 +21,17 @@ PREVIOUS_RELEASE_FILE="/opt/vigil/.previous_release"
 
 usage() {
   cat <<'EOF'
-scripts/update.sh — Code-Stand wechseln.
+scripts/update.sh — switch code revision.
 
-  --to <ref>          Ziel-Commit/Tag (Default: origin/main)
+  --to <ref>          target commit/tag (default: origin/main)
   --skip-tests          only together with --force; is logged
-  --force              erlaubt --skip-tests
+  --force              allows --skip-tests
   --update-unit         adopt a changed systemd unit
   --rollback            go back to the previous release without building
   --dry-run             log changes with [DRY RUN] instead of applying them
   --non-interactive     run through without any prompts
   --verbose             extra debug output (set -x)
-  --help                   diese Hilfe
+  --help                   this help
 EOF
 }
 
@@ -45,7 +45,7 @@ done
 while [ $# -gt 0 ]; do
   case "$1" in
     --to)
-      ZIEL_REF="$2"
+      TARGET_REF="$2"
       shift 2
       ;;
     --skip-tests)
@@ -80,14 +80,14 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     *)
-      err "Unbekannte Option: $1 (siehe --help)"
+      err "Unknown option: $1 (see --help)"
       exit 2
       ;;
   esac
 done
 
 if [ "$SKIP_TESTS" = "1" ] && [ "$FORCE" != "1" ]; then
-  err "--skip-tests verlangt --force."
+  err "--skip-tests requires --force."
   exit 2
 fi
 if [ "$SKIP_TESTS" = "1" ]; then
@@ -135,7 +135,7 @@ if [ "$ROLLBACK" = "1" ]; then
 
   if [ "$DRY_RUN" = "1" ]; then
     log "[DRY RUN] switch back to ${OLD_RELEASE}, restart the service, verify()"
-    ok "Trockenlauf abgeschlossen."
+    ok "Dry run finished."
     exit 0
   fi
 
@@ -183,45 +183,45 @@ if [ -n "$(as_vigil git -C /opt/vigil/repo status --porcelain 2>/dev/null || tru
   exit 2
 fi
 
-FREI_KB="$(df --output=avail -k /opt | tail -1 | tr -d ' ')"
-if [ "$FREI_KB" -lt 1048576 ]; then
-  err "Weniger als 1 GB frei unter /opt (${FREI_KB} KB)."
+FREE_KB="$(df --output=avail -k /opt | tail -1 | tr -d ' ')"
+if [ "$FREE_KB" -lt 1048576 ]; then
+  err "Less than 1 GB free under /opt (${FREE_KB} KB)."
   exit 2
 fi
 
 for path in /var/lib/vigil /opt/vigil/repo /opt/vigil/releases; do
-  falsch="$(find "$path" '!' -user vigil -o '!' -group vigil 2>/dev/null | head -5 || true)"
-  if [ -n "$falsch" ]; then
+  wrong="$(find "$path" '!' -user vigil -o '!' -group vigil 2>/dev/null | head -5 || true)"
+  if [ -n "$wrong" ]; then
     err "Wrong ownership under ${path} — fix: chown -R vigil:vigil ${path}"
     exit 2
   fi
 done
 
-record_done "Preflight bestanden"
+record_done "preflight passed"
 
 ## ── Step 2 — fetch the target revision ───────────────────────────────────
 
-step "2/8  Ziel-Stand holen"
+step "2/8  Fetch target revision"
 
 as_vigil git -C /opt/vigil/repo fetch --all --tags
 
-AKTUELLE_SHA="$(as_vigil git -C /opt/vigil/repo rev-parse --short HEAD)"
-TARGET_SHA="$(as_vigil git -C /opt/vigil/repo rev-parse --short "$ZIEL_REF")"
+CURRENT_SHA="$(as_vigil git -C /opt/vigil/repo rev-parse --short HEAD)"
+TARGET_SHA="$(as_vigil git -C /opt/vigil/repo rev-parse --short "$TARGET_REF")"
 
-if [ "$AKTUELLE_SHA" = "$TARGET_SHA" ]; then
+if [ "$CURRENT_SHA" = "$TARGET_SHA" ]; then
   ok "Target commit ${TARGET_SHA} matches the running revision — nothing to do."
   exit 0
 fi
 
-log "Wechsel: ${AKTUELLE_SHA} → ${TARGET_SHA}"
-as_vigil git -C /opt/vigil/repo log --oneline "${AKTUELLE_SHA}..${TARGET_SHA}" || true
+log "Switch: ${CURRENT_SHA} → ${TARGET_SHA}"
+as_vigil git -C /opt/vigil/repo log --oneline "${CURRENT_SHA}..${TARGET_SHA}" || true
 
-GEAENDERTE_DATEIEN="$(as_vigil git -C /opt/vigil/repo diff --name-only "${AKTUELLE_SHA}..${TARGET_SHA}")"
-if echo "$GEAENDERTE_DATEIEN" | grep -qE '^mix\.exs$|^config/|^deploy/vigil\.service$'; then
+CHANGED_FILES="$(as_vigil git -C /opt/vigil/repo diff --name-only "${CURRENT_SHA}..${TARGET_SHA}")"
+if echo "$CHANGED_FILES" | grep -qE '^mix\.exs$|^config/|^deploy/vigil\.service$'; then
   warn "The change touches mix.exs, config/ or deploy/vigil.service — review the summary."
 fi
 
-record_done "Ziel-Stand ${TARGET_SHA} geholt"
+record_done "fetched target revision ${TARGET_SHA}"
 
 ## ── Step 3 — dependency audit (hard abort, no override) ──────────────────
 
@@ -236,10 +236,10 @@ else
   echo "$AUDIT_OUTPUT"
   if echo "$AUDIT_OUTPUT" | grep -qiE '\b(high|critical)\b'; then
     err "mix hex.audit reports HIGH/CRITICAL advisories. Aborting (no override in update.sh)."
-    as_vigil git -C /opt/vigil/repo checkout -q "$AKTUELLE_SHA"
+    as_vigil git -C /opt/vigil/repo checkout -q "$CURRENT_SHA"
     exit 2
   fi
-  ok "Kein HIGH/CRITICAL-Advisory."
+  ok "No HIGH/CRITICAL advisory."
 fi
 record_done "ran the dependency audit"
 
@@ -254,7 +254,7 @@ elif [ "$DRY_RUN" = "1" ]; then
 else
   if ! as_vigil bash -c 'cd /opt/vigil/repo && mix test'; then
     err "mix test is red — not deploying, the running service is untouched."
-    as_vigil git -C /opt/vigil/repo checkout -q "$AKTUELLE_SHA"
+    as_vigil git -C /opt/vigil/repo checkout -q "$CURRENT_SHA"
     exit 1
   fi
   ok "mix test is green."
@@ -263,7 +263,7 @@ record_done "tests run (or deliberately skipped)"
 
 ## ── Step 5 — build ───────────────────────────────────────────────────────
 
-step "5/8  Bauen"
+step "5/8  Build"
 
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] MIX_ENV=prod mix release --path /opt/vigil/releases/${TARGET_SHA}"
@@ -275,23 +275,23 @@ record_done "built release ${TARGET_SHA}"
 
 ## ── Optional: adopt the systemd unit ─────────────────────────────────────
 
-UNIT_QUELLE="/opt/vigil/repo/deploy/vigil.service"
-if ! diff -q "$UNIT_QUELLE" /etc/systemd/system/vigil.service >/dev/null 2>&1; then
+UNIT_SOURCE="/opt/vigil/repo/deploy/vigil.service"
+if ! diff -q "$UNIT_SOURCE" /etc/systemd/system/vigil.service >/dev/null 2>&1; then
   if [ "$UPDATE_UNIT" = "1" ]; then
     if [ "$DRY_RUN" = "1" ]; then
       log "[DRY RUN] adopt the changed systemd unit"
     else
-      cp "$UNIT_QUELLE" /etc/systemd/system/vigil.service
-      ANALYSE="$(systemd-analyze verify /etc/systemd/system/vigil.service 2>&1 || true)"
-      if [ -n "$ANALYSE" ]; then
-        err "systemd-analyze verify meldet Probleme mit der neuen Unit:"
-        echo "$ANALYSE" >&2
+      cp "$UNIT_SOURCE" /etc/systemd/system/vigil.service
+      ANALYSIS="$(systemd-analyze verify /etc/systemd/system/vigil.service 2>&1 || true)"
+      if [ -n "$ANALYSIS" ]; then
+        err "systemd-analyze verify reports problems with the new unit:"
+        echo "$ANALYSIS" >&2
         exit 1
       fi
       systemctl daemon-reload
       ok "systemd unit adopted."
     fi
-    record_done "systemd-Unit aktualisiert"
+    record_done "systemd unit updated"
   else
     warn "deploy/vigil.service changed — adopt it with --update-unit, otherwise the old unit stays active."
     record_next_step "run update.sh --update-unit to adopt the changed systemd unit"
@@ -300,7 +300,7 @@ fi
 
 ## ── Step 6 — switch over ─────────────────────────────────────────────────
 
-step "6/8  Umschalten"
+step "6/8  Switch over"
 
 PREVIOUS_RELEASE="$(readlink -f /opt/vigil/current)"
 
@@ -315,7 +315,7 @@ else
   wait_until_healthy || exit 1
   ok "Switched to ${TARGET_SHA} (previous release: ${PREVIOUS_RELEASE})."
 fi
-record_done "Umgeschaltet auf ${TARGET_SHA}"
+record_done "switched over to ${TARGET_SHA}"
 
 ## ── Step 7 — verify() with automatic rollback ────────────────────────────
 
@@ -342,7 +342,7 @@ else
       err "Update rolled back to $(basename "$PREVIOUS_RELEASE"). The service is running again."
       exit 3
     else
-      err "Rollback auf ${PREVIOUS_RELEASE} ebenfalls fehlgeschlagen. Manuell eingreifen — Proxmox-Snapshot des Containers einspielen."
+      err "Rollback to ${PREVIOUS_RELEASE} also failed. Manual intervention needed — restore the container's Proxmox snapshot."
       exit 1
     fi
   fi
@@ -355,23 +355,23 @@ step "8/8  Cleanup"
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] clean up old releases (keep the last 3, never delete current/previous)"
 else
-  AKTUELLER_LINK="$(readlink -f /opt/vigil/current)"
-  VORHERIGER_LINK="$PREVIOUS_RELEASE"
+  CURRENT_LINK="$(readlink -f /opt/vigil/current)"
+  PREVIOUS_LINK="$PREVIOUS_RELEASE"
 
-  mapfile -t ALLE_RELEASES < <(find /opt/vigil/releases -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | awk '{print $2}')
+  mapfile -t ALL_RELEASES < <(find /opt/vigil/releases -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | awk '{print $2}')
 
-  behalten=0
-  for release in "${ALLE_RELEASES[@]}"; do
-    if [ "$release" = "$AKTUELLER_LINK" ] || [ "$release" = "$VORHERIGER_LINK" ]; then
+  kept=0
+  for release in "${ALL_RELEASES[@]}"; do
+    if [ "$release" = "$CURRENT_LINK" ] || [ "$release" = "$PREVIOUS_LINK" ]; then
       continue
     fi
-    behalten=$((behalten + 1))
-    if [ "$behalten" -gt 1 ]; then
-      log "Alten Release entfernen: ${release}"
+    kept=$((kept + 1))
+    if [ "$kept" -gt 1 ]; then
+      log "Removing old release: ${release}"
       rm -rf "$release"
     fi
   done
 fi
 record_done "cleaned up old releases (kept the last 3)"
 
-ok "update.sh abgeschlossen."
+ok "update.sh finished."

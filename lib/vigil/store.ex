@@ -68,7 +68,7 @@ defmodule Vigil.Store do
 
     case pull_result do
       :ok -> :ok
-      {:error, reason} -> Logger.warning("vigil: initialer git pull fehlgeschlagen: #{reason}")
+      {:error, reason} -> Logger.warning("vigil: initial git pull failed: #{reason}")
     end
 
     {:ok, state}
@@ -612,7 +612,7 @@ defmodule Vigil.Store do
         end)
         |> case do
           {:ok, rec} -> {:ok, chunk_result(rec, backlinks?)}
-          :not_found -> {:error, "Nicht gefunden: #{id}"}
+          :not_found -> {:error, "Not found: #{id}"}
         end
       else
         lookup_lenient(@files_table, id, fn ->
@@ -624,7 +624,7 @@ defmodule Vigil.Store do
         end)
         |> case do
           {:ok, file} -> {:ok, file_result(file, backlinks?, state)}
-          :not_found -> {:error, "Nicht gefunden: #{id}"}
+          :not_found -> {:error, "Not found: #{id}"}
         end
       end
     else
@@ -673,7 +673,7 @@ defmodule Vigil.Store do
         end)
         |> case do
           {:ok, rec} -> {:ok, build_links_result(rec.id, [rec.id], direction, depth)}
-          :not_found -> {:error, "Nicht gefunden: #{id}"}
+          :not_found -> {:error, "Not found: #{id}"}
         end
       else
         lookup_lenient(@files_table, id, fn ->
@@ -685,7 +685,7 @@ defmodule Vigil.Store do
         end)
         |> case do
           {:ok, file} -> {:ok, build_links_result(file.path, file.chunk_ids, direction, depth)}
-          :not_found -> {:error, "Nicht gefunden: #{id}"}
+          :not_found -> {:error, "Not found: #{id}"}
         end
       end
     else
@@ -1174,7 +1174,7 @@ defmodule Vigil.Store do
           end
 
         {:error, out} ->
-          {:error, "git rm/commit fehlgeschlagen: #{out}"}
+          {:error, "git rm/commit failed: #{out}"}
       end
     else
       {:error, msg} -> {:error, msg}
@@ -1217,11 +1217,11 @@ defmodule Vigil.Store do
              }}
 
           {:error, out} ->
-            {:error, "Verschieben lokal committed, aber Push fehlgeschlagen: #{out}"}
+            {:error, "Move committed locally, but push failed: #{out}"}
         end
 
       {:error, out} ->
-        {:error, "git mv/commit fehlgeschlagen: #{out}"}
+        {:error, "git mv/commit failed: #{out}"}
     end
   end
 
@@ -1267,7 +1267,7 @@ defmodule Vigil.Store do
           end
 
         {:error, out} ->
-          {:error, "git commit fehlgeschlagen: #{out}"}
+          {:error, "git commit failed: #{out}"}
       end
     end
   end
@@ -1581,11 +1581,11 @@ defmodule Vigil.Store do
                 {:ok, %{name: normalized, pushed: true}}
 
               {:error, out} ->
-                {:error, "Skill lokal gespeichert, aber Push fehlgeschlagen: #{out}"}
+                {:error, "Skill saved locally, but push failed: #{out}"}
             end
 
           {:error, out} ->
-            {:error, "git commit fehlgeschlagen: #{out}"}
+            {:error, "git commit failed: #{out}"}
         end
       end
     else

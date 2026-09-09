@@ -3,7 +3,7 @@
 # service. Runs as root, once per container, idempotent.
 # Does not touch secrets, vault content, or starting the service.
 #
-# Nutzung: sudo ./scripts/setup.sh [--repo-url <url>] [--skip-cloudflared]
+# Usage: sudo ./scripts/setup.sh [--repo-url <url>] [--skip-cloudflared]
 #            [--otp-version <x> --force] [--dry-run] [--non-interactive]
 #            [--verbose] [--help]
 
@@ -25,16 +25,16 @@ usage() {
   cat <<'EOF'
 scripts/setup.sh — Debian 13 → an installed but not started vigil service.
 
-Reihenfolge: setup.sh → init.sh → update.sh (bei Bedarf, wiederholt)
+Order: setup.sh → init.sh → update.sh (as needed, repeatable)
 
-  --repo-url <url>       Code-Repo (Default: git@github.com:Lunicorn-lab/vigil.git)
+  --repo-url <url>       code repo (default: git@github.com:Lunicorn-lab/vigil.git)
   --skip-cloudflared      set the tunnel up manually; this script skips cloudflared
   --otp-version <x>       override .tool-versions (only together with --force)
-  --force                 erlaubt --otp-version, sonst ohne Wirkung
+  --force                 allows --otp-version, otherwise has no effect
   --dry-run               log changes with [DRY RUN] instead of applying them
   --non-interactive       run through without any prompts
   --verbose               extra debug output (set -x)
-  --help                  diese Hilfe
+  --help                  this help
 EOF
 }
 
@@ -78,14 +78,14 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     *)
-      err "Unbekannte Option: $1 (siehe --help)"
+      err "Unknown option: $1 (see --help)"
       exit 2
       ;;
   esac
 done
 
 if [ -n "$OTP_VERSION_OVERRIDE" ] && [ "$FORCE" != "1" ]; then
-  err "--otp-version verlangt --force."
+  err "--otp-version requires --force."
   exit 2
 fi
 
@@ -103,14 +103,14 @@ else
 fi
 
 if [ "${VERSION_ID:-}" != "13" ] && [ "${VERSION_CODENAME:-}" != "trixie" ]; then
-  err "Erwartet: Debian 13 (trixie). Gefunden: ${PRETTY_NAME:-unbekannt}."
+  err "Expected: Debian 13 (trixie). Found: ${PRETTY_NAME:-unknown}."
   exit 2
 fi
-ok "Debian-Version: ${PRETTY_NAME:-13 (trixie)}"
+ok "Debian version: ${PRETTY_NAME:-13 (trixie)}"
 
 ARCH="$(dpkg --print-architecture)"
 case "$ARCH" in
-  amd64 | arm64) ok "Architektur: ${ARCH}" ;;
+  amd64 | arm64) ok "Architecture: ${ARCH}" ;;
   *)
     err "Unsupported architecture: ${ARCH} (expected amd64 or arm64)."
     exit 2
@@ -126,20 +126,20 @@ ok "Free space on /: $((FREE_KB / 1024)) MB"
 
 RAM_KB="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
 if [ "$RAM_KB" -lt 1048576 ]; then
-  err "Weniger als 1 GB RAM (${RAM_KB} KB)."
+  err "Less than 1 GB RAM (${RAM_KB} KB)."
   exit 2
 fi
 ok "RAM: $((RAM_KB / 1024)) MB"
 
 if curl -fsI --max-time 10 https://deb.debian.org >/dev/null 2>&1; then
-  ok "Netz: deb.debian.org erreichbar"
+  ok "Network: deb.debian.org reachable"
 else
   err "deb.debian.org unreachable. Fix: check network/DNS/proxy."
   exit 2
 fi
 
 if curl -fsI --max-time 10 https://github.com >/dev/null 2>&1; then
-  ok "Netz: github.com erreichbar"
+  ok "Network: github.com reachable"
 else
   err "github.com unreachable. Fix: check network/DNS/proxy."
   exit 2
@@ -191,9 +191,9 @@ check_tool_versions() {
     return
   fi
 
-  local ziel_elixir ziel_otp actual_elixir actual_otp
-  ziel_elixir="$(awk '/^elixir/ {print $2}' "$file" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
-  ziel_otp="$(awk '/^erlang/ {print $2}' "$file" | cut -d. -f1)"
+  local target_elixir target_otp actual_elixir actual_otp
+  target_elixir="$(awk '/^elixir/ {print $2}' "$file" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')"
+  target_otp="$(awk '/^erlang/ {print $2}' "$file" | cut -d. -f1)"
   actual_elixir="$(elixir --version 2>/dev/null | grep -oP 'Elixir \K[0-9]+\.[0-9]+' || true)"
   actual_otp="$(erl -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().' -noshell 2>/dev/null || true)"
 
@@ -202,12 +202,12 @@ check_tool_versions() {
     return
   fi
 
-  if [ "$ziel_elixir" != "$actual_elixir" ] || [ "$ziel_otp" != "$actual_otp" ]; then
-    err "Versions-Mismatch: .tool-versions verlangt Elixir ${ziel_elixir}.x / OTP ${ziel_otp}, Debian 13 liefert Elixir ${actual_elixir}.x / OTP ${actual_otp}."
+  if [ "$target_elixir" != "$actual_elixir" ] || [ "$target_otp" != "$actual_otp" ]; then
+    err "Version mismatch: .tool-versions requires Elixir ${target_elixir}.x / OTP ${target_otp}, Debian 13 provides Elixir ${actual_elixir}.x / OTP ${actual_otp}."
     err "Fix: either update .tool-versions in the repo to 'elixir ${actual_elixir}.x-otp-${actual_otp}', or use a different Debian version."
     exit 2
   fi
-  ok ".tool-versions passt zur installierten Version (Elixir ${actual_elixir}.x / OTP ${actual_otp})."
+  ok ".tool-versions matches the installed version (Elixir ${actual_elixir}.x / OTP ${actual_otp})."
 }
 
 ## ── Step 3 — system user and directories ─────────────────────────────────
@@ -237,8 +237,8 @@ fi
 # git mv) — check and fix recursively rather than failing on it.
 for path in /opt/vigil/repo /opt/vigil/releases /var/lib/vigil; do
   if [ -d "$path" ]; then
-    falsch="$(find "$path" '!' -user vigil -o '!' -group vigil 2>/dev/null | head -20 || true)"
-    if [ -n "$falsch" ]; then
+    wrong="$(find "$path" '!' -user vigil -o '!' -group vigil 2>/dev/null | head -20 || true)"
+    if [ -n "$wrong" ]; then
       warn "Wrong ownership found under ${path}, fixing it (chown -R vigil:vigil)."
       run_step "fix ownership of ${path}" -- chown -R vigil:vigil "$path"
     fi
@@ -269,7 +269,7 @@ else
   fi
   FOUND="$(echo "$SCAN" | ssh-keygen -lf /dev/stdin -E sha256 2>/dev/null | awk '{print $2}')"
   if [ "$FOUND" != "$GITHUB_ED25519_FINGERPRINT" ]; then
-    err "GitHub-Hostkey-Fingerprint weicht ab! Erwartet ${GITHUB_ED25519_FINGERPRINT}, gefunden ${FOUND}."
+    err "GitHub host key fingerprint mismatch! Expected ${GITHUB_ED25519_FINGERPRINT}, found ${FOUND}."
     err "Refusing to trust blindly — possible MITM. Aborting, known_hosts not written."
     exit 2
   fi
@@ -282,9 +282,9 @@ else
 fi
 
 if [ -f "$DEPLOY_KEY" ]; then
-  log "Deploy-Key existiert bereits (${DEPLOY_KEY})."
+  log "Deploy key already exists (${DEPLOY_KEY})."
 else
-  run_step "Deploy-Key erzeugen" -- \
+  run_step "generate deploy key" -- \
     su -s /bin/bash -c "ssh-keygen -t ed25519 -N '' -C 'vigil@$(hostname)' -f ${DEPLOY_KEY}" vigil
   if [ "$DRY_RUN" != "1" ]; then
     chmod 0700 "$SSH_DIR"
@@ -299,14 +299,14 @@ if [ "$DRY_RUN" != "1" ] && [ -f "${DEPLOY_KEY}.pub" ]; then
   echo "  ────────────────────────────────────────"
   cat "${DEPLOY_KEY}.pub"
   echo "  ────────────────────────────────────────"
-  echo "  Repository → Settings → Deploy keys → Add deploy key, 'Allow write access' aktivieren."
+  echo "  Repository → Settings → Deploy keys → Add deploy key, enable 'Allow write access'."
   echo
 
   if as_vigil ssh -o BatchMode=yes -o ConnectTimeout=5 -T git@github.com 2>&1 | grep -qi "successfully authenticated"; then
-    ok "Deploy-Key funktioniert bereits (ssh -T git@github.com erfolgreich)."
+    ok "Deploy key already works (ssh -T git@github.com succeeded)."
   else
     warn "Deploy key is not registered with GitHub yet (ssh -T git@github.com fails — expected until the key is added)."
-    record_next_step "Public Key aus ${DEPLOY_KEY}.pub bei GitHub als Deploy-Key mit Schreibrechten hinterlegen"
+    record_next_step "add the public key from ${DEPLOY_KEY}.pub to GitHub as a deploy key with write access"
   fi
 fi
 
@@ -335,7 +335,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 UNIT_SOURCE="${SCRIPT_DIR}/../deploy/vigil.service"
 
 if [ ! -f "$UNIT_SOURCE" ]; then
-  err "Unit-Vorlage fehlt: ${UNIT_SOURCE}"
+  err "Unit template missing: ${UNIT_SOURCE}"
   exit 2
 fi
 
@@ -345,13 +345,13 @@ else
   cp "$UNIT_SOURCE" /etc/systemd/system/vigil.service
   chmod 0644 /etc/systemd/system/vigil.service
 
-  ANALYSE="$(systemd-analyze verify /etc/systemd/system/vigil.service 2>&1 || true)"
-  UNERWARTET="$(echo "$ANALYSE" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
-  if [ -n "$UNERWARTET" ]; then
-    err "systemd-analyze verify meldet unerwartete Probleme:"
-    echo "$UNERWARTET" >&2
+  ANALYSIS="$(systemd-analyze verify /etc/systemd/system/vigil.service 2>&1 || true)"
+  UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
+  if [ -n "$UNEXPECTED" ]; then
+    err "systemd-analyze verify reports unexpected problems:"
+    echo "$UNEXPECTED" >&2
     exit 2
-  elif [ -n "$ANALYSE" ]; then
+  elif [ -n "$ANALYSIS" ]; then
     warn "systemd unit points at a release binary that is not built yet (expected before init.sh)."
   else
     ok "systemd-analyze verify: no problems."
@@ -368,12 +368,12 @@ step "7/9  cloudflared"
 
 if [ "$SKIP_CLOUDFLARED" = "1" ]; then
   warn "cloudflared skipped (--skip-cloudflared) — set the tunnel up manually."
-  record_next_step "Cloudflare Tunnel manuell einrichten (siehe README §4)"
+  record_next_step "set up the Cloudflare tunnel manually (see README §4)"
 elif [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] install cloudflared, write tunnel config, enable the service"
 else
   if command -v cloudflared >/dev/null 2>&1; then
-    log "cloudflared bereits installiert ($(cloudflared --version 2>&1 | head -1))."
+    log "cloudflared already installed ($(cloudflared --version 2>&1 | head -1))."
   else
     DEB_ARCH="$ARCH"
     TMP_DEB="$(mktemp --suffix=.deb)"
@@ -385,13 +385,13 @@ else
 
   if [ "$NON_INTERACTIVE" = "1" ]; then
     warn "Setting up the cloudflared tunnel needs an interactive 'cloudflared tunnel login' (browser) — skipped under --non-interactive."
-    record_next_step "cloudflared tunnel login && cloudflared tunnel create vigil, dann /etc/cloudflared/config.yml von Hand anlegen"
+    record_next_step "cloudflared tunnel login && cloudflared tunnel create vigil, then create /etc/cloudflared/config.yml by hand"
   else
     if [ ! -f /root/.cloudflared/cert.pem ]; then
       log "cloudflared tunnel login — open the printed link in a browser."
       cloudflared tunnel login || {
-        warn "cloudflared tunnel login fehlgeschlagen oder abgebrochen."
-        record_next_step "cloudflared tunnel login manuell nachholen"
+        warn "cloudflared tunnel login failed or was cancelled."
+        record_next_step "run cloudflared tunnel login manually later"
       }
     fi
 
@@ -451,5 +451,5 @@ record_next_step "configure Cloudflare Access (see the README) before running in
 ## ── Step 9 — summary ─────────────────────────────────────────────────────
 
 step "9/9  Summary"
-record_next_step "sudo ./scripts/init.sh --new-vault  (oder --existing-vault <git-url>)"
+record_next_step "sudo ./scripts/init.sh --new-vault  (or --existing-vault <git-url>)"
 ok "setup.sh finished."

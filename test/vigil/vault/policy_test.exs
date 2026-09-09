@@ -422,7 +422,7 @@ defmodule Vigil.Vault.PolicyTest do
     test "an unknown section is reported as unknown, not as bad content" do
       # Ordering regression: the chunk must be resolved before the replacement
       # content is judged, or a bad id gets reported as a content problem.
-      assert {:error, "Nicht gefunden: bike/x.md#nope"} =
+      assert {:error, "Not found: bike/x.md#nope"} =
                Policy.check(:replace_section, %{id: "bike/x.md#nope", content: "## H"}, facts())
     end
 
