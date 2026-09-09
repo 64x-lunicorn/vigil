@@ -764,6 +764,90 @@ defmodule Vigil.StoreTest do
       assert msg =~ "Could not write file"
       assert {:ok, _} = Store.read("home/diacritics-äöü-café.md", false)
     end
+
+    test "append against an unreadable file returns a clean error, store stays alive", %{
+      vault: vault
+    } do
+      path = Path.join(vault, "bike/via-carolina.md")
+      File.chmod!(path, 0o000)
+
+      result = Store.append(%{path: "bike/via-carolina.md", content: "Extra."})
+
+      File.chmod!(path, 0o644)
+
+      assert {:error, msg} = result
+      assert msg =~ "Could not read file"
+      assert Store.search(%{query: "tires"}) != []
+      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+    end
+
+    test "replace_section against an unreadable file returns a clean error, store stays alive", %{
+      vault: vault
+    } do
+      path = Path.join(vault, "bike/via-carolina.md")
+      File.chmod!(path, 0o000)
+
+      result = Store.replace_section("bike/via-carolina.md#fueling", "New strategy.")
+
+      File.chmod!(path, 0o644)
+
+      assert {:error, msg} = result
+      assert msg =~ "Could not read file"
+      assert Store.search(%{query: "tires"}) != []
+      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+    end
+
+    test "delete_section against an unreadable file returns a clean error, store stays alive", %{
+      vault: vault
+    } do
+      path = Path.join(vault, "bike/via-carolina.md")
+      File.chmod!(path, 0o000)
+
+      result = Store.delete_section("bike/via-carolina.md#gear")
+
+      File.chmod!(path, 0o644)
+
+      assert {:error, msg} = result
+      assert msg =~ "Could not read file"
+      assert Store.search(%{query: "tires"}) != []
+      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+    end
+
+    test "rewrite_note against an unreadable file returns a clean error, store stays alive", %{
+      vault: vault
+    } do
+      path = Path.join(vault, "bike/terra-speed.md")
+      File.chmod!(path, 0o000)
+
+      result =
+        Store.rewrite_note(%{
+          path: "bike/terra-speed.md",
+          content: "# New\nCompletely new.",
+          confirm: true
+        })
+
+      File.chmod!(path, 0o644)
+
+      assert {:error, msg} = result
+      assert msg =~ "Could not read file"
+      assert Store.search(%{query: "tires"}) != []
+      assert {:ok, _} = Store.read("bike/terra-speed.md", false)
+    end
+
+    test "update_frontmatter against an unreadable file returns a clean error, store stays alive",
+         %{vault: vault} do
+      path = Path.join(vault, "bike/terra-speed.md")
+      File.chmod!(path, 0o000)
+
+      result = Store.update_frontmatter(%{path: "bike/terra-speed.md", type: "decision"})
+
+      File.chmod!(path, 0o644)
+
+      assert {:error, msg} = result
+      assert msg =~ "Could not read file"
+      assert Store.search(%{query: "tires"}) != []
+      assert {:ok, _} = Store.read("bike/terra-speed.md", false)
+    end
   end
 
   describe "links" do

@@ -529,7 +529,18 @@ defmodule Vigil.Store do
 
   defp domains_yaml_raw(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
-    if File.exists?(path), do: File.read!(path), else: ""
+
+    case File.read(path) do
+      {:ok, content} ->
+        content
+
+      {:error, reason} ->
+        if File.exists?(path) do
+          Logger.warning("cannot read _domains.yml: #{fs_error(reason)}")
+        end
+
+        ""
+    end
   end
 
   defp list_domain_names(state), do: VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
@@ -981,9 +992,9 @@ defmodule Vigil.Store do
     heading = Map.get(params, :heading)
     content = Map.fetch!(params, :content)
 
-    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)) do
-      abs_path = abs(state, path)
-      {:ok, original} = File.read(abs_path)
+    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)),
+         abs_path = abs(state, path),
+         {:ok, original} <- read_existing_file(abs_path) do
       orig_lines = Markdown.split_lines(original)
 
       new_lines = insert_append(path, orig_lines, heading, content)
@@ -1069,10 +1080,9 @@ defmodule Vigil.Store do
     heading_count = count_existing_headings(Map.fetch!(params, :path))
 
     with {:ok, %{path: path}} <-
-           Policy.check(:rewrite_note, params, facts(state, heading_count: heading_count)) do
-      abs_path = abs(state, path)
-      {:ok, original} = File.read(abs_path)
-
+           Policy.check(:rewrite_note, params, facts(state, heading_count: heading_count)),
+         abs_path = abs(state, path),
+         {:ok, original} <- read_existing_file(abs_path) do
       case Markdown.split_frontmatter(original) do
         {:ok, frontmatter, _old_body} ->
           new_content = normalize_trailing_newline(frontmatter <> content)
@@ -1122,24 +1132,25 @@ defmodule Vigil.Store do
   # only writer (docs/design.md, "One writer").
   defp splice_chunk(state, path, rec, keep_lines, replacement, message) do
     abs_path = abs(state, path)
-    {:ok, original} = File.read(abs_path)
-    orig_lines = Markdown.split_lines(original)
 
-    prefix = Enum.slice(orig_lines, 0, keep_lines)
-    suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
+    with {:ok, original} <- read_existing_file(abs_path) do
+      orig_lines = Markdown.split_lines(original)
 
-    new_content = Enum.join(prefix ++ replacement ++ suffix, "\n") <> "\n"
-    write_and_commit(state, path, abs_path, new_content, message)
+      prefix = Enum.slice(orig_lines, 0, keep_lines)
+      suffix = Enum.slice(orig_lines, rec.body_end_line, length(orig_lines) - rec.body_end_line)
+
+      new_content = Enum.join(prefix ++ replacement ++ suffix, "\n") <> "\n"
+      write_and_commit(state, path, abs_path, new_content, message)
+    end
   end
 
   ## update_frontmatter
 
   defp do_update_frontmatter(params, state) do
-    with {:ok, resolved} <- Policy.check(:update_frontmatter, params, facts(state)) do
-      path = resolved.path
-      abs_path = abs(state, path)
-      {:ok, original} = File.read(abs_path)
-
+    with {:ok, resolved} <- Policy.check(:update_frontmatter, params, facts(state)),
+         path = resolved.path,
+         abs_path = abs(state, path),
+         {:ok, original} <- read_existing_file(abs_path) do
       case Markdown.split_frontmatter(original) do
         {:ok, _old_frontmatter, body} ->
           new_frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
@@ -1234,19 +1245,19 @@ defmodule Vigil.Store do
 
     created_at = existing_created_at || commit_meta.updated_at
 
-    {:ok, content} = File.read(Path.join(state.vault_path, to))
+    with {:ok, content} <- read_for_reparse(state.vault_path, to, "move") do
+      meta = %{
+        created_at: created_at,
+        updated_at: commit_meta.updated_at,
+        last_author: commit_meta.last_author
+      }
 
-    meta = %{
-      created_at: created_at,
-      updated_at: commit_meta.updated_at,
-      last_author: commit_meta.last_author
-    }
+      {:ok, file} = Parser.parse(to, content, meta)
 
-    {:ok, file} = Parser.parse(to, content, meta)
-
-    remove_file_from_index(from)
-    index_file(file)
-    rebuild_links_index()
+      remove_file_from_index(from)
+      index_file(file)
+      rebuild_links_index()
+    end
   end
 
   ## shared write path
@@ -1299,6 +1310,34 @@ defmodule Vigil.Store do
   defp fs_error(:erofs), do: "filesystem is read-only"
   defp fs_error(reason), do: inspect(reason)
 
+  # Used by the write paths that read a note's current content before
+  # transforming it (append, rewrite_note, splice_chunk, update_frontmatter).
+  # A read failure here happens before anything is written, so it is
+  # reported back to the caller as an ordinary error tuple rather than
+  # crashing the GenServer.
+  defp read_existing_file(path) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, content}
+      {:error, reason} -> {:error, "Could not read file #{path}: #{fs_error(reason)}"}
+    end
+  end
+
+  # Used by reparse_file/reparse_moved_file: the write or move itself has
+  # already succeeded (and been committed/pushed) by the time these run. A
+  # read failure here must not crash the GenServer and take down unrelated
+  # calls — it only means the index stays stale for `rel_path` until the
+  # next reload, so the failure is logged rather than propagated.
+  defp read_for_reparse(vault_path, rel_path, verb) do
+    case File.read(Path.join(vault_path, rel_path)) do
+      {:ok, content} ->
+        {:ok, content}
+
+      {:error, reason} ->
+        Logger.warning("vigil: could not reparse #{rel_path} after #{verb}: #{fs_error(reason)}")
+        :error
+    end
+  end
+
   defp reparse_file(state, rel_path, commit_meta) do
     existing_created_at =
       case :ets.lookup(@files_table, rel_path) do
@@ -1308,19 +1347,19 @@ defmodule Vigil.Store do
 
     created_at = existing_created_at || commit_meta.updated_at
 
-    {:ok, content} = File.read(Path.join(state.vault_path, rel_path))
+    with {:ok, content} <- read_for_reparse(state.vault_path, rel_path, "write") do
+      meta = %{
+        created_at: created_at,
+        updated_at: commit_meta.updated_at,
+        last_author: commit_meta.last_author
+      }
 
-    meta = %{
-      created_at: created_at,
-      updated_at: commit_meta.updated_at,
-      last_author: commit_meta.last_author
-    }
+      {:ok, file} = Parser.parse(rel_path, content, meta)
 
-    {:ok, file} = Parser.parse(rel_path, content, meta)
-
-    remove_file_from_index(rel_path)
-    index_file(file)
-    rebuild_links_index()
+      remove_file_from_index(rel_path)
+      index_file(file)
+      rebuild_links_index()
+    end
   end
 
   # Removes chunks and files only. The link index is not maintained here but
