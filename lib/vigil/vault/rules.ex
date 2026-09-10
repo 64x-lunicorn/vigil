@@ -86,6 +86,63 @@ defmodule Vigil.Vault.Rules do
     |> Enum.sort_by(& &1.slug)
   end
 
+  @typedoc """
+  One slug that would move: a note's filename, or one of its H2–H4 headings.
+  `heading` is the heading's text, `nil` on a filename change; `new` is `nil`
+  when no slug can be derived at all.
+  """
+  @type slug_change :: %{
+          kind: :file | :heading,
+          path: String.t(),
+          heading: String.t() | nil,
+          old: String.t(),
+          new: String.t() | nil
+        }
+
+  @doc """
+  Every slug change in a whole vault, filename and heading alike, in the order
+  the files were given and, within one file, the filename before its headings.
+
+  Both halves of "what would this slug change break" are answered here, so
+  `mix vigil.slug_diff` and the doctor cannot disagree about the blast radius
+  (`docs/design.md`, "Vault hygiene has one set of rules"). They used to share
+  only the per-item comparison and copy the walk, and the copies had drifted:
+  one reported an underivable slug as `nil` and the other as `:error`, and one
+  dropped the heading text from its findings entirely.
+
+  A note that cannot be read contributes no heading changes; its filename is
+  still compared, because that answer needs no content.
+
+  Both callers keep their own rendering. Only the walk and the facts are here.
+  """
+  @spec slug_changes(String.t(), [String.t()]) :: [slug_change()]
+  def slug_changes(vault_path, files) do
+    Enum.flat_map(files, fn rel_path ->
+      file_change(rel_path) ++ heading_changes(vault_path, rel_path)
+    end)
+  end
+
+  defp file_change(rel_path) do
+    case filename_slug_change(rel_path) do
+      nil -> []
+      %{old: old, new: new} -> [%{kind: :file, path: rel_path, heading: nil, old: old, new: new}]
+    end
+  end
+
+  defp heading_changes(vault_path, rel_path) do
+    case File.read(Path.join(vault_path, rel_path)) do
+      {:ok, content} ->
+        content
+        |> heading_slug_changes()
+        |> Enum.map(fn %{text: text, old: old, new: new} ->
+          %{kind: :heading, path: rel_path, heading: text, old: old, new: new}
+        end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
   @doc """
   Whether the *filename* half of `path` would move when the slug function
   changes — the other half of `heading_slug_changes/1`.
@@ -94,11 +151,10 @@ defmodule Vigil.Vault.Rules do
   `Vigil.Slug.legacy_slugify/1` and `Vigil.Slug.slugify/1`, otherwise
   `%{old:, new:}` with `new` `nil` when no slug can be derived at all.
 
-  A filename and a heading are one question — what a slug change breaks — so
-  the two callers that ask it (`Vigil.VaultCheck` and `mix vigil.slug_diff`)
-  cannot disagree about the blast radius, which is the entire reason
-  `mix vigil.slug_diff` exists (`docs/design.md`, "Path normalization and
-  naming rules").
+  A filename and a heading are one question — what a slug change breaks — and
+  `slug_changes/2` is where a whole vault is asked it. Which is the entire
+  reason `mix vigil.slug_diff` exists (`docs/design.md`, "Path normalization
+  and naming rules").
   """
   def filename_slug_change(path) do
     basename = Path.basename(path, ".md")
@@ -115,7 +171,8 @@ defmodule Vigil.Vault.Rules do
   from `Vigil.Slug.legacy_slugify/1` to `Vigil.Slug.slugify/1`.
 
   `new` is `nil` for a heading from which no slug can be derived at all.
-  Headings whose slug is unchanged are omitted.
+  Headings whose slug is unchanged are omitted, and so are headings inside a
+  fenced block: they have no chunk id, so no reference to them can break.
   """
   def heading_slug_changes(content) do
     content

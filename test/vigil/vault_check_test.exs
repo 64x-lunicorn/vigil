@@ -311,6 +311,25 @@ defmodule Vigil.VaultCheckTest do
     assert Enum.any?(diff.changes, &(&1.kind == "file" and &1.path == "domaina/café.md"))
   end
 
+  # The doctor used to map over the old and new slug and drop the heading text,
+  # so its report said a heading slug changed without saying which heading.
+  test "B3: a heading finding names the heading", %{vault: vault} do
+    File.write!(Path.join(vault, "domaina/headings.md"), """
+    ---
+    type: reference
+    ---
+    # Headings
+
+    ## Café Overview
+    Text.
+    """)
+
+    diff = VaultCheck.run(vault).b3_chunk_diff
+
+    assert %{kind: "heading", heading: "Café Overview", new: "cafe-overview"} =
+             Enum.find(diff.changes, &(&1.kind == "heading"))
+  end
+
   test "B4: domain drift in both directions", %{vault: vault} do
     findings = VaultCheck.run(vault).b4_domain_drift
     messages = Enum.map(findings, & &1.message)

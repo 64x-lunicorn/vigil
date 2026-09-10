@@ -516,8 +516,11 @@ counts and which threshold was crossed.
 or `?`. A signal, not proof.
 
 **A slug diff covers filenames and headings.** Both halves of "what would this
-slug change break" are answered in one place, so `mix vigil.slug_diff` and the
-doctor cannot disagree about the blast radius.
+slug change break" are answered in one place — one walk over the vault in
+`Vigil.Vault.Rules`, one set of facts — so `mix vigil.slug_diff` and the
+doctor cannot disagree about the blast radius. The two render it differently
+on purpose (a JSON report for `jq`, a line per difference for a human); the
+facts underneath are the same ones.
 
 ---
 

@@ -205,33 +205,16 @@ defmodule Vigil.VaultCheck do
 
   ## Chunk-id diff (old vs. new slug logic)
 
+  # The walk belongs to Vigil.Vault.Rules, so the doctor and mix vigil.slug_diff
+  # cannot disagree about the blast radius. Only the rendering is the doctor's:
+  # a JSON report for jq, with the kind as a string.
   defp b3_diff(files, vault_path) do
     changes =
-      Enum.flat_map(files, fn rel_path ->
-        file_diff =
-          case Rules.filename_slug_change(rel_path) do
-            nil -> []
-            %{old: old, new: new} -> [%{kind: "file", path: rel_path, old: old, new: new}]
-          end
-
-        heading_diffs =
-          case File.read(Path.join(vault_path, rel_path)) do
-            {:ok, content} -> b3_heading_diffs(rel_path, content)
-            {:error, _} -> []
-          end
-
-        file_diff ++ heading_diffs
-      end)
+      vault_path
+      |> Rules.slug_changes(files)
+      |> Enum.map(&%{&1 | kind: Atom.to_string(&1.kind)})
 
     %{checked: length(files), changes: changes}
-  end
-
-  defp b3_heading_diffs(rel_path, content) do
-    content
-    |> Rules.heading_slug_changes()
-    |> Enum.map(fn %{old: old, new: new} ->
-      %{kind: "heading", path: rel_path, old: old, new: new}
-    end)
   end
 
   ## Domain drift
