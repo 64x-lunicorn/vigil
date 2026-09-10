@@ -2,8 +2,8 @@ defmodule Vigil.Vault.AbsentFacts do
   @moduledoc """
   A `Vigil.Vault.Facts` whose every question answers "nothing there".
 
-  The counterpart to `Vigil.Store`'s production adapters, for tests that
-  decide a policy with no vault behind it. It is a separate name on purpose:
+  The counterpart to `Vigil.Vault.Facts.over_vault/3`, for tests that decide a
+  policy with no vault behind it. It is a separate name on purpose:
   every one of these answers sits on the permissive side of the gate it feeds,
   so a test that wants an absent fact has to say so — `Vigil.Vault.Facts`
   itself supplies no defaults.

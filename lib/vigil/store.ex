@@ -303,36 +303,25 @@ defmodule Vigil.Store do
 
   ## Vault facts for Vigil.Vault.Policy
 
-  # Built fresh per write. The function fields are the adapters at the policy's
-  # seam: here they read the filesystem and the index, in Vigil.Vault.PolicyTest
-  # they are literals. Facts.new/1 requires every one of them — an unanswered
-  # question raises instead of opening the gate it guards.
+  # Built fresh per write, and built by Vigil.Vault.Facts — the module that
+  # defines the seam names both of its answer sets, so what the production one
+  # claims is checkable without a git repository or a running writer. What is
+  # this module's is gathering the plain facts: which domains the vault has,
+  # which project directories exist, what _domains.yml says about naming.
   #
   # `now` is the instant the write's own response's envelope was decided at
-  # (Vigil.MCP.Envelope.for_tool/2), passed in rather than read here — a
-  # second clock read behind the writer is what let a create at 23:59:59.9
-  # resolve `today` to a different day than the envelope heading the same
-  # response.
+  # (Vigil.MCP.Envelope.for_tool/2), passed through rather than read here.
   defp facts(state, now) do
-    Facts.new(
-      domains: list_domain_names(state),
-      exclude: state.exclude,
-      project_dirs: project_dirs(state),
-      naming: naming_rules(state),
-      today: DateTime.to_date(now),
-      path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
-      read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
-      find_backlinks: fn path -> Index.backlinks(state.index, path) end,
-      # The depth comes from the policy, which is where the duplicate gate's
-      # sensitivity is stated — terms, depth and threshold together. An
-      # adapter that chose its own would be a third module deciding how
-      # sensitive the gate is.
-      find_similar: fn query, domain, depth ->
-        Index.search(state.index, %{query: query, domain: domain, limit: depth})
-      end,
-      count_headings: fn path -> Index.count_headings(state.index, path) end,
-      find_chunk: fn id -> Index.find_chunk(state.index, id) end,
-      find_section: fn path, heading -> Index.find_section(state.index, path, heading) end
+    Facts.over_vault(
+      state.index,
+      %{
+        vault_path: state.vault_path,
+        domains: list_domain_names(state),
+        exclude: state.exclude,
+        project_dirs: project_dirs(state),
+        naming: naming_rules(state)
+      },
+      now
     )
   end
 

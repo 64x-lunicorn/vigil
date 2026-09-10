@@ -459,6 +459,20 @@ default. A question added and left unwired stops the write at construction
 rather than opening the gate it was meant to guard; a test that wants an absent
 fact names it.
 
+**The seam names both of its answer sets.** `Facts.over_vault/3` builds the
+production one — a pure function of the index, the vault's plain facts and the
+write's instant, returning the adapters that will read the filesystem and the
+index — and `Vigil.Vault.AbsentFacts`, which lives with the tests because only
+they have a use for it, builds the one that answers "nothing there". The
+production set used to be a private closure inside `Vigil.Store`'s `GenServer`,
+which meant the claims it makes could only be reached by starting the writer
+against a real git vault and performing a write. Three of them are load-bearing
+and now have tests of their own: that the similarity search carries no
+preferred type, which is what makes the duplicate gate's threshold mean what
+`Vigil.Index.strength/1` says it means; that the write's date is the instant
+handed in rather than a clock read of its own; and that the depth the policy
+asks with is the search's limit.
+
 **The answer has a name too.** `check/3` returns one `Vigil.Vault.Decision`
 struct per write shape — a create decision, an append decision carrying its
 resolved target, a section decision carrying its resolved chunk, a delete
