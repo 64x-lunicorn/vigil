@@ -22,6 +22,30 @@ signature library as a dependency and a class of bug (wrong `aud` claims) that
 cannot exist with a lookup. The audience is stored at issue time and compared
 at verification time.
 
+**The token record has one owner.** `Vigil.OAuth.Token` is the module that
+says what a stored token is. It writes every one that exists — the pair a
+grant redemption produces, the lone long-lived token that
+`mix vigil.seed_token` seeds, and the spent marker rotation leaves behind —
+it classifies one (`access`, `refresh`, `spent_refresh`), and it answers
+whether a token is a valid access token for a resource and at what scope.
+Everything else asks it: `Vigil.OAuth.Flow` for the refresh grant and the
+family a replay revokes, `Vigil.MCP.Server` for verification at `/mcp`,
+`Vigil.OAuth.Store` for expiry when sweeping and the grant when revoking.
+
+Where the answer is an invariant, it is a function head rather than a
+comment. Only a refresh record can be marked spent, so `spent_at` can be read
+as "replayed" — the marker means that only because rotation is the one thing
+that writes it, and there is now one place rotation can.
+
+The reason is that four modules used to construct or destructure the same map
+and none of them owned it. An access token was "an access token" by the
+*absence* of a `:type` key in one module and by not matching a `:refresh`
+type in another; the defaults for records written before scopes and
+grants existed were each written twice, in different modules, with nothing
+making them agree — and the `grant_id` default has to fall one way for issuing
+and the other way for revoking, which is a thing that can only be stated once
+if the two statements live next to each other.
+
 **Persistence via `:dets`.** Tokens and registered clients must survive a
 restart, otherwise every deploy forces re-authorization. `:dets` ships with
 OTP; no dependency.
@@ -102,9 +126,11 @@ A spent marker is evidence with an expiry date: the record keeps its
 so the table does not grow a permanent tombstone per rotation. Tokens written
 before grants existed carry none, and "every token whose grant is unknown" is
 deliberately not treated as a family — one replay must not revoke a stranger.
-`mix vigil.seed_token` mints a grant of its own for the token it writes, so a
-token seeded out of band is a one-token family rather than a token with no
-family. (§2.2.2, §4.14.2)
+`mix vigil.seed_token` mints through `Vigil.OAuth.Token` like everything
+else, and that mint gives the token a grant of its own — so a token seeded
+out of band is a one-token family rather than a token with no family. The
+`bin/vigil rpc` path in `scripts/lib.sh` calls the same function for the same
+reason. (§2.2.2, §4.14.2)
 
 **Does the authorization response carry `iss`?** Yes, on the success redirect
 and the error redirect alike — RFC 9207 §2 asks for both: "In authorization
@@ -474,12 +500,31 @@ fact rather than a guess.
 
 ## Token verification at `/mcp`
 
-On every request: look the token up, reject refresh tokens presented as access
-tokens, check expiry (deleting the token if expired), and compare the stored
-audience against the configured resource with a constant-time comparison.
+One call: `Vigil.OAuth.Token.validate_access(token, resource)`, which answers
+`{:ok, scope}` or `:error`. It looks the token up, refuses a refresh token
+presented as an access token, checks expiry (deleting the record if expired),
+and compares the stored audience against the configured resource with a
+constant-time comparison.
+
+There is one failure shape on purpose. `/mcp` answers every one of them with
+the same 401 challenge, so a caller learns nothing from which check rejected
+it — not whether the token exists, not whether it was minted for somebody
+else's resource. A refused refresh token is left alone rather than deleted: it
+is a valid token handed to the wrong endpoint, and deleting it would let
+anyone holding it destroy the ability to renew.
+
+`Vigil.MCP.Server` adds only the part that is HTTP — reading the token out of
+the `Authorization` header and turning any refusal into the challenge. That is
+what makes audience mismatch, expiry, refresh-presented-as-access and the
+old-record defaults answerable in a test with no `Plug.Conn`
+(`test/vigil/oauth/token_test.exs`).
 
 Scope decides what the token may call: `vault` allows everything, `vault:read`
 rejects every write tool with an explicit error rather than an HTTP-level 403.
+A record written before scopes existed names none, and is read as the full
+`vault` scope — it was minted when that was the only thing a token could be,
+and reading it as `vault:read` would silently take write access away from a
+client that has it.
 
 ---
 

@@ -16,14 +16,14 @@ defmodule Vigil.MCP.ServerTest do
 
     oauth = Vigil.OAuthCase.setup!()
 
-    token = OAuth.Token.random()
+    %{vault: vault, token: seed_token(oauth), oauth: oauth}
+  end
 
-    OAuth.Store.put_token(token, %{
-      aud: oauth.resource,
-      expires_at: System.system_time(:second) + 3600
-    })
-
-    %{vault: vault, token: token, oauth: oauth}
+  # A real access token, minted by the module that owns the record. The tests
+  # that hand-write one below do it on purpose: those are the shapes `/mcp`
+  # has to refuse, and no minting path produces them.
+  defp seed_token(oauth, scope \\ OAuth.scope()) do
+    OAuth.Token.issue_out_of_band(oauth.resource, scope, 3600, System.system_time(:second))
   end
 
   defp post(token, body, headers \\ []) do
@@ -454,13 +454,7 @@ defmodule Vigil.MCP.ServerTest do
 
   describe "links" do
     test "a vault:read token can call links without a skill_key", %{oauth: oauth} do
-      read_token = OAuth.Token.random()
-
-      OAuth.Store.put_token(read_token, %{
-        aud: oauth.resource,
-        scope: "vault:read",
-        expires_at: System.system_time(:second) + 3600
-      })
+      read_token = seed_token(oauth, OAuth.read_scope())
 
       conn =
         post(
@@ -504,13 +498,7 @@ defmodule Vigil.MCP.ServerTest do
 
   describe "read-only scope" do
     test "a vault:read token can search/read/current but not create", %{oauth: oauth} do
-      read_token = OAuth.Token.random()
-
-      OAuth.Store.put_token(read_token, %{
-        aud: oauth.resource,
-        scope: "vault:read",
-        expires_at: System.system_time(:second) + 3600
-      })
+      read_token = seed_token(oauth, OAuth.read_scope())
 
       conn =
         post(
@@ -548,13 +536,7 @@ defmodule Vigil.MCP.ServerTest do
     end
 
     test "a vault:read token cannot call skill_write either", %{oauth: oauth} do
-      read_token = OAuth.Token.random()
-
-      OAuth.Store.put_token(read_token, %{
-        aud: oauth.resource,
-        scope: "vault:read",
-        expires_at: System.system_time(:second) + 3600
-      })
+      read_token = seed_token(oauth, OAuth.read_scope())
 
       conn =
         post(

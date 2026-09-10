@@ -796,9 +796,8 @@ defmodule Vigil.OAuth.EndpointTest do
   test "a token survives an OAuth.Store restart against the same state dir", %{
     state_dir: state_dir
   } do
-    token = OAuth.Token.random()
-
-    OAuth.Store.put_token(token, %{aud: @resource, expires_at: System.system_time(:second) + 3600})
+    token =
+      OAuth.Token.issue_out_of_band(@resource, "vault", 3600, System.system_time(:second))
 
     stop_supervised!(Vigil.OAuth.Store)
     start_supervised!({Vigil.OAuth.Store, state_dir: state_dir})

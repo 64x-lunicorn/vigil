@@ -1,10 +1,11 @@
 defmodule Mix.Tasks.Vigil.SeedToken do
   @shortdoc "Seeds a long-lived OAuth access token directly into the dets store"
   @moduledoc """
-  For first access and for `verify()` during a rebuild: writes an access token
-  straight into `oauth_tokens.dets` without going through the interactive
-  authorization-code flow. Starts `Vigil.OAuth.Store` on its own for this (no
-  `Application.start`, no Bandit, no port conflict with a running service).
+  For first access and for `verify()` during a rebuild: mints an access token
+  through `Vigil.OAuth.Token` straight into `oauth_tokens.dets`, without going
+  through the interactive authorization-code flow. Starts `Vigil.OAuth.Store`
+  on its own for this (no `Application.start`, no Bandit, no port conflict with
+  a running service).
 
   Prints **only the token, on stdout** — no `Logger`, so it never reaches
   journald. The caller is responsible for not logging the output either.
@@ -38,20 +39,12 @@ defmodule Mix.Tasks.Vigil.SeedToken do
 
     {:ok, pid} = Vigil.OAuth.Store.start_link(state_dir: state_dir)
 
-    token = Vigil.OAuth.Token.random()
     now = System.system_time(:second)
 
-    # A grant of its own, so this token is a family the replay defence can
-    # revoke like any other. It descends from no authorization code — there was
-    # no flow — but "issued out of band" is still one grant, and leaving the
-    # field out would make it indistinguishable from a token written before
-    # grants existed.
-    Vigil.OAuth.Store.put_token(token, %{
-      grant_id: Vigil.Uuid.v4(),
-      aud: resource,
-      scope: scope,
-      expires_at: now + ttl_days * 86_400
-    })
+    # The record is `Vigil.OAuth.Token`'s to write, out of band or not: this
+    # task used to hand-write a variant of it, which is how it came to be the
+    # one shape carrying no grant.
+    token = Vigil.OAuth.Token.issue_out_of_band(resource, scope, ttl_days * 86_400, now)
 
     GenServer.stop(pid)
 

@@ -10,7 +10,7 @@ defmodule Vigil.OAuth.JanitorTest do
 
   use ExUnit.Case, async: false
 
-  alias Vigil.OAuth.{Janitor, Store}
+  alias Vigil.OAuth.{Janitor, Store, Token}
 
   @now 1_700_000_000
   @rate_limits :oauth_rate_limits
@@ -33,9 +33,10 @@ defmodule Vigil.OAuth.JanitorTest do
     Store.put_token("token-live", token_attrs(@now + 3600))
 
     # A rotated refresh token is marked spent rather than deleted, so it is a
-    # row the sweep has to reclaim on its own expiry like any other.
-    Store.spend_token("token-spent-expired", token_attrs(@now), @now - 60)
-    Store.spend_token("token-spent-live", token_attrs(@now + 3600), @now - 60)
+    # row the sweep has to reclaim on its own expiry like any other. Only a
+    # refresh record can be spent, so these are refresh-shaped.
+    Token.spend_refresh("token-spent-expired", refresh_attrs(@now), @now - 60)
+    Token.spend_refresh("token-spent-live", refresh_attrs(@now + 3600), @now - 60)
 
     # sweep_rate_limits/1 drops a window older than 15 minutes.
     Store.record_failure("198.51.100.1", @now - 901)
@@ -59,6 +60,11 @@ defmodule Vigil.OAuth.JanitorTest do
 
   defp token_attrs(expires_at) do
     %{aud: "https://vault.factory-lab.org/mcp", scope: "vault", expires_at: expires_at}
+  end
+
+  defp refresh_attrs(expires_at) do
+    token_attrs(expires_at)
+    |> Map.merge(%{type: :refresh, client_id: "client-1", grant_id: "grant-1"})
   end
 
   defp doc(name) do

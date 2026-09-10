@@ -10,6 +10,8 @@ defmodule Vigil.OAuth.Store do
   use GenServer
   require Logger
 
+  alias Vigil.OAuth.Token
+
   @clients :oauth_clients
   @codes :oauth_codes
   @tokens :oauth_tokens
@@ -137,32 +139,21 @@ defmodule Vigil.OAuth.Store do
   end
 
   @doc """
-  Marks a refresh token spent instead of deleting it.
-
-  Deleting it made a replay indistinguishable from a token that never existed,
-  and the replay is the whole point of rotation: it is the moment the
-  authorization server learns that exactly one of two holders is an attacker.
-  The record keeps its `expires_at`, so the janitor reclaims it on the same
-  schedule as a live one and the marker does not outlive what it is evidence
-  about.
-  """
-  def spend_token(token, attrs, now), do: put_token(token, Map.put(attrs, :spent_at, now))
-
-  @doc """
   Deletes every token descended from one authorization grant.
 
   Keyed on the grant rather than the client on purpose: a client legitimately
   holds more than one grant over time, and revoking by `client_id` would take
   down authorizations that have nothing to do with the replay.
 
-  A `nil` grant revokes nothing. Tokens written before grants existed carry no
-  grant, and "every token whose grant is unknown" is not a family.
+  A `nil` grant revokes nothing — that is what `Vigil.OAuth.Token.grant_of/1`
+  answers for a token written before grants existed, and "every token whose
+  grant is unknown" is not a family.
   """
   def revoke_grant(nil), do: :ok
 
   def revoke_grant(grant_id) do
     Enum.each(all_tokens(), fn {token, attrs} ->
-      if Map.get(attrs, :grant_id) == grant_id, do: delete_token(token)
+      if Token.grant_of(attrs) == grant_id, do: delete_token(token)
     end)
   end
 
@@ -244,7 +235,7 @@ defmodule Vigil.OAuth.Store do
     end)
 
     Enum.each(all_tokens(), fn {token, attrs} ->
-      if attrs.expires_at <= now, do: delete_token(token)
+      if Token.expired?(attrs, now), do: delete_token(token)
     end)
 
     sweep_rate_limits(now)
