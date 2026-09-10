@@ -70,15 +70,57 @@ provided by PKCE or the OpenID Connect nonce value". Since PKCE is mandatory
 here, a client that omits `state` is not thereby unprotected. (§4.7.1)
 
 **Are refresh tokens rotated, and what happens on a second presentation?**
-Rotated: the presented token is deleted before the new pair is minted, so a
-replay finds nothing and gets `invalid_grant`. That meets §2.2.2 — "Refresh
-tokens for public clients MUST be sender-constrained or use refresh token
-rotation" — and detects replay as §4.14.2 requires. It does not *act* on the
-detection: the signal is generated and dropped. **Finding → #78.**
+Rotated, and the second presentation revokes the whole authorization grant.
+That meets §2.2.2 — "Refresh tokens for public clients MUST be
+sender-constrained or use refresh token rotation" — and acts on the detection
+§4.14.2 asks for, rather than only generating it.
 
-**Does the authorization response carry `iss`?** No, and nothing depends on it.
-§4.4.2.1 wants the issuer identifier in the authorization response, via the
-`iss` parameter of RFC 9207. **Finding → #77.**
+The mechanism is a marker, not a deletion. The presented token is marked
+**spent** before the new pair is minted; presenting a spent token is the
+signal, because §4.14.2's case is precisely that "if a refresh token is
+compromised and subsequently used by both the attacker and the legitimate
+client, one of them will present an invalidated refresh token". vigil cannot
+tell which of the two did, so every access and refresh token descended from
+that authorization goes — which is the cost §4.14.2 names, "forcing the
+legitimate client to obtain a fresh authorization grant".
+
+Three things about the shape:
+
+- **The family is keyed on the grant, not the client.** A `grant_id` is minted
+  with the authorization code and carried onto every token redeemed or
+  refreshed from it. A client legitimately holds more than one grant over
+  time, so revoking by `client_id` would take down authorizations that had
+  nothing to do with the replay.
+- **The answer is `invalid_grant` either way**, identical to a refresh token
+  that never existed. The caller does not learn that a family was found.
+- **No other check runs first.** Presenting a spent token *is* the signal, so
+  an attacker who has the token but not the `client_id` cannot keep the family
+  alive by getting the rest of the request wrong.
+
+A spent marker is evidence with an expiry date: the record keeps its
+`expires_at` and the janitor reclaims it on the same schedule as a live token,
+so the table does not grow a permanent tombstone per rotation. Tokens written
+before grants existed carry none, and "every token whose grant is unknown" is
+deliberately not treated as a family — one replay must not revoke a stranger.
+`mix vigil.seed_token` mints a grant of its own for the token it writes, so a
+token seeded out of band is a one-token family rather than a token with no
+family. (§2.2.2, §4.14.2)
+
+**Does the authorization response carry `iss`?** Yes, on the success redirect
+and the error redirect alike — RFC 9207 §2 asks for both: "In authorization
+responses to the client, including error responses, an authorization server
+supporting this specification MUST indicate its identity by including the `iss`
+parameter in the authorization response." Every response leaves through one
+function, `redirect_with_query/3`, so there is no shape that can forget it, and
+`authorization_response_iss_parameter_supported` in the metadata is what tells
+a client it may reject a response that arrives without one.
+
+This is the mix-up defence. Without it a client that talks to more than one
+authorization server cannot tell which one answered, and can be induced to send
+a code minted by an attacker's server to vigil, or vigil's code to the
+attacker's token endpoint. §4.4.2.2 names the alternative — a distinct redirect
+URI per authorization server — but that is the client's choice to make, not
+something vigil can enforce. (§4.4.2.1)
 
 **What authenticates a client at the token endpoint?** Nothing —
 `token_endpoint_auth_methods_supported` is `["none"]` and there are no client
@@ -90,15 +132,45 @@ the consent page is about a different thing — that any local process can *ask*
 for consent while looking like the client. (§2.5, and RFC 8252 §8.3)
 
 **Is the rate limit per client, per address, or global — and what does an
-attacker gain by exhausting it for someone else?** Neither of the two limits
-covers the authorization server. `Vigil.MCP.RateLimit` is per access token and
-guards `/mcp` only. `Vigil.OAuth.Store.rate_limited?/2` has one caller,
-`Flow.consent/4`, so it counts wrong consent passwords and nothing else:
-`/oauth/register`, `/oauth/authorize` and `/oauth/token` are unlimited.
-**Finding → #79.** And the one limit that exists is keyed on `conn.remote_ip`,
-which behind the deployment's proxy is the proxy — one global bucket, so
-exhausting it locks out the owner rather than the attacker.
-**Finding → #81.** (§4.13)
+attacker gain by exhausting it for someone else?** There are three limits and
+they cover different things:
+
+| Limit | Keyed on | Budget | Covers |
+|---|---|---|---|
+| `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM`/min | every `/mcp` request, and only once the token has validated |
+| `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
+| `Vigil.OAuth.Store.rate_limited?/2` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+
+The middle row is the one that bounds an unauthenticated caller, and it is
+checked *before* the handler runs rather than inside it, so a refusal costs
+nothing the request was trying to buy: `/authorize` refuses before
+`Vigil.OAuth.Client.resolve/2` can send a CIMD fetch to an address the caller
+chose, `/register` before it writes a `:dets` row and fsyncs it, `/token`
+before it looks a guess up. Refusals take the shape of the surface they
+refuse — an HTML page for the consent form, an RFC 6749 `temporarily_unavailable`
+body for the two endpoints a program reads.
+
+What an attacker gains by exhausting someone else's budget is bounded by the
+key: with the proxy settings configured it is one address's budget, and
+without them it is the single global bucket described in the next answer. The
+consent limit is the one worth spending, and it locks out consenting for
+fifteen minutes rather than anything longer-lived.
+
+**Which address is a limit keyed on, behind a proxy?** Whatever
+`Vigil.OAuth.ClientAddr` says, which is `conn.remote_ip` until the deployment
+says otherwise. A forwarded header is written by whoever sent the request
+unless something in front of vigil overwrites it, so believing one
+unconditionally would turn a per-address limit into no limit at all. §4.13
+states the condition first: "A reverse proxy MUST therefore sanitize any
+inbound requests to ensure the authenticity and integrity of all header values
+relevant for the security of the application servers". vigil therefore reads a
+header only when told its name *and* told which peers may set it
+(`VIGIL_TRUSTED_PROXY_HEADER`, `VIGIL_TRUSTED_PROXIES`), takes the rightmost
+hop it did not add itself, and falls back to the peer on anything it cannot
+account for — an untrusted peer, an unparseable hop, a list that is entirely
+its own proxies. Both settings are empty by default, so a deployment that has
+not been told about its proxy keeps the single global bucket it always had
+rather than silently getting worse. (§4.13)
 
 Two things the walk confirmed in passing: the authorization server never
 redirects to an unregistered `redirect_uri` — an untrusted client or URI gets a
@@ -107,15 +179,15 @@ framing since the headers below (§4.16).
 
 ### What the walk found
 
-| # | Gap | RFC 9700 |
-|---|---|---|
-| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 |
-| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 |
-| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — |
-| [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 |
+| # | Gap | RFC 9700 | Answered by |
+|---|---|---|---|
+| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 | `iss` on both redirect shapes, advertised |
+| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 | a replay revokes the whole grant |
+| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — | `Vigil.RateLimit`, per address per endpoint |
+| [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 | `Vigil.OAuth.ClientAddr` |
 
-None of them is an incident on the current deployment, where Cloudflare Access
-is in front of the endpoint. They are the defences that are absent behind it.
+None of them was an incident on the current deployment, where Cloudflare Access
+is in front of the endpoint. They are the defences that were absent behind it.
 
 ---
 
@@ -169,7 +241,8 @@ token:
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "code_challenge_methods_supported": ["S256"],
   "token_endpoint_auth_methods_supported": ["none"],
-  "client_id_metadata_document_supported": true
+  "client_id_metadata_document_supported": true,
+  "authorization_response_iss_parameter_supported": true
 }
 ```
 
@@ -287,6 +360,10 @@ sequenceDiagram
 The consent page requires the `VIGIL_AUTH_PASSWORD` every time. There is no
 session cookie after login — it happens rarely enough.
 
+Every redirect back to the client carries `iss`, the issuer identifier of
+RFC 9207, next to `code` (or `error`) and the `state` the client sent. See the
+mix-up answer in the RFC 9700 walk above.
+
 A loopback redirect address is called out on the consent page: any local
 process on that machine could impersonate the client.
 
@@ -352,23 +429,46 @@ Checks run in this order:
    → else `invalid_grant`
 7. If `resource` was sent, it must match the stored one → else `invalid_target`
 
-Success returns an access token (1 hour) and a refresh token (30 days).
+Success returns an access token (1 hour) and a refresh token (30 days), both
+carrying the `grant_id` minted with the code.
 
 ### `grant_type=refresh_token`
 
-**Rotation is mandatory** for a public client: the old refresh token is deleted
-and a new one issued alongside the new access token.
+**Rotation is mandatory** for a public client: the old refresh token is marked
+spent and a new pair is issued.
 
-An invalid or expired refresh token **must** return `invalid_grant` —
+Checks run in this order:
+
+1. Token exists and is a refresh token → else `invalid_grant`
+2. **Already spent → revoke every token of that grant**, and answer
+   `invalid_grant`. This check is first on purpose; see the replay answer in
+   the RFC 9700 walk above
+3. Not expired → else `invalid_grant`
+4. `client_id` matches the stored one → else `invalid_grant`
+5. If `resource` was sent, it must match the stored one → else `invalid_target`
+
+An invalid, expired or replayed refresh token **must** return `invalid_grant` —
 specifically not `invalid_request` and not a custom code. Clients renew tokens
 reactively on a 401 and proactively shortly before expiry; a wrong error code
-breaks renewal.
+breaks renewal. A client whose grant was revoked has to run the authorization
+flow again, consent page included.
 
 ### Error format
 
 RFC 6749: `{"error": "...", "error_description": "..."}` with HTTP 400, except
 `invalid_client` which returns 401. Permitted values: `invalid_request`,
 `invalid_client`, `invalid_grant`, `unsupported_grant_type`, `invalid_target`.
+
+**A rate-limited request is the one deliberate departure**: HTTP 429,
+`{"error": "temporarily_unavailable"}`, and a `Retry-After` carrying the
+window. §5.2 lists neither — it mandates 400 for the token endpoint, and
+`temporarily_unavailable` is §4.1.2.1's code, defined for the authorization
+endpoint. Both are kept anyway. §8.5 allows further error codes; 429 postdates
+RFC 6749 entirely (it is RFC 6585's) and is the only status that says "refused
+for rate" rather than "your request was malformed"; and a client that renews
+reactively on a 401 has to tell those two apart or it will retry a malformed
+request forever. `Retry-After` comes from the window itself, so the wait is a
+fact rather than a guess.
 
 ---
 
@@ -391,14 +491,18 @@ Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
 not matter, and a token lost to a crash costs one re-authorization.
 
 `Vigil.OAuth.Janitor` runs every five minutes and sweeps all four tables:
-expired authorization codes, expired access and refresh tokens, rate-limit
-counters older than 15 minutes, and CIMD cache entries whose hour is up. No
-cron, no job library — just `Process.send_after/3`.
+expired authorization codes, expired access and refresh tokens — spent ones
+included, since a rotated refresh token is marked rather than deleted —
+rate-limit counters older than 15 minutes, and CIMD cache entries whose hour
+is up. No cron, no job library — just `Process.send_after/3`.
 
 The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
-client supplies, and it is filled from `GET /oauth/authorize`, which is not
-rate-limited — so nothing bounds the rate at which it grows either. The sweep is
-what keeps it finite. See [#79](https://github.com/64x-lunicorn/vigil/issues/79).
+client supplies and filled from `GET /oauth/authorize`, so it grows on input
+from outside. Two separate things bound it: the per-address limit on
+`/oauth/authorize` bounds the rate at which a caller can add to it, and this
+sweep bounds the total by dropping what has expired. Neither substitutes for
+the other — a rate limit alone leaves a table that only grows, and a sweep
+alone leaves the rate unbounded.
 
 The interval and the instant are both arguments with production defaults, so a
 test can drive one sweep rather than wait five minutes for it. The instant is a
@@ -436,6 +540,8 @@ cannot authenticate anyone is worse than no service.
 - No JWT, no signing keys, no JWKS
 - No `client_credentials` grant
 - No `client_secret` — every client is public and uses PKCE
-- No revocation endpoint (delete the `.dets` file)
+- No revocation *endpoint* — a replayed refresh token revokes its grant from
+  the inside, but there is nothing for a client to call (delete the `.dets`
+  file)
 - No OpenID Connect discovery
 - No session cookie after login

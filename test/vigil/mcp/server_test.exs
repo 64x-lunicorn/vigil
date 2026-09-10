@@ -11,7 +11,7 @@ defmodule Vigil.MCP.ServerTest do
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
     start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
     start_supervised!(Vigil.MCP.Envelope)
-    start_supervised!(Vigil.MCP.RateLimit)
+    start_supervised!(Vigil.RateLimit)
 
     oauth = Vigil.OAuthCase.setup!()
 
@@ -580,7 +580,7 @@ defmodule Vigil.MCP.ServerTest do
     # A small explicit budget (rather than the default 60) keeps this an
     # integration test of the wiring — Server.init/1 resolving the budget
     # and handle_mcp/1 enforcing it — without needing dozens of requests;
-    # Vigil.MCP.RateLimitTest covers the limiter's own behavior directly.
+    # Vigil.RateLimitTest covers the limiter's own behavior directly.
     defp post_with_budget(token, body, budget, headers) do
       conn =
         conn(:post, "/mcp", Jason.encode!(body))

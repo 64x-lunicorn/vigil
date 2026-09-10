@@ -35,6 +35,25 @@ defmodule Vigil.OAuth.FlowTest do
     )
   end
 
+  # One whole authorization: consent, code, redemption. Several tests need a
+  # second grant for the same client, which is the case the family revocation
+  # must not touch.
+  defp tokens_for(client_id) do
+    {:ok, ctx} = Flow.authorize_request(authorize_params(client_id))
+    code = Flow.issue_authorization_code(ctx)
+
+    {:ok, tokens} =
+      Flow.grant(%{
+        "grant_type" => "authorization_code",
+        "code" => code,
+        "client_id" => client_id,
+        "redirect_uri" => "https://app.example/cb",
+        "code_verifier" => "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+      })
+
+    tokens
+  end
+
   describe "register/2" do
     test "a registration never carries a client_secret" do
       assert {:ok, registration} =
@@ -207,7 +226,8 @@ defmodule Vigil.OAuth.FlowTest do
       assert {:ok, fresh} = Flow.grant(params)
       assert fresh.refresh_token != tokens.refresh_token
 
-      # The presented token is spent: a replay finds nothing.
+      # The presented token is spent, so a replay is refused — and, as the
+      # tests below cover, recognised rather than merely refused.
       assert {:error, 400, "invalid_grant"} = Flow.grant(params)
     end
 
@@ -227,6 +247,139 @@ defmodule Vigil.OAuth.FlowTest do
                  "refresh_token" => tokens.refresh_token,
                  "client_id" => "someone-else"
                })
+    end
+
+    test "every token records the grant it descends from", %{tokens: tokens} do
+      {:ok, access} = Store.get_token(tokens.access_token)
+      {:ok, refresh} = Store.get_token(tokens.refresh_token)
+
+      assert is_binary(access.grant_id)
+      assert access.grant_id == refresh.grant_id
+    end
+
+    test "a rotated pair stays in the same grant", %{client_id: client_id, tokens: tokens} do
+      {:ok, before} = Store.get_token(tokens.refresh_token)
+
+      assert {:ok, fresh} =
+               Flow.grant(%{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => tokens.refresh_token,
+                 "client_id" => client_id
+               })
+
+      {:ok, after_refresh} = Store.get_token(fresh.refresh_token)
+      assert after_refresh.grant_id == before.grant_id
+    end
+
+    test "a second grant to the same client is a different grant" do
+      client_id = client!()
+
+      first = tokens_for(client_id)
+      second = tokens_for(client_id)
+
+      {:ok, one} = Store.get_token(first.refresh_token)
+      {:ok, two} = Store.get_token(second.refresh_token)
+
+      assert one.grant_id != two.grant_id
+    end
+
+    test "replaying a spent refresh token kills the pair that replaced it", %{
+      client_id: client_id,
+      tokens: tokens
+    } do
+      params = %{
+        "grant_type" => "refresh_token",
+        "refresh_token" => tokens.refresh_token,
+        "client_id" => client_id
+      }
+
+      # The legitimate rotation.
+      assert {:ok, rotated} = Flow.grant(params)
+      assert {:ok, _} = Store.get_token(rotated.access_token)
+
+      # Somebody presents the spent token. RFC 9700 §4.14.2: exactly one of
+      # the two holders is an attacker, and the authorization server does not
+      # know which — so the whole grant goes.
+      assert {:error, 400, "invalid_grant"} = Flow.grant(params)
+
+      assert Store.get_token(rotated.access_token) == :error
+      assert Store.get_token(rotated.refresh_token) == :error
+      assert Store.get_token(tokens.access_token) == :error
+      assert Store.get_token(tokens.refresh_token) == :error
+    end
+
+    test "a replay is answered exactly like a token that never existed", %{
+      client_id: client_id,
+      tokens: tokens
+    } do
+      params = %{
+        "grant_type" => "refresh_token",
+        "refresh_token" => tokens.refresh_token,
+        "client_id" => client_id
+      }
+
+      assert {:ok, _} = Flow.grant(params)
+
+      replay = Flow.grant(params)
+      unknown = Flow.grant(%{params | "refresh_token" => Vigil.OAuth.Token.random()})
+
+      # The caller must not learn that a family was found and revoked.
+      assert replay == unknown
+    end
+
+    test "one grant's revocation leaves another grant alone", %{
+      client_id: client_id,
+      tokens: tokens
+    } do
+      other = tokens_for(client_id)
+
+      params = %{
+        "grant_type" => "refresh_token",
+        "refresh_token" => tokens.refresh_token,
+        "client_id" => client_id
+      }
+
+      assert {:ok, _} = Flow.grant(params)
+      assert {:error, 400, "invalid_grant"} = Flow.grant(params)
+
+      # A client legitimately holds more than one grant over time, which is
+      # why the family is keyed on the grant and not on the client.
+      assert {:ok, _} = Store.get_token(other.access_token)
+      assert {:ok, _} = Store.get_token(other.refresh_token)
+    end
+
+    test "a refresh token from before grants existed revokes nothing on replay" do
+      # What is already in a deployment's dets file, written before grants
+      # existed: a refresh token and an access token, neither carrying one.
+      # "Every token whose grant is unknown" must not be read as a family, or
+      # one replay would revoke a stranger along with its own.
+      client_id = client!()
+      legacy = Vigil.OAuth.Token.random()
+      unrelated = Vigil.OAuth.Token.random()
+      aud = Vigil.OAuth.resource()
+
+      Store.put_token(legacy, %{
+        type: :refresh,
+        client_id: client_id,
+        aud: aud,
+        scope: "vault",
+        expires_at: System.system_time(:second) + 3600
+      })
+
+      Store.put_token(unrelated, %{aud: aud, scope: "vault", expires_at: 4_000_000_000})
+
+      params = %{
+        "grant_type" => "refresh_token",
+        "refresh_token" => legacy,
+        "client_id" => client_id
+      }
+
+      assert {:ok, fresh} = Flow.grant(params)
+      assert {:error, 400, "invalid_grant"} = Flow.grant(params)
+
+      assert {:ok, _} = Store.get_token(unrelated)
+      # The rotated pair got a grant of its own, so it is not collateral either.
+      assert {:ok, _} = Store.get_token(fresh.access_token)
     end
 
     test "the scope survives a refresh", %{client_id: client_id, tokens: tokens} do

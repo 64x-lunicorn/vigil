@@ -41,7 +41,13 @@ defmodule Mix.Tasks.Vigil.SeedToken do
     token = Vigil.OAuth.Token.random()
     now = System.system_time(:second)
 
+    # A grant of its own, so this token is a family the replay defence can
+    # revoke like any other. It descends from no authorization code — there was
+    # no flow — but "issued out of band" is still one grant, and leaving the
+    # field out would make it indistinguishable from a token written before
+    # grants existed.
     Vigil.OAuth.Store.put_token(token, %{
+      grant_id: Vigil.Uuid.v4(),
       aud: resource,
       scope: scope,
       expires_at: now + ttl_days * 86_400

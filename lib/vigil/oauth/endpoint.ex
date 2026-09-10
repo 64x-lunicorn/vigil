@@ -9,10 +9,42 @@ defmodule Vigil.OAuth.Endpoint do
   use Plug.Router
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{ConsentPage, Flow}
+  alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow}
+  alias Vigil.RateLimit
+
+  @default_rpm 30
+  @default_register_rpm 5
 
   plug(:match)
   plug(:dispatch)
+
+  # Resolves what the deployment says about its proxy and its budgets once,
+  # when the router is initialized, rather than re-parsing a CIDR list and
+  # re-reading application config on every request.
+  @impl true
+  def init(opts) do
+    opts
+    |> Keyword.put_new_lazy(:client_addr, &ClientAddr.config/0)
+    |> Keyword.put_new_lazy(:limits, &configured_limits/0)
+  end
+
+  @impl true
+  def call(conn, opts) do
+    conn
+    |> put_private(:oauth_client_addr, opts[:client_addr])
+    |> put_private(:oauth_limits, opts[:limits])
+    |> super(opts)
+  end
+
+  defp configured_limits do
+    rpm = RateLimit.budget(:oauth_rate_limit_rpm, @default_rpm)
+
+    %{
+      authorize: rpm,
+      token: rpm,
+      register: RateLimit.budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
+    }
+  end
 
   ## Discovery
 
@@ -31,27 +63,82 @@ defmodule Vigil.OAuth.Endpoint do
   ## Flow
 
   post "/oauth/register" do
-    handle_register(conn)
+    under_limit(conn, :register, &handle_register/1)
   end
 
   get "/oauth/authorize" do
-    conn = fetch_query_params(conn)
-    with_authorize_request(conn, conn.query_params, &render_consent(&1, &2, nil))
+    under_limit(conn, :authorize, fn conn ->
+      conn = fetch_query_params(conn)
+      with_authorize_request(conn, conn.query_params, &render_consent(&1, &2, nil))
+    end)
   end
 
   post "/oauth/authorize" do
-    {:ok, body, conn} = Plug.Conn.read_body(conn)
-    params = URI.decode_query(body)
+    under_limit(conn, :authorize, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      params = URI.decode_query(body)
 
-    with_authorize_request(conn, params, &process_consent_decision(&1, &2, params))
+      with_authorize_request(conn, params, &process_consent_decision(&1, &2, params))
+    end)
   end
 
   post "/oauth/token" do
-    handle_token(conn)
+    under_limit(conn, :token, &handle_token/1)
   end
 
   match _ do
     send_resp(conn, 404, "")
+  end
+
+  ## Rate limits
+
+  # Every endpoint here is reachable without a token, so this is the only thing
+  # bounding what an unauthenticated caller can make vigil do: fetch a CIMD
+  # document from an address it chose, write a `:dets` row and fsync it, or ask
+  # the token endpoint to answer a guess. Cloudflare Access is what keeps that
+  # from being reachable on the deployment `docs/guide.md` describes; this is
+  # the defence behind it.
+  #
+  # It runs before the handler rather than inside it, so the refusal costs
+  # nothing that the request was trying to buy — in particular `/authorize`
+  # refuses before `Vigil.OAuth.Client.resolve/2` can go out to the network.
+  #
+  # A refusal takes the shape of the surface it refuses: the consent page is
+  # HTML a browser renders, and the other two are read by a program.
+  defp under_limit(conn, endpoint, handler) do
+    budget = Map.fetch!(conn.private.oauth_limits, endpoint)
+    key = {:oauth, endpoint, client_addr(conn)}
+
+    if RateLimit.limited?(key, budget, System.system_time(:second)) do
+      refuse(conn, endpoint)
+    else
+      handler.(conn)
+    end
+  end
+
+  defp refuse(conn, :authorize) do
+    conn
+    |> put_retry_after()
+    |> send_html(429, error_html("Too many requests. Try again in a minute."))
+  end
+
+  # HTTP 429 with `temporarily_unavailable` is a departure from RFC 6749 §5.2 —
+  # that section mandates 400 for the token endpoint and lists neither. Both
+  # are kept: §8.5 allows further error codes, 429 postdates RFC 6749
+  # (RFC 6585) and is the only status that says "refused for rate" rather than
+  # "your request was malformed", and a client that renews reactively on a 401
+  # needs to tell those apart. `docs/oauth.md` records the reasoning.
+  defp refuse(conn, _endpoint) do
+    conn
+    |> put_resp_header("cache-control", "no-store")
+    |> put_retry_after()
+    |> send_json(429, %{error: "temporarily_unavailable"})
+  end
+
+  # The wait is a fact rather than a guess, and it comes from the window itself
+  # so the two cannot drift apart.
+  defp put_retry_after(conn) do
+    put_resp_header(conn, "retry-after", Integer.to_string(RateLimit.window_seconds()))
   end
 
   ## Registration
@@ -95,7 +182,7 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp process_allow(conn, ctx, params) do
-    case Flow.consent(client_ip(conn), params["password"], ctx) do
+    case Flow.consent(client_addr(conn), params["password"], ctx) do
       {:ok, code} ->
         redirect_with_query(conn, ctx.redirect_uri, put_state(%{"code" => code}, ctx.state))
 
@@ -152,8 +239,21 @@ defmodule Vigil.OAuth.Endpoint do
     redirect_with_query(conn, redirect_uri, put_state(%{"error" => error_code}, state))
   end
 
+  # Every authorization response leaves through here, success and error alike,
+  # which is why `iss` is added here rather than at the two call sites. RFC 9207
+  # §2 asks for exactly that: "In authorization responses to the client,
+  # including error responses, an authorization server supporting this
+  # specification MUST indicate its identity by including the `iss` parameter
+  # in the authorization response."
+  #
+  # It is the mix-up defence of RFC 9700 §4.4.2.1. A client that talks to more
+  # than one authorization server otherwise cannot tell which one answered, and
+  # can be induced to send a code minted by an attacker's server to vigil, or
+  # vigil's code to the attacker's token endpoint. vigil's clients talk to one
+  # server today, so this closes a gap rather than an incident.
   defp redirect_with_query(conn, redirect_uri, query) do
     separator = if String.contains?(redirect_uri, "?"), do: "&", else: "?"
+    query = Map.put(query, "iss", OAuth.issuer())
 
     conn
     |> put_resp_header("location", redirect_uri <> separator <> URI.encode_query(query))
@@ -164,7 +264,11 @@ defmodule Vigil.OAuth.Endpoint do
   defp put_state(query, ""), do: query
   defp put_state(query, state), do: Map.put(query, "state", state)
 
-  defp client_ip(conn), do: conn.remote_ip |> :inet.ntoa() |> List.to_string()
+  # Which address a limit is counted against. `Vigil.OAuth.ClientAddr` owns the
+  # decision; this only says where the configuration was put. Not "ip": the
+  # answer is a text form that may be IPv6, and may be a forwarded hop rather
+  # than the peer of the connection.
+  defp client_addr(conn), do: ClientAddr.of(conn, conn.private.oauth_client_addr)
 
   defp send_json(conn, status, payload) do
     conn

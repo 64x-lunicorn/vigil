@@ -136,6 +136,36 @@ defmodule Vigil.OAuth.Store do
     :dets.sync(@tokens)
   end
 
+  @doc """
+  Marks a refresh token spent instead of deleting it.
+
+  Deleting it made a replay indistinguishable from a token that never existed,
+  and the replay is the whole point of rotation: it is the moment the
+  authorization server learns that exactly one of two holders is an attacker.
+  The record keeps its `expires_at`, so the janitor reclaims it on the same
+  schedule as a live one and the marker does not outlive what it is evidence
+  about.
+  """
+  def spend_token(token, attrs, now), do: put_token(token, Map.put(attrs, :spent_at, now))
+
+  @doc """
+  Deletes every token descended from one authorization grant.
+
+  Keyed on the grant rather than the client on purpose: a client legitimately
+  holds more than one grant over time, and revoking by `client_id` would take
+  down authorizations that have nothing to do with the replay.
+
+  A `nil` grant revokes nothing. Tokens written before grants existed carry no
+  grant, and "every token whose grant is unknown" is not a family.
+  """
+  def revoke_grant(nil), do: :ok
+
+  def revoke_grant(grant_id) do
+    Enum.each(all_tokens(), fn {token, attrs} ->
+      if Map.get(attrs, :grant_id) == grant_id, do: delete_token(token)
+    end)
+  end
+
   def all_tokens,
     do: :dets.foldl(fn {token, attrs}, acc -> [{token, attrs} | acc] end, [], @tokens)
 
@@ -186,9 +216,10 @@ defmodule Vigil.OAuth.Store do
   Drops CIMD cache entries whose hour is up.
 
   This table is keyed on the `client_id` URL a client supplies, and it is
-  filled from `GET /oauth/authorize`, which is not rate-limited — so it grows
-  on input from outside and nothing bounds either the rate or the total. This
-  sweep is the only thing that keeps it finite. See issue #79.
+  filled from `GET /oauth/authorize`, so it grows on input from outside. Two
+  separate things bound it: `Vigil.OAuth.Endpoint`'s per-address limit bounds
+  the rate at which a caller can add to it, and this sweep bounds the total by
+  dropping what has expired. Neither substitutes for the other.
   """
   def sweep_cimd_cache(now) do
     sweep_table(@cimd_cache, fn {_url, _doc, expires_at} -> expires_at <= now end)

@@ -3,29 +3,37 @@ defmodule Vigil.MCP.Server do
   use Plug.Router
   require Logger
 
-  alias Vigil.MCP.{Tools, Envelope, RateLimit}
+  alias Vigil.MCP.{Tools, Envelope}
+  alias Vigil.RateLimit
   alias Vigil.Store
   alias Vigil.OAuth
 
   @protocol_version "2025-11-25"
+  @default_rpm 60
 
   plug(:match)
   plug(:dispatch)
 
-  # Resolves the rate limit budget once, when Bandit starts this plug (or a
-  # test calls init/1 directly — several do, with no options, and that must
-  # keep working), rather than reading application config on every request.
+  # Resolves the rate limit budget and the authorization server's own options
+  # once, when Bandit starts this plug (or a test calls init/1 directly —
+  # several do, with no options, and that must keep working), rather than
+  # reading application config on every request. Forwarding used to call
+  # `Vigil.OAuth.Endpoint.init/1` per request, which re-parsed the trusted
+  # proxy list every time.
   @impl true
   def init(opts) do
-    Keyword.put_new_lazy(opts, :rate_limit_budget, fn ->
-      Application.get_env(:vigil, :rate_limit_rpm, 60)
+    opts
+    |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
+      RateLimit.budget(:rate_limit_rpm, @default_rpm)
     end)
+    |> Keyword.put_new_lazy(:oauth, fn -> Vigil.OAuth.Endpoint.init([]) end)
   end
 
   @impl true
   def call(conn, opts) do
     conn
     |> put_private(:rate_limit_budget, opts[:rate_limit_budget])
+    |> put_private(:oauth_opts, opts[:oauth])
     |> super(opts)
   end
 
@@ -46,7 +54,7 @@ defmodule Vigil.MCP.Server do
   # Everything that is not /mcp is the authorization server's: discovery
   # documents, registration, consent and token. Two protocols, two routers.
   match _ do
-    Vigil.OAuth.Endpoint.call(conn, Vigil.OAuth.Endpoint.init([]))
+    Vigil.OAuth.Endpoint.call(conn, conn.private.oauth_opts)
   end
 
   ## MCP handling

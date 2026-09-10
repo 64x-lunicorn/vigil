@@ -3,7 +3,7 @@ defmodule Vigil.MCP.Envelope do
   The session table behind the time envelope.
 
   A `GenServer` only because the table needs an owner that outlives a request —
-  exactly as `Vigil.MCP.RateLimit`'s does. The table is public and the lookup
+  exactly as `Vigil.RateLimit`'s does. The table is public and the lookup
   and the insert happen in the caller, so a response costs no process hop to
   do one read and one write.
 

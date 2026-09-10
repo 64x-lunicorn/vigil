@@ -571,7 +571,34 @@ Five layers, each doing one job:
    control (the token already did that): it is proof that the assistant has
    *read the writing conventions* in this session. It can only be obtained by
    calling `skill_read`.
-5. **Rate limiting** — fixed window per access token.
+5. **Rate limiting** — fixed window, in three places that are easy to
+   confuse. `/mcp` is limited per access token, so it is unreachable without
+   one. The authorization server's own endpoints — `register`, `authorize`,
+   `token` — are limited per **client address**, because they are reachable
+   with no token at all and each one costs something: an outbound CIMD fetch
+   to an address the caller chose, a `:dets` row and an fsync, or the work of
+   answering a guess. The consent form counts wrong passwords only, per
+   address, over a much longer window. One limiter, `Vigil.RateLimit`, serves
+   the first two; the third is a lockout rather than a request limit and
+   belongs to `Vigil.OAuth.Store`.
+
+**Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of
+the TCP connection, which behind layer 1 is the proxy — so a per-address limit
+keyed on it is one global bucket. A forwarded header is written by whoever sent
+the request unless something overwrites it, so vigil believes one only when
+told its name *and* told which peers may set it, and takes the rightmost hop it
+did not add itself. Both settings are empty by default: unconfigured, the limit
+stays global, which is stricter than intended rather than weaker. Getting them
+wrong is the only way to make this worse than not having it.
+
+**A grant** is one authorization, and it is the unit of revocation. A `grant_id`
+is minted with the authorization code and carried onto every token redeemed or
+refreshed from it, so a replayed refresh token can take down the whole family.
+Not `client_id`: a client legitimately holds more than one grant over time. A
+rotated refresh token is marked **spent** rather than deleted, because deleting
+it makes a replay indistinguishable from a token that never existed — and the
+replay is the signal that one of two holders is an attacker. See
+[oauth.md](oauth.md) for the full walk.
 
 The SkillKey creates a bootstrap problem: `skill_write` needs a key, but a
 fresh vault has no conventions skill to read one from. Resolved by having

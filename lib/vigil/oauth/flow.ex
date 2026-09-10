@@ -132,6 +132,9 @@ defmodule Vigil.OAuth.Flow do
       code_challenge: ctx.code_challenge,
       resource: OAuth.resource(),
       scope: ctx.scope,
+      # The authorization grant this code, and every token redeemed from it,
+      # belongs to. It is what "revoke the whole family" is expressed in.
+      grant_id: Vigil.Uuid.v4(),
       expires_at: now + @authorization_code_ttl
     })
 
@@ -154,12 +157,30 @@ defmodule Vigil.OAuth.Flow do
 
       {:ok, data} ->
         cond do
-          data.expires_at <= now -> {:error, 400, "invalid_grant"}
-          data.client_id != params["client_id"] -> {:error, 400, "invalid_grant"}
-          data.redirect_uri != params["redirect_uri"] -> {:error, 400, "invalid_grant"}
-          not pkce_ok?(params, data) -> {:error, 400, "invalid_grant"}
-          not target_ok?(params, data.resource) -> {:error, 400, "invalid_target"}
-          true -> {:ok, issue_tokens(data.client_id, data.resource, scope_of(data), now)}
+          data.expires_at <= now ->
+            {:error, 400, "invalid_grant"}
+
+          data.client_id != params["client_id"] ->
+            {:error, 400, "invalid_grant"}
+
+          data.redirect_uri != params["redirect_uri"] ->
+            {:error, 400, "invalid_grant"}
+
+          not pkce_ok?(params, data) ->
+            {:error, 400, "invalid_grant"}
+
+          not target_ok?(params, data.resource) ->
+            {:error, 400, "invalid_target"}
+
+          true ->
+            {:ok,
+             issue_tokens(
+               data.client_id,
+               data.resource,
+               scope_of(data),
+               grant_for_issue(data),
+               now
+             )}
         end
     end
   end
@@ -168,30 +189,55 @@ defmodule Vigil.OAuth.Flow do
     refresh_token = params["refresh_token"] || ""
 
     case Store.get_token(refresh_token) do
-      {:ok, %{type: :refresh} = data} ->
-        cond do
-          data.expires_at <= now ->
-            {:error, 400, "invalid_grant"}
-
-          data.client_id != params["client_id"] ->
-            {:error, 400, "invalid_grant"}
-
-          not target_ok?(params, data.aud) ->
-            {:error, 400, "invalid_target"}
-
-          true ->
-            # Rotation: the presented refresh token is spent before the new
-            # pair is minted, so a replay finds nothing.
-            Store.delete_token(refresh_token)
-            {:ok, issue_tokens(data.client_id, data.aud, scope_of(data), now)}
-        end
-
-      _ ->
-        {:error, 400, "invalid_grant"}
+      # Order matters: a spent token is a replay before it is anything else.
+      {:ok, %{type: :refresh, spent_at: _} = data} -> replayed(data)
+      {:ok, %{type: :refresh} = data} -> refresh(refresh_token, data, params, now)
+      _ -> {:error, 400, "invalid_grant"}
     end
   end
 
   def grant(_params, _now), do: {:error, 400, "unsupported_grant_type"}
+
+  defp refresh(refresh_token, data, params, now) do
+    cond do
+      data.expires_at <= now ->
+        {:error, 400, "invalid_grant"}
+
+      data.client_id != params["client_id"] ->
+        {:error, 400, "invalid_grant"}
+
+      not target_ok?(params, data.aud) ->
+        {:error, 400, "invalid_target"}
+
+      true ->
+        # Rotation: the presented token is spent before the new pair is minted,
+        # so a replay is refused — and, because it is marked rather than
+        # deleted, recognised as a replay rather than mistaken for a token that
+        # never existed.
+        Store.spend_token(refresh_token, data, now)
+        {:ok, issue_tokens(data.client_id, data.aud, scope_of(data), grant_for_issue(data), now)}
+    end
+  end
+
+  # A refresh token presented after it was rotated away. RFC 9700 §4.14.2:
+  # "If a refresh token is compromised and subsequently used by both the
+  # attacker and the legitimate client, one of them will present an
+  # invalidated refresh token", and the authorization server "will revoke the
+  # active refresh token" — which stops the attack "at the cost of forcing the
+  # legitimate client to obtain a fresh authorization grant".
+  #
+  # vigil cannot tell which of the two holders replayed, so the whole grant
+  # goes: every access and refresh token descended from the same authorization.
+  # The answer is `invalid_grant` either way, identical to an unknown token, so
+  # the caller does not learn that a family was found.
+  #
+  # No other check runs first. Presenting a spent token *is* the signal, and an
+  # attacker who knows the token but not the `client_id` should not be able to
+  # keep the family alive by getting the rest of the request wrong.
+  defp replayed(data) do
+    Store.revoke_grant(Map.get(data, :grant_id))
+    {:error, 400, "invalid_grant"}
+  end
 
   defp pkce_ok?(params, data) do
     Token.pkce_valid?(params["code_verifier"] || "", data.code_challenge)
@@ -203,14 +249,28 @@ defmodule Vigil.OAuth.Flow do
 
   defp scope_of(data), do: Map.get(data, :scope, OAuth.scope())
 
-  defp issue_tokens(client_id, aud, scope, now) do
+  # The grant a newly issued pair belongs to. A code or refresh token minted
+  # before grants existed carries none, and minting one here keeps the
+  # invariant unconditional: every token issued from now on belongs to a family
+  # that can be revoked. Note this is only right for *issuing* — revoking a
+  # grant that does not exist has to stay a no-op, so `replayed/1` reads the
+  # field directly rather than through this.
+  defp grant_for_issue(data), do: Map.get(data, :grant_id) || Vigil.Uuid.v4()
+
+  defp issue_tokens(client_id, aud, scope, grant_id, now) do
     access_token = Token.random()
     refresh_token = Token.random()
 
-    Store.put_token(access_token, %{aud: aud, scope: scope, expires_at: now + @access_token_ttl})
+    Store.put_token(access_token, %{
+      grant_id: grant_id,
+      aud: aud,
+      scope: scope,
+      expires_at: now + @access_token_ttl
+    })
 
     Store.put_token(refresh_token, %{
       type: :refresh,
+      grant_id: grant_id,
       client_id: client_id,
       aud: aud,
       scope: scope,

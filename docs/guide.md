@@ -357,7 +357,7 @@ flowchart TB
     L1 --> L2["2 · OAuth 2.1 + PKCE<br/><i>vigil is its own authorization server</i>"]
     L2 --> L3["3 · Scope<br/><i>vault vs vault:read</i>"]
     L3 --> L4["4 · SkillKey<br/><i>rotating HMAC, write tools only</i>"]
-    L4 --> L5["5 · Rate limit<br/><i>per access token, fixed window</i>"]
+    L4 --> L5["5 · Rate limit<br/><i>fixed window, per token and per address</i>"]
     L5 --> OK["Tool dispatch"]
 ```
 
@@ -369,7 +369,26 @@ flowchart TB
 3. **Scopes.** `vault` for full access, `vault:read` for read-only clients.
 4. **SkillKey.** Rotating HMAC derived from `VIGIL_AUTH_PASSWORD`, required by
    every write tool.
-5. **Rate limiting** per access token, fixed window.
+5. **Rate limiting**, fixed window — per access token behind `/mcp`, per
+   client address in front of the authorization server.
+
+Layer 5 is the one to read carefully, because there are three limits and they
+cover different things:
+
+| Limit | Keyed on | Budget | Covers |
+|---|---|---|---|
+| `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM` per minute | every `/mcp` request, and only after the token validates |
+| `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` per minute | `/oauth/register`, `/oauth/authorize`, `/oauth/token` — all reachable without a token |
+| `Vigil.OAuth.Store` | client address | 5 per 15 minutes | wrong passwords on the consent form, and nothing else |
+
+The middle row is what bounds an unauthenticated caller: without it, `/authorize`
+would fetch a CIMD document from an address the caller chose as often as it
+liked, `/register` would write a `:dets` row and fsync per call, and `/token`
+would answer guesses for free. Cloudflare Access is what keeps those from being
+reachable at all on this deployment; the limits are the defence behind it.
+
+Which address the per-address limits count against is a configured question,
+not a guess: see [the two proxy settings](#the-two-proxy-settings-and-why-they-default-to-unset).
 
 The systemd unit runs with `ProtectSystem=strict`, `ProtectHome=true`,
 `PrivateTmp=true`, `NoNewPrivileges=true`, and `/var/lib/vigil` as the only
@@ -393,14 +412,62 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_RESOURCE` | `http://localhost:4000/mcp` | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |
 | `VIGIL_STATE_DIR` | `tmp/oauth_state` | directory for the three `:dets` files |
+| `VIGIL_TRUSTED_PROXY_HEADER` | unset | header carrying the real client address, e.g. `CF-Connecting-IP` |
+| `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
 | `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
+| `VIGIL_OAUTH_RATE_LIMIT_RPM` | `30` | max `/oauth/authorize` and `/oauth/token` per minute per client address |
+| `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` | `5` | max `/oauth/register` per minute per client address |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
+
+Every budget above (`VIGIL_RATE_LIMIT_RPM` and the two OAuth ones) goes through
+one check: a value that is not a positive integer is refused, the default is
+used instead, and a warning names the setting. A limit that is quietly not the
+one you configured is worse than a loud one, so look for that warning in the
+journal after changing one.
 
 The last two only affect the instructions handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
 will keep writing German notes.
+
+### The two proxy settings, and why they default to unset
+
+vigil's rate limits are keyed per client address, and `conn.remote_ip` — the
+peer of the TCP connection — is the proxy, not the client, in the deployment
+above. Left alone, that makes every limit one global bucket: stricter than
+intended rather than weaker, and exhaustible by anyone who can reach
+`/oauth/authorize`.
+
+Reading `X-Forwarded-For` is not the fix on its own. The header is written by
+whoever sent the request unless something in front of vigil overwrites it, so
+believing it unconditionally turns a global limit into no limit at all — every
+attempt simply claims a new address. So vigil believes a header only when told
+which one and told which peers may set it:
+
+```
+VIGIL_TRUSTED_PROXY_HEADER=CF-Connecting-IP
+VIGIL_TRUSTED_PROXIES=173.245.48.0/20,103.21.244.0/22
+```
+
+**Set both or neither.** A header name without a trusted peer is ignored, and
+a trusted peer without a header name has nothing to read. With neither set,
+behaviour is exactly what it was before the settings existed.
+
+**Setting them wrong is worse than leaving them unset.** If `VIGIL_TRUSTED_PROXIES`
+includes an address that is not in fact a sanitizing proxy — the whole of
+`0.0.0.0/0`, say, or a range vigil is reachable from directly — then any caller
+in that range gets a fresh rate-limit bucket per request just by naming a new
+address. Put the proxy's own addresses there and nothing else. For Cloudflare
+that is the published
+[IP ranges](https://www.cloudflare.com/ips/), and the header to name is
+`CF-Connecting-IP`, which Cloudflare overwrites rather than appends to.
+
+When several hops are listed, vigil takes the rightmost one it did not add
+itself: proxies append what they saw, so anything further left is a claim from
+outside. A hop that is not an address at all stops the walk and the peer is
+used instead — otherwise a caller could inject garbage to push the walk onto a
+value it chose.
 
 ---
 
@@ -509,6 +576,7 @@ lib/vigil/
 ├── git.ex               # System.cmd wrapper: add/commit/push/pull/log/rm/mv
 ├── skills.ex            # skills/ — one repository, two systems
 ├── skill_key.ex         # rotating HMAC attestation token
+├── rate_limit.ex        # one fixed-window limit, shared by /mcp and OAuth
 ├── uuid.ex              # UUIDv4 for the OAuth layer
 ├── vault_discovery.ex   # pure file discovery, no GenServer
 ├── vault_check.ex       # read-only vault doctor
@@ -523,7 +591,6 @@ lib/vigil/
 └── mcp/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints
     ├── tools.ex         # one table per tool: schema, validation, dispatch
-    ├── rate_limit.ex    # fixed-window rate limit per token
     ├── envelope.ex      # time envelope, session delta tracking
     └── envelope/
         └── decision.ex  # which envelope a response carries, as a pure function
