@@ -635,7 +635,11 @@ Five layers, each doing one job:
    answering a guess. The consent form counts wrong passwords only, per
    address, over a much longer window. One limiter, `Vigil.RateLimit`, serves
    the first two; the third is a lockout rather than a request limit and
-   belongs to `Vigil.OAuth.Store`.
+   belongs to `Vigil.OAuth.Store`. Every one of them is swept by
+   `Vigil.OAuth.Janitor`, whose list of modules to ask is its own: a module
+   belongs on it as soon as it owns a table with an expiry, whatever namespace
+   it lives in. A budget bounds how fast rows arrive and a sweep
+   bounds how many there are, and neither substitutes for the other.
 
 **Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of
 the TCP connection, which behind layer 1 is the proxy — so a per-address limit

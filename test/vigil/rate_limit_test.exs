@@ -78,4 +78,40 @@ defmodule Vigil.RateLimitTest do
     assert RateLimit.limited?("key-d1", 1, now + 1)
     assert RateLimit.limited?("key-d2", 1, now + 1)
   end
+
+  describe "sweep_expired/1" do
+    # An elapsed window already reads as absent through `limited?/3`, so only
+    # the table itself shows whether the row was reclaimed.
+    @table :vigil_rate_limits
+
+    test "a window that has elapsed is reclaimed" do
+      now = 1_700_000_000
+      refute RateLimit.limited?("key-e", 1, now)
+      assert [{"key-e", 1, ^now}] = :ets.lookup(@table, "key-e")
+
+      assert RateLimit.sweep_expired(now + 61) == 1
+      assert :ets.lookup(@table, "key-e") == []
+    end
+
+    test "a window still inside its minute survives, and its caller stays refused" do
+      now = 1_700_000_000
+      refute RateLimit.limited?("key-f", 1, now)
+
+      # 60s on is the last instant `limited?/3` still counts the window at, so
+      # it is the last instant the sweep must keep it. A sweep that reclaimed
+      # here would hand the caller a fresh budget it has not waited out.
+      assert RateLimit.sweep_expired(now + 60) == 0
+      assert RateLimit.limited?("key-f", 1, now + 60)
+    end
+
+    test "a sweep reclaims the elapsed windows and leaves the live ones" do
+      now = 1_700_000_000
+      refute RateLimit.limited?("key-g-old", 1, now)
+      refute RateLimit.limited?("key-g-live", 1, now + 61)
+
+      assert RateLimit.sweep_expired(now + 61) == 1
+      assert :ets.lookup(@table, "key-g-old") == []
+      assert [{"key-g-live", 1, _}] = :ets.lookup(@table, "key-g-live")
+    end
+  end
 end

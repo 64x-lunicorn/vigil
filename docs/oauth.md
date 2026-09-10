@@ -167,6 +167,10 @@ they cover different things:
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
 | `Vigil.OAuth.Store.rate_limited?/2` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
 
+The first two rows are one table, `Vigil.RateLimit`'s, and the third is
+`Vigil.OAuth.Store`'s. `Vigil.OAuth.Janitor` sweeps both, on the schedule
+"Storage and cleanup" below sets out.
+
 The middle row is the one that bounds an unauthenticated caller, and it is
 checked *before* the handler runs rather than inside it, so a refusal costs
 nothing the request was trying to buy: `/authorize` refuses before
@@ -535,19 +539,48 @@ Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
 `:dets.sync/1` after every write — the write rate is low enough that it does
 not matter, and a token lost to a crash costs one re-authorization.
 
-`Vigil.OAuth.Janitor` runs every five minutes and sweeps all four tables:
-expired authorization codes, expired access and refresh tokens — spent ones
-included, since a rotated refresh token is marked rather than deleted —
-rate-limit counters older than 15 minutes, and CIMD cache entries whose hour
-is up. No cron, no job library — just `Process.send_after/3`.
+`Vigil.OAuth.Janitor` runs every five minutes and sweeps five tables, which is
+every table that holds something with an expiry. `oauth_clients.dets` is not
+among them and is deliberately not swept: a registration has no expiry to read,
+and a client stays until it is deleted.
 
-The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
-client supplies and filled from `GET /oauth/authorize`, so it grows on input
-from outside. Two separate things bound it: the per-address limit on
-`/oauth/authorize` bounds the rate at which a caller can add to it, and this
+| Swept | Owner | Reclaimed when |
+|---|---|---|
+| authorization codes | `Vigil.OAuth.Store` | the code has expired |
+| access and refresh tokens | `Vigil.OAuth.Store` | the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
+| consent-failure counters | `Vigil.OAuth.Store` | the 15-minute lockout window has elapsed |
+| CIMD cache entries | `Vigil.OAuth.Store` | the cached hour is up |
+| request-limit windows | `Vigil.RateLimit` | the one-minute window has elapsed |
+
+No cron, no job library — just `Process.send_after/3`.
+
+The last row is both request limiters, not one of them: `Vigil.RateLimit`
+holds a single table for `/mcp` keyed by access token *and* the OAuth endpoints
+keyed by client address, so one sweep covers both. Only the third row is the
+15-minute consent lockout, and it covers wrong passwords on the consent form
+and nothing else.
+
+The janitor's list is its own rather than `Vigil.OAuth.Store`'s inventory. It
+was that inventory in effect until #89, and the one swept table `Store` does
+not own was swept by nobody. A module belongs on the list as soon as it owns a
+table with an expiry, whatever namespace it lives in.
+
+Reclaiming is `Vigil.RateLimit`'s own business rather than the janitor's: what
+counts as an elapsed window is the same fact `limited?/3` decides on, and a
+sweep drops only windows `limited?/3` would already ignore. Sweeping therefore
+cannot hand a caller a budget it has not waited out — reclaiming an elapsed row
+and starting a fresh window on the next request are the same decision.
+
+The CIMD cache is the one whose reasoning came first. It is keyed on the
+`client_id` URL a client supplies and filled from `GET /oauth/authorize`, so it
+grows on input from outside. Two separate things bound it: the per-address
+limit on `/oauth/authorize` bounds the rate at which a caller can add to it,
+and this
 sweep bounds the total by dropping what has expired. Neither substitutes for
 the other — a rate limit alone leaves a table that only grows, and a sweep
-alone leaves the rate unbounded.
+alone leaves the rate unbounded. That argument is not the cache's alone: it is
+why the request-limit table is swept too, since a per-key budget bounds how
+fast rows arrive and nothing else bounds how many there are.
 
 The interval and the instant are both arguments with production defaults, so a
 test can drive one sweep rather than wait five minutes for it. The instant is a
