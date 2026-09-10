@@ -104,21 +104,39 @@ defmodule Vigil.Vault.RulesTest do
     end
   end
 
-  describe "slug_changes/1" do
+  describe "heading_slug_changes/1" do
     test "reports every H2-H4 heading whose slug would change" do
       content = "# Title\n## Café Overview\n## already-clean\n"
 
-      assert [%{text: "Café Overview", old: old, new: new}] = Rules.slug_changes(content)
+      assert [%{text: "Café Overview", old: old, new: new}] = Rules.heading_slug_changes(content)
       assert old != new
       assert new == "cafe-overview"
     end
 
     test "H1 is not a heading and never appears in the diff" do
-      assert Rules.slug_changes("# Café Title\n\nbody\n") == []
+      assert Rules.heading_slug_changes("# Café Title\n\nbody\n") == []
     end
 
     test "a heading with no derivable slug reports new: nil" do
-      assert [%{text: "———", new: nil}] = Rules.slug_changes("## ———\n")
+      assert [%{text: "———", new: nil}] = Rules.heading_slug_changes("## ———\n")
+    end
+  end
+
+  describe "filename_slug_change/1" do
+    test "a basename whose slug moves reports both slugs" do
+      assert Rules.filename_slug_change("bike/café.md") == %{old: "caf", new: "cafe"}
+    end
+
+    test "a canonical basename reports no change" do
+      assert Rules.filename_slug_change("bike/terra-speed.md") == nil
+    end
+
+    test "a basename from which no slug can be derived reports new: nil" do
+      assert %{new: nil} = Rules.filename_slug_change("bike/———.md")
+    end
+
+    test "only the basename is compared, not the directories" do
+      assert Rules.filename_slug_change("Bike Stuff/terra-speed.md") == nil
     end
   end
 end

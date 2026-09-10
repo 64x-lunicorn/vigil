@@ -208,18 +208,10 @@ defmodule Vigil.VaultCheck do
   defp b3_diff(files, vault_path) do
     changes =
       Enum.flat_map(files, fn rel_path ->
-        basename = Path.basename(rel_path, ".md")
-
         file_diff =
-          case {Slug.legacy_slugify(basename), Slug.slugify(basename)} do
-            {old, {:ok, new}} when old != new ->
-              [%{kind: "file", path: rel_path, old: old, new: new}]
-
-            {old, {:error, _}} ->
-              [%{kind: "file", path: rel_path, old: old, new: nil}]
-
-            _ ->
-              []
+          case Rules.filename_slug_change(rel_path) do
+            nil -> []
+            %{old: old, new: new} -> [%{kind: "file", path: rel_path, old: old, new: new}]
           end
 
         heading_diffs =
@@ -236,7 +228,7 @@ defmodule Vigil.VaultCheck do
 
   defp b3_heading_diffs(rel_path, content) do
     content
-    |> Rules.slug_changes()
+    |> Rules.heading_slug_changes()
     |> Enum.map(fn %{old: old, new: new} ->
       %{kind: "heading", path: rel_path, old: old, new: new}
     end)

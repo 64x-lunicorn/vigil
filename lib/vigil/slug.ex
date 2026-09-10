@@ -189,9 +189,10 @@ defmodule Vigil.Slug do
   The slug logic as it was *before* the canonical-slug rework, preserved
   verbatim.
 
-  Used exclusively by `mix vigil.slug_diff` to show which chunk IDs would
-  change on migration. **Never** used in the production path — this is the one
-  deliberate exception to "a single slug implementation in the project".
+  Used only to show what a slug change would break: `Vigil.Vault.Rules` holds
+  the comparison, and `Vigil.VaultCheck` and `mix vigil.slug_diff` report it.
+  **Never** used in the production path — this is the one deliberate exception
+  to "a single slug implementation in the project".
   """
   def legacy_slugify(text) do
     text

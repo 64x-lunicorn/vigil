@@ -87,13 +87,37 @@ defmodule Vigil.Vault.Rules do
   end
 
   @doc """
+  Whether the *filename* half of `path` would move when the slug function
+  changes — the other half of `heading_slug_changes/1`.
+
+  Returns `nil` when the basename slugifies the same way under
+  `Vigil.Slug.legacy_slugify/1` and `Vigil.Slug.slugify/1`, otherwise
+  `%{old:, new:}` with `new` `nil` when no slug can be derived at all.
+
+  A filename and a heading are one question — what a slug change breaks — so
+  the two callers that ask it (`Vigil.VaultCheck` and `mix vigil.slug_diff`)
+  cannot disagree about the blast radius, which is the entire reason
+  `mix vigil.slug_diff` exists (`docs/design.md`, "Path normalization and
+  naming rules").
+  """
+  def filename_slug_change(path) do
+    basename = Path.basename(path, ".md")
+
+    case {Slug.legacy_slugify(basename), Slug.slugify(basename)} do
+      {old, {:ok, new}} when old != new -> %{old: old, new: new}
+      {old, {:error, _}} -> %{old: old, new: nil}
+      _ -> nil
+    end
+  end
+
+  @doc """
   Every H2–H4 heading in `content` whose chunk id would change when moving
   from `Vigil.Slug.legacy_slugify/1` to `Vigil.Slug.slugify/1`.
 
   `new` is `nil` for a heading from which no slug can be derived at all.
   Headings whose slug is unchanged are omitted.
   """
-  def slug_changes(content) do
+  def heading_slug_changes(content) do
     content
     |> Markdown.headings()
     |> Enum.flat_map(fn {_rank, text} ->
