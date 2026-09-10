@@ -9,17 +9,19 @@ defmodule Vigil.OAuth.Flow do
   a conn — and, before that, without starting a git-backed vault, because the
   whole flow used to live inside the MCP router.
 
-  What a *token record* is belongs next door, to `Vigil.OAuth.Token`: minting
-  the pair a grant produces, telling access from refresh from replay, and
-  answering whether a token is valid for a resource. Verification is an OAuth
-  2.1 decision like the ones here and just as free of a conn — it only used to
-  live in the router because the record had no owner.
+  What a *record* is belongs next door. `Vigil.OAuth.Token` owns the token
+  record: minting the pair a grant produces, telling access from refresh from
+  replay, and answering whether a token is valid for a resource.
+  `Vigil.OAuth.Code` owns the authorization-code record: minting one at
+  consent, and answering whether the request presenting one may redeem it.
+  What stays here is what to *say* about a verdict — every way a code can be
+  wrong is one `invalid_grant` — and the checks that span both grants.
+  Verification is an OAuth 2.1 decision like the ones here and just as free of
+  a conn; it only used to live in the router because the record had no owner.
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Cimd, Client, RedirectUri, Store, Token}
-
-  @authorization_code_ttl 60
+  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Store, Token}
 
   @doc """
   Dynamic client registration. Returns the registration response, or
@@ -123,31 +125,12 @@ defmodule Vigil.OAuth.Flow do
 
       Plug.Crypto.secure_compare(password || "", OAuth.auth_password()) ->
         Store.reset_rate_limit(ip)
-        {:ok, issue_authorization_code(ctx, now)}
+        {:ok, Code.issue(ctx, now)}
 
       true ->
         Store.record_failure(ip, now)
         :wrong_password
     end
-  end
-
-  @doc "Mints a one-time authorization code for an approved consent, and returns it."
-  def issue_authorization_code(ctx, now \\ System.system_time(:second)) do
-    code = Token.random()
-
-    Store.put_code(code, %{
-      client_id: ctx.client.client_id,
-      redirect_uri: ctx.redirect_uri,
-      code_challenge: ctx.code_challenge,
-      resource: OAuth.resource(),
-      scope: ctx.scope,
-      # The authorization grant this code, and every token redeemed from it,
-      # belongs to. It is what "revoke the whole family" is expressed in.
-      grant_id: Vigil.Uuid.v4(),
-      expires_at: now + @authorization_code_ttl
-    })
-
-    code
   end
 
   @doc """
@@ -160,30 +143,16 @@ defmodule Vigil.OAuth.Flow do
   def grant(params, now \\ System.system_time(:second))
 
   def grant(%{"grant_type" => "authorization_code"} = params, now) do
-    case Store.take_code(params["code"] || "") do
-      :error ->
+    case Code.redeem(params["code"] || "", params, now) do
+      # Unknown, expired, the wrong client, the wrong redirect URI, a verifier
+      # that does not match the challenge — RFC 6749 §5.2 answers all five with
+      # one code, so this renders every problem the same way rather than
+      # matching them one by one and inviting a sixth to be told apart.
+      {:error, _problem} ->
         {:error, 400, "invalid_grant"}
 
-      {:ok, data} ->
-        cond do
-          data.expires_at <= now ->
-            {:error, 400, "invalid_grant"}
-
-          data.client_id != params["client_id"] ->
-            {:error, 400, "invalid_grant"}
-
-          data.redirect_uri != params["redirect_uri"] ->
-            {:error, 400, "invalid_grant"}
-
-          not pkce_ok?(params, data) ->
-            {:error, 400, "invalid_grant"}
-
-          not target_ok?(params, data.resource) ->
-            {:error, 400, "invalid_target"}
-
-          true ->
-            {:ok, Token.issue_pair(data, data.resource, now)}
-        end
+      {:ok, record} ->
+        redeemed(record, params, now)
     end
   end
 
@@ -199,6 +168,16 @@ defmodule Vigil.OAuth.Flow do
   end
 
   def grant(_params, _now), do: {:error, 400, "unsupported_grant_type"}
+
+  defp redeemed(record, params, now) do
+    aud = Code.audience_of(record)
+
+    if target_ok?(params, aud) do
+      {:ok, Token.issue_pair(record, aud, now)}
+    else
+      {:error, 400, "invalid_target"}
+    end
+  end
 
   defp refresh(refresh_token, data, params, now) do
     cond do
@@ -239,10 +218,6 @@ defmodule Vigil.OAuth.Flow do
   defp replayed(data) do
     Store.revoke_grant(Token.grant_of(data))
     {:error, 400, "invalid_grant"}
-  end
-
-  defp pkce_ok?(params, data) do
-    Token.pkce_valid?(params["code_verifier"] || "", data.code_challenge)
   end
 
   defp target_ok?(params, expected) do

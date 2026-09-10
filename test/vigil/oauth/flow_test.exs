@@ -8,7 +8,7 @@ defmodule Vigil.OAuth.FlowTest do
   """
   use ExUnit.Case, async: false
 
-  alias Vigil.OAuth.{Flow, Store}
+  alias Vigil.OAuth.{Code, Flow, Store}
 
   setup do
     Vigil.OAuthCase.setup!()
@@ -40,7 +40,7 @@ defmodule Vigil.OAuth.FlowTest do
   # must not touch.
   defp tokens_for(client_id) do
     {:ok, ctx} = Flow.authorize_request(authorize_params(client_id))
-    code = Flow.issue_authorization_code(ctx)
+    code = Code.issue(ctx)
 
     {:ok, tokens} =
       Flow.grant(%{
@@ -122,7 +122,7 @@ defmodule Vigil.OAuth.FlowTest do
     setup do
       client_id = client!()
       {:ok, ctx} = Flow.authorize_request(authorize_params(client_id))
-      code = Flow.issue_authorization_code(ctx)
+      code = Code.issue(ctx)
 
       %{client_id: client_id, code: code}
     end
@@ -202,7 +202,7 @@ defmodule Vigil.OAuth.FlowTest do
     setup do
       client_id = client!()
       {:ok, ctx} = Flow.authorize_request(authorize_params(client_id))
-      code = Flow.issue_authorization_code(ctx)
+      code = Code.issue(ctx)
 
       {:ok, tokens} =
         Flow.grant(%{
@@ -518,10 +518,10 @@ defmodule Vigil.OAuth.FlowTest do
     end
   end
 
-  describe "issue_authorization_code/2" do
+  describe "a minted code is one-time use" do
     test "the code is one-time: taking it twice fails" do
       {:ok, ctx} = Flow.authorize_request(authorize_params(client!()))
-      code = Flow.issue_authorization_code(ctx)
+      code = Code.issue(ctx)
 
       assert {:ok, _} = Store.take_code(code)
       assert :error = Store.take_code(code)

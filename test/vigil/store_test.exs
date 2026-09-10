@@ -28,22 +28,26 @@ defmodule Vigil.StoreTest do
 
   # docs/design.md, "The write path": a caller that breaks a declared contract
   # outright fails in its own process rather than in the writer's. The tool
-  # table is what declares the contract — `limit` 1..25, `depth` 1..2, an id
-  # for every operation that names one — and `Store.call/2`'s heads match it,
-  # so the mistake raises where it was made and the single writer keeps
-  # answering everyone else. An operation the Store does not have is refused
-  # in the same frame: there is no catch-all head to absorb it.
+  # table is what declares the contract — a `limit` for search, a `depth` and
+  # a `direction` for links, an id for every operation that names one — and
+  # `Store.call/2`'s heads match it, so the mistake raises where it was made
+  # and the single writer keeps answering everyone else. An operation the
+  # Store does not have is refused in the same frame: there is no catch-all
+  # head to absorb it. What the heads do not restate is a *bound*: `depth` is
+  # `1..2` in the tool table, which refuses 3 before the Store is reached —
+  # pinned in Vigil.MCP.ToolsTest, "a depth outside 1..2 is refused before the
+  # Store is reached".
   #
   # The calls go through a variable on purpose. Written as literals the
   # compiler's type checker warns about every one of them — it can see they
   # match no head, which is the point of the test.
   describe "a broken contract fails in the caller's process" do
-    test "a missing limit, an undeclared depth, a missing id, an operation that does not exist" do
+    test "a missing limit, a missing depth, a missing id, an operation that does not exist" do
       writer = Process.whereis(Store)
 
       broken = [
         {:search, %{query: "tires"}},
-        {:links, %{id: "bike/via-carolina.md", direction: :out, depth: 3}},
+        {:links, %{id: "bike/via-carolina.md", direction: :out}},
         {:read, %{backlinks: false}},
         {:nonsense, %{}}
       ]
@@ -732,32 +736,29 @@ defmodule Vigil.StoreTest do
       assert search(%{query: "Failing Test"}) == []
     end
 
-    # Thin end-to-end wiring check: skill_list/skill_read/skill_write reach
-    # Vigil.Skills through the GenServer and the write still serializes
-    # through Store's single mailbox. Full behavioral coverage (name
-    # validation, frontmatter validation, SkillKey token) lives in
-    # test/vigil/skills_test.exs.
-    test "skill_list, skill_read, and skill_write work end-to-end through the GenServer" do
-      [skill] = Store.call(:skill_list, %{})
-      assert skill.name == "tdd"
-
-      {:ok, %{content: c1}} = Store.call(:skill_read, %{name: "tdd"})
-      {:ok, %{content: c2}} = Store.call(:skill_read, %{name: "tdd.md"})
-      assert c1 == c2
-      assert c1 =~ "SkillKey:"
-
-      assert {:error, msg} = Store.call(:skill_read, %{name: "does-not-exist"})
-      assert msg =~ "tdd"
-
+    # Thin end-to-end wiring check: a skill write reaches Vigil.Skills through
+    # the GenServer — it commits and pushes in order with note writes
+    # (docs/design.md, principle 2) — and what it wrote is not indexed as a
+    # note. Full behavioral coverage (name validation, frontmatter validation,
+    # SkillKey token) lives in test/vigil/skills_test.exs; the two skill reads
+    # no longer go through this process at all and are covered in
+    # test/vigil/mcp/tools_dispatch_test.exs.
+    test "skill_write works end-to-end through the GenServer and is never indexed" do
       assert {:ok, %{name: "new", pushed: true}} =
                Store.call(:skill_write, %{
                  name: "new",
                  content: "---\nname: new\ndescription: test skill\n---\n# New\n1. one"
                })
 
-      {:ok, %{content: content}} = Store.call(:skill_read, %{name: "new"})
-      assert content =~ "1. one"
+      assert File.read!(Path.join(Store.vault_path(), "skills/new.md")) =~ "1. one"
       assert search(%{query: "one"}) == []
+    end
+
+    # docs/design.md, "The write path": the vault path is published from
+    # inside the writer, so a caller can ask where the vault is without
+    # queueing behind whatever the writer is doing.
+    test "the vault path is published, not asked for", %{vault: vault} do
+      assert Store.vault_path() == Path.expand(vault)
     end
   end
 

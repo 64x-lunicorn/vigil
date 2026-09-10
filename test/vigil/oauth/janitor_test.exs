@@ -10,7 +10,7 @@ defmodule Vigil.OAuth.JanitorTest do
 
   use ExUnit.Case, async: false
 
-  alias Vigil.OAuth.{Janitor, Store, Token}
+  alias Vigil.OAuth.{Code, Flow, Janitor, Store, Token}
   alias Vigil.RateLimit
 
   @now 1_700_000_000
@@ -29,8 +29,7 @@ defmodule Vigil.OAuth.JanitorTest do
   # four tables `Vigil.OAuth.Store` owns. `Vigil.RateLimit`'s table is the
   # fifth the sweep walks and is seeded by the tests that cover it.
   defp seed do
-    Store.put_code("code-expired", code_attrs(@now))
-    Store.put_code("code-live", code_attrs(@now + 60))
+    codes = %{expired: mint_code(@now - 3600), live: mint_code(@now)}
 
     Store.put_token("token-expired", token_attrs(@now))
     Store.put_token("token-live", token_attrs(@now + 3600))
@@ -48,17 +47,29 @@ defmodule Vigil.OAuth.JanitorTest do
     # cimd_cache_put/3 stores now + 3600, so a put an hour ago has expired.
     Store.cimd_cache_put("https://stale.example.org/m", doc("stale"), @now - 3600)
     Store.cimd_cache_put("https://fresh.example.org/m", doc("fresh"), @now - 3599)
+
+    codes
   end
 
-  defp code_attrs(expires_at) do
-    %{
-      client_id: "client-1",
-      redirect_uri: "https://client.example.org/cb",
-      code_challenge: "challenge",
-      resource: "https://vault.factory-lab.org/mcp",
-      scope: "vault",
-      expires_at: expires_at
-    }
+  # A real authorization code, minted by the module that owns the record
+  # (Vigil.OAuth.Code) at the instant given — so what the sweep walks is the
+  # shape production writes, `grant_id` and all, rather than a variant this
+  # file made up. A code lives a minute, so one minted an hour ago has expired
+  # at @now and one minted at @now has not.
+  defp mint_code(now) do
+    {:ok, %{client_id: client_id}} =
+      Flow.register(%{"redirect_uris" => ["https://client.example.org/cb"]})
+
+    {:ok, ctx} =
+      Flow.authorize_request(%{
+        "client_id" => client_id,
+        "redirect_uri" => "https://client.example.org/cb",
+        "response_type" => "code",
+        "code_challenge" => "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+        "code_challenge_method" => "S256"
+      })
+
+    Code.issue(ctx, now)
   end
 
   defp token_attrs(expires_at) do
@@ -91,9 +102,9 @@ defmodule Vigil.OAuth.JanitorTest do
 
   test "a sweep drops what expired and keeps what did not, in all four tables" do
     start_janitor(interval: :timer.minutes(5), now: fn -> @now end)
-    seed()
+    codes = seed()
 
-    assert keys(Store.all_codes()) == ["code-expired", "code-live"]
+    assert keys(Store.all_codes()) == Enum.sort([codes.expired, codes.live])
 
     assert keys(Store.all_tokens()) == [
              "token-expired",
@@ -107,7 +118,7 @@ defmodule Vigil.OAuth.JanitorTest do
 
     sweep_now()
 
-    assert keys(Store.all_codes()) == ["code-live"]
+    assert keys(Store.all_codes()) == [codes.live]
     assert keys(Store.all_tokens()) == ["token-live", "token-spent-live"]
 
     assert :ets.lookup(@rate_limits, "198.51.100.1") == []
@@ -141,11 +152,11 @@ defmodule Vigil.OAuth.JanitorTest do
     # Everything seeded expires long before real "now", so a janitor holding an
     # instant from before them must keep all of it.
     start_janitor(interval: :timer.minutes(5), now: fn -> @now - 7200 end)
-    seed()
+    codes = seed()
 
     sweep_now()
 
-    assert keys(Store.all_codes()) == ["code-expired", "code-live"]
+    assert keys(Store.all_codes()) == Enum.sort([codes.expired, codes.live])
 
     assert keys(Store.all_tokens()) == [
              "token-expired",
@@ -207,7 +218,7 @@ defmodule Vigil.OAuth.JanitorTest do
     # A code put *after* the first sweeps have run is still collected, which
     # only holds if the janitor rescheduled rather than swept once.
     Process.sleep(50)
-    Store.put_code("code-late", code_attrs(@now))
+    mint_code(@now - 3600)
 
     assert eventually(fn -> keys(Store.all_codes()) == [] end)
   end

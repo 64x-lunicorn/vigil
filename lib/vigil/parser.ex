@@ -4,6 +4,7 @@ defmodule Vigil.Parser do
   require Logger
 
   alias Vigil.Markdown
+  alias Vigil.Vault.Frontmatter
 
   defmodule Chunk do
     @moduledoc """
@@ -115,57 +116,37 @@ defmodule Vigil.Parser do
     end
   end
 
+  # The rule itself belongs to Vigil.Vault.Frontmatter (docs/design.md,
+  # "Frontmatter — exactly one required field"), so that the reader and the
+  # write gate cannot disagree about which notes are allowed to exist. What
+  # stays here is this reader's rendering of the verdict: parsing is
+  # defensive, so a frontmatter the vault does not allow costs a warning
+  # naming the reason and the note is indexed as a `reference`. The server
+  # always starts and nothing is lost.
   defp resolve_type(path, frontmatter) do
-    raw_type = Map.get(frontmatter, "type")
+    type = Map.get(frontmatter, "type")
+    starts = Map.get(frontmatter, "starts")
+    ends = Map.get(frontmatter, "ends")
 
-    type =
-      case raw_type do
-        "reference" ->
-          :reference
+    case Frontmatter.check(type, starts, ends) do
+      {:ok, %Frontmatter{type: type, starts: starts, ends: ends}} ->
+        {type, starts, ends}
 
-        "decision" ->
-          :decision
-
-        "event" ->
-          :event
-
-        nil ->
-          Logger.warning("missing 'type' field in #{path}, treating as reference")
-          :reference
-
-        other ->
-          Logger.warning("invalid type '#{inspect(other)}' in #{path}, treating as reference")
-          :reference
-      end
-
-    if type == :event do
-      with {:ok, starts} <- parse_timestamp(Map.get(frontmatter, "starts")),
-           {:ok, ends} <- parse_timestamp(Map.get(frontmatter, "ends")),
-           true <- DateTime.compare(ends, starts) != :lt do
-        {:event, starts, ends}
-      else
-        _ ->
-          Logger.warning("event #{path} has invalid/missing starts/ends, treating as reference")
-
-          {:reference, nil, nil}
-      end
-    else
-      {type, nil, nil}
+      {:error, problem} ->
+        Logger.warning("#{reason(problem)} in #{path}, treating as reference")
+        {:reference, nil, nil}
     end
   end
 
-  defp parse_timestamp(nil), do: :error
+  defp reason(:type_missing), do: "missing 'type' field"
+  defp reason({:unknown_type, value}), do: "invalid type '#{inspect(value)}'"
+  defp reason(:times_missing), do: "event without both starts and ends"
+  defp reason(:times_not_allowed), do: "starts/ends on a note that is not an event"
 
-  defp parse_timestamp(%DateTime{} = dt), do: {:ok, dt}
+  defp reason(:times_unparsable),
+    do: "starts/ends is not an ISO 8601 timestamp with an offset"
 
-  defp parse_timestamp(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, dt, _offset} -> {:ok, dt}
-      {:error, _} -> :error
-    end
-  end
-
-  defp parse_timestamp(_), do: :error
+  defp reason(:ends_before_starts), do: "ends is before starts"
 
   defp fallback_title(path) do
     path

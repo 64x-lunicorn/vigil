@@ -10,7 +10,7 @@ defmodule Vigil.OAuth.Store do
   use GenServer
   require Logger
 
-  alias Vigil.OAuth.Token
+  alias Vigil.OAuth.{Code, Token}
 
   @clients :oauth_clients
   @codes :oauth_codes
@@ -231,7 +231,7 @@ defmodule Vigil.OAuth.Store do
 
   def sweep_expired(now) do
     Enum.each(all_codes(), fn {code, attrs} ->
-      if attrs.expires_at <= now, do: delete_code(code)
+      if Code.expired?(attrs, now), do: delete_code(code)
     end)
 
     Enum.each(all_tokens(), fn {token, attrs} ->
