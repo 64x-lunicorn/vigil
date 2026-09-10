@@ -119,15 +119,18 @@ defmodule Vigil.OAuth.Endpoint do
       "scope" => ctx.scope
     }
 
+    nonce = style_nonce()
+
     html =
       ConsentPage.render(%{
         client_name: ctx.client.name,
         redirect_uri: ctx.redirect_uri,
         hidden_fields: hidden,
-        error: error_message
+        error: error_message,
+        nonce: nonce
       })
 
-    send_html(conn, 200, html)
+    send_html(conn, 200, html, nonce)
   end
 
   ## Token
@@ -169,11 +172,58 @@ defmodule Vigil.OAuth.Endpoint do
     |> send_resp(status, Jason.encode!(payload))
   end
 
-  defp send_html(conn, status, html) do
+  defp send_html(conn, status, html, nonce \\ nil) do
     conn
     |> put_resp_content_type("text/html")
+    |> merge_resp_headers(html_security_headers(nonce))
     |> send_resp(status, html)
   end
+
+  @doc """
+  The response headers for the HTML vigil serves.
+
+  The consent page is the only HTML here and the only place a human types a
+  password, and it is unusually cheap to lock down: no template directory, no
+  assets, no JavaScript, and a single inline `<style>` block. So the policy
+  denies everything and permits exactly that one block, by nonce rather than
+  by `'unsafe-inline'` — an injected `<style>` without the nonce does not run.
+  Pass `nil` for the error page, which has no style at all.
+
+  What each one buys:
+
+    * `frame-ancestors 'none'`, with `X-Frame-Options: DENY` for clients that
+      predate it, stops the page being framed. An attacker who frames it
+      cannot steer a click onto Allow.
+    * `Referrer-Policy: no-referrer` stops the URL leaking. The consent page's
+      URL carries `client_id`, `redirect_uri`, `state` and `code_challenge`.
+    * `form-action 'self'` keeps the password POST on this origin.
+    * `X-Content-Type-Options: nosniff` and `default-src 'none'` close the
+      distance between "renders no external assets today" and "renders no
+      external assets".
+
+  The nonce half lives on `Vigil.OAuth.ConsentPage`'s `<style>` tag; the two
+  have to name the same value.
+  """
+  def html_security_headers(nonce) do
+    [
+      {"content-security-policy", content_security_policy(nonce)},
+      {"x-frame-options", "DENY"},
+      {"x-content-type-options", "nosniff"},
+      {"referrer-policy", "no-referrer"}
+    ]
+  end
+
+  defp content_security_policy(nonce) do
+    ["default-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"]
+    |> then(fn directives ->
+      if nonce, do: directives ++ ["style-src 'nonce-#{nonce}'"], else: directives
+    end)
+    |> Enum.join("; ")
+  end
+
+  # Fresh per response: a nonce reused across responses is a nonce an attacker
+  # can learn from one and spend on the next.
+  defp style_nonce, do: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
 
   defp error_html(message) do
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>vigil — error</title></head>" <>

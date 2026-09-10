@@ -1,5 +1,14 @@
 defmodule Vigil.OAuth.ConsentPage do
-  @moduledoc "Minimal inline-EEx consent page. No template directory, no assets."
+  @moduledoc """
+  Minimal inline-EEx consent page. No template directory, no assets.
+
+  Having no assets is what makes a strict Content-Security-Policy cheap here:
+  the policy can deny by default and carve out nothing at all except this one
+  `<style>` block, which carries a per-response nonce rather than being waved
+  through with `'unsafe-inline'`. The policy itself is
+  `Vigil.OAuth.Endpoint.html_security_headers/1` — the two halves have to agree
+  on the nonce, so neither moves without the other.
+  """
 
   @template """
   <!DOCTYPE html>
@@ -7,7 +16,7 @@ defmodule Vigil.OAuth.ConsentPage do
   <head>
   <meta charset="utf-8">
   <title>vigil — grant access?</title>
-  <style>
+  <style nonce="<%= nonce %>">
   body { font-family: system-ui, sans-serif; max-width: 32rem; margin: 4rem auto; padding: 0 1rem; }
   .warn { color: #a33; font-weight: bold; }
   .err { color: #a33; }
@@ -42,10 +51,17 @@ defmodule Vigil.OAuth.ConsentPage do
   @doc """
   Renders the consent page. `client_name` and hidden field values are treated
   as untrusted (client-registration-controlled) and HTML-escaped.
+
+  `:nonce` is the CSP nonce for the one `<style>` block; it must be the same
+  value the response's `style-src` names, or the page renders unstyled.
   """
   def render(
-        %{client_name: client_name, redirect_uri: redirect_uri, hidden_fields: hidden_fields} =
-          params
+        %{
+          client_name: client_name,
+          redirect_uri: redirect_uri,
+          hidden_fields: hidden_fields,
+          nonce: nonce
+        } = params
       ) do
     redirect_host = URI.parse(redirect_uri).host || redirect_uri
     loopback = redirect_host in ["localhost", "127.0.0.1"]
@@ -58,7 +74,10 @@ defmodule Vigil.OAuth.ConsentPage do
       redirect_host: escape(redirect_host),
       loopback: loopback,
       error: Map.get(params, :error) && escape(params.error),
-      hidden_fields: escaped_hidden
+      hidden_fields: escaped_hidden,
+      # url-safe base64, so it carries nothing an HTML attribute or a CSP
+      # source expression would have to escape.
+      nonce: nonce
     ]
 
     EEx.eval_string(@template, bindings)

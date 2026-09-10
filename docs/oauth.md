@@ -202,6 +202,36 @@ session cookie after login — it happens rarely enough.
 A loopback redirect address is called out on the consent page: any local
 process on that machine could impersonate the client.
 
+### Response headers on the consent page
+
+It is the only HTML vigil serves and the only place a human types a password.
+It also has almost nothing to allow — no template directory, no assets, no
+JavaScript, and one inline `<style>` block — so the policy denies everything
+and carves out exactly that block, by nonce rather than by `'unsafe-inline'`.
+
+```http
+Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; style-src 'nonce-<per-response>'
+X-Frame-Options: DENY
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+```
+
+| Header | What it buys |
+|---|---|
+| `frame-ancestors 'none'` + `X-Frame-Options: DENY` | The page cannot be framed, so an attacker cannot steer a click onto **Allow**. The second is for clients that predate the first. |
+| `Referrer-Policy: no-referrer` | The consent page's URL carries `client_id`, `redirect_uri`, `state` and `code_challenge`. It stops leaking. |
+| `form-action 'self'` | The password POST cannot be redirected off this origin. |
+| `default-src 'none'` + `nosniff` | Closes the distance between "renders no external assets today" and "renders no external assets". |
+
+The nonce is fresh per response and is generated in `Vigil.OAuth.Endpoint`;
+`Vigil.OAuth.ConsentPage` stamps the same value on its `<style>` tag. The two
+have to agree, so neither moves without the other. The HTML error page gets the
+same headers minus `style-src`, having no style at all.
+
+The escaping on the page is separate and unchanged: `client_name`, the redirect
+host, the error text and every hidden field value are HTML-escaped, because
+`client_name` is whatever a client registered.
+
 ---
 
 ## Token endpoint
