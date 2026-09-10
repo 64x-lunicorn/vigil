@@ -155,14 +155,16 @@ defmodule Vigil.Parser do
   # URLs) are not note references. Group 1: path without extension,
   # group 2: fragment.
   @mdlink_re ~r/\[[^\]]*\]\(([^)#\s]+)\.md(?:#([^)]+))?\)/
-  @fenced_code_re ~r/```.*?```/s
   @inline_code_re ~r/`[^`\n]*`/
 
   defp build_chunks(path, {lines, offset}, type, starts, ends, created_at, updated_at) do
+    # One reading of the note, fence state included: a heading inside a fenced
+    # block is a line of somebody's code sample, and opens no chunk.
     numbered =
       lines
+      |> Markdown.read()
       |> Enum.with_index(1)
-      |> Enum.map(fn {line, idx} -> {line, idx + offset} end)
+      |> Enum.map(fn {read, idx} -> {read, idx + offset} end)
 
     state = %{
       title: nil,
@@ -174,15 +176,14 @@ defmodule Vigil.Parser do
     }
 
     state =
-      Enum.reduce(numbered, state, fn {line, line_no}, acc ->
-        cond do
-          # The first H1 is the note title and creates no chunk of its own.
-          first_h1 = is_nil(acc.title) && Markdown.h1(line) ->
-            %{acc | title: first_h1}
+      Enum.reduce(numbered, state, fn {%{line: line, kind: kind}, line_no}, acc ->
+        case kind do
+          # The first H1 is the note title and creates no chunk of its own. A
+          # second one is body text like any other line.
+          {:h1, title} ->
+            if acc.title, do: content_line(acc, line, line_no), else: %{acc | title: title}
 
-          heading = Markdown.heading(line) ->
-            {level, text} = heading
-
+          {:heading, level, text} ->
             acc = close_current(acc, path, type, starts, ends, created_at, updated_at)
 
             new_stack =
@@ -203,20 +204,8 @@ defmodule Vigil.Parser do
                 }
             }
 
-          acc.current != nil ->
-            %{acc | current: %{acc.current | lines: [{line, line_no} | acc.current.lines]}}
-
-          true ->
-            current =
-              acc[:pre] ||
-                %{
-                  heading: nil,
-                  heading_path: [],
-                  heading_line: nil,
-                  lines: []
-                }
-
-            %{acc | pre: %{current | lines: [{line, line_no} | current.lines]}}
+          _fence_or_content ->
+            content_line(acc, line, line_no)
         end
       end)
 
@@ -233,6 +222,17 @@ defmodule Vigil.Parser do
       end
 
     {state.title, chunks}
+  end
+
+  # A line that is neither the title nor a heading: the body of the chunk that
+  # is open, or of the note's fragmentless opening chunk when none is.
+  defp content_line(%{current: nil} = acc, line, line_no) do
+    pre = acc.pre || %{heading: nil, heading_path: [], heading_line: nil, lines: []}
+    %{acc | pre: %{pre | lines: [{line, line_no} | pre.lines]}}
+  end
+
+  defp content_line(acc, line, line_no) do
+    %{acc | current: %{acc.current | lines: [{line, line_no} | acc.current.lines]}}
   end
 
   defp close_current(%{current: nil} = acc, _p, _t, _s, _e, _ca, _ua), do: acc
@@ -341,6 +341,11 @@ defmodule Vigil.Parser do
   `[text](path.md)` / `[text](path.md#fragment)`. Links inside fenced code
   blocks (` ``` `) and inline code (`` ` ``) are **not** extracted — otherwise
   the parser would index example code as real references.
+
+  Which lines are fenced comes from `Vigil.Markdown.read/1`, the same reading
+  the chunker takes its headings from, so the two halves of parsing one file
+  cannot disagree about where the code samples are. Inline code is a
+  within-line fact and stays a regex.
   """
   def extract_links(body) do
     cleaned = strip_code(body)
@@ -370,7 +375,12 @@ defmodule Vigil.Parser do
 
   defp strip_code(text) do
     text
-    |> blank_matches(@fenced_code_re)
+    |> Markdown.read()
+    |> Enum.map(fn
+      %{kind: kind} when kind in [:fence, :code] -> ""
+      %{line: line} -> line
+    end)
+    |> Enum.join("\n")
     |> blank_matches(@inline_code_re)
   end
 

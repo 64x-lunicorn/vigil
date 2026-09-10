@@ -117,8 +117,79 @@ defmodule Vigil.Vault.RulesTest do
       assert Rules.heading_slug_changes("# Café Title\n\nbody\n") == []
     end
 
+    # A heading inside a fence has no chunk id, so a slug change cannot break a
+    # reference to it — reporting it overstates the blast radius.
+    test "a heading inside a fenced block is not part of the blast radius" do
+      assert Rules.heading_slug_changes("# T\n\n```markdown\n## Café Overview\n```\n") == []
+    end
+
     test "a heading with no derivable slug reports new: nil" do
       assert [%{text: "———", new: nil}] = Rules.heading_slug_changes("## ———\n")
+    end
+  end
+
+  describe "slug_changes/2" do
+    setup do
+      vault = Path.join(System.tmp_dir!(), "vigil_rules_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(Path.join(vault, "bike"))
+      on_exit(fn -> File.rm_rf(vault) end)
+      %{vault: vault}
+    end
+
+    defp write!(vault, rel_path, content) do
+      File.write!(Path.join(vault, rel_path), content)
+      rel_path
+    end
+
+    test "one walk answers for filenames and headings alike", %{vault: vault} do
+      café =
+        write!(vault, "bike/café.md", """
+        ---
+        type: reference
+        ---
+        # Café
+
+        ## Café Overview
+        Text.
+
+        ## already-clean
+        Text.
+
+        ```markdown
+        ## Fenced Café
+        ```
+        """)
+
+      assert Rules.slug_changes(vault, [café]) == [
+               %{kind: :file, path: café, heading: nil, old: "caf", new: "cafe"},
+               %{
+                 kind: :heading,
+                 path: café,
+                 heading: "Café Overview",
+                 old: "caf-overview",
+                 new: "cafe-overview"
+               }
+             ]
+    end
+
+    test "a heading and a filename with no derivable slug have one representation", %{
+      vault: vault
+    } do
+      dashes = write!(vault, "bike/———.md", "# T\n\n## ———\nText.\n")
+
+      assert [
+               %{kind: :file, path: ^dashes, new: nil},
+               %{kind: :heading, path: ^dashes, heading: "———", new: nil}
+             ] = Rules.slug_changes(vault, [dashes])
+    end
+
+    test "a clean note contributes nothing, and a note that cannot be read is not fatal", %{
+      vault: vault
+    } do
+      clean = write!(vault, "bike/terra-speed.md", "# T\n\n## Fueling\nText.\n")
+
+      assert Rules.slug_changes(vault, [clean]) == []
+      assert Rules.slug_changes(vault, ["bike/gone.md"]) == []
     end
   end
 

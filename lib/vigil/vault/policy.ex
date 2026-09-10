@@ -20,7 +20,7 @@ defmodule Vigil.Vault.Policy do
   """
 
   alias Vigil.{Markdown, Slug}
-  alias Vigil.Vault.Facts
+  alias Vigil.Vault.{Decision, Facts}
 
   @type op ::
           :create
@@ -37,12 +37,13 @@ defmodule Vigil.Vault.Policy do
   @doc """
   Decides `op` for `request` against `facts`.
 
-  Returns `{:ok, resolved}` — a map of everything the caller needs that the
-  policy derived (the normalized path, the domain, parsed timestamps, a
-  project directory to create) — or `{:error, message}` with the message the
-  caller is expected to hand back verbatim.
+  Returns `{:ok, decision}` — one `Vigil.Vault.Decision` struct per write
+  shape, carrying what the policy derived and the caller needs: the normalized
+  path, the resolved target or chunk, parsed timestamps, a project directory
+  to create. Or `{:error, message}`, with the message the caller is expected
+  to hand back verbatim.
   """
-  @spec check(op, map, Facts.t()) :: {:ok, map} | {:error, String.t()}
+  @spec check(op, map, Facts.t()) :: {:ok, Decision.t()} | {:error, String.t()}
 
   def check(:create, request, facts) do
     path = Map.fetch!(request, :path)
@@ -58,10 +59,9 @@ defmodule Vigil.Vault.Policy do
          {:ok, type, starts, ends} <- type_and_times(request),
          :ok <- duplicates(normalized, domain, request, facts) do
       {:ok,
-       %{
+       %Decision.Create{
          path: normalized,
          normalized_from: if(changed?, do: path),
-         domain: domain,
          create_project_dir: create_dir,
          type: type,
          starts: starts,
@@ -76,7 +76,7 @@ defmodule Vigil.Vault.Policy do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          {:ok, target} <- append_target(path, Map.get(request, :heading), facts),
          :ok <- appended_content(target, content) do
-      {:ok, %{path: path, target: target}}
+      {:ok, %Decision.Append{path: path, target: target}}
     end
   end
 
@@ -86,14 +86,14 @@ defmodule Vigil.Vault.Policy do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          :ok <- content_shape(content),
          :ok <- shrink_threshold(path, content, confirm?(request), facts) do
-      {:ok, %{path: path}}
+      {:ok, %Decision.RewriteNote{path: path}}
     end
   end
 
   def check(:update_frontmatter, request, facts) do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          {:ok, type, starts, ends} <- type_and_times(request) do
-      {:ok, %{path: path, type: type, starts: starts, ends: ends}}
+      {:ok, %Decision.UpdateFrontmatter{path: path, type: type, starts: starts, ends: ends}}
     end
   end
 
@@ -106,7 +106,7 @@ defmodule Vigil.Vault.Policy do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          backlinks = facts.find_backlinks.(path),
          :ok <- require_confirm(confirm?(request), delete_description(path, backlinks)) do
-      {:ok, %{path: path, backlinks: backlinks}}
+      {:ok, %Decision.DeleteNote{path: path, backlinks: backlinks}}
     end
   end
 
@@ -126,7 +126,7 @@ defmodule Vigil.Vault.Policy do
     with :ok <- section_id_writable(id, facts),
          {:ok, chunk} <- section_chunk(id, facts, "replaced"),
          :ok <- replacement_content(Map.fetch!(request, :content)) do
-      {:ok, %{path: chunk.path, chunk: chunk}}
+      {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
   end
 
@@ -135,7 +135,7 @@ defmodule Vigil.Vault.Policy do
 
     with :ok <- section_id_writable(id, facts),
          {:ok, chunk} <- section_chunk(id, facts, "deleted") do
-      {:ok, %{path: chunk.path, chunk: chunk}}
+      {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
   end
 
@@ -153,17 +153,14 @@ defmodule Vigil.Vault.Policy do
          :ok <- path_sanity(to),
          {:ok, normalized_to, _changed?} <- normalize(to),
          :ok <- path_sanity(normalized_to),
-         {:ok, domain, create_dir} <- writable_path(normalized_to, facts, false),
+         {:ok, domain, _create_dir} <- writable_path(normalized_to, facts, false),
          :ok <- naming_convention(normalized_to, domain, content, facts),
          :ok <- refute_exists(normalized_to, facts),
          :ok <- require_confirm(confirm?(request), "moves #{from} to #{to}") do
-      {:ok,
-       %{
-         from: normalized_from,
-         to: normalized_to,
-         domain: domain,
-         create_project_dir: create_dir
-       }}
+      # No project directory to create: the move asks `writable_path/3` with
+      # directory creation switched off, and `Vigil.Store` creates one for
+      # `:create` alone.
+      {:ok, %Decision.MoveNote{from: normalized_from, to: normalized_to}}
     end
   end
 
@@ -394,20 +391,43 @@ defmodule Vigil.Vault.Policy do
   # section on the next parse, into two chunks one of which nobody asked for.
   # The other two targets append at the end of the file, where a heading opens
   # a section rather than cutting one in half, and are left alone.
+  #
+  # "Heading" means what the parser means by it: a `##` line inside a fenced
+  # block splits nothing, and appending a code sample to an existing section
+  # is an ordinary thing to want.
+  #
+  # Which is why the fence has to be closed. A block left open swallows every
+  # line below the splice point — the whole rest of the note becomes part of
+  # the sample, and every section under it loses its chunk id. That is a
+  # larger blast than the split this gate exists to prevent, and only the
+  # mid-note targets can suffer it: the other two append at the end of the
+  # file, where there is nothing below to swallow.
   defp appended_content({:section, _chunk}, content) do
-    refute_headings(
-      content,
-      "content appended to an existing section must not contain headings (## through ####): it would split the section in two"
-    )
+    with :ok <-
+           refute_headings(
+             content,
+             "content appended to an existing section must not contain headings (## through ####): it would split the section in two"
+           ) do
+      refute_open_fence(content)
+    end
   end
 
   defp appended_content(_target, _content), do: :ok
 
-  defp refute_headings(content, message) do
-    if Enum.any?(Markdown.split_lines(content), &Markdown.heading?/1) do
-      {:error, message}
+  defp refute_open_fence(content) do
+    if Markdown.unclosed_fence?(content) do
+      {:error,
+       "content appended to an existing section must not leave a fenced block open: every line below it in the note would become part of the code sample"}
     else
       :ok
+    end
+  end
+
+  defp refute_headings(content, message) do
+    if Markdown.headings(content) == [] do
+      :ok
+    else
+      {:error, message}
     end
   end
 
@@ -475,6 +495,11 @@ defmodule Vigil.Vault.Policy do
   # the existing sections OR more than 20 headings; below that rewrite_note
   # goes through without it. The baseline is what vigil has indexed for the
   # note the policy resolved, asked for here rather than handed in.
+  #
+  # Both sides count the same way: the index has no chunk for a heading inside
+  # a fenced block, and `Markdown.count_headings/1` does not count one either.
+  # Counting them on the way in would judge the new content against a baseline
+  # it does not share.
   defp shrink_threshold(path, content, confirm, facts) do
     old_count = facts.count_headings.(path)
     removed = old_count - Markdown.count_headings(content)

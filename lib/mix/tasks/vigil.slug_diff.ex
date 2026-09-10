@@ -38,7 +38,7 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
     files =
       Vigil.VaultDiscovery.discover_files!(vault_path, Application.get_env(:vigil, :exclude, []))
 
-    differences = Enum.flat_map(files, &file_differences(vault_path, &1))
+    differences = Vigil.Vault.Rules.slug_changes(vault_path, files)
 
     if differences == [] do
       Mix.shell().info(
@@ -49,37 +49,21 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
     else
       Mix.shell().info("#{length(differences)} difference(s) found:\n")
 
-      Enum.each(differences, fn {kind, path, old, new} ->
-        Mix.shell().info("  [#{kind}] #{path}: #{inspect(old)} -> #{inspect(new)}")
+      Enum.each(differences, fn change ->
+        {label, subject} = line(change)
+
+        Mix.shell().info(
+          "  [#{label}] #{subject}: #{inspect(change.old)} -> #{inspect(change.new)}"
+        )
       end)
 
       exit({:shutdown, 1})
     end
   end
 
-  defp file_differences(vault_path, rel_path) do
-    file_diff =
-      case Vigil.Vault.Rules.filename_slug_change(rel_path) do
-        nil -> []
-        %{old: old, new: nil} -> [{"file", rel_path, old, :error}]
-        %{old: old, new: new} -> [{"file", rel_path, old, new}]
-      end
-
-    heading_diffs =
-      case File.read(Path.join(vault_path, rel_path)) do
-        {:ok, content} -> heading_differences(rel_path, content)
-        {:error, _} -> []
-      end
-
-    file_diff ++ heading_diffs
-  end
-
-  defp heading_differences(rel_path, content) do
-    content
-    |> Vigil.Vault.Rules.heading_slug_changes()
-    |> Enum.map(fn
-      %{text: text, old: old, new: nil} -> {"heading #{rel_path}", text, old, :error}
-      %{text: text, old: old, new: new} -> {"heading #{rel_path}", text, old, new}
-    end)
-  end
+  # One line per difference, for a human: what it is tagged as, and what it
+  # names. The walk and the facts behind it are Vigil.Vault.Rules'; what a
+  # line looks like is this task's.
+  defp line(%{kind: :file, path: path}), do: {"file", path}
+  defp line(%{kind: :heading, path: path, heading: heading}), do: {"heading #{path}", heading}
 end

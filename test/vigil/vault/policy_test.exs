@@ -83,6 +83,13 @@ defmodule Vigil.Vault.PolicyTest do
     test "an existing project directory needs no creation" do
       assert {:ok, %{create_project_dir: nil}} = create("projects/vigil/x.md")
     end
+
+    test "the create decision carries no domain: nothing writes one" do
+      assert {:ok, resolved} = create("projects/vigil/x.md")
+
+      assert Enum.sort(Map.keys(Map.from_struct(resolved))) ==
+               [:create_project_dir, :ends, :normalized_from, :path, :starts, :type]
+    end
   end
 
   describe "normalization on :create" do
@@ -287,6 +294,32 @@ defmodule Vigil.Vault.PolicyTest do
       assert msg =~ "removes 8 of 10 headings"
     end
 
+    # The index stopped counting fenced headings when the parser did. Counting
+    # them on the way in judges the new content against a baseline it does not
+    # share, and the gate lets through what it was built to stop.
+    test "a fenced code sample is counted the way the index counts the baseline" do
+      f = facts(path_exists?: fn _ -> true end, count_headings: fn _ -> 10 end)
+
+      content = """
+      # T
+
+      ## One
+      ## Two
+      ## Three
+      ## Four
+
+      ```markdown
+      ## Example
+      ## Another Example
+      ```
+      """
+
+      req = %{path: "bike/x.md", content: content, confirm: false}
+
+      assert {:error, msg} = Policy.check(:rewrite_note, req, f)
+      assert msg =~ "removes 6 of 10 headings"
+    end
+
     test "a modest shrink goes through without confirm" do
       f = facts(path_exists?: fn _ -> true end, count_headings: fn _ -> 10 end)
 
@@ -338,6 +371,46 @@ defmodule Vigil.Vault.PolicyTest do
                )
 
       assert msg =~ "split the section in two"
+    end
+
+    # A heading inside a fence splits nothing on the next parse, and appending
+    # a code sample to an existing section is an ordinary thing to want.
+    test "a heading inside a fenced sample does not split the section it lands in" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      content = "Client config:\n\n```markdown\n## Example\n```\n"
+
+      assert {:ok, %{target: {:section, _}}} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Gear", content: content},
+                 f
+               )
+    end
+
+    # The other half of what fence-awareness opened. An unclosed fence splits
+    # nothing where it stands, but every line below it in the note becomes
+    # part of the sample — a strictly larger blast than the split this gate
+    # exists to prevent.
+    test "content that leaves a fenced block open is refused" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      assert {:error, msg} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Gear", content: "Sample:\n\n```markdown\n## X\n"},
+                 f
+               )
+
+      assert msg =~ "must not leave a fenced block open"
     end
 
     test "the same content is fine at the end of the file and in a new section", %{f: f} do
@@ -576,15 +649,20 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:move_note, %{from: "bike/a.md", to: "work/a.md", confirm: true}, f)
     end
 
-    test "an ordinary move is allowed" do
+    # The decision says where the note comes from and where it goes, and
+    # nothing else: a move creates no project directory, and no writer ever
+    # read the domain it resolved.
+    test "an ordinary move is allowed, and resolves to nothing but from and to" do
       f = facts(path_exists?: fn p -> p == "bike/a.md" end)
 
-      assert {:ok, %{from: "bike/a.md", to: "training/b.md"}} =
+      assert {:ok, %{from: "bike/a.md", to: "training/b.md"} = resolved} =
                Policy.check(
                  :move_note,
                  %{from: "bike/a.md", to: "training/b.md", confirm: true},
                  f
                )
+
+      assert Enum.sort(Map.keys(Map.from_struct(resolved))) == [:from, :to]
     end
   end
 end

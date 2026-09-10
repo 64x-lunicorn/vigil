@@ -33,14 +33,6 @@ defmodule Vigil.MarkdownTest do
     end
   end
 
-  describe "heading?/1" do
-    test "agrees with heading/1" do
-      assert Markdown.heading?("## X")
-      refute Markdown.heading?("# X")
-      refute Markdown.heading?("text")
-    end
-  end
-
   describe "h1/1 and first_h1/1" do
     test "h1 extracts the trimmed title" do
       assert Markdown.h1("# Café Overview ") == "Café Overview"
@@ -57,11 +49,19 @@ defmodule Vigil.MarkdownTest do
     test "counts H2 through H4 only" do
       assert Markdown.count_headings("# A\n## B\n### C\n#### D\n##### E\n") == 3
     end
+
+    test "a heading inside a fenced block is not counted" do
+      assert Markdown.count_headings("# A\n## B\n\n```markdown\n## Example\n```\n") == 1
+    end
   end
 
   describe "headings/1" do
     test "returns rank and text in document order" do
       assert Markdown.headings("# A\n## B\ntext\n### C\n") == [{2, "B"}, {3, "C"}]
+    end
+
+    test "a heading inside a fenced block is a line of a code sample, not a heading" do
+      assert Markdown.headings("## Real\n\n~~~\n## Sample\n~~~\n") == [{2, "Real"}]
     end
   end
 
@@ -71,6 +71,19 @@ defmodule Vigil.MarkdownTest do
       refute Markdown.starts_with_h1?("body\n# Title")
       assert Markdown.starts_with_frontmatter?("  \n---\ntype: x\n---\n")
       refute Markdown.starts_with_frontmatter?("# Title\n")
+    end
+  end
+
+  describe "unclosed_fence?/1" do
+    test "true when the walk ends inside a block that never closed" do
+      assert Markdown.unclosed_fence?("text\n```markdown\n## X\n")
+      assert Markdown.unclosed_fence?("~~~\n")
+      refute Markdown.unclosed_fence?("text\n```\n## X\n```\n")
+      refute Markdown.unclosed_fence?("plain text\n")
+    end
+
+    test "a closing delimiter of the other flavour does not close the block" do
+      assert Markdown.unclosed_fence?("```\ncode\n~~~\n")
     end
   end
 
@@ -114,6 +127,74 @@ defmodule Vigil.MarkdownTest do
     test "reports the two failure modes distinctly" do
       assert Markdown.split_frontmatter("# Title\n") == {:error, "No frontmatter found"}
       assert Markdown.split_frontmatter("---\na: 1\n") == {:error, "Unterminated frontmatter"}
+    end
+  end
+
+  describe "read/1" do
+    test "classifies a note's lines: title, headings, ordinary content" do
+      assert Markdown.read("# Title\nintro\n## Fueling\nbody\n") == [
+               %{line: "# Title", kind: {:h1, "Title"}},
+               %{line: "intro", kind: :content},
+               %{line: "## Fueling", kind: {:heading, 2, "Fueling"}},
+               %{line: "body", kind: :content}
+             ]
+    end
+
+    test "takes lines a caller has already split off, as the parser hands them over" do
+      assert Markdown.read(["## Fueling", "body"]) == [
+               %{line: "## Fueling", kind: {:heading, 2, "Fueling"}},
+               %{line: "body", kind: :content}
+             ]
+    end
+
+    test "a heading inside a fenced block is code, not a heading" do
+      content = "# T\n\n## Real\n\n```markdown\n## Example\n```\n"
+
+      assert [
+               %{kind: {:h1, "T"}},
+               %{kind: :content},
+               %{kind: {:heading, 2, "Real"}},
+               %{kind: :content},
+               %{line: "```markdown", kind: :fence},
+               %{line: "## Example", kind: :code},
+               %{line: "```", kind: :fence}
+             ] = Markdown.read(content)
+    end
+
+    test "an info string opens a block and its absence closes one" do
+      assert [%{kind: :fence}, %{kind: :code}, %{kind: :fence}, %{kind: {:heading, 2, "After"}}] =
+               Markdown.read("```elixir\ncode\n```\n## After\n")
+    end
+
+    test "tildes are delimiters too, and do not close a backtick block" do
+      assert [%{kind: :fence}, %{kind: :code}, %{kind: :fence}] =
+               Markdown.read("~~~\n## Inside\n~~~\n")
+
+      assert [%{kind: :fence}, %{kind: :code}, %{kind: :code}, %{kind: :code}] =
+               Markdown.read("```\n~~~\n## Inside\n~~~\n")
+    end
+
+    test "four backticks open a block that three do not close" do
+      assert [%{kind: :fence}, %{kind: :code}, %{kind: :code}] =
+               Markdown.read("````\n```\n## Inside\n")
+    end
+
+    test "a fence left open at the end of the file keeps every remaining line fenced" do
+      assert [
+               %{kind: {:heading, 2, "Real"}},
+               %{kind: :fence},
+               %{kind: :code},
+               %{kind: :code}
+             ] = Markdown.read("## Real\n```\n## Never closed\nstill code\n")
+    end
+
+    test "a delimiter may be indented, and the H1 inside a fence is code as well" do
+      assert [%{kind: :fence}, %{kind: :code}, %{kind: :fence}] =
+               Markdown.read("  ```\n# Not a title\n  ```\n")
+    end
+
+    test "an empty note reads as no lines" do
+      assert Markdown.read("") == []
     end
   end
 end

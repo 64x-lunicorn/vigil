@@ -425,7 +425,7 @@ run_vault_adoption() {
     echo "WARNING: ${b3_count} chunk ids will change. Stored references and [[…]] links"
     echo "to those sections will break. This is a deliberate migration, not a"
     echo "side effect — review it before going live."
-    echo "$findings_json" | jq -r '.b3_chunk_diff.changes[] | "  [\(.kind)] \(.path): \(.old) -> \(.new // "ERROR")"'
+    echo "$findings_json" | jq -r '.b3_chunk_diff.changes[] | "  [\(.kind)] \(.path)\(if .heading then " › \(.heading)" else "" end): \(.old) -> \(.new // "ERROR")"'
   fi
 
   # Inventory overview, always printed
