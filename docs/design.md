@@ -223,6 +223,9 @@ This is what keeps retrieval cheap: the assistant fetches one section, not a
 
 ## Search
 
+All of the following is decided in `Vigil.Index.search/2` — one module, one
+result shape.
+
 - Literal matching over chunk bodies and headings via `:binary.match/2`
   (Boyer-Moore). No regex.
 - **The query is a phrase**, exactly as entered. No token split, no AND/OR.
@@ -444,7 +447,7 @@ created and refuses with the candidates named, unless the call passes
 are stated together in `Vigil.Vault.Policy`, because they are one decision:
 the terms are the note's whole name plus each `-`-separated segment of at least
 four characters, each term is asked for the best 25 hits in the domain, and a
-hit counts when it reaches `Vigil.Search.strength(:title)` — the score at which
+hit counts when it reaches `Vigil.Index.strength(:title)` — the score at which
 the query names a note rather than merely appearing in it. Notes inside the same
 project folder are never duplicates of each other.
 

@@ -15,6 +15,29 @@ defmodule Vigil.IndexTest do
   # requires one rather than inventing a second default.
   defp search(index, params), do: Index.search(index, Map.put_new(params, :limit, 10))
 
+  # search/2 is pure over an %Index{} — no GenServer, no fixture vault, no
+  # Parser needed to reach it. These build the bare struct directly, the way
+  # the ranking tests here used to build a synthetic item for a since-removed
+  # `Vigil.Search.run/3`.
+  defp ranking_chunk(overrides) do
+    Map.merge(
+      %Index.Chunk{
+        id: "x/a.md",
+        path: "x/a.md",
+        domain: "x",
+        file_title: "A",
+        heading_path: [],
+        type: :reference,
+        body: "",
+        body_downcased: "",
+        updated_at: nil
+      },
+      overrides
+    )
+  end
+
+  defp ranking_index(chunks), do: %Index{chunks: Map.new(chunks, &{&1.id, &1})}
+
   defp parse(rel_path) do
     content = File.read!(Path.join(@fixtures, rel_path))
     {:ok, file} = Parser.parse(rel_path, content, @git_meta)
@@ -170,6 +193,142 @@ defmodule Vigil.IndexTest do
       results = search(updated, %{query: "tubeless", domain: "bike"})
       hit = Enum.find(results, &(&1.id =~ "terra-speed"))
       refute Map.has_key?(hit, :hub)
+    end
+  end
+
+  describe "search/2 — ranking" do
+    test "title hit outranks body hit" do
+      index =
+        ranking_index([
+          ranking_chunk(%{
+            id: "x/a.md",
+            file_title: "Terra Speed",
+            body: "nothing",
+            body_downcased: "nothing"
+          }),
+          ranking_chunk(%{
+            id: "x/b.md",
+            file_title: "Anderes",
+            body: "mentions terra speed once",
+            body_downcased: "mentions terra speed once"
+          })
+        ])
+
+      [first, second] = search(index, %{query: "terra speed"})
+      assert first.id == "x/a.md"
+      assert second.id == "x/b.md"
+      assert first.score > second.score
+    end
+
+    test "prefer hint boosts matching type" do
+      index =
+        ranking_index([
+          ranking_chunk(%{
+            id: "x/ref.md",
+            type: :reference,
+            body: "wort",
+            body_downcased: "wort"
+          }),
+          ranking_chunk(%{id: "x/dec.md", type: :decision, body: "wort", body_downcased: "wort"})
+        ])
+
+      [first, _second] = search(index, %{query: "wort", prefer: :decision})
+      assert first.id == "x/dec.md"
+    end
+
+    test "preview is capped at 120 characters" do
+      long_body = String.duplicate("word ", 40)
+
+      index =
+        ranking_index([
+          ranking_chunk(%{file_title: "Treffer", body: long_body, body_downcased: long_body})
+        ])
+
+      [result] = search(index, %{query: "treffer"})
+      assert String.length(result.preview) <= 121
+    end
+
+    test "phrase match requires contiguous substring" do
+      index =
+        ranking_index([
+          ranking_chunk(%{
+            id: "x/together.md",
+            body: "terra speed is good",
+            body_downcased: "terra speed is good"
+          }),
+          ranking_chunk(%{
+            id: "x/apart.md",
+            body: "terra Reifen ... weit entfernt speed",
+            body_downcased: "terra reifen ... weit entfernt speed"
+          })
+        ])
+
+      results = search(index, %{query: "terra speed"})
+      assert Enum.map(results, & &1.id) == ["x/together.md"]
+    end
+
+    test "limit is taken at its word — no clamp, no default of its own" do
+      chunks = for n <- 1..30, do: ranking_chunk(%{id: "x/#{n}.md", file_title: "Treffer #{n}"})
+      index = ranking_index(chunks)
+
+      assert length(search(index, %{query: "treffer", limit: 25})) == 25
+      assert length(search(index, %{query: "treffer", limit: 3})) == 3
+    end
+
+    test "a limit is required: search/2 does not invent one" do
+      index = ranking_index([ranking_chunk(%{file_title: "Treffer"})])
+
+      assert_raise KeyError, fn -> Index.search(index, %{query: "treffer"}) end
+    end
+  end
+
+  # The scale a caller filters a score against. Vigil.Vault.Policy's
+  # duplicate gate keeps hits at strength(:title) and above, so these are
+  # load-bearing for a module outside this one: they are published rather
+  # than inferred.
+  describe "strength/1" do
+    test "each kind contributes what it is published as" do
+      title = ranking_index([ranking_chunk(%{file_title: "Terra"})])
+      assert [%{score: score}] = search(title, %{query: "terra"})
+      assert score == Index.strength(:title)
+
+      heading = ranking_index([ranking_chunk(%{heading_path: ["Terra"]})])
+      assert [%{score: score}] = search(heading, %{query: "terra"})
+      assert score == Index.strength(:heading)
+
+      once = ranking_index([ranking_chunk(%{body: "terra", body_downcased: "terra"})])
+      assert [%{score: score}] = search(once, %{query: "terra"})
+      assert score == Index.strength(:body_occurrence)
+
+      preferred =
+        ranking_index([ranking_chunk(%{file_title: "Terra", type: :decision})])
+
+      assert [%{score: score}] = search(preferred, %{query: "terra", prefer: :decision})
+      assert score == Index.strength(:title) + Index.strength(:preferred_type)
+    end
+
+    test "the body contributes at most its published maximum, however often it hits" do
+      body = String.duplicate("terra ", 20)
+      index = ranking_index([ranking_chunk(%{body: body, body_downcased: body})])
+
+      assert [%{score: score}] = search(index, %{query: "terra"})
+      assert score == Index.strength(:body_occurrences_max)
+    end
+
+    # Which is why strength(:title) is documented as "the query names this
+    # note", not as "the title matched": a heading hit with the body at its
+    # maximum reaches exactly the same score.
+    test "a heading hit with the body at its maximum reaches a title hit's score" do
+      body = String.duplicate("terra ", 20)
+
+      index =
+        ranking_index([
+          ranking_chunk(%{heading_path: ["Terra"], body: body, body_downcased: body})
+        ])
+
+      assert [%{score: score}] = search(index, %{query: "terra"})
+      assert score == Index.strength(:heading) + Index.strength(:body_occurrences_max)
+      assert score == Index.strength(:title)
     end
   end
 
