@@ -50,8 +50,10 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
       Mix.shell().info("#{length(differences)} difference(s) found:\n")
 
       Enum.each(differences, fn change ->
+        {label, subject} = line(change)
+
         Mix.shell().info(
-          "  [#{label(change)}] #{subject(change)}: #{inspect(change.old)} -> #{inspect(change.new)}"
+          "  [#{label}] #{subject}: #{inspect(change.old)} -> #{inspect(change.new)}"
         )
       end)
 
@@ -59,11 +61,9 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
     end
   end
 
-  # One line per difference, for a human. The walk and the facts behind it are
-  # Vigil.Vault.Rules'; what a line looks like is this task's.
-  defp label(%{kind: :file}), do: "file"
-  defp label(%{kind: :heading, path: path}), do: "heading #{path}"
-
-  defp subject(%{kind: :file, path: path}), do: path
-  defp subject(%{kind: :heading, heading: heading}), do: heading
+  # One line per difference, for a human: what it is tagged as, and what it
+  # names. The walk and the facts behind it are Vigil.Vault.Rules'; what a
+  # line looks like is this task's.
+  defp line(%{kind: :file, path: path}), do: {"file", path}
+  defp line(%{kind: :heading, path: path, heading: heading}), do: {"heading #{path}", heading}
 end

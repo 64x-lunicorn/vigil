@@ -352,7 +352,7 @@ defmodule Vigil.Store do
   defp ensure_directories(:create, %Decision.Create{} = decision, state),
     do: create_project_dir(state, decision.create_project_dir)
 
-  defp ensure_directories(_op, _resolved, _state), do: :ok
+  defp ensure_directories(_op, _decision, _state), do: :ok
 
   # A create has no current content by definition, and the two git-level
   # operations never look at it; every other operation is a transformation of

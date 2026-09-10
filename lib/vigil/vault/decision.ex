@@ -20,6 +20,8 @@ defmodule Vigil.Vault.Decision do
   the same one, and what differs is what the plan does with it.
   """
 
+  alias Vigil.{Index, Vault.Edit}
+
   defmodule Create do
     @moduledoc "A note to write where none is: where it lands, and as what."
     @enforce_keys [:path, :normalized_from, :create_project_dir, :type, :starts, :ends]
@@ -40,8 +42,7 @@ defmodule Vigil.Vault.Decision do
     @enforce_keys [:path, :target]
     defstruct @enforce_keys
 
-    @type target :: :end | {:new_section, String.t()} | {:section, map()}
-    @type t :: %__MODULE__{path: String.t(), target: target()}
+    @type t :: %__MODULE__{path: String.t(), target: Edit.target()}
   end
 
   defmodule Section do
@@ -49,7 +50,7 @@ defmodule Vigil.Vault.Decision do
     @enforce_keys [:path, :chunk]
     defstruct @enforce_keys
 
-    @type t :: %__MODULE__{path: String.t(), chunk: map()}
+    @type t :: %__MODULE__{path: String.t(), chunk: Index.Chunk.t()}
   end
 
   defmodule RewriteNote do

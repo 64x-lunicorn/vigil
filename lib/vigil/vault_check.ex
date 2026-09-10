@@ -207,15 +207,22 @@ defmodule Vigil.VaultCheck do
 
   # The walk belongs to Vigil.Vault.Rules, so the doctor and mix vigil.slug_diff
   # cannot disagree about the blast radius. Only the rendering is the doctor's:
-  # a JSON report for jq, with the kind as a string.
+  # a JSON report for jq, with the kind as a string and the heading text on the
+  # rows that have one.
   defp b3_diff(files, vault_path) do
     changes =
       vault_path
       |> Rules.slug_changes(files)
-      |> Enum.map(&%{&1 | kind: Atom.to_string(&1.kind)})
+      |> Enum.map(&b3_change/1)
 
     %{checked: length(files), changes: changes}
   end
+
+  defp b3_change(%{kind: :file, path: path, old: old, new: new}),
+    do: %{kind: "file", path: path, old: old, new: new}
+
+  defp b3_change(%{kind: :heading, path: path, heading: heading, old: old, new: new}),
+    do: %{kind: "heading", path: path, heading: heading, old: old, new: new}
 
   ## Domain drift
 
