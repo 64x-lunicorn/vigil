@@ -5,6 +5,7 @@ defmodule Vigil.Store do
 
   alias Vigil.{
     Clock,
+    Commit,
     Index,
     Markdown,
     Parser,
@@ -238,7 +239,7 @@ defmodule Vigil.Store do
         %{}
 
       {:error, reason} ->
-        Logger.warning("cannot read _domains.yml: #{fs_error(reason)}")
+        Logger.warning("cannot read _domains.yml: #{Commit.fs_error(reason)}")
         %{}
     end
   end
@@ -262,7 +263,7 @@ defmodule Vigil.Store do
 
       {:error, reason} ->
         if File.exists?(path) do
-          Logger.warning("cannot read _domains.yml: #{fs_error(reason)}")
+          Logger.warning("cannot read _domains.yml: #{Commit.fs_error(reason)}")
         end
 
         ""
@@ -316,7 +317,7 @@ defmodule Vigil.Store do
   defp create_project_dir(_state, nil), do: :ok
 
   defp create_project_dir(state, project) do
-    safe_mkdir_p(Path.join([state.vault_path, "projects", project]))
+    Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
   end
 
   ## create
@@ -333,7 +334,6 @@ defmodule Vigil.Store do
         write_and_commit(
           state,
           resolved.path,
-          abs(state, resolved.path),
           full_content,
           "create: #{resolved.path} — #{first_line(content)}"
         )
@@ -416,7 +416,7 @@ defmodule Vigil.Store do
       case Markdown.split_frontmatter(original) do
         {:ok, frontmatter, _old_body} ->
           new_content = Markdown.normalize_trailing_newline(frontmatter <> content)
-          write_and_commit(state, path, abs_path, new_content, "rewrite_note: #{path}")
+          write_and_commit(state, path, new_content, "rewrite_note: #{path}")
 
         {:error, msg} ->
           {{:error, msg}, state}
@@ -446,7 +446,7 @@ defmodule Vigil.Store do
 
     with {:ok, original} <- read_existing_file(abs_path),
          {:ok, new_content} <- edit_fun.(original) do
-      write_and_commit(state, path, abs_path, new_content, message)
+      write_and_commit(state, path, new_content, message)
     else
       {:error, msg} -> {{:error, msg}, state}
     end
@@ -463,7 +463,7 @@ defmodule Vigil.Store do
         {:ok, _old_frontmatter, body} ->
           new_frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
           new_content = Markdown.normalize_trailing_newline(new_frontmatter <> body)
-          write_and_commit(state, path, abs_path, new_content, "update_frontmatter: #{path}")
+          write_and_commit(state, path, new_content, "update_frontmatter: #{path}")
 
         {:error, msg} ->
           {{:error, msg}, state}
@@ -557,61 +557,32 @@ defmodule Vigil.Store do
 
   ## shared write path
 
-  defp write_and_commit(state, rel_path, abs_path, full_content, message) do
-    with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
-         :ok <- safe_write(abs_path, full_content) do
-      case Git.add_commit(state.vault_path, rel_path, message) do
-        {:ok, commit_meta} ->
-          index =
-            case reparse(state, rel_path, commit_meta, "write") do
-              {:ok, file} -> Index.put(state.index, file)
-              :error -> state.index
-            end
-
-          new_state = %{state | index: index}
-
-          case Git.push(new_state.vault_path, new_state.git_remote) do
-            :ok ->
-              {{:ok, %{path: rel_path, pushed: true}}, new_state}
-
-            {:error, out} ->
-              {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
+  # The write effect belongs to Vigil.Commit; what this adds is the note-shaped
+  # part around it — the reparse between commit and push (docs/design.md, "The
+  # write path"), which would be wrong for a skill.
+  defp write_and_commit(state, rel_path, full_content, message) do
+    case Commit.write(state.vault_path, rel_path, full_content, message) do
+      {:ok, commit_meta} ->
+        index =
+          case reparse(state, rel_path, commit_meta, "write") do
+            {:ok, file} -> Index.put(state.index, file)
+            :error -> state.index
           end
 
-        {:error, out} ->
-          {{:error, "git commit failed: #{out}"}, state}
-      end
-    else
-      {:error, msg} -> {{:error, msg}, state}
+        new_state = %{state | index: index}
+
+        case Git.push(new_state.vault_path, new_state.git_remote) do
+          :ok ->
+            {{:ok, %{path: rel_path, pushed: true}}, new_state}
+
+          {:error, out} ->
+            {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
+        end
+
+      {:error, msg} ->
+        {{:error, msg}, state}
     end
   end
-
-  defp safe_mkdir_p(path) do
-    case File.mkdir_p(path) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Could not create directory #{path}: #{fs_error(reason)}"}
-    end
-  end
-
-  defp safe_write(path, content) do
-    case File.write(path, content) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Could not write file #{path}: #{fs_error(reason)}"}
-    end
-  end
-
-  defp fs_error(:eacces), do: "no write permission"
-  defp fs_error(:enospc), do: "out of disk space"
-  defp fs_error(:eisdir), do: "target path is a directory"
-  defp fs_error(:enotdir), do: "a path component is not a directory"
-  defp fs_error(:erofs), do: "filesystem is read-only"
-  defp fs_error(reason), do: inspect(reason)
 
   # Used by the write paths that read a note's current content before
   # transforming it (append, rewrite_note, edit_and_commit, update_frontmatter).
@@ -621,7 +592,7 @@ defmodule Vigil.Store do
   defp read_existing_file(path) do
     case File.read(path) do
       {:ok, content} -> {:ok, content}
-      {:error, reason} -> {:error, "Could not read file #{path}: #{fs_error(reason)}"}
+      {:error, reason} -> {:error, "Could not read file #{path}: #{Commit.fs_error(reason)}"}
     end
   end
 
@@ -636,7 +607,10 @@ defmodule Vigil.Store do
         {:ok, content}
 
       {:error, reason} ->
-        Logger.warning("vigil: could not reparse #{rel_path} after #{verb}: #{fs_error(reason)}")
+        Logger.warning(
+          "vigil: could not reparse #{rel_path} after #{verb}: #{Commit.fs_error(reason)}"
+        )
+
         :error
     end
   end
