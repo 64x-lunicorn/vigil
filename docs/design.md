@@ -570,6 +570,8 @@ between commit and push, which would index a skill as a note; and each write
 action's push-failure message, which names its own object: a change, a
 deletion, a move, a skill.
 
+---
+
 ## Git is reached through a value
 
 `Vigil.Commit` is the write effect, and it does two things at once: it touches
@@ -596,10 +598,10 @@ it holds no configuration it could build one from. One default, in one place.
 
 **The second adapter is a commit log, and it keeps the metadata.** It records
 what it was asked to commit, under the instant it was handed, authored as
-`vigil` — and answers `log_metadata` from that record. It does not read a clock
-of its own. The alternative, an adapter answering "no metadata", was rejected:
-it would put a `created_at` of `nil` under every test in the suite, which is a
-shape production never has.
+`vigil` — and answers `log_metadata` from that record. It does not read a
+clock of its own. The alternative, an adapter answering "no metadata", was
+rejected: it would put a `created_at` of `nil` under every test in the suite,
+which is a shape production never has.
 
 This is not a second metadata database, and principle 3 is untouched by it.
 "Creation date = first commit" is a claim about where a fact lives and what
