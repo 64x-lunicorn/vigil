@@ -9,11 +9,12 @@ defmodule Vigil.MCP.Tools do
   before a call ever reaches `dispatch_tool/2`. A schema and its validation
   cannot drift out of agreement when they are the same table.
 
-  `dispatch_tool/2`'s clauses stay hand-written: they aren't uniform enough
-  to generate (`Store.read/2` is positional, `Store.links/3` is
-  positional-3, `Store.search/1` takes a map), and by the time validation has
-  run, each clause only has to say what it uniquely knows — the shape of its
-  `Store` call — never how to parse or default an argument.
+  `dispatch_tool/2`'s clauses stay hand-written for now, but they are all the
+  same call: `Store.call/2` with an operation and a params map. What each
+  clause still says is the half the table does not declare yet — which
+  operation a tool runs, which of its parameters travel, and which enum
+  values become atoms — never how to parse or default an argument, because by
+  the time a clause is reached validation has run.
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
@@ -410,7 +411,7 @@ defmodule Vigil.MCP.Tools do
   AP-6's read-only (`vault:read`) scope. `skill_write` requires a SkillKey
   same as any other write tool; the bootstrap deadlock this could cause on a
   brand-new vault (no `vigil-vault-conventions` skill yet to read a key from)
-  is resolved in `Vigil.Store.skill_read/1`, which reveals the current key
+  is resolved in the Store's `:skill_read`, which reveals the current key
   even when the requested skill doesn't exist yet.
   """
   @spec write_tool?(String.t()) :: boolean()
@@ -540,7 +541,7 @@ defmodule Vigil.MCP.Tools do
   ## Dispatch — what each tool uniquely knows about its `Store` call.
 
   defp dispatch_tool("search", params) do
-    Store.search(%{
+    Store.call(:search, %{
       query: params.query,
       domain: params.domain,
       type: type_atom(params.type),
@@ -551,15 +552,19 @@ defmodule Vigil.MCP.Tools do
   end
 
   defp dispatch_tool("read", params) do
-    Store.read(params.id, params.backlinks)
+    Store.call(:read, %{id: params.id, backlinks: params.backlinks})
   end
 
   defp dispatch_tool("links", params) do
-    Store.links(params.id, direction_atom(params.direction), params.depth)
+    Store.call(:links, %{
+      id: params.id,
+      direction: direction_atom(params.direction),
+      depth: params.depth
+    })
   end
 
   defp dispatch_tool("create", params) do
-    Store.create(%{
+    Store.call(:create, %{
       path: params.path,
       type: params.type,
       content: params.content,
@@ -571,23 +576,27 @@ defmodule Vigil.MCP.Tools do
   end
 
   defp dispatch_tool("append", params) do
-    Store.append(%{path: params.path, heading: params.heading, content: params.content})
+    Store.call(:append, %{path: params.path, heading: params.heading, content: params.content})
   end
 
   defp dispatch_tool("replace_section", params) do
-    Store.replace_section(params.id, params.content)
+    Store.call(:replace_section, %{id: params.id, content: params.content})
   end
 
   defp dispatch_tool("rewrite_note", params) do
-    Store.rewrite_note(%{path: params.path, content: params.content, confirm: params.confirm})
+    Store.call(:rewrite_note, %{
+      path: params.path,
+      content: params.content,
+      confirm: params.confirm
+    })
   end
 
   defp dispatch_tool("delete_section", params) do
-    Store.delete_section(params.id)
+    Store.call(:delete_section, %{id: params.id})
   end
 
   defp dispatch_tool("update_frontmatter", params) do
-    Store.update_frontmatter(%{
+    Store.call(:update_frontmatter, %{
       path: params.path,
       type: params.type,
       starts: params.starts,
@@ -596,35 +605,35 @@ defmodule Vigil.MCP.Tools do
   end
 
   defp dispatch_tool("delete_note", params) do
-    Store.delete_note(%{path: params.path, confirm: params.confirm})
+    Store.call(:delete_note, %{path: params.path, confirm: params.confirm})
   end
 
   defp dispatch_tool("move_note", params) do
-    Store.move_note(%{from: params.from, to: params.to, confirm: params.confirm})
+    Store.call(:move_note, %{from: params.from, to: params.to, confirm: params.confirm})
   end
 
   defp dispatch_tool("lint", _params) do
-    ok(Store.lint())
+    ok(Store.call(:lint, %{}))
   end
 
   defp dispatch_tool("current", _params) do
-    ok(Store.current())
+    ok(Store.call(:current, %{}))
   end
 
   defp dispatch_tool("reload", _params) do
-    ok(Store.reload())
+    ok(Store.call(:reload, %{}))
   end
 
   defp dispatch_tool("skill_list", _params) do
-    ok(Store.skill_list())
+    ok(Store.call(:skill_list, %{}))
   end
 
   defp dispatch_tool("skill_read", params) do
-    Store.skill_read(params.name)
+    Store.call(:skill_read, %{name: params.name})
   end
 
   defp dispatch_tool("skill_write", params) do
-    Store.skill_write(params.name, params.content)
+    Store.call(:skill_write, %{name: params.name, content: params.content})
   end
 
   defp ok(value), do: {:ok, value}

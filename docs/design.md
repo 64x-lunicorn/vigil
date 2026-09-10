@@ -341,6 +341,16 @@ parameters are ignored: the schemas do not set `additionalProperties: false`,
 and rejecting extras a client legitimately sent would fail callers over
 something the server never declared.
 
+**One shape for every tool-facing call.** `Vigil.Store.call/2` takes an
+operation and a params map — not a positional pair for `read`, a positional
+triple for `links` and a map for `search`. The difference
+between two tools is the map, so a parameter added to a tool changes the table
+and the handler that reads it, rather than a client function, a message shape
+and a `handle_call` clause as well. The eight writes share a single clause:
+which operation is being written is data `Vigil.Vault.Policy` and
+`Vigil.Vault.Plan` already take as an argument. What stays per operation is
+the contract — the head that matches what a call cannot do without.
+
 A bound is part of that declaration, not a correction applied afterwards.
 Integer parameters carry a range in the table (`limit` is `1..25`, `depth` is
 `1..2`), the range is published as `minimum`/`maximum`, and a value outside it
@@ -465,8 +475,9 @@ write.
 to error tuples and never allowed to propagate into the GenServer. One failed
 write must not cost read access to everything else. A caller that breaks a
 declared contract outright — a `search` without a `limit`, a `links` with a
-depth the tool table does not allow — is matched in `Vigil.Store`'s client
-functions, so it fails in its own process rather than in the writer's.
+depth the tool table does not allow, a `read` without an id — is matched in
+`Vigil.Store.call/2`'s heads, so it fails in its own process rather than in
+the writer's.
 
 The write effect itself — create the directory, write the file, commit it, and
 the wording for a POSIX error — belongs to `Vigil.Commit`, and notes and skills
