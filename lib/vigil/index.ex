@@ -50,7 +50,15 @@ defmodule Vigil.Index do
   end
 
   defmodule Chunk do
-    @moduledoc "One chunk (a heading and its body, or a file's pre-heading text)."
+    @moduledoc """
+    One chunk (a heading and its body, or a file's pre-heading text), plus
+    `domain` and `file_title` denormalised onto it for search filtering and
+    result titles.
+
+    `heading_line` and `body_end_line` follow the same 1-based, inclusive
+    convention documented on `Vigil.Parser.Chunk` — see there for what they
+    mean and for the 0-based index helpers.
+    """
     defstruct [
       :id,
       :path,
@@ -65,7 +73,7 @@ defmodule Vigil.Index do
       :ends,
       :body,
       :body_downcased,
-      :raw_links,
+      :links,
       :created_at,
       :updated_at
     ]
@@ -815,7 +823,7 @@ defmodule Vigil.Index do
            ends: chunk.ends,
            body: chunk.body,
            body_downcased: chunk.body_downcased,
-           raw_links: chunk.links,
+           links: chunk.links,
            created_at: chunk.created_at,
            updated_at: chunk.updated_at
          }}
