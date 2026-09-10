@@ -7,8 +7,8 @@ defmodule Vigil.LinkIndexTest do
     %{path: path, domain: domain || path |> String.split("/") |> hd()}
   end
 
-  defp chunk(id, path, raw_links) do
-    %{id: id, path: path, raw_links: raw_links}
+  defp chunk(id, path, links) do
+    %{id: id, path: path, links: links}
   end
 
   defp link(raw, fragment \\ nil), do: %{raw: raw, fragment: fragment}

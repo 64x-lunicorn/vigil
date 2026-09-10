@@ -450,10 +450,10 @@ defmodule Vigil.Vault.Policy do
         {:error, "Invalid type"}
 
       type_atom == :event and (is_nil(starts) or is_nil(ends)) ->
-        {:error, "starts/ends sind Pflicht bei type: event"}
+        {:error, "starts/ends are required for type: event"}
 
       type_atom != :event and (not is_nil(starts) or not is_nil(ends)) ->
-        {:error, "starts/ends sind nur bei type: event erlaubt"}
+        {:error, "starts/ends are only allowed for type: event"}
 
       type_atom == :event ->
         with {:ok, s, _} <- DateTime.from_iso8601(starts),

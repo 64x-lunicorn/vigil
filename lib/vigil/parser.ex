@@ -6,7 +6,23 @@ defmodule Vigil.Parser do
   alias Vigil.Markdown
 
   defmodule Chunk do
-    @moduledoc false
+    @moduledoc """
+    One chunk: a heading and its body, or a file's pre-heading text.
+
+    `heading_line` and `body_end_line` are 1-based, inclusive line numbers
+    into the file's full line list (frontmatter included, so they are offset
+    by however many lines the frontmatter block took). `heading_line` is
+    `nil` for the file's pre-heading chunk, which has no heading of its own.
+
+    `Vigil.Index.Chunk` denormalises `domain` and `file_title` onto the same
+    two fields, under the same convention — it is not a second convention to
+    track.
+
+    Callers that need a 0-based index into a line list (to slice or splice
+    it) should reach for `heading_index/1`, `body_start_index/1` and
+    `body_end_index/1` below rather than re-deriving the offset themselves;
+    they accept any chunk-shaped map, `Vigil.Index.Chunk` included.
+    """
     defstruct [
       :id,
       :path,
@@ -23,6 +39,15 @@ defmodule Vigil.Parser do
       :created_at,
       :updated_at
     ]
+
+    @doc "0-based index of the chunk's own heading line."
+    def heading_index(%{heading_line: line}) when is_integer(line), do: line - 1
+
+    @doc "0-based index of the first line of the chunk's body — one past the heading."
+    def body_start_index(%{heading_line: line}) when is_integer(line), do: line
+
+    @doc "0-based index of the line right after the chunk's body ends."
+    def body_end_index(%{body_end_line: line}) when is_integer(line), do: line
   end
 
   defmodule File_ do

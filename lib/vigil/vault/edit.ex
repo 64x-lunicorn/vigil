@@ -20,6 +20,7 @@ defmodule Vigil.Vault.Edit do
   """
 
   alias Vigil.{Index, Markdown}
+  alias Vigil.Parser.Chunk
 
   @type target :: {:section, Index.Chunk.t()} | {:new_section, String.t()} | :end
 
@@ -29,7 +30,14 @@ defmodule Vigil.Vault.Edit do
   def replace_body(content, chunk, new_body) do
     with :ok <- validate_chunk(chunk) do
       lines = Markdown.split_lines(content)
-      {:ok, splice(lines, chunk.heading_line, chunk.body_end_line, body_lines(new_body))}
+
+      {:ok,
+       splice(
+         lines,
+         Chunk.body_start_index(chunk),
+         Chunk.body_end_index(chunk),
+         body_lines(new_body)
+       )}
     end
   end
 
@@ -44,9 +52,10 @@ defmodule Vigil.Vault.Edit do
   def delete_section(content, chunk) do
     with :ok <- validate_chunk(chunk) do
       lines = Markdown.split_lines(content)
-      resume = chunk.body_end_line + separator_after(lines, chunk.body_end_line)
+      body_end_index = Chunk.body_end_index(chunk)
+      resume = body_end_index + separator_after(lines, body_end_index)
 
-      {:ok, splice(lines, chunk.heading_line - 1, resume, [])}
+      {:ok, splice(lines, Chunk.heading_index(chunk), resume, [])}
     end
   end
 
@@ -62,8 +71,9 @@ defmodule Vigil.Vault.Edit do
       # ends at its last non-blank line and the blank line that follows it is
       # still there, after the insert point (docs/design.md, "Chunking").
       lines = Markdown.split_lines(content)
+      body_end_index = Chunk.body_end_index(chunk)
 
-      {:ok, splice(lines, chunk.body_end_line, chunk.body_end_line, body_lines(new_content))}
+      {:ok, splice(lines, body_end_index, body_end_index, body_lines(new_content))}
     end
   end
 
@@ -89,8 +99,8 @@ defmodule Vigil.Vault.Edit do
   # 1 when the line after a section's body is the blank one that separated it
   # from what follows — the slot the section occupied. Never more than one: a
   # wider gap someone set on purpose survives, one line narrower.
-  defp separator_after(lines, body_end_line) do
-    case Enum.at(lines, body_end_line) do
+  defp separator_after(lines, body_end_index) do
+    case Enum.at(lines, body_end_index) do
       nil -> 0
       line -> if String.trim(line) == "", do: 1, else: 0
     end

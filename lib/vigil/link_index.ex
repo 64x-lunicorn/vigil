@@ -14,7 +14,7 @@ defmodule Vigil.LinkIndex do
 
   @doc """
   `files`: list of `%{path:, domain:, ...}`.
-  `chunks`: list of `%{id:, path:, raw_links: [%{raw:, fragment:}], ...}`.
+  `chunks`: list of `%{id:, path:, links: [%{raw:, fragment:}], ...}`.
 
   Returns `%{out: [{chunk_id, resolved}, ...], in: [{target_key, source_chunk_id}, ...]}`.
   """
@@ -23,7 +23,7 @@ defmodule Vigil.LinkIndex do
     chunk_ids = MapSet.new(chunks, & &1.id)
 
     out =
-      for chunk <- chunks, raw_link <- chunk.raw_links do
+      for chunk <- chunks, raw_link <- chunk.links do
         {chunk.id, resolve_link(raw_link, chunk.path, index, chunk_ids)}
       end
 

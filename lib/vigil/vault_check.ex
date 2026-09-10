@@ -12,6 +12,7 @@ defmodule Vigil.VaultCheck do
   """
 
   alias Vigil.{Markdown, Parser, Slug, VaultDiscovery}
+  alias Vigil.Parser.Chunk
   alias Vigil.Vault.Rules
 
   @max_basisname_laenge 60
@@ -273,7 +274,7 @@ defmodule Vigil.VaultCheck do
     parsed_file.chunks
     |> Enum.chunk_every(2, 1, :discard)
     |> Enum.filter(fn [previous, chunk] ->
-      chunk.heading != nil and chunk.heading_line == previous.body_end_line + 1
+      chunk.heading != nil and Chunk.heading_index(chunk) == Chunk.body_end_index(previous)
     end)
     |> Enum.map(fn [_previous, chunk] ->
       %{

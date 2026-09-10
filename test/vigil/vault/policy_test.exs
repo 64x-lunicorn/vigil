@@ -125,12 +125,12 @@ defmodule Vigil.Vault.PolicyTest do
 
     test "an event needs both starts and ends" do
       assert {:error, msg} = create("bike/x.md", type: "event")
-      assert msg =~ "starts/ends"
+      assert msg =~ "starts/ends are required for type: event"
     end
 
     test "a non-event may not carry starts or ends" do
       assert {:error, msg} = create("bike/x.md", starts: "2026-09-09T10:00:00+02:00")
-      assert msg =~ "nur bei type: event"
+      assert msg =~ "starts/ends are only allowed for type: event"
     end
 
     test "event timestamps must be ISO8601 with an offset" do
