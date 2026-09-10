@@ -13,9 +13,13 @@ defmodule Vigil.MCP.Tools do
 
   The call is a row's `call:` and its parameters: every declared parameter
   travels under the name the table gives it, except `skill_key`, which
-  authorizes a write (AP-4) and belongs to no Store operation. Nothing is
-  parsed or defaulted at that point — by the time the call is built,
-  validation has run and every declared parameter has a value.
+  authorizes a write (AP-4) and belongs to no operation. Nothing is parsed or
+  defaulted at that point — by the time the call is built, validation has run
+  and every declared parameter has a value.
+
+  `Vigil.Store` answers all but two of the operations. `skill_list` and
+  `skill_read` are answered against `Vigil.Skills` in the caller's own
+  process — see `answer/2`.
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
@@ -32,7 +36,7 @@ defmodule Vigil.MCP.Tools do
   enum through as a string.
   """
 
-  alias Vigil.Store
+  alias Vigil.{Skills, Store}
 
   # The one declared parameter that is not a parameter of any Store operation:
   # it authorizes a write and is consumed by the gate below.
@@ -460,8 +464,8 @@ defmodule Vigil.MCP.Tools do
   AP-6's read-only (`vault:read`) scope. `skill_write` requires a SkillKey
   same as any other write tool; the bootstrap deadlock this could cause on a
   brand-new vault (no `vigil-vault-conventions` skill yet to read a key from)
-  is resolved in the Store's `:skill_read`, which reveals the current key
-  even when the requested skill doesn't exist yet.
+  is resolved in `Vigil.Skills.read/2`, which reveals the current key even
+  when the requested skill doesn't exist yet.
   """
   @spec write_tool?(String.t()) :: boolean()
   def write_tool?(name) do
@@ -501,10 +505,22 @@ defmodule Vigil.MCP.Tools do
         with :ok <- maybe_require_skill_key(tool, args),
              {:ok, params} <- validate_params(tool.params, args) do
           params = params |> Map.delete(@skill_key) |> maybe_put_now(tool, now)
-          tool.call |> Store.call(params) |> to_result()
+          tool.call |> answer(params) |> to_result()
         end
     end
   end
+
+  # Almost every operation is the single writer's. The two exceptions are the
+  # skill reads: `skills/` is a separate system from the vault's notes
+  # (docs/design.md, "skills/ — one repository, two systems"), Vigil.Skills
+  # takes the vault path as a plain argument, and principle 2 — one writer —
+  # is a rule about writes. A skill *write* still goes through the mailbox, to
+  # commit and push in order with note writes. Answering the reads here is
+  # what keeps a skill read — the mandatory bootstrap in front of every write
+  # (AP-4) — from queueing behind the push at the end of the write before it.
+  defp answer(:skill_list, %{}), do: Skills.list(Store.vault_path())
+  defp answer(:skill_read, %{name: name}), do: Skills.read(name, Store.vault_path())
+  defp answer(op, params), do: Store.call(op, params)
 
   defp maybe_put_now(params, %{now: true}, now), do: Map.put(params, :now, now)
   defp maybe_put_now(params, _tool, _now), do: params

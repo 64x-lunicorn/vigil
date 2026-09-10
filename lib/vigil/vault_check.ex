@@ -13,7 +13,7 @@ defmodule Vigil.VaultCheck do
 
   alias Vigil.{Commit, Markdown, Parser, Slug, VaultDiscovery}
   alias Vigil.Parser.Chunk
-  alias Vigil.Vault.{Domains, Rules}
+  alias Vigil.Vault.{Domains, Frontmatter, Rules}
 
   @max_basisname_laenge 60
   @max_frontmatter_bytes 1024
@@ -115,49 +115,42 @@ defmodule Vigil.VaultCheck do
     end
   end
 
+  # The rule is Vigil.Vault.Frontmatter's, the same one the write gate and the
+  # parser ask (docs/design.md, "Frontmatter — exactly one required field").
+  # What stays here is the doctor's rendering of the verdict as a finding —
+  # one per note, in the doctor's own wording. Restating the rule is how this
+  # check came to pass an event with a `starts` and no `ends` that the write
+  # gate refuses, and to say nothing at all about a timestamp that will not
+  # parse.
   defp b1_type_checks(path, frontmatter) do
     type = Map.get(frontmatter, "type")
-    starts = Map.get(frontmatter, "starts")
-    ends = Map.get(frontmatter, "ends")
 
-    base_findings =
-      cond do
-        type == nil ->
-          [%{path: path, message: "field 'type' is missing"}]
-
-        type not in ["reference", "decision", "event"] ->
-          [
-            %{
-              path: path,
-              message: "unknown type '#{type}' (allowed: reference, decision, event)"
-            }
-          ]
-
-        type == "event" and starts == nil ->
-          [%{path: path, message: "event without starts — will never be picked up by current"}]
-
-        type != "event" and (starts != nil or ends != nil) ->
-          [%{path: path, message: "starts/ends have no effect on type '#{type}'"}]
-
-        true ->
-          []
-      end
-
-    base_findings ++ ends_before_starts(path, type, starts, ends)
-  end
-
-  defp ends_before_starts(path, "event", starts, ends)
-       when is_binary(starts) and is_binary(ends) do
-    with {:ok, s, _} <- DateTime.from_iso8601(starts),
-         {:ok, e, _} <- DateTime.from_iso8601(ends),
-         :lt <- DateTime.compare(e, s) do
-      [%{path: path, message: "ends is before starts"}]
-    else
-      _ -> []
+    case Frontmatter.check(type, Map.get(frontmatter, "starts"), Map.get(frontmatter, "ends")) do
+      {:ok, %Frontmatter{}} -> []
+      {:error, problem} -> [%{path: path, message: finding(problem, type)}]
     end
   end
 
-  defp ends_before_starts(_path, _type, _starts, _ends), do: []
+  defp finding(:type_missing, _type), do: "field 'type' is missing"
+
+  defp finding({:unknown_type, value}, _type),
+    do: "unknown type '#{type_text(value)}' (allowed: reference, decision, event)"
+
+  defp finding(:times_missing, _type),
+    do: "event needs both starts and ends — will never be picked up by current"
+
+  defp finding(:times_not_allowed, type), do: "starts/ends have no effect on type '#{type}'"
+
+  defp finding(:times_unparsable, _type),
+    do: "starts/ends is not an ISO 8601 timestamp with an offset"
+
+  defp finding(:ends_before_starts, _type), do: "ends is before starts"
+
+  # A type the vault does not know is quoted back at the reader, and YAML can
+  # put anything there — a bare word arrives as a string and is shown as
+  # written, anything else is inspected rather than interpolated.
+  defp type_text(value) when is_binary(value), do: value
+  defp type_text(value), do: inspect(value)
 
   ## Filename checks
 

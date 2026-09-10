@@ -54,9 +54,9 @@ defmodule Vigil.IndexTest do
     %{index: Index.build(parsed_fixture_files())}
   end
 
-  describe "read/3 — chunk by id" do
+  describe "read/2 — chunk by id" do
     test "returns exactly that chunk, without backlinks by default", %{index: index} do
-      {:ok, result} = Index.read(index, "bike/via-carolina.md#fueling", false)
+      {:ok, result} = Index.read(index, %{id: "bike/via-carolina.md#fueling", backlinks: false})
 
       assert result.heading == "Fueling"
       assert result.body =~ "baseline"
@@ -64,17 +64,21 @@ defmodule Vigil.IndexTest do
     end
 
     test "backlinks is opt-in (note-level, even for a chunk read)", %{index: index} do
-      {:ok, with_backlinks} = Index.read(index, "bike/terra-speed.md#dimensions", true)
+      {:ok, with_backlinks} =
+        Index.read(index, %{id: "bike/terra-speed.md#dimensions", backlinks: true})
+
       assert with_backlinks.backlinks == ["bike/via-carolina.md"]
 
-      {:ok, without_backlinks} = Index.read(index, "bike/terra-speed.md#dimensions", false)
+      {:ok, without_backlinks} =
+        Index.read(index, %{id: "bike/terra-speed.md#dimensions", backlinks: false})
+
       refute Map.has_key?(without_backlinks, :backlinks)
     end
   end
 
-  describe "read/3 — note by path" do
+  describe "read/2 — note by path" do
     test "returns a table of contents and links out/in/broken counters", %{index: index} do
-      {:ok, result} = Index.read(index, "bike/via-carolina.md", false)
+      {:ok, result} = Index.read(index, %{id: "bike/via-carolina.md", backlinks: false})
 
       assert result.title == "Via Carolina"
       refute Map.has_key?(result, :body)
@@ -86,25 +90,27 @@ defmodule Vigil.IndexTest do
     end
 
     test "backlinks is opt-in", %{index: index} do
-      {:ok, result} = Index.read(index, "bike/terra-speed.md", true)
+      {:ok, result} = Index.read(index, %{id: "bike/terra-speed.md", backlinks: true})
       assert "bike/via-carolina.md" in result.backlinks
     end
   end
 
-  describe "read/3 — lenient path" do
+  describe "read/2 — lenient path" do
     test "an id that misses exactly is retried once through path normalization", %{index: index} do
-      {:ok, result} = Index.read(index, "Bike/Via-Carolina.md", false)
+      {:ok, result} = Index.read(index, %{id: "Bike/Via-Carolina.md", backlinks: false})
       assert result.path == "bike/via-carolina.md"
     end
   end
 
-  describe "read/3 — invalid and missing" do
+  describe "read/2 — invalid and missing" do
     test "a path that fails the safety check answers Invalid path", %{index: index} do
-      assert Index.read(index, "../etc/passwd", false) == {:error, "Invalid path"}
+      assert Index.read(index, %{id: "../etc/passwd", backlinks: false}) ==
+               {:error, "Invalid path"}
     end
 
     test "anything else answers Not found", %{index: index} do
-      assert {:error, "Not found: bike/nope.md"} = Index.read(index, "bike/nope.md", false)
+      assert {:error, "Not found: bike/nope.md"} =
+               Index.read(index, %{id: "bike/nope.md", backlinks: false})
     end
   end
 
@@ -114,10 +120,10 @@ defmodule Vigil.IndexTest do
 
       updated = Index.put(index, file)
 
-      assert {:ok, result} = Index.read(updated, "bike/new.md", false)
+      assert {:ok, result} = Index.read(updated, %{id: "bike/new.md", backlinks: false})
       assert result.title == "New"
 
-      {:ok, via_carolina} = Index.read(updated, "bike/via-carolina.md", false)
+      {:ok, via_carolina} = Index.read(updated, %{id: "bike/via-carolina.md", backlinks: false})
       assert via_carolina.links == %{out: 1, in: 2, broken: 0}
     end
 
@@ -127,9 +133,10 @@ defmodule Vigil.IndexTest do
 
       removed = Index.remove(with_new, "bike/new.md")
 
-      assert Index.read(removed, "bike/new.md", false) == {:error, "Not found: bike/new.md"}
+      assert Index.read(removed, %{id: "bike/new.md", backlinks: false}) ==
+               {:error, "Not found: bike/new.md"}
 
-      {:ok, via_carolina} = Index.read(removed, "bike/via-carolina.md", false)
+      {:ok, via_carolina} = Index.read(removed, %{id: "bike/via-carolina.md", backlinks: false})
       assert via_carolina.links == %{out: 1, in: 1, broken: 0}
     end
   end
@@ -332,7 +339,7 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "links/4" do
+  describe "links/2" do
     test "outgoing to a broken note", %{index: index} do
       {:ok, file} =
         Parser.parse(
@@ -343,7 +350,8 @@ defmodule Vigil.IndexTest do
 
       updated = Index.put(index, file)
 
-      {:ok, result} = Index.links(updated, "bike/points-nowhere.md", :out, 1)
+      {:ok, result} =
+        Index.links(updated, %{id: "bike/points-nowhere.md", direction: :out, depth: 1})
 
       assert [%{target: "does-not-exist", status: "broken"}] =
                Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
@@ -361,7 +369,12 @@ defmodule Vigil.IndexTest do
 
       updated = Index.put(index, file)
 
-      {:ok, result} = Index.links(updated, "bike/references-missing-section.md", :out, 1)
+      {:ok, result} =
+        Index.links(updated, %{
+          id: "bike/references-missing-section.md",
+          direction: :out,
+          depth: 1
+        })
 
       assert [%{target: "via-carolina#does-not-exist", status: "broken"}] =
                Enum.map(result.outgoing, &Map.take(&1, [:target, :status]))
@@ -383,7 +396,8 @@ defmodule Vigil.IndexTest do
 
       updated = index |> Index.put(doppel1) |> Index.put(doppel2) |> Index.put(referencer)
 
-      {:ok, result} = Index.links(updated, "garden/verweist-mehrdeutig.md", :out, 1)
+      {:ok, result} =
+        Index.links(updated, %{id: "garden/verweist-mehrdeutig.md", direction: :out, depth: 1})
 
       assert [%{status: "ambiguous", candidates: candidates}] =
                Enum.map(result.outgoing, &Map.take(&1, [:status, :candidates]))
@@ -392,12 +406,14 @@ defmodule Vigil.IndexTest do
     end
 
     test "incoming finds a link from another domain", %{index: index} do
-      {:ok, result} = Index.links(index, "bike/via-carolina.md", :in, 1)
+      {:ok, result} = Index.links(index, %{id: "bike/via-carolina.md", direction: :in, depth: 1})
       assert Enum.any?(result.incoming, &(&1.source == "training/note-without-anything.md"))
     end
 
     test "depth 2 adds each directly connected note's own depth-1 view", %{index: index} do
-      {:ok, result} = Index.links(index, "bike/via-carolina.md", :both, 2)
+      {:ok, result} =
+        Index.links(index, %{id: "bike/via-carolina.md", direction: :both, depth: 2})
+
       assert Map.has_key?(result.neighbors, "bike/terra-speed.md")
 
       neighbor = result.neighbors["bike/terra-speed.md"]
@@ -405,7 +421,9 @@ defmodule Vigil.IndexTest do
     end
 
     test "lenient path resolution", %{index: index} do
-      {:ok, result} = Index.links(index, "bike/Via Carolina!!.md", :out, 1)
+      {:ok, result} =
+        Index.links(index, %{id: "bike/Via Carolina!!.md", direction: :out, depth: 1})
+
       assert result.id == "bike/via-carolina.md"
     end
   end
@@ -420,7 +438,7 @@ defmodule Vigil.IndexTest do
         )
 
       updated = Index.put(index, file)
-      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+      report = Index.lint(updated, %{now: ~U[2026-01-01 10:00:00Z]})
 
       assert [finding] = Enum.filter(report.duplicate_headings, &(&1.path == "bike/messy.md"))
       assert finding.slug == "duplicate"
@@ -439,7 +457,7 @@ defmodule Vigil.IndexTest do
         )
 
       updated = Index.put(index, file)
-      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+      report = Index.lint(updated, %{now: ~U[2026-01-01 10:00:00Z]})
 
       assert [finding] = Enum.filter(report.duplicate_headings, &(&1.path == "bike/chains.md"))
       assert finding.ids == ["bike/chains.md#b", "bike/chains.md#b-2"]
@@ -454,7 +472,7 @@ defmodule Vigil.IndexTest do
         )
 
       updated = Index.put(index, file)
-      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+      report = Index.lint(updated, %{now: ~U[2026-01-01 10:00:00Z]})
 
       assert Enum.any?(report.sentence_headings, &String.starts_with?(&1.id, "bike/messy.md"))
     end
@@ -468,7 +486,7 @@ defmodule Vigil.IndexTest do
         )
 
       updated = Index.put(index, file)
-      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+      report = Index.lint(updated, %{now: ~U[2026-01-01 10:00:00Z]})
 
       assert "via-carolina#does-not-exist" in report.orphaned_links
     end
@@ -481,7 +499,7 @@ defmodule Vigil.IndexTest do
       {:ok, file} = Parser.parse("bike/many.md", content, @git_meta)
 
       updated = Index.put(index, file)
-      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+      report = Index.lint(updated, %{now: ~U[2026-01-01 10:00:00Z]})
 
       assert [finding] = Enum.filter(report.overlong_notes, &(&1.path == "bike/many.md"))
       assert finding.headings == 31
@@ -497,14 +515,14 @@ defmodule Vigil.IndexTest do
       {:ok, file} =
         Parser.parse("bike/many.md", "# Many\n\n" <> Enum.join(headings, "\n\n"), @git_meta)
 
-      report = index |> Index.put(file) |> Index.lint(~U[2026-01-01 10:00:00Z])
+      report = index |> Index.put(file) |> Index.lint(%{now: ~U[2026-01-01 10:00:00Z]})
 
       assert Enum.any?(report.overlong_notes, &(&1.path == "bike/many.md"))
     end
 
     test "decision notes stale relative to an injected now", %{index: index} do
       long_after = DateTime.add(~U[2026-01-01 10:00:00Z], 200 * 86_400, :second)
-      report = Index.lint(index, long_after)
+      report = Index.lint(index, %{now: long_after})
 
       assert Enum.any?(report.stale_decisions, &(&1.path == "projects/vigil/vigil-ranking.md"))
     end
@@ -513,7 +531,7 @@ defmodule Vigil.IndexTest do
   describe "current/2" do
     test "an active event appears in current", %{index: index} do
       during_event = ~U[2026-07-11 00:00:00Z]
-      result = Index.current(index, during_event)
+      result = Index.current(index, %{now: during_event})
 
       assert Enum.any?(result.active, &(&1.id == "bike/via-carolina.md"))
     end
@@ -535,21 +553,21 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "lookups/1 find_chunk" do
+  describe "find_chunk/2" do
     test "returns the Chunk struct at an id, or nil", %{index: index} do
-      find = Index.lookups(index).find_chunk
+      assert %Index.Chunk{heading: "Fueling"} =
+               Index.find_chunk(index, "bike/via-carolina.md#fueling")
 
-      assert %Index.Chunk{heading: "Fueling"} = find.("bike/via-carolina.md#fueling")
-      assert find.("bike/via-carolina.md#nope") == nil
+      assert Index.find_chunk(index, "bike/via-carolina.md#nope") == nil
     end
 
-    test "resolves leniently, as read/3 does, and carries the canonical path", %{index: index} do
+    test "resolves leniently, as read/2 does, and carries the canonical path", %{index: index} do
       assert %Index.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
-               Index.lookups(index).find_chunk.("bike/Via Carolina!!.md#fueling")
+               Index.find_chunk(index, "bike/Via Carolina!!.md#fueling")
     end
 
     test "nil for an id without a fragment", %{index: index} do
-      assert Index.lookups(index).find_chunk.("bike/via-carolina.md") == nil
+      assert Index.find_chunk(index, "bike/via-carolina.md") == nil
     end
   end
 
@@ -589,7 +607,9 @@ defmodule Vigil.IndexTest do
     test "the note's chunks keep it too", %{index: index} do
       rewritten = Index.put(index, reparsed("bike/via-carolina.md", @later))
 
-      {:ok, chunk} = Index.read(rewritten, "bike/via-carolina.md#fueling", false)
+      {:ok, chunk} =
+        Index.read(rewritten, %{id: "bike/via-carolina.md#fueling", backlinks: false})
+
       assert chunk.created_at == DateTime.to_iso8601(@git_meta.created_at)
     end
 
@@ -606,7 +626,9 @@ defmodule Vigil.IndexTest do
 
       note = Index.note(same_path, "bike/via-carolina.md")
       assert note.created_at == @git_meta.created_at
-      assert {:ok, _} = Index.read(same_path, "bike/via-carolina.md#fueling", false)
+
+      assert {:ok, _} =
+               Index.read(same_path, %{id: "bike/via-carolina.md#fueling", backlinks: false})
     end
 
     test "a move carries the creation date from the source path", %{index: index} do
@@ -620,30 +642,31 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "lookups/1 count_headings" do
+  describe "count_headings/2" do
     test "counts chunks with a heading, ignoring the pre-heading chunk", %{index: index} do
-      assert Index.lookups(index).count_headings.("bike/via-carolina.md") == 3
+      assert Index.count_headings(index, "bike/via-carolina.md") == 3
     end
 
     test "zero for an unknown path", %{index: index} do
-      assert Index.lookups(index).count_headings.("bike/nope.md") == 0
+      assert Index.count_headings(index, "bike/nope.md") == 0
     end
   end
 
-  describe "lookups/1 find_section" do
+  describe "find_section/3" do
     test "finds the chunk whose heading slugifies to the same slug", %{index: index} do
-      find = Index.lookups(index).find_section
+      assert %Index.Chunk{heading: "Gear"} =
+               Index.find_section(index, "bike/via-carolina.md", "Gear")
 
-      assert %Index.Chunk{heading: "Gear"} = find.("bike/via-carolina.md", "Gear")
-      assert %Index.Chunk{heading: "Gear"} = find.("bike/via-carolina.md", "gear!")
+      assert %Index.Chunk{heading: "Gear"} =
+               Index.find_section(index, "bike/via-carolina.md", "gear!")
     end
 
     test "nil when no heading in the note matches", %{index: index} do
-      assert Index.lookups(index).find_section.("bike/via-carolina.md", "Weather") == nil
+      assert Index.find_section(index, "bike/via-carolina.md", "Weather") == nil
     end
 
     test "nil for an unknown path", %{index: index} do
-      assert Index.lookups(index).find_section.("bike/nope.md", "Gear") == nil
+      assert Index.find_section(index, "bike/nope.md", "Gear") == nil
     end
   end
 

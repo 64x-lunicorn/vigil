@@ -260,8 +260,7 @@ defmodule Vigil.Vault.EditTest do
 
     defp parsed_chunk(content, id) do
       {:ok, file} = Vigil.Parser.parse("x/notes.md", content, %{})
-      find_chunk = Index.lookups(Index.build([file])).find_chunk
-      find_chunk.(id)
+      Index.find_chunk(Index.build([file]), id)
     end
 
     test "replacing a mid-file body leaves exactly one blank line before the next heading" do
