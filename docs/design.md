@@ -572,6 +572,66 @@ deletion, a move, a skill.
 
 ---
 
+## Git is reached through a value
+
+`Vigil.Commit` is the write effect, and it does two things at once: it touches
+the filesystem and it commits. The filesystem half stays where it is. The git
+half is a value its callers hold rather than a module they name.
+
+**The value is the whole of `Vigil.Git`, not the write half.** Six questions:
+`add_commit`, `remove_commit`, `move_commit`, `push` — and `pull` and
+`log_metadata`, which no write ever asks. Those two belong to the load, and
+`Vigil.Store` asks them directly. A seam drawn around the write effect alone
+would leave every load reaching for a repository, and `log_metadata` answering
+`%{}` for a directory that is not one — which is a `created_at` of `nil` on
+every note, arriving as an ordinary answer. The seam is drawn where git is,
+not where the writes are.
+
+**It is a struct of functions with no defaults**, built by `struct!/2`, the
+same shape and the same rule as `Vigil.Vault.Facts`: a question added and left
+unwired fails at construction rather than answering. The production adapter is
+a function on `Vigil.Git` beside the contract it implements, not a set of
+closures assembled by a caller — there are two callers, `Vigil.Store` and
+`Vigil.Skills`, and an adapter assembled at the call site would exist twice.
+`Store` builds it when it is not handed one; `Skills` has no default, because
+it holds no configuration it could build one from. One default, in one place.
+
+**The second adapter is a commit log, and it keeps the metadata.** It records
+what it was asked to commit, under the instant it was handed, authored as
+`vigil` — and answers `log_metadata` from that record. It does not read a
+clock of its own. The alternative, an adapter answering "no metadata", was
+rejected: it would put a `created_at` of `nil` under every test in the suite,
+which is a shape production never has.
+
+This is not a second metadata database, and principle 3 is untouched by it.
+"Creation date = first commit" is a claim about where a fact lives and what
+therefore must not be written into frontmatter. What the seam states is
+narrower: a commit reports the instant and the author it was made under. Git
+satisfies that claim by being a metadata database. The second adapter
+satisfies it by remembering. Neither invents a fact the other derives — and
+the one thing that could go wrong here, the two drifting apart, is the reason
+the contract is tested rather than assumed.
+
+**One suite runs against both adapters, and it is the only thing that touches
+a repository.** Everything git actually owns is asserted there: that a commit
+is authored `vigil <vigil@local>` whatever the ambient configuration says,
+that a failed push leaves the local commit standing, that `move` and `delete`
+are `git mv` and `git rm` rather than filesystem calls, that a first commit is
+what `log_metadata` reports as a creation date. Every other test asserts
+something about vigil and merely used to travel through git to do it — that a
+write path leaves one trailing newline, that the index carries a `created_at`
+across an append, that a push failure is reported in the words the operation
+deserves. Those are claims about `Vigil.Markdown`, `Vigil.Index` and
+`Vigil.Store`, and each of them now fails for one reason instead of two.
+
+The speed is a consequence and not the argument. The argument is that
+`Vigil.Store`'s order — perform, commit, reparse, push — was the one part of
+the write path with no test that could fail on it, because exercising it meant
+building a repository. An adapter that records its calls can be asked what
+order they came in.
+
+---
+
 ## How a file is written
 
 Vigil is the only writer (principle 2), so the shape of a file on disk is
