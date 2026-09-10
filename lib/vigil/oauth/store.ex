@@ -187,6 +187,24 @@ defmodule Vigil.OAuth.Store do
     :ets.insert(@cimd_cache, {url, doc, now + @cimd_ttl})
   end
 
+  @doc """
+  Drops CIMD cache entries whose hour is up.
+
+  This table is keyed on the `client_id` URL a client supplies, so it grows on
+  input from outside and is bounded by nothing. Registration is rate-limited,
+  which bounds the *rate* of growth but not the total.
+  """
+  def sweep_cimd_cache(now) do
+    :ets.foldl(
+      fn {url, _doc, expires_at}, acc ->
+        if expires_at <= now, do: [url | acc], else: acc
+      end,
+      [],
+      @cimd_cache
+    )
+    |> Enum.each(&:ets.delete(@cimd_cache, &1))
+  end
+
   ## Janitor sweeps
 
   def sweep_expired(now) do
@@ -199,5 +217,6 @@ defmodule Vigil.OAuth.Store do
     end)
 
     sweep_rate_limits(now)
+    sweep_cimd_cache(now)
   end
 end

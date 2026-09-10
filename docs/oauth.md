@@ -260,9 +260,18 @@ Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
 `:dets.sync/1` after every write — the write rate is low enough that it does
 not matter, and a token lost to a crash costs one re-authorization.
 
-`Vigil.OAuth.Janitor` runs every five minutes and deletes expired codes,
-expired access and refresh tokens, and rate-limit counters older than 15
-minutes. No cron, no job library — just `Process.send_after/3`.
+`Vigil.OAuth.Janitor` runs every five minutes and sweeps all four tables:
+expired authorization codes, expired access and refresh tokens, rate-limit
+counters older than 15 minutes, and CIMD cache entries whose hour is up. No
+cron, no job library — just `Process.send_after/3`.
+
+The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
+client supplies, so it grows on input from outside; registration is
+rate-limited, which bounds the rate of growth but not the total.
+
+The interval and the instant are both arguments with production defaults, so a
+test can drive one sweep rather than wait five minutes for it. The instant is a
+function, not a value: the janitor outlives any single one.
 
 > **Note:** `:dets` is not safe for concurrent access from multiple OS
 > processes. Seeding a token while the service is running must go through
