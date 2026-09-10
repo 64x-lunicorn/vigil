@@ -409,6 +409,15 @@ defmodule Vigil.IndexTest do
                @later.created_at
     end
 
+    test "a move onto the note's own path keeps the note", %{index: index} do
+      same_path =
+        Index.move(index, "bike/via-carolina.md", reparsed("bike/via-carolina.md", @later))
+
+      note = Index.note(same_path, "bike/via-carolina.md")
+      assert note.created_at == @git_meta.created_at
+      assert {:ok, _} = Index.read(same_path, "bike/via-carolina.md#fueling", false)
+    end
+
     test "a move carries the creation date from the source path", %{index: index} do
       content = File.read!(Path.join(@fixtures, "bike/via-carolina.md"))
       {:ok, moved} = Parser.parse("training/via-carolina.md", content, @later)

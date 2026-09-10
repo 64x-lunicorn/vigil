@@ -293,6 +293,22 @@ defmodule Vigil.StoreTest do
       assert result.body =~ "Resolved."
     end
 
+    # The writable-path check runs on the normalized path part, not the raw
+    # one: a messy domain segment or extension resolves for `read`, so it has
+    # to resolve here too.
+    test "leniency covers the whole path part, not just the basename" do
+      for messy <- ["Bike/via-carolina.md#fueling", "bike/via-carolina.MD#fueling"] do
+        assert {:ok, _} = Store.read(messy, false)
+
+        assert {:ok, %{path: "bike/via-carolina.md"}} =
+                 Store.replace_section(messy, "Resolved via #{messy}.")
+      end
+    end
+
+    test "a section id that normalizes into skills/ is still Invalid path" do
+      assert {:error, "Invalid path"} = Store.replace_section("Skills/tdd.md#x", "text")
+    end
+
     test "an id naming skills/ is Invalid path, not Not found" do
       assert {:error, "Invalid path"} = Store.replace_section("skills/tdd.md#x", "text")
       assert {:error, "Invalid path"} = Store.delete_section("skills/tdd.md#x")

@@ -262,15 +262,33 @@ defmodule Vigil.Vault.Policy do
   end
 
   # The path the caller named must be a writable note before the id is looked
-  # up at all. Only the verdict is kept — the path the write uses comes from
-  # the resolved record, never from here.
+  # up at all — and it is judged on the normalized path, because that is the
+  # path `find_chunk` resolves to. Judging the raw one would answer "Invalid
+  # path" for an id `read` accepts, which is the asymmetry this seam exists to
+  # close. Sanity is still checked before normalization as well as after
+  # (`writable_note/2` re-checks it), so normalization cannot turn a rejected
+  # path into an accepted one. Only the verdict is kept: the path the write
+  # uses comes from the resolved record, never from here.
   defp section_id_writable(id, facts) do
     case String.split(id, "#", parts: 2) do
       [path, _fragment] ->
-        with {:ok, _path} <- writable_note(path, facts), do: :ok
+        with :ok <- path_sanity(path),
+             {:ok, _path} <- writable_note(canonical_or_raw(path), facts) do
+          :ok
+        end
 
       [_path] ->
         {:error, "id must contain a fragment: path#heading-slug"}
+    end
+  end
+
+  # A path no filename can be derived from stays as it is: the lookup will not
+  # find it either, and "Not found" is what `read` answers for an id naming no
+  # section.
+  defp canonical_or_raw(path) do
+    case Slug.normalize_path(path) do
+      {:ok, normalized, _changed?} -> normalized
+      {:error, _reason} -> path
     end
   end
 

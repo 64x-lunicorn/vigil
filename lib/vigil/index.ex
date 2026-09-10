@@ -99,7 +99,7 @@ defmodule Vigil.Index do
   def move(index, from, parsed_file) do
     index
     |> replace(from, parsed_file)
-    |> drop(from)
+    |> drop_source(from, parsed_file.path)
     |> rebuild_links()
   end
 
@@ -138,6 +138,13 @@ defmodule Vigil.Index do
         {note, chunks}
     end
   end
+
+  # A move onto the note's own path is a no-op move, not a delete: dropping the
+  # source after the replace would take the note just put there. The write
+  # policy refuses such a move before it gets here, and this function does not
+  # rely on that.
+  defp drop_source(index, path, path), do: index
+  defp drop_source(index, from, _to), do: drop(index, from)
 
   defp drop(index, path) do
     %{
