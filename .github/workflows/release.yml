@@ -30,7 +30,13 @@ jobs:
   # A tag is only worth publishing if it passes exactly the same gate as main.
   ci:
     name: CI
-    uses: ./.github/workflows/ci.yml
+    # zizmor prefers the newer "$/..." form here, which pins the reusable
+    # workflow to this repository explicitly. "./..." already resolves to this
+    # repository at this ref for a local reusable workflow, and it is the form
+    # GitHub has documented for years; the release path is the one thing here
+    # that cannot be exercised on a pull request, so it keeps the syntax with
+    # the longer track record.
+    uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
     permissions:
       contents: read
 
