@@ -455,6 +455,13 @@ Every tool response carries exactly one of these fields:
 It sits at the top level of the JSON the assistant reads — not in `_meta`, not
 as a separate content block. The target is under 10 tokens per response.
 
+**Every** response, including an error. An error response carries its message
+as JSON next to the envelope field and keeps its error marker, and it advances
+the session's state like any other response: a session whose first call failed
+has still made a first call. The field is attached around both outcomes of a
+tool call rather than inside the success branch, so the rule is structurally
+true rather than true in one of two branches.
+
 This is the reason the assistant never has to guess what time it is.
 
 ---

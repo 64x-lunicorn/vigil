@@ -170,33 +170,56 @@ defmodule Vigil.MCP.ServerTest do
     refute Map.has_key?(payload2, "_")
   end
 
-  test "tool errors set isError and return a plain-text message", %{token: token} do
-    key = Vigil.SkillKey.current(Vigil.SkillKey.config())
-
-    conn =
-      post(
-        token,
-        %{
-          jsonrpc: "2.0",
-          id: 4,
-          method: "tools/call",
-          params: %{
-            name: "create",
-            arguments: %{
-              path: "bike/terra-speed.md",
-              type: "reference",
-              content: "# X\nx",
-              skill_key: key
-            }
-          }
-        },
-        [{"mcp-session-id", "session-d"}]
-      )
+  test "tool errors set isError and carry the message alongside an envelope", %{token: token} do
+    conn = failing_create(token, "session-d", 4)
 
     body = Jason.decode!(conn.resp_body)
     result = body["result"]
     assert result["isError"] == true
-    assert hd(result["content"])["text"] =~ "already exists"
+
+    payload = Jason.decode!(hd(result["content"])["text"])
+    assert payload["error"] =~ "already exists"
+    assert Map.has_key?(payload, "_")
+    refute Map.has_key?(payload, "_t")
+  end
+
+  # An error is a response the session made, so it advances the session's
+  # envelope state: without that, a session whose first call failed would get
+  # the long first-response form all over again on its next one.
+  test "a failed first call is not repeated as a first call", %{token: token} do
+    failing_create(token, "session-e", 5)
+
+    conn =
+      post(
+        token,
+        %{jsonrpc: "2.0", id: 6, method: "tools/call", params: %{name: "reload", arguments: %{}}},
+        [{"mcp-session-id", "session-e"}]
+      )
+
+    payload = Jason.decode!(hd(Jason.decode!(conn.resp_body)["result"]["content"])["text"])
+    assert Map.has_key?(payload, "_t")
+    refute Map.has_key?(payload, "_")
+  end
+
+  defp failing_create(token, session_id, id) do
+    post(
+      token,
+      %{
+        jsonrpc: "2.0",
+        id: id,
+        method: "tools/call",
+        params: %{
+          name: "create",
+          arguments: %{
+            path: "bike/terra-speed.md",
+            type: "reference",
+            content: "# X\nx",
+            skill_key: Vigil.SkillKey.current(Vigil.SkillKey.config())
+          }
+        }
+      },
+      [{"mcp-session-id", session_id}]
+    )
   end
 
   describe "SkillKey" do

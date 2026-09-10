@@ -23,28 +23,29 @@ defmodule Vigil.MCP.EnvelopeTest do
   end
 
   test "first call gets '_', second unchanged call gets '_t'" do
-    assert %{"_" => line} = Envelope.for_call("session-1", @now, snapshot())
+    assert %{"_" => line} = Envelope.for_tool("session-1", "search", @now, snapshot())
     assert line =~ ~r/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}\.\d{2}\. \d{2}:\d{2}/
 
-    assert %{"_t" => time} = Envelope.for_call("session-1", @later, snapshot())
+    assert %{"_t" => time} = Envelope.for_tool("session-1", "search", @later, snapshot())
     assert time =~ ~r/^\d{2}:\d{2}$/
   end
 
   test "current always gets '_t' and still counts as the session's first call" do
-    assert %{"_t" => _} = Envelope.for_current("session-2", @now, snapshot())
-    assert %{"_t" => _} = Envelope.for_call("session-2", @later, snapshot())
+    assert %{"_t" => _} = Envelope.for_tool("session-2", "current", @now, snapshot())
+    assert %{"_t" => _} = Envelope.for_tool("session-2", "search", @later, snapshot())
   end
 
   test "a phase change during the session is reported as '_!'" do
-    assert %{"_" => _} = Envelope.for_call("session-3", @now, snapshot())
+    assert %{"_" => _} = Envelope.for_tool("session-3", "search", @now, snapshot())
 
     active_ids = MapSet.new(["bike/phasentest.md"])
     titles = %{"bike/phasentest.md" => "Phasentest"}
     near = %{active: [%{id: "bike/phasentest.md", ends_in: "1h"}], upcoming: []}
 
     result =
-      Envelope.for_call(
+      Envelope.for_tool(
         "session-3",
+        "search",
         @later,
         snapshot(active_ids: active_ids, titles: titles, near: near)
       )
@@ -53,10 +54,15 @@ defmodule Vigil.MCP.EnvelopeTest do
     assert text =~ "now active"
   end
 
+  test "the table is public, so no response pays a call into the owning process" do
+    assert :ets.info(:vigil_sessions, :protection) == :public
+    assert :ets.info(:vigil_sessions, :owner) == Process.whereis(Envelope)
+  end
+
   test "two parallel sessions have independent envelope state" do
-    assert %{"_" => _} = Envelope.for_call("session-a", @now, snapshot())
-    assert %{"_" => _} = Envelope.for_call("session-b", @now, snapshot())
-    assert %{"_t" => _} = Envelope.for_call("session-a", @later, snapshot())
-    assert %{"_t" => _} = Envelope.for_call("session-b", @later, snapshot())
+    assert %{"_" => _} = Envelope.for_tool("session-a", "search", @now, snapshot())
+    assert %{"_" => _} = Envelope.for_tool("session-b", "search", @now, snapshot())
+    assert %{"_t" => _} = Envelope.for_tool("session-a", "search", @later, snapshot())
+    assert %{"_t" => _} = Envelope.for_tool("session-b", "search", @later, snapshot())
   end
 end
