@@ -125,15 +125,15 @@ defmodule Vigil.OAuth.ClientAddr do
   def parse_trusted(entries) when is_list(entries), do: Enum.flat_map(entries, &parse_cidr/1)
 
   defp parse_cidr(entry) do
-    {address, prefix} =
+    {address, mask} =
       case String.split(entry, "/", parts: 2) do
         [address] -> {address, nil}
-        [address, prefix] -> {address, prefix}
+        [address, mask] -> {address, mask}
       end
 
     with {:ok, addr} <- parse_address(address),
-         {:ok, bits} <- prefix_bits(prefix, bit_size(bits(addr))) do
-      [{addr, bits}]
+         {:ok, prefix} <- prefix_bits(mask, bit_size(bits(addr))) do
+      [{addr, prefix}]
     else
       :error ->
         Logger.warning("ignoring unparseable trusted proxy entry: #{inspect(entry)}")
@@ -143,9 +143,9 @@ defmodule Vigil.OAuth.ClientAddr do
 
   defp prefix_bits(nil, width), do: {:ok, width}
 
-  defp prefix_bits(prefix, width) do
-    case Integer.parse(prefix) do
-      {bits, ""} when bits >= 0 and bits <= width -> {:ok, bits}
+  defp prefix_bits(mask, width) do
+    case Integer.parse(mask) do
+      {prefix, ""} when prefix >= 0 and prefix <= width -> {:ok, prefix}
       _ -> :error
     end
   end

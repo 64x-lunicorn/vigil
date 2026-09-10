@@ -99,10 +99,12 @@ Three things about the shape:
 
 A spent marker is evidence with an expiry date: the record keeps its
 `expires_at` and the janitor reclaims it on the same schedule as a live token,
-so the table does not grow a permanent tombstone per rotation. Tokens that
-predate the field — a refresh token from an older deployment, or an access
-token from `mix vigil.seed_token` — carry no grant, and "every token whose
-grant is unknown" is deliberately not treated as a family. (§2.2.2, §4.14.2)
+so the table does not grow a permanent tombstone per rotation. Tokens written
+before grants existed carry none, and "every token whose grant is unknown" is
+deliberately not treated as a family — one replay must not revoke a stranger.
+`mix vigil.seed_token` mints a grant of its own for the token it writes, so a
+token seeded out of band is a one-token family rather than a token with no
+family. (§2.2.2, §4.14.2)
 
 **Does the authorization response carry `iss`?** Yes, on the success redirect
 and the error redirect alike — RFC 9207 §2 asks for both: "In authorization
@@ -456,6 +458,17 @@ flow again, consent page included.
 RFC 6749: `{"error": "...", "error_description": "..."}` with HTTP 400, except
 `invalid_client` which returns 401. Permitted values: `invalid_request`,
 `invalid_client`, `invalid_grant`, `unsupported_grant_type`, `invalid_target`.
+
+**A rate-limited request is the one deliberate departure**: HTTP 429,
+`{"error": "temporarily_unavailable"}`, and a `Retry-After` carrying the
+window. §5.2 lists neither — it mandates 400 for the token endpoint, and
+`temporarily_unavailable` is §4.1.2.1's code, defined for the authorization
+endpoint. Both are kept anyway. §8.5 allows further error codes; 429 postdates
+RFC 6749 entirely (it is RFC 6585's) and is the only status that says "refused
+for rate" rather than "your request was malformed"; and a client that renews
+reactively on a 401 has to tell those two apart or it will retry a malformed
+request forever. `Retry-After` comes from the window itself, so the wait is a
+fact rather than a guess.
 
 ---
 

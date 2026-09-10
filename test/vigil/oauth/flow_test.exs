@@ -349,13 +349,13 @@ defmodule Vigil.OAuth.FlowTest do
     end
 
     test "a refresh token from before grants existed revokes nothing on replay" do
-      # What is already in a deployment's dets file: a refresh token with no
-      # grant, and an access token seeded by `mix vigil.seed_token`, which
-      # never had one either. "Every token whose grant is unknown" must not be
-      # read as a family, or one replay would revoke the seeded token too.
+      # What is already in a deployment's dets file, written before grants
+      # existed: a refresh token and an access token, neither carrying one.
+      # "Every token whose grant is unknown" must not be read as a family, or
+      # one replay would revoke a stranger along with its own.
       client_id = client!()
       legacy = Vigil.OAuth.Token.random()
-      seeded = Vigil.OAuth.Token.random()
+      unrelated = Vigil.OAuth.Token.random()
       aud = Vigil.OAuth.resource()
 
       Store.put_token(legacy, %{
@@ -366,7 +366,7 @@ defmodule Vigil.OAuth.FlowTest do
         expires_at: System.system_time(:second) + 3600
       })
 
-      Store.put_token(seeded, %{aud: aud, scope: "vault", expires_at: 4_000_000_000})
+      Store.put_token(unrelated, %{aud: aud, scope: "vault", expires_at: 4_000_000_000})
 
       params = %{
         "grant_type" => "refresh_token",
@@ -377,7 +377,7 @@ defmodule Vigil.OAuth.FlowTest do
       assert {:ok, fresh} = Flow.grant(params)
       assert {:error, 400, "invalid_grant"} = Flow.grant(params)
 
-      assert {:ok, _} = Store.get_token(seeded)
+      assert {:ok, _} = Store.get_token(unrelated)
       # The rotated pair got a grant of its own, so it is not collateral either.
       assert {:ok, _} = Store.get_token(fresh.access_token)
     end

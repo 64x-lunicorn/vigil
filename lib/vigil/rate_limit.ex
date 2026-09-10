@@ -26,6 +26,9 @@ defmodule Vigil.RateLimit do
     {:ok, %{}}
   end
 
+  @doc "The window's length in seconds — what a refused caller has to wait out."
+  def window_seconds, do: @window_seconds
+
   @doc """
   True if `key` has exceeded `budget` requests for the fixed window
   containing `now`; otherwise records the request and returns false.

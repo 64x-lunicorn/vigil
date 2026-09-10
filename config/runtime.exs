@@ -24,8 +24,9 @@ config :vigil,
     |> String.split(",", trim: true)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == "")),
-  # Which address a rate limit is keyed on. Both are unset by default and
-  # that is the safe setting: a forwarded header is attacker-controlled
+  # Which address a rate limit is keyed on. The header name is unset and the
+  # trusted list is empty by default, and that is the safe setting: a
+  # forwarded header is attacker-controlled
   # unless a proxy is known to sanitize it, so vigil believes one only when
   # told both the header's name and the peers allowed to set it. Setting
   # these wrong is worse than leaving them unset — see docs/guide.md.

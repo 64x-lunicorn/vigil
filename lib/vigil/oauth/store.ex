@@ -155,9 +155,8 @@ defmodule Vigil.OAuth.Store do
   holds more than one grant over time, and revoking by `client_id` would take
   down authorizations that have nothing to do with the replay.
 
-  A `nil` grant revokes nothing. Tokens that predate the field carry no grant —
-  `mix vigil.seed_token` writes one such — and "every token whose grant is
-  unknown" is not a family.
+  A `nil` grant revokes nothing. Tokens written before grants existed carry no
+  grant, and "every token whose grant is unknown" is not a family.
   """
   def revoke_grant(nil), do: :ok
 

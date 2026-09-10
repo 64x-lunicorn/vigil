@@ -7,6 +7,7 @@ defmodule Vigil.OAuth.Endpoint do
   Every decision it makes is `Vigil.OAuth.Flow`'s.
   """
   use Plug.Router
+  require Logger
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow}
@@ -31,8 +32,8 @@ defmodule Vigil.OAuth.Endpoint do
   @impl true
   def call(conn, opts) do
     conn
-    |> put_private(:vigil_client_addr, opts[:client_addr] || ClientAddr.config())
-    |> put_private(:vigil_limits, opts[:limits] || configured_limits())
+    |> put_private(:oauth_client_addr, opts[:client_addr])
+    |> put_private(:oauth_limits, opts[:limits])
     |> super(opts)
   end
 
@@ -48,11 +49,16 @@ defmodule Vigil.OAuth.Endpoint do
 
   # A budget that is not a positive number is not a budget. Falling back to the
   # default keeps a mistyped environment variable from producing a limit that
-  # either refuses everything or crashes on the comparison.
+  # either refuses everything or crashes on the comparison — and says so, since
+  # a limit that is quietly not the one you configured is worse than a loud one.
   defp budget(key, default) do
     case Application.get_env(:vigil, key, default) do
-      rpm when is_integer(rpm) and rpm > 0 -> rpm
-      _ -> default
+      rpm when is_integer(rpm) and rpm > 0 ->
+        rpm
+
+      other ->
+        Logger.warning("#{key} is #{inspect(other)}, not a positive integer — using #{default}")
+        default
     end
   end
 
@@ -102,7 +108,6 @@ defmodule Vigil.OAuth.Endpoint do
 
   ## Rate limits
 
-  @doc false
   # Every endpoint here is reachable without a token, so this is the only thing
   # bounding what an unauthenticated caller can make vigil do: fetch a CIMD
   # document from an address it chose, write a `:dets` row and fsync it, or ask
@@ -117,8 +122,8 @@ defmodule Vigil.OAuth.Endpoint do
   # A refusal takes the shape of the surface it refuses: the consent page is
   # HTML a browser renders, and the other two are read by a program.
   defp under_limit(conn, endpoint, handler) do
-    budget = Map.fetch!(conn.private.vigil_limits, endpoint)
-    key = {:oauth, endpoint, ClientAddr.of(conn, conn.private.vigil_client_addr)}
+    budget = Map.fetch!(conn.private.oauth_limits, endpoint)
+    key = {:oauth, endpoint, client_addr(conn)}
 
     if RateLimit.limited?(key, budget, System.system_time(:second)) do
       refuse(conn, endpoint)
@@ -128,13 +133,28 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp refuse(conn, :authorize) do
-    send_html(conn, 429, error_html("Too many requests. Try again in a minute."))
+    conn
+    |> put_retry_after()
+    |> send_html(429, error_html("Too many requests. Try again in a minute."))
   end
 
+  # HTTP 429 with `temporarily_unavailable` is a departure from RFC 6749 §5.2 —
+  # that section mandates 400 for the token endpoint and lists neither. Both
+  # are kept: §8.5 allows further error codes, 429 postdates RFC 6749
+  # (RFC 6585) and is the only status that says "refused for rate" rather than
+  # "your request was malformed", and a client that renews reactively on a 401
+  # needs to tell those apart. `docs/oauth.md` records the reasoning.
   defp refuse(conn, _endpoint) do
     conn
     |> put_resp_header("cache-control", "no-store")
+    |> put_retry_after()
     |> send_json(429, %{error: "temporarily_unavailable"})
+  end
+
+  # The wait is a fact rather than a guess, and it comes from the window itself
+  # so the two cannot drift apart.
+  defp put_retry_after(conn) do
+    put_resp_header(conn, "retry-after", Integer.to_string(RateLimit.window_seconds()))
   end
 
   ## Registration
@@ -178,7 +198,7 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp process_allow(conn, ctx, params) do
-    case Flow.consent(client_ip(conn), params["password"], ctx) do
+    case Flow.consent(client_addr(conn), params["password"], ctx) do
       {:ok, code} ->
         redirect_with_query(conn, ctx.redirect_uri, put_state(%{"code" => code}, ctx.state))
 
@@ -260,9 +280,11 @@ defmodule Vigil.OAuth.Endpoint do
   defp put_state(query, ""), do: query
   defp put_state(query, state), do: Map.put(query, "state", state)
 
-  # Which address the consent limit is counted against. `Vigil.OAuth.ClientAddr`
-  # owns the decision; this only says where the configuration was put.
-  defp client_ip(conn), do: ClientAddr.of(conn, conn.private.vigil_client_addr)
+  # Which address a limit is counted against. `Vigil.OAuth.ClientAddr` owns the
+  # decision; this only says where the configuration was put. Not "ip": the
+  # answer is a text form that may be IPv6, and may be a forwarded hop rather
+  # than the peer of the connection.
+  defp client_addr(conn), do: ClientAddr.of(conn, conn.private.oauth_client_addr)
 
   defp send_json(conn, status, payload) do
     conn

@@ -357,7 +357,7 @@ flowchart TB
     L1 --> L2["2 · OAuth 2.1 + PKCE<br/><i>vigil is its own authorization server</i>"]
     L2 --> L3["3 · Scope<br/><i>vault vs vault:read</i>"]
     L3 --> L4["4 · SkillKey<br/><i>rotating HMAC, write tools only</i>"]
-    L4 --> L5["5 · Rate limit<br/><i>per access token, fixed window</i>"]
+    L4 --> L5["5 · Rate limit<br/><i>fixed window, per token and per address</i>"]
     L5 --> OK["Tool dispatch"]
 ```
 
@@ -369,7 +369,8 @@ flowchart TB
 3. **Scopes.** `vault` for full access, `vault:read` for read-only clients.
 4. **SkillKey.** Rotating HMAC derived from `VIGIL_AUTH_PASSWORD`, required by
    every write tool.
-5. **Rate limiting** per access token, fixed window.
+5. **Rate limiting**, fixed window — per access token behind `/mcp`, per
+   client address in front of the authorization server.
 
 Layer 5 is the one to read carefully, because there are three limits and they
 cover different things:

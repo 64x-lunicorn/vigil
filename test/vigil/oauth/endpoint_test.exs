@@ -513,6 +513,9 @@ defmodule Vigil.OAuth.EndpointTest do
     conn = post_form("/oauth/token", %{"grant_type" => "authorization_code"})
     assert conn.status == 429
     assert Jason.decode!(conn.resp_body)["error"] == "temporarily_unavailable"
+    # The wait is stated, so a client renewing reactively does not have to guess.
+    assert get_resp_header(conn, "retry-after") == ["60"]
+    assert get_resp_header(conn, "cache-control") == ["no-store"]
   end
 
   test "the consent page past its budget is refused as HTML, not as JSON" do
@@ -531,6 +534,7 @@ defmodule Vigil.OAuth.EndpointTest do
     # The same headers the rest of the HTML surface carries — a refusal is
     # still a page a browser renders.
     assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+    assert get_resp_header(conn, "retry-after") == ["60"]
   end
 
   test "a refused /authorize never reaches the CIMD fetch" do
