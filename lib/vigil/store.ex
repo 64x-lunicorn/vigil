@@ -129,9 +129,13 @@ defmodule Vigil.Store do
     exclude = Keyword.get(opts, :exclude, [])
     git_remote = Keyword.get(opts, :git_remote, "origin")
 
-    unless File.dir?(Path.join(vault_path, ".git")) do
-      raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
-    end
+    # The one default, in the one place that has configuration to build it
+    # from (docs/design.md, "Git is reached through a value"). Vigil.Skills
+    # has none and is handed this value; a caller that hands one in here is
+    # saying which git this vault has, and the repository check goes with the
+    # adapter that needs one rather than staying behind as a claim about a
+    # vault nobody is going to shell out into.
+    git = Keyword.get_lazy(opts, :git, fn -> over_repository!(vault_path) end)
 
     if :ets.whereis(@published_table) == :undefined do
       :ets.new(@published_table, [:set, :named_table, :public, read_concurrency: true])
@@ -143,6 +147,7 @@ defmodule Vigil.Store do
       vault_path: vault_path,
       exclude: exclude,
       git_remote: git_remote,
+      git: git,
       domains: %{},
       index: %Index{}
     }
@@ -155,6 +160,14 @@ defmodule Vigil.Store do
     end
 
     {:ok, state}
+  end
+
+  defp over_repository!(vault_path) do
+    unless File.dir?(Path.join(vault_path, ".git")) do
+      raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
+    end
+
+    Git.over_repository()
   end
 
   # One message shape for all of them: {operation, params}. The five reads and
@@ -200,9 +213,9 @@ defmodule Vigil.Store do
   ## Loading
 
   defp do_full_load(state) do
-    pull_result = Git.pull(state.vault_path, state.git_remote)
+    pull_result = state.git.pull.(state.vault_path, state.git_remote)
 
-    git_meta = Git.log_metadata(state.vault_path)
+    git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)
 
     domain_dirs = VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
@@ -397,7 +410,7 @@ defmodule Vigil.Store do
   # push-failure message — and the plan's own report, merged into the success
   # map.
   defp execute(%Plan{action: {:write, path, content}} = plan, state) do
-    case Commit.write(state.vault_path, path, content, plan.message) do
+    case Commit.write(state.git, state.vault_path, path, content, plan.message) do
       {:ok, commit_meta} ->
         state = put_reparsed(state, path, commit_meta, "write")
 
@@ -413,7 +426,7 @@ defmodule Vigil.Store do
   end
 
   defp execute(%Plan{action: {:delete, path}} = plan, state) do
-    case Commit.delete(state.vault_path, path, plan.message) do
+    case Commit.delete(state.git, state.vault_path, path, plan.message) do
       :ok ->
         state = put_index(state, Index.remove(state.index, path))
 
@@ -436,7 +449,7 @@ defmodule Vigil.Store do
     # instead of a basename.
     backlinks_before = Index.backlinks(state.index, from)
 
-    case Commit.move(state.vault_path, from, to, plan.message) do
+    case Commit.move(state.git, state.vault_path, from, to, plan.message) do
       {:ok, commit_meta} ->
         state = move_reparsed(state, from, to, commit_meta)
         broken = backlinks_before -- Index.backlinks(state.index, to)
@@ -453,7 +466,7 @@ defmodule Vigil.Store do
   end
 
   defp push(state, success, failure_prefix) do
-    case Commit.push(state.vault_path, state.git_remote) do
+    case Commit.push(state.git, state.vault_path, state.git_remote) do
       :ok -> {{:ok, success}, state}
       {:error, out} -> {{:error, "#{failure_prefix}: #{out}"}, state}
     end
@@ -546,6 +559,10 @@ defmodule Vigil.Store do
   # queue behind the push of the write before it.
 
   defp do_skill_write(name, content, state) do
-    Skills.write(name, content, %{vault_path: state.vault_path, git_remote: state.git_remote})
+    Skills.write(name, content, %{
+      vault_path: state.vault_path,
+      git_remote: state.git_remote,
+      git: state.git
+    })
   end
 end

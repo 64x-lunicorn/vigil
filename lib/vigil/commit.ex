@@ -30,17 +30,21 @@ defmodule Vigil.Commit do
   Writes `content` to `rel_path` inside `vault_path` and commits it under
   `message`, creating the parent directory if it is missing.
 
+  `git` is the adapter its caller holds (`docs/design.md`, "Git is reached
+  through a value") — this module touches the filesystem itself and asks that
+  value for the commit.
+
   Returns the commit metadata on success — the caller decides what to do
   between the commit and the push.
   """
-  @spec write(String.t(), String.t(), String.t(), String.t()) ::
+  @spec write(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
-  def write(vault_path, rel_path, content, message) do
+  def write(%Git{} = git, vault_path, rel_path, content, message) do
     abs_path = Path.join(vault_path, rel_path)
 
     with :ok <- mkdir_p(Path.dirname(abs_path)),
          :ok <- write_file(abs_path, content) do
-      case Git.add_commit(vault_path, rel_path, message) do
+      case git.add_commit.(vault_path, rel_path, message) do
         {:ok, commit_meta} -> {:ok, commit_meta}
         {:error, out} -> {:error, "git commit failed: #{out}"}
       end
@@ -53,9 +57,9 @@ defmodule Vigil.Commit do
   Nothing comes back but the verdict: the file is gone, so there is no note to
   reparse and no metadata a caller could put on one.
   """
-  @spec delete(String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
-  def delete(vault_path, rel_path, message) do
-    case Git.remove_commit(vault_path, rel_path, message) do
+  @spec delete(Git.t(), String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  def delete(%Git{} = git, vault_path, rel_path, message) do
+    case git.remove_commit.(vault_path, rel_path, message) do
       :ok -> :ok
       {:error, out} -> {:error, "git rm/commit failed: #{out}"}
     end
@@ -66,10 +70,10 @@ defmodule Vigil.Commit do
 
   Returns the commit metadata for the note at its new path.
   """
-  @spec move(String.t(), String.t(), String.t(), String.t()) ::
+  @spec move(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
-  def move(vault_path, from, to, message) do
-    case Git.move_commit(vault_path, from, to, message) do
+  def move(%Git{} = git, vault_path, from, to, message) do
+    case git.move_commit.(vault_path, from, to, message) do
       {:ok, commit_meta} -> {:ok, commit_meta}
       {:error, out} -> {:error, "git mv/commit failed: #{out}"}
     end
@@ -83,13 +87,13 @@ defmodule Vigil.Commit do
   caller is the one that knows which — so the sentence in front of it is the
   caller's (`docs/design.md`, "The write path").
   """
-  @spec push(String.t(), String.t()) :: :ok | {:error, String.t()}
-  def push(vault_path, remote), do: Git.push(vault_path, remote)
+  @spec push(Git.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  def push(%Git{} = git, vault_path, remote), do: git.push.(vault_path, remote)
 
   @doc """
   Creates `path` and every missing parent, or says why it could not.
 
-  `write/4` does this for the file's own directory. It is public for the one
+  `write/5` does this for the file's own directory. It is public for the one
   caller that creates a directory as an act of its own — `create`'s
   `create_dirs`, where a failure has to be attributable to the directory
   rather than to the file.

@@ -1,6 +1,7 @@
 defmodule Vigil.StoreTest do
   use ExUnit.Case, async: false
 
+  alias Vigil.Git.CommitLog
   alias Vigil.Store
 
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
@@ -838,6 +839,57 @@ defmodule Vigil.StoreTest do
       assert %{reloaded: true, pull_failed: reason} = Store.call(:reload, %{})
       assert is_binary(reason)
       assert search(%{query: "tires"}) != []
+    end
+  end
+
+  # docs/design.md, "The write path": perform the action, commit, reparse into
+  # the index, then push. Until git became a value this was the one part of the
+  # write path no test could fail on, because exercising it meant building a
+  # repository. An adapter that records its calls can be asked what order they
+  # came in.
+  describe "the order a plan is executed in" do
+    test "perform, commit, reparse, push", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      test_process = self()
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+
+      # The commit is asked for after the file is written, so what the adapter
+      # finds on disk when it is called answers "was the action performed
+      # first?".
+      git = %{
+        git
+        | add_commit: fn vault_path, path, message ->
+            send(test_process, {:on_disk, File.read(Path.join(vault_path, path))})
+            git.add_commit.(vault_path, path, message)
+          end
+      }
+
+      start_supervised!(
+        {Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote", git: git}
+      )
+
+      assert {:error, msg} =
+               Store.call(:create, %{
+                 path: "bike/ordered.md",
+                 type: "reference",
+                 content: "# Ordered\ntext"
+               })
+
+      assert msg =~ "Change saved and committed locally, but push failed"
+
+      assert_received {:on_disk, {:ok, content}}
+      assert content =~ "Ordered"
+
+      assert [
+               {:pull, "nonexistent-remote"},
+               {:add_commit, "bike/ordered.md", "create: bike/ordered.md — # Ordered"},
+               {:push, "nonexistent-remote"}
+             ] = CommitLog.calls(log)
+
+      # The push failed and the note is in the index regardless, which it can
+      # only be if the reparse ran before the push rather than after it.
+      assert {:ok, %{title: "Ordered"}} =
+               Store.call(:read, %{id: "bike/ordered.md", backlinks: false})
     end
   end
 

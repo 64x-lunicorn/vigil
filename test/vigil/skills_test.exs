@@ -65,7 +65,7 @@ defmodule Vigil.SkillsTest do
                Skills.write(
                  "new",
                  "---\nname: new\ndescription: test skill\n---\n# New\n1. one",
-                 %{vault_path: vault, git_remote: "origin"}
+                 %{vault_path: vault, git_remote: "origin", git: Vigil.Git.over_repository()}
                )
 
       assert File.exists?(Path.join(vault, "skills/new.md"))
@@ -88,7 +88,7 @@ defmodule Vigil.SkillsTest do
                Skills.write(
                  "trailing",
                  "---\nname: trailing\ndescription: test skill\n---\n# Trailing\n1. one\n\n\n",
-                 %{vault_path: vault, git_remote: "origin"}
+                 %{vault_path: vault, git_remote: "origin", git: Vigil.Git.over_repository()}
                )
 
       assert File.read!(Path.join(vault, "skills/trailing.md")) |> String.ends_with?("1. one\n")
@@ -108,7 +108,7 @@ defmodule Vigil.SkillsTest do
         Skills.write(
           "blocked",
           "---\nname: blocked\ndescription: test skill\n---\n# Blocked\n1. one",
-          %{vault_path: vault, git_remote: "origin"}
+          %{vault_path: vault, git_remote: "origin", git: Vigil.Git.over_repository()}
         )
 
       File.chmod!(dir, 0o755)
@@ -127,7 +127,8 @@ defmodule Vigil.SkillsTest do
       assert {:error, msg} =
                Skills.write("broken", "---\nname: broken\n---\n# x", %{
                  vault_path: vault,
-                 git_remote: "origin"
+                 git_remote: "origin",
+                 git: Vigil.Git.over_repository()
                })
 
       assert msg =~ "name' and 'description'"
@@ -149,7 +150,8 @@ defmodule Vigil.SkillsTest do
       assert {:error, "Invalid path"} =
                Skills.write("../evil", "---\nname: x\ndescription: x\n---\n# X", %{
                  vault_path: vault,
-                 git_remote: "origin"
+                 git_remote: "origin",
+                 git: Vigil.Git.over_repository()
                })
 
       refute File.exists?(Path.join(vault, "skills"))
@@ -164,7 +166,8 @@ defmodule Vigil.SkillsTest do
       assert {:error, msg} =
                Skills.write("valid-name_1", "---\nname: x\ndescription: x\n---\n# X", %{
                  vault_path: vault,
-                 git_remote: "origin"
+                 git_remote: "origin",
+                 git: Vigil.Git.over_repository()
                })
 
       assert msg =~ "push failed"
@@ -189,7 +192,11 @@ defmodule Vigil.SkillsTest do
       vault = tmp_dir()
 
       assert {:error, "content must start with frontmatter"} =
-               Skills.write("x", "# X\nno frontmatter", %{vault_path: vault, git_remote: "origin"})
+               Skills.write("x", "# X\nno frontmatter", %{
+                 vault_path: vault,
+                 git_remote: "origin",
+                 git: Vigil.Git.over_repository()
+               })
     end
 
     test "unterminated frontmatter is rejected" do
@@ -198,7 +205,8 @@ defmodule Vigil.SkillsTest do
       assert {:error, "Unterminated frontmatter"} =
                Skills.write("x", "---\nname: x\ndescription: d\n# X", %{
                  vault_path: vault,
-                 git_remote: "origin"
+                 git_remote: "origin",
+                 git: Vigil.Git.over_repository()
                })
     end
 
@@ -208,7 +216,8 @@ defmodule Vigil.SkillsTest do
       assert {:error, msg} =
                Skills.write("x", "---\ndescription: d\n---\n# X", %{
                  vault_path: vault,
-                 git_remote: "origin"
+                 git_remote: "origin",
+                 git: Vigil.Git.over_repository()
                })
 
       assert msg =~ "name' and 'description'"
@@ -217,7 +226,12 @@ defmodule Vigil.SkillsTest do
     test "none of the rejected writes touch the filesystem" do
       vault = tmp_dir()
 
-      Skills.write("x", "no frontmatter", %{vault_path: vault, git_remote: "origin"})
+      Skills.write("x", "no frontmatter", %{
+        vault_path: vault,
+        git_remote: "origin",
+        git: Vigil.Git.over_repository()
+      })
+
       refute File.exists?(Path.join(vault, "skills"))
     end
   end
