@@ -241,6 +241,12 @@ Three layers guard every write, in this order.
 no path segment starting with `.` or `_`. Checked before *and* after
 normalization.
 
+The rule lives in `Vigil.Slug`, beside the normalization it is applied under,
+and both sides ask it: `Vigil.Vault.Policy` before a write, `Vigil.Index`
+before a read. It is not a permission check — `skills/tdd.md` passes it — which
+is why `read` and `links` can apply it without inheriting the write rules, and
+why a reader may still reach a note in a domain that is no longer writable.
+
 **2. Normalization.** `Vigil.Slug` produces one canonical form: NFC, trim,
 lowercase, explicit transliteration (`ä`→`ae`, `ø`→`oe`, `ß`→`ss`, …), generic
 diacritic stripping, non-alphanumeric runs to a single hyphen, collapse and
@@ -350,6 +356,15 @@ nothing. It asks the vault questions through `Vigil.Vault.Facts` — whether a
 path exists, what a note contains, which chunk an id resolves to — and where a
 decision authorises an effect it says so in its result rather than performing
 it. Asking never changes the vault.
+
+`Facts` is a purity seam, and it answers or it raises. Every one of its
+questions guards a gate, and every "nothing there" answer sits on the
+permissive side of the gate it feeds: headings that count as zero switch the
+shrink gate off, a path that does not exist lets `create` past its existence
+refusal, no similar notes switches duplicate detection off. So no field has a
+default. A question added and left unwired stops the write at construction
+rather than opening the gate it was meant to guard; a test that wants an absent
+fact names it.
 
 The point of one gate is that there is no second way in. The rules used to be
 private helpers in `Vigil.Store` that only `create` and `move_note` called, so
@@ -463,6 +478,36 @@ survives, one line narrower.
 These rules say nothing about repairing notes written before them. Files that
 already lost a separator stay as they are; principle 5 says the server reports
 and does not fix on its own initiative.
+
+---
+
+## Vault hygiene has one set of rules
+
+`lint` (through `Vigil.Index`) and `mix vigil.vault_check` (through
+`Vigil.VaultCheck`) both report on the shape of the vault, and they report to
+different readers: `lint` answers an assistant over MCP and is token-frugal,
+the doctor writes a JSON report for `jq`. The output shapes stay separate. The
+facts underneath do not — they were restated in both and drifted, and they live
+in `Vigil.Vault.Rules` now.
+
+**A duplicate heading is a duplicate *slug*.** Two headings collide when the
+slug of their heading text collides *within one note*, because that is what
+`Vigil.Parser`'s uniquifier keys its collision counter on: `## A / ### B` and
+`## C / ### B` really do produce `b` and `b-2`. Grouping by the heading chain
+instead under-reports exactly the notes whose chunk ids are unstable, which is
+the breaking change this project fears most (see "Known trade-offs").
+
+**An overlong note is 30 headings or 2000 words.** Two axes rather than a chunk
+count, because the pair says *why* the note is too long — many sections, or
+much prose — which is what the reader acts on. The `lint` finding carries both
+counts and which threshold was crossed.
+
+**A sentence-shaped heading** is longer than 60 characters or ends in `.`, `!`
+or `?`. A signal, not proof.
+
+**A slug diff covers filenames and headings.** Both halves of "what would this
+slug change break" are answered in one place, so `mix vigil.slug_diff` and the
+doctor cannot disagree about the blast radius.
 
 ---
 

@@ -855,6 +855,39 @@ defmodule Vigil.StoreTest do
       assert {:ok, _} = Store.read("bike/via-carolina.md", false)
     end
 
+    # The index is updated between commit and push for every write action
+    # (docs/design.md, "The write path"), the git-level ones included: the note
+    # is gone from the repository, so it must be gone from the index too, push
+    # or no push.
+    test "a delete whose push fails still leaves the index without the note", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+
+      assert {:error, msg} =
+               Store.delete_note(%{path: "bike/terra-speed.md", confirm: true})
+
+      assert msg =~ "Deletion committed locally, but push failed"
+      refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      refute search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
+    end
+
+    test "a move whose push fails still leaves the index at the new path", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+
+      assert {:error, msg} =
+               Store.move_note(%{
+                 from: "bike/terra-speed.md",
+                 to: "bike/terra-40c.md",
+                 confirm: true
+               })
+
+      assert msg =~ "Move committed locally, but push failed"
+      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      assert {:ok, _} = Store.read("bike/terra-40c.md", false)
+    end
+
     test "writing into a read-only domain directory returns a precise error, store stays alive",
          %{
            vault: vault

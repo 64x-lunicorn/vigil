@@ -19,9 +19,17 @@ defmodule Vigil.Store do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  def search(params), do: GenServer.call(__MODULE__, {:search, params})
+  # `limit` is required, and matched in the head so a caller that omits it
+  # fails in its own process rather than in the single writer's. Vigil.MCP.Tools
+  # declares the bound (1..25, default 10) and supplies a value on every call.
+  def search(%{limit: _} = params), do: GenServer.call(__MODULE__, {:search, params})
   def read(id, backlinks?), do: GenServer.call(__MODULE__, {:read, id, backlinks?})
-  def links(id, direction, depth), do: GenServer.call(__MODULE__, {:links, id, direction, depth})
+  # Depth is bounded where it is declared (Vigil.MCP.Tools, 1..2). Matched here
+  # too, so a caller outside that contract fails in its own process rather than
+  # reaching the single writer with a depth nothing downstream checks.
+  def links(id, direction, depth) when depth in [1, 2],
+    do: GenServer.call(__MODULE__, {:links, id, direction, depth})
+
   def create(params), do: GenServer.call(__MODULE__, {:create, params})
   def append(params), do: GenServer.call(__MODULE__, {:append, params})
 
@@ -328,7 +336,7 @@ defmodule Vigil.Store do
 
   defp write(op, request, state) do
     with {:ok, resolved} <- Policy.check(op, request, facts(state)),
-         :ok <- prepare(op, resolved, state),
+         :ok <- ensure_directories(op, resolved, state),
          {:ok, current} <- current_content(op, resolved, state),
          {:ok, plan} <- Plan.build(op, resolved, request, current) do
       execute(plan, state)
@@ -338,12 +346,13 @@ defmodule Vigil.Store do
   end
 
   # The policy decides that a project directory may be created; creating it is
-  # this module's job. write_and_commit/5 would mkdir_p the parent anyway, but
-  # doing it here keeps a filesystem failure attributable to the directory.
-  defp prepare(:create, resolved, state),
+  # this module's job, and only `:create` can ask for one. Vigil.Commit would
+  # mkdir_p the parent anyway, but doing it here keeps a filesystem failure
+  # attributable to the directory.
+  defp ensure_directories(:create, resolved, state),
     do: create_project_dir(state, resolved.create_project_dir)
 
-  defp prepare(_op, _resolved, _state), do: :ok
+  defp ensure_directories(_op, _resolved, _state), do: :ok
 
   # A create has no current content by definition, and the two git-level
   # operations never look at it; every other operation is a transformation of

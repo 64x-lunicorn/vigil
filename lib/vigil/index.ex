@@ -582,6 +582,9 @@ defmodule Vigil.Index do
     |> Enum.sort_by(fn {path, _group} -> path end)
     |> Enum.flat_map(fn {path, note_chunks} ->
       note_chunks
+      # index.chunks is a map, so the note's own order has to be restored
+      # before grouping — the ids a finding lists are read in file order.
+      |> Enum.sort_by(& &1.heading_line)
       |> Rules.duplicate_headings()
       |> Enum.map(fn %{slug: slug, chunks: group} ->
         %{

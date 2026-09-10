@@ -116,6 +116,13 @@ defmodule Vigil.Vault.PlanTest do
       assert written(plan) =~ "Old body.\nMore.\n\n## Gearing"
     end
 
+    test "a section that is gone is an error, not a raise" do
+      resolved = %{path: "bike/terra-speed.md", target: {:section, nil}}
+
+      assert {:error, "no such section"} =
+               Plan.build(:append, resolved, %{content: "More."}, @note)
+    end
+
     test "in a new section at the end of the file" do
       resolved = %{path: "bike/terra-speed.md", target: {:new_section, "Tyres"}}
 
