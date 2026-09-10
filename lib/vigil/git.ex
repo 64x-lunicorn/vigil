@@ -1,7 +1,84 @@
 defmodule Vigil.Git do
-  @moduledoc false
+  @moduledoc """
+  Git, as a value its callers hold rather than a module they name
+  (`docs/design.md`, "Git is reached through a value").
+
+  Two things live here. The **contract** is a struct of six functions — the
+  whole of what vigil asks git: `add_commit`, `remove_commit`, `move_commit`
+  and `push`, which a write uses, and `pull` and `log_metadata`, which the load
+  uses and no write ever asks. The seam is drawn where git is, not where the
+  writes are: one around the write effect alone would leave every load reaching
+  for a repository, and `log_metadata` answering `%{}` for a directory that is
+  not one — a `created_at` of `nil` on every note, arriving as an ordinary
+  answer.
+
+  The **production adapter** is the rest of this module: `over_repository/0`
+  wires the six questions to the `git` commands underneath it. It is a function
+  here, beside the contract it implements, rather than closures assembled by a
+  caller — there are two callers, `Vigil.Store` and `Vigil.Skills`, and an
+  adapter assembled at the call site would exist twice. `Store` builds it when
+  it is not handed one; `Skills` has no default, because it holds no
+  configuration it could build one from.
+
+  No field has a default, and the struct is built by `struct!/2` — the same
+  shape and the same rule as `Vigil.Vault.Facts`: a question added here and
+  left unwired fails at construction rather than answering.
+
+  The second adapter is `Vigil.Git.CommitLog`, which lives with the tests
+  because only they have a use for it, and `test/vigil/git_test.exs` is the
+  contract both of them are held to.
+  """
 
   require Logger
+
+  @enforce_keys [
+    # git pull --ff-only <remote> main. :ok | {:error, reason}.
+    :pull,
+    # The whole vault's commit metadata: path => %{created_at:, updated_at:,
+    # last_author:}. What "creation date = first commit" is read out of
+    # (docs/design.md, principle 3).
+    :log_metadata,
+    # Stage one path and commit it, authored as vigil.
+    # {:ok, %{updated_at:, last_author:}} | {:error, reason}.
+    :add_commit,
+    # git rm one path and commit the removal. :ok | {:error, reason}.
+    :remove_commit,
+    # git mv, then commit both paths.
+    # {:ok, %{updated_at:, last_author:}} | {:error, reason}.
+    :move_commit,
+    # git push <remote> main. :ok | {:error, reason}.
+    :push
+  ]
+
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{}
+
+  @doc """
+  Builds a git adapter from an answer to every one of the six questions.
+
+  Raises `ArgumentError` when a field is missing or unknown, which is the
+  point: an unwired question must fail where the adapter is built, not answer
+  something plausible at the moment a write depends on it.
+  """
+  @spec new(Enumerable.t()) :: t
+  def new(fields), do: struct!(__MODULE__, fields)
+
+  @doc """
+  The production adapter: every question answered by running `git` in the
+  repository it is handed.
+  """
+  @spec over_repository() :: t
+  def over_repository do
+    new(
+      pull: &pull/2,
+      log_metadata: &log_metadata/1,
+      add_commit: &add_commit/3,
+      remove_commit: &remove_commit/3,
+      move_commit: &move_commit/4,
+      push: &push/2
+    )
+  end
 
   # Identity AND signing behaviour are forced per commit rather than trusting
   # the ambient git configuration. The service user has no signing key and no

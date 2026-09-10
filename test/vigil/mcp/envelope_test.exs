@@ -1,6 +1,8 @@
 defmodule Vigil.MCP.EnvelopeTest do
   # Vigil.MCP.Envelope is a named singleton also started by ServerTest, so
-  # this stays async: false to avoid a name collision with it.
+  # this stays async: false to avoid a name collision with it — and the Store
+  # it starts is the production registration, which is what
+  # Vigil.MCP.Envelope's snapshot reaches without being told where to look.
   use ExUnit.Case, async: false
 
   alias Vigil.MCP.Envelope
@@ -13,9 +15,14 @@ defmodule Vigil.MCP.EnvelopeTest do
   # to the next, read the clock once, and fetch the snapshot that instant is
   # decided against out of the vault the Store actually holds.
   setup do
-    {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+    vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+
+    start_supervised!(
+      {Store,
+       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+    )
+
     start_supervised!(Envelope)
     %{vault: vault}
   end
@@ -94,7 +101,11 @@ defmodule Vigil.MCP.EnvelopeTest do
     stop_supervised!(Vigil.Store)
     assert_raise ArgumentError, fn -> Envelope.for_tool("session-4", "search") end
 
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+    start_supervised!(
+      {Store,
+       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+    )
+
     assert {%{"_t" => _}, _} = Envelope.for_tool("session-4", "search")
   end
 
@@ -106,8 +117,10 @@ defmodule Vigil.MCP.EnvelopeTest do
   # The other half of the same claim: the snapshot the envelope is decided
   # against is read out of a public table too, so a response costs one call
   # into the writer — the tool's own — and not a second one behind it.
+  # The table carries the writer's own name, so a Store started under one of
+  # its own publishes through a table of its own.
   test "the events the snapshot is built from are published, not asked for" do
-    assert :ets.info(:vigil_store, :protection) == :public
-    assert :ets.info(:vigil_store, :owner) == Process.whereis(Store)
+    assert :ets.info(Store, :protection) == :public
+    assert :ets.info(Store, :owner) == Process.whereis(Store)
   end
 end

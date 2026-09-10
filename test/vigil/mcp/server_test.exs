@@ -1,4 +1,7 @@
 defmodule Vigil.MCP.ServerTest do
+  # Not async: the whole MCP surface is named singletons — the envelope, the
+  # rate limiter, and the Store under its production registration, which is
+  # the name Vigil.MCP.Tools and Vigil.MCP.Server find the writer by.
   use ExUnit.Case, async: false
   use Plug.Test
 
@@ -8,9 +11,14 @@ defmodule Vigil.MCP.ServerTest do
   alias Vigil.OAuth
 
   setup do
-    {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+    vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+
+    start_supervised!(
+      {Store,
+       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+    )
+
     start_supervised!(Vigil.MCP.Envelope)
     start_supervised!(Vigil.RateLimit)
 

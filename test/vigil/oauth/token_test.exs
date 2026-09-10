@@ -20,13 +20,29 @@ defmodule Vigil.OAuth.TokenTest do
 
   defp resource, do: OAuth.resource()
 
-  # What a pair descends from: an authorization code being redeemed, or a
-  # refresh token being rotated. Both carry a client, a scope and a grant.
+  # An authorization code being redeemed: a client, a scope, a grant — and the
+  # audience it was minted for, under the name Vigil.OAuth.Code writes it
+  # under. The pair is issued from the record alone, so this is where its
+  # audience comes from too.
   defp redeemed(overrides \\ []) do
     %{
       client_id: "client-1",
+      resource: Keyword.get(overrides, :resource, OAuth.resource()),
       scope: Keyword.get(overrides, :scope, OAuth.scope()),
       grant_id: Keyword.get(overrides, :grant, Vigil.Uuid.v4())
+    }
+  end
+
+  # A refresh token being rotated: the same four facts, under this module's
+  # own names.
+  defp rotated(overrides \\ []) do
+    %{
+      type: :refresh,
+      client_id: "client-1",
+      aud: Keyword.get(overrides, :aud, OAuth.resource()),
+      scope: Keyword.get(overrides, :scope, OAuth.scope()),
+      grant_id: Keyword.get(overrides, :grant, Vigil.Uuid.v4()),
+      expires_at: Keyword.get(overrides, :expires_at, System.system_time(:second) + 100)
     }
   end
 
@@ -69,11 +85,11 @@ defmodule Vigil.OAuth.TokenTest do
     end
   end
 
-  describe "issue_pair/3" do
+  describe "issue_pair/2" do
     setup do
       now = System.system_time(:second)
       grant = Vigil.Uuid.v4()
-      pair = Token.issue_pair(redeemed(grant: grant), resource(), now)
+      pair = Token.issue_pair(redeemed(grant: grant), now)
       %{now: now, grant: grant, pair: pair}
     end
 
@@ -113,12 +129,7 @@ defmodule Vigil.OAuth.TokenTest do
     test "the pair inherits the scope and the grant of what it descends from", %{now: now} do
       # Both are read off the record here rather than at the two call sites,
       # so a redemption cannot inherit them one way and a rotation another.
-      pair =
-        Token.issue_pair(
-          redeemed(grant: "g-inherited", scope: OAuth.read_scope()),
-          resource(),
-          now
-        )
+      pair = Token.issue_pair(redeemed(grant: "g-inherited", scope: OAuth.read_scope()), now)
 
       {:ok, access} = Store.get_token(pair.access_token)
 
@@ -126,8 +137,29 @@ defmodule Vigil.OAuth.TokenTest do
       assert access.grant_id == "g-inherited"
     end
 
+    test "the pair inherits the audience of what it descends from", %{now: now} do
+      # The audience used to be a parameter, because a code stores it as
+      # `:resource` and a refresh token as `:aud`. Both records answer for
+      # themselves now, and the same pair comes out either way.
+      for record <- [redeemed(), rotated()] do
+        pair = Token.issue_pair(record, now)
+
+        assert Token.validate_access(pair.access_token, OAuth.resource(), now) ==
+                 {:ok, OAuth.scope()}
+      end
+    end
+
+    test "a code minted for another resource issues a pair good only there", %{now: now} do
+      pair = Token.issue_pair(redeemed(resource: "https://andere.tld/mcp"), now)
+
+      assert Token.validate_access(pair.access_token, OAuth.resource(), now) == :error
+
+      assert Token.validate_access(pair.access_token, "https://andere.tld/mcp", now) ==
+               {:ok, OAuth.scope()}
+    end
+
     test "a record from before grants existed still mints into a family", %{now: now} do
-      pair = Token.issue_pair(%{client_id: "client-1", scope: OAuth.scope()}, resource(), now)
+      pair = Token.issue_pair(rotated(grant: nil) |> Map.delete(:grant_id), now)
 
       {:ok, access} = Store.get_token(pair.access_token)
       {:ok, refresh} = Store.get_token(pair.refresh_token)
@@ -140,7 +172,7 @@ defmodule Vigil.OAuth.TokenTest do
   describe "validate_access/3" do
     setup do
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), resource(), now)
+      pair = Token.issue_pair(redeemed(), now)
       %{now: now, pair: pair}
     end
 
@@ -149,7 +181,7 @@ defmodule Vigil.OAuth.TokenTest do
     end
 
     test "a read-only token validates at the read scope", %{now: now} do
-      pair = Token.issue_pair(redeemed(scope: OAuth.read_scope()), resource(), now)
+      pair = Token.issue_pair(redeemed(scope: OAuth.read_scope()), now)
 
       assert Token.validate_access(pair.access_token, resource(), now) ==
                {:ok, OAuth.read_scope()}
@@ -195,7 +227,7 @@ defmodule Vigil.OAuth.TokenTest do
   describe "fetch_refresh/1" do
     setup do
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), resource(), now)
+      pair = Token.issue_pair(redeemed(), now)
       %{now: now, pair: pair}
     end
 
@@ -227,7 +259,7 @@ defmodule Vigil.OAuth.TokenTest do
       # the one thing that writes the marker and this is the only place it
       # can. A real access record has no way through here.
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), resource(), now)
+      pair = Token.issue_pair(redeemed(), now)
       {:ok, access} = Store.get_token(pair.access_token)
 
       assert_raise FunctionClauseError, fn ->
@@ -237,7 +269,7 @@ defmodule Vigil.OAuth.TokenTest do
 
     test "the marker keeps the record's own expiry, so the janitor still reclaims it" do
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), resource(), now)
+      pair = Token.issue_pair(redeemed(), now)
       {:ok, record} = Store.get_token(pair.refresh_token)
 
       Token.spend_refresh(pair.refresh_token, record, now)
@@ -248,9 +280,20 @@ defmodule Vigil.OAuth.TokenTest do
   end
 
   describe "the defaults for records written before the field existed" do
-    test "a record without a scope grants the full scope" do
+    test "a token record without a scope grants the full scope" do
       assert Token.scope_of(%{aud: "x"}) == OAuth.scope()
       assert Token.scope_of(%{aud: "x", scope: OAuth.read_scope()}) == OAuth.read_scope()
+    end
+
+    # The default is a rule about token records, and it stops there. A code
+    # lives sixty seconds, so no code from before scopes existed can be in a
+    # store — and a code without one is a record this server did not write.
+    test "the default does not reach an authorization code", %{} do
+      now = System.system_time(:second)
+
+      assert_raise KeyError, fn ->
+        Token.issue_pair(redeemed() |> Map.delete(:scope), now)
+      end
     end
 
     test "a record without a grant belongs to no family" do

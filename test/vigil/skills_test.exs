@@ -1,7 +1,23 @@
 defmodule Vigil.SkillsTest do
-  use ExUnit.Case, async: false
+  # Nothing here is registered under a name: Vigil.Skills takes its vault, its
+  # remote and its git adapter as plain arguments, so every test in this file
+  # is independent of every other (docs/design.md, "skills/ — one repository,
+  # two systems").
+  use ExUnit.Case, async: true
 
+  alias Vigil.Git.CommitLog
   alias Vigil.Skills
+
+  # Where a skill write goes and what it reaches git through. The commit log
+  # is the adapter (docs/design.md, "Git is reached through a value"): what
+  # these tests assert is vigil's — the file that lands, the newline it ends
+  # with, the sentence a failure carries — and git_test.exs is where the
+  # commit itself is asserted, against a repository and against this.
+  # `remote: nil` is a vault with no remote configured, which is how a push
+  # failure is provoked.
+  defp target(vault, opts \\ []) do
+    %{vault_path: vault, git_remote: "origin", git: CommitLog.new(vault, opts)}
+  end
 
   defp tmp_dir do
     path = Path.join(System.tmp_dir!(), "vigil_skills_test_#{System.unique_integer([:positive])}")
@@ -58,20 +74,17 @@ defmodule Vigil.SkillsTest do
 
   describe "write/3 (FixtureVault-backed)" do
     test "writes, commits, and pushes; does not parse or index the file" do
-      {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+      vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
       assert {:ok, %{name: "new", pushed: true}} =
                Skills.write(
                  "new",
                  "---\nname: new\ndescription: test skill\n---\n# New\n1. one",
-                 %{vault_path: vault, git_remote: "origin"}
+                 target(vault)
                )
 
       assert File.exists?(Path.join(vault, "skills/new.md"))
-
-      {out, 0} = System.cmd("git", ["log", "-1", "--format=%an"], cd: vault)
-      assert String.trim(out) == "vigil"
 
       {:ok, %{content: content}} = Skills.read("new", vault)
       assert content =~ "1. one"
@@ -81,14 +94,14 @@ defmodule Vigil.SkillsTest do
     # Vigil.Markdown rather than in the note-editing module (docs/design.md,
     # "How a file is written").
     test "content ending in blank lines is written with exactly one trailing newline" do
-      {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+      vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
       assert {:ok, _} =
                Skills.write(
                  "trailing",
                  "---\nname: trailing\ndescription: test skill\n---\n# Trailing\n1. one\n\n\n",
-                 %{vault_path: vault, git_remote: "origin"}
+                 target(vault)
                )
 
       assert File.read!(Path.join(vault, "skills/trailing.md")) |> String.ends_with?("1. one\n")
@@ -98,7 +111,7 @@ defmodule Vigil.SkillsTest do
     # notes and skills alike. A failed skill write says the same sentence a
     # failed note write says, and is still an error tuple, not a raise.
     test "a failed write returns the shared filesystem error" do
-      {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+      vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
       dir = Path.join(vault, "skills")
@@ -108,7 +121,7 @@ defmodule Vigil.SkillsTest do
         Skills.write(
           "blocked",
           "---\nname: blocked\ndescription: test skill\n---\n# Blocked\n1. one",
-          %{vault_path: vault, git_remote: "origin"}
+          target(vault)
         )
 
       File.chmod!(dir, 0o755)
@@ -121,14 +134,11 @@ defmodule Vigil.SkillsTest do
     end
 
     test "rejects content missing required frontmatter fields, without touching git" do
-      {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+      vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
       assert {:error, msg} =
-               Skills.write("broken", "---\nname: broken\n---\n# x", %{
-                 vault_path: vault,
-                 git_remote: "origin"
-               })
+               Skills.write("broken", "---\nname: broken\n---\n# x", target(vault))
 
       assert msg =~ "name' and 'description'"
       refute File.exists?(Path.join(vault, "skills/broken.md"))
@@ -147,25 +157,23 @@ defmodule Vigil.SkillsTest do
       vault = tmp_dir()
 
       assert {:error, "Invalid path"} =
-               Skills.write("../evil", "---\nname: x\ndescription: x\n---\n# X", %{
-                 vault_path: vault,
-                 git_remote: "origin"
-               })
+               Skills.write("../evil", "---\nname: x\ndescription: x\n---\n# X", target(vault))
 
       refute File.exists?(Path.join(vault, "skills"))
     end
 
     test "a lowercase alphanumeric/hyphen/underscore name passes validation and reaches disk" do
-      vault = tmp_dir() |> tmp_dir_with_git()
+      vault = tmp_dir()
 
       # No "origin" remote configured — push fails, but that failure itself
       # proves valid_skill_name?/1 and validate_skill_frontmatter/1 both let
       # this write through to the git-write path.
       assert {:error, msg} =
-               Skills.write("valid-name_1", "---\nname: x\ndescription: x\n---\n# X", %{
-                 vault_path: vault,
-                 git_remote: "origin"
-               })
+               Skills.write(
+                 "valid-name_1",
+                 "---\nname: x\ndescription: x\n---\n# X",
+                 target(vault, remote: nil)
+               )
 
       assert msg =~ "push failed"
       assert File.exists?(Path.join(vault, "skills/valid-name_1.md"))
@@ -189,27 +197,21 @@ defmodule Vigil.SkillsTest do
       vault = tmp_dir()
 
       assert {:error, "content must start with frontmatter"} =
-               Skills.write("x", "# X\nno frontmatter", %{vault_path: vault, git_remote: "origin"})
+               Skills.write("x", "# X\nno frontmatter", target(vault))
     end
 
     test "unterminated frontmatter is rejected" do
       vault = tmp_dir()
 
       assert {:error, "Unterminated frontmatter"} =
-               Skills.write("x", "---\nname: x\ndescription: d\n# X", %{
-                 vault_path: vault,
-                 git_remote: "origin"
-               })
+               Skills.write("x", "---\nname: x\ndescription: d\n# X", target(vault))
     end
 
     test "frontmatter missing 'name' or 'description' is rejected" do
       vault = tmp_dir()
 
       assert {:error, msg} =
-               Skills.write("x", "---\ndescription: d\n---\n# X", %{
-                 vault_path: vault,
-                 git_remote: "origin"
-               })
+               Skills.write("x", "---\ndescription: d\n---\n# X", target(vault))
 
       assert msg =~ "name' and 'description'"
     end
@@ -217,17 +219,9 @@ defmodule Vigil.SkillsTest do
     test "none of the rejected writes touch the filesystem" do
       vault = tmp_dir()
 
-      Skills.write("x", "no frontmatter", %{vault_path: vault, git_remote: "origin"})
+      Skills.write("x", "no frontmatter", target(vault))
+
       refute File.exists?(Path.join(vault, "skills"))
     end
-  end
-
-  defp tmp_dir_with_git(path) do
-    System.cmd("git", ["init", "-q"], cd: path)
-    System.cmd("git", ["config", "user.name", "vigil"], cd: path)
-    System.cmd("git", ["config", "user.email", "vigil@local"], cd: path)
-    System.cmd("git", ["config", "commit.gpgsign", "false"], cd: path)
-    System.cmd("git", ["commit", "-q", "--allow-empty", "-m", "init"], cd: path)
-    path
   end
 end

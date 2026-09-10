@@ -30,14 +30,13 @@ defmodule Vigil.Vault.Facts do
   """
 
   alias Vigil.Index
+  alias Vigil.Vault.Layout
 
   @enforce_keys [
-    # Discovered domain directories (see Vigil.VaultDiscovery).
-    :domains,
-    # VIGIL_EXCLUDE — the hard boundary.
-    :exclude,
-    # Existing directory names under projects/.
-    :project_dirs,
+    # Which paths in this vault are notes (see Vigil.Vault.Layout). One value,
+    # asked one question — the domains, the exclude boundary and the project
+    # directories are what it was built from, not three facts of their own.
+    :layout,
     # domain => naming rules parsed from _domains.yml.
     :naming,
     # Vault-local today, for the :date naming suggestion.
@@ -78,16 +77,13 @@ defmodule Vigil.Vault.Facts do
   def new(fields), do: struct!(__MODULE__, fields)
 
   @typedoc """
-  The vault's plain facts, as the caller gathered them: the domains it has,
-  what `_domains.yml` says about naming, which project directories exist, and
-  where on disk it is. Everything here is a fact about the vault; the instant
+  The vault's plain facts, as the caller gathered them: its layout — which
+  paths in it are notes, and where on disk it is — and what `_domains.yml`
+  says about naming. Everything here is a fact about the vault; the instant
   the write belongs to is not one, and travels beside it.
   """
   @type vault :: %{
-          vault_path: Path.t(),
-          domains: [String.t()],
-          exclude: [String.t()],
-          project_dirs: [String.t()],
+          layout: Layout.t(),
           naming: %{optional(String.t()) => map}
         }
 
@@ -109,19 +105,11 @@ defmodule Vigil.Vault.Facts do
   @spec over_vault(Index.t(), vault, DateTime.t()) :: t
   def over_vault(
         %Index{} = index,
-        %{
-          vault_path: vault_path,
-          domains: domains,
-          exclude: exclude,
-          project_dirs: project_dirs,
-          naming: naming
-        },
+        %{layout: %Layout{vault_path: vault_path} = layout, naming: naming},
         %DateTime{} = now
       ) do
     new(
-      domains: domains,
-      exclude: exclude,
-      project_dirs: project_dirs,
+      layout: layout,
       naming: naming,
       today: DateTime.to_date(now),
       path_exists?: fn path -> File.exists?(Path.join(vault_path, path)) end,

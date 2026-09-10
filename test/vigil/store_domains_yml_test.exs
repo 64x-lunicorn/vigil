@@ -1,48 +1,55 @@
 defmodule Vigil.StoreDomainsYmlTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   import ExUnit.CaptureLog
 
   alias Vigil.Store
 
-  # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
-  # every real call, so `Store.call(:search, ...)` requires one rather than defaulting.
-  defp search(params), do: Store.call(:search, Map.put_new(params, :limit, 10))
+  # One writer for this file, under a name of its own — see Vigil.StoreTest.
+  @store __MODULE__
 
-  defp git_init_empty(tmp) do
+  # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
+  # every real call, so `Store.call(@store, :search, ...)` requires one rather than defaulting.
+  defp search(params), do: Store.call(@store, :search, Map.put_new(params, :limit, 10))
+
+  defp empty_vault(tmp) do
     File.mkdir_p!(tmp)
-    File.write!(Path.join(tmp, ".gitkeep"), "")
-    System.cmd("git", ["init", "-q"], cd: tmp)
-    System.cmd("git", ["symbolic-ref", "HEAD", "refs/heads/main"], cd: tmp)
-    System.cmd("git", ["config", "user.name", "Daniel"], cd: tmp)
-    System.cmd("git", ["config", "user.email", "daniel@local"], cd: tmp)
-    # See Vigil.FixtureVault.build/1: avoids depending on the (flaky, here
-    # irrelevant) 1Password-backed commit signing from the global git config.
-    System.cmd("git", ["config", "commit.gpgsign", "false"], cd: tmp)
-    System.cmd("git", ["add", "-A"], cd: tmp)
-    System.cmd("git", ["commit", "-q", "-m", "empty"], cd: tmp)
+    tmp
+  end
+
+  # The Store reaches git through the commit log here, like every other
+  # vault-backed file (docs/design.md, "Git is reached through a value").
+  defp start_store(vault) do
+    start_supervised!(
+      {Store,
+       vault_path: vault,
+       exclude: [],
+       git_remote: "origin",
+       git: Vigil.Git.CommitLog.new(vault),
+       name: @store}
+    )
   end
 
   test "missing _domains.yml logs a warning but the server starts and instructions still work" do
     tmp = Path.join(System.tmp_dir!(), "vigil_no_domains_#{System.unique_integer([:positive])}")
-    git_init_empty(tmp)
+    empty_vault(tmp)
 
     on_exit(fn -> File.rm_rf(tmp) end)
 
     log =
       capture_log(fn ->
-        start_supervised!({Store, vault_path: tmp, exclude: [], git_remote: "origin"})
+        start_store(tmp)
       end)
 
     assert log =~ "_domains.yml"
-    assert Store.instructions_domains_text() == ""
+    assert Store.instructions_domains_text(@store) == ""
   end
 
   test "empty vault starts without error and search returns an empty list" do
     tmp = Path.join(System.tmp_dir!(), "vigil_empty_#{System.unique_integer([:positive])}")
-    git_init_empty(tmp)
+    empty_vault(tmp)
     on_exit(fn -> File.rm_rf(tmp) end)
 
-    start_supervised!({Store, vault_path: tmp, exclude: [], git_remote: "origin"})
+    start_store(tmp)
     assert search(%{query: "irgendwas"}) == []
   end
 
@@ -50,14 +57,14 @@ defmodule Vigil.StoreDomainsYmlTest do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+    start_store(vault)
 
     path = Path.join(vault, "_domains.yml")
     File.chmod!(path, 0o000)
 
     log =
       capture_log(fn ->
-        assert Store.instructions_domains_text() == ""
+        assert Store.instructions_domains_text(@store) == ""
       end)
 
     File.chmod!(path, 0o644)
@@ -76,11 +83,11 @@ defmodule Vigil.StoreDomainsYmlTest do
 
     log =
       capture_log(fn ->
-        start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+        start_store(vault)
       end)
 
     assert log =~ "key 'phantom' has no matching directory"
 
-    assert Store.instructions_domains_text() =~ "bike:"
+    assert Store.instructions_domains_text(@store) =~ "bike:"
   end
 end

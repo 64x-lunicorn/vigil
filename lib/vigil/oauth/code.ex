@@ -126,4 +126,16 @@ defmodule Vigil.OAuth.Code do
   for, and what an RFC 8707 `resource` parameter is checked against.
   """
   def audience_of(record), do: record.resource
+
+  @doc """
+  The scope a code carries into the pair redeemed from it.
+
+  No default, and deliberately. `Vigil.OAuth.Token.scope_of/1` reads a missing
+  scope as full vault access, which is a rule about token records written
+  before scopes existed. A code lives sixty seconds, so no code from before
+  scopes existed can be in a store: one without a scope is a record this
+  server did not write, and it fails here rather than minting a pair with more
+  access than the authorization carried.
+  """
+  def scope_of(record), do: record.scope
 end

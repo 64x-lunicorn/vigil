@@ -573,18 +573,18 @@ lib/vigil/
 ├── clock.ex             # the vault's one notion of "now"
 ├── time_fmt.ex          # duration wording for the time envelope
 ├── commit.ex            # the write effect: mkdir, write, add, commit
-├── git.ex               # System.cmd wrapper: add/commit/push/pull/log/rm/mv
+├── git.ex               # the git contract, and the adapter that shells out
 ├── skills.ex            # skills/ — one repository, two systems
 ├── skill_key.ex         # rotating HMAC attestation token
 ├── rate_limit.ex        # one fixed-window limit, shared by /mcp and OAuth
 ├── uuid.ex              # UUIDv4 for the OAuth layer
-├── vault_discovery.ex   # pure file discovery, no GenServer
 ├── vault_check.ex       # read-only vault doctor
 ├── vault/               # the vault's own rules, all of them pure
 │   ├── policy.ex        # whether a write is allowed — one gate, check/3
 │   ├── plan.ex          # what a write becomes: an action and a commit message
 │   ├── edit.ex          # what a chunk-shaped edit turns content into
 │   ├── facts.ex         # the questions the policy asks the vault
+│   ├── layout.ex        # which paths are notes — the write gate and the load ask
 │   ├── domains.ex       # _domains.yml, as a value
 │   └── rules.ex         # the hygiene rules lint and the doctor share
 ├── oauth/               # authorization server: dets store, DCR, CIMD, PKCE

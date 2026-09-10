@@ -57,9 +57,34 @@ the shape of one record and not the other. Two tests hand-wrote their own
 variants, one of them without the `grant_id` production always sets.
 
 What stays with `Vigil.OAuth.Flow` is the rendering: five distinct problems,
-one `invalid_grant`, said once. The audience check stays there too, because it
-is the one check the two grants share and RFC 8707 answers it differently
+one `invalid_grant`, said once. The audience *check* stays there too, because
+it is the one check the two grants share and RFC 8707 answers it differently
 (`invalid_target`).
+
+**A pair is issued from a record alone.** `Vigil.OAuth.Token.issue_pair/2`
+takes what the pair descends from and the instant, and reads the client, the
+audience, the scope and the grant off it. The audience used to arrive as a
+separate parameter, because the two records name it differently — `:aud` on a
+refresh token, `:resource` on an authorization code — and reading both names
+in the token module would have put the shape of a record it does not own into
+it. With the code record owned, it can ask: a refresh token answers for
+itself, a code answers `Vigil.OAuth.Code.audience_of/1`.
+
+The scope is inherited the same way, and the difference between the two
+records is deliberate. `Vigil.OAuth.Token.scope_of/1` reads a missing scope as
+full vault access, because a token record written before scopes existed was
+minted when `vault` was the only thing a token could be. That rule stops at
+token records: `Vigil.OAuth.Code.scope_of/1` has no default. A code lives
+sixty seconds, so no code from before scopes existed can be in a store, and a
+code without one is a record this server did not write — it fails rather than
+minting a pair with more access than the authorization carried.
+
+**The registered-client record has one owner**, on the same argument.
+`Vigil.OAuth.Client` writes it at registration and reads it at resolution;
+what stays with `Vigil.OAuth.Flow` is the RFC 7591 registration *response*,
+which is a protocol shape rather than a record. It used to be a map literal in
+the flow and a destructuring in the resolver — one record, two places and a
+round trip.
 
 **Persistence via `:dets`.** Tokens and registered clients must survive a
 restart, otherwise every deploy forces re-authorization. `:dets` ships with

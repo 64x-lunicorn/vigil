@@ -11,9 +11,9 @@ defmodule Vigil.VaultCheck do
   no knowledge of vault content and deliberately live in `scripts/init.sh`.
   """
 
-  alias Vigil.{Commit, Markdown, Parser, Slug, VaultDiscovery}
+  alias Vigil.{Commit, Markdown, Parser, Slug}
   alias Vigil.Parser.Chunk
-  alias Vigil.Vault.{Domains, Frontmatter, Rules}
+  alias Vigil.Vault.{Domains, Frontmatter, Layout, Rules}
 
   @max_basisname_laenge 60
   @max_frontmatter_bytes 1024
@@ -27,8 +27,9 @@ defmodule Vigil.VaultCheck do
     # boundary — "not filtered — not read" — and a report that lists notes the
     # server deliberately never reads would breach it.
     exclude = Application.get_env(:vigil, :exclude, [])
-    domain_dirs = VaultDiscovery.domain_dirs!(vault_path, exclude)
-    files = VaultDiscovery.discover_files!(vault_path, exclude)
+    layout = Layout.over_vault!(vault_path, exclude)
+    domain_dirs = layout.domains
+    files = Layout.note_paths(layout)
 
     entries =
       Enum.map(files, fn rel_path ->

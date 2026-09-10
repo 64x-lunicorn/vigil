@@ -9,7 +9,11 @@ defmodule Vigil.Skills do
   does not do is `Vigil.Store`'s reparse between commit and push, which would
   index a skill as a note.
 
-  Takes `vault_path`/`git_remote` as plain arguments — no GenServer, no ETS.
+  Takes `vault_path`/`git_remote` as plain arguments — no GenServer, no ETS —
+  and the git adapter as a value beside them (`docs/design.md`, "Git is
+  reached through a value"). There is no default for it here: this module
+  holds no configuration it could build one from, so the one caller that has
+  it hands it over.
   """
 
   alias Vigil.{Commit, Markdown, SkillKey}
@@ -89,7 +93,7 @@ defmodule Vigil.Skills do
   Writes a skill, commits and pushes it. Does not parse or index the file —
   skills are never notes.
   """
-  def write(name, content, %{vault_path: vault_path, git_remote: git_remote}) do
+  def write(name, content, %{vault_path: vault_path, git_remote: git_remote, git: git}) do
     normalized = normalize_skill_name(name)
 
     rel_path = "skills/#{normalized}.md"
@@ -98,12 +102,13 @@ defmodule Vigil.Skills do
          :ok <- validate_skill_frontmatter(content),
          {:ok, _commit_meta} <-
            Commit.write(
+             git,
              vault_path,
              rel_path,
              Markdown.normalize_trailing_newline(content),
              "skill_write: #{rel_path}"
            ) do
-      push(normalized, vault_path, git_remote)
+      push(git, normalized, vault_path, git_remote)
     else
       false -> {:error, "Invalid path"}
       {:error, msg} -> {:error, msg}
@@ -114,8 +119,8 @@ defmodule Vigil.Skills do
   # of the failure is this module's. The push-failure messages in the project
   # describe different objects — a skill, and a change, a deletion or a move to
   # the vault — and saying so is the point of having four.
-  defp push(name, vault_path, git_remote) do
-    case Commit.push(vault_path, git_remote) do
+  defp push(git, name, vault_path, git_remote) do
+    case Commit.push(git, vault_path, git_remote) do
       :ok -> {:ok, %{name: name, pushed: true}}
       {:error, out} -> {:error, "Skill saved locally, but push failed: #{out}"}
     end

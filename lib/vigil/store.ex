@@ -10,21 +10,31 @@ defmodule Vigil.Store do
     Index,
     Parser,
     Git,
-    Skills,
-    VaultDiscovery
+    Skills
   }
 
-  alias Vigil.Vault.{Decision, Domains, Facts, Plan, Policy}
+  alias Vigil.Vault.{Decision, Domains, Facts, Layout, Plan, Policy}
 
-  # What this process publishes for readers that must not queue behind it. It
-  # is written from inside the writer — at init for the vault path, on every
-  # index change for the event notes — which is what makes a public table safe
-  # to read anywhere else.
-  @published_table :vigil_store
+  # The name a writer registers under, and — the same atom — the name of the
+  # table it publishes through. Production registers under this module and
+  # nothing hands in another: `Vigil.MCP.Tools`, `Vigil.MCP.Envelope` and
+  # `Vigil.MCP.Server` find the writer by that name and name no other. A caller
+  # that supplies one gets a writer of its own, which is what lets the
+  # vault-backed test files run in parallel — one writer per file, rather than
+  # one for the whole suite to queue behind.
+  #
+  # What the table is for: readers that must not queue behind the writer. It is
+  # written from inside it — at init for the vault path, on every index change
+  # for the event notes — which is what makes a public table safe to read
+  # anywhere else.
+  @default_name __MODULE__
 
   ## Public API
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts) do
+    name = Keyword.get(opts, :name, @default_name)
+    GenServer.start_link(__MODULE__, Keyword.put(opts, :name, name), name: name)
+  end
 
   # Every tool-facing call has one shape: the operation, and a map of that
   # operation's parameters. What differs between two tools is the map, not the
@@ -43,19 +53,28 @@ defmodule Vigil.Store do
   # write goes through. Vigil.MCP.Tools declares every bound and default (`limit` 1..25
   # default 10, `depth` 1..2 default 1, `backlinks` default false) and
   # supplies a value on every call, so nothing here restates one.
-  def call(:search, %{limit: _} = params), do: request(:search, params)
-  def call(:read, %{id: _, backlinks: _} = params), do: request(:read, params)
+  def call(store \\ @default_name, op, params)
 
-  def call(:links, %{id: _, direction: _, depth: _} = params), do: request(:links, params)
+  def call(store, :search, %{limit: _} = params), do: request(store, :search, params)
+  def call(store, :read, %{id: _, backlinks: _} = params), do: request(store, :read, params)
 
-  def call(:create, %{} = params), do: request(:create, params)
-  def call(:append, %{} = params), do: request(:append, params)
-  def call(:replace_section, %{id: _, content: _} = params), do: request(:replace_section, params)
-  def call(:rewrite_note, %{} = params), do: request(:rewrite_note, params)
-  def call(:delete_section, %{id: _} = params), do: request(:delete_section, params)
-  def call(:update_frontmatter, %{} = params), do: request(:update_frontmatter, params)
-  def call(:delete_note, %{} = params), do: request(:delete_note, params)
-  def call(:move_note, %{} = params), do: request(:move_note, params)
+  def call(store, :links, %{id: _, direction: _, depth: _} = params),
+    do: request(store, :links, params)
+
+  def call(store, :create, %{} = params), do: request(store, :create, params)
+  def call(store, :append, %{} = params), do: request(store, :append, params)
+
+  def call(store, :replace_section, %{id: _, content: _} = params),
+    do: request(store, :replace_section, params)
+
+  def call(store, :rewrite_note, %{} = params), do: request(store, :rewrite_note, params)
+  def call(store, :delete_section, %{id: _} = params), do: request(store, :delete_section, params)
+
+  def call(store, :update_frontmatter, %{} = params),
+    do: request(store, :update_frontmatter, params)
+
+  def call(store, :delete_note, %{} = params), do: request(store, :delete_note, params)
+  def call(store, :move_note, %{} = params), do: request(store, :move_note, params)
   # The two rows that resolve an instant. Vigil.MCP.Tools puts the response's
   # envelope instant into the params of every row declaring `now:`, so in
   # production nothing is resolved here; the fallback covers a caller with no
@@ -63,12 +82,14 @@ defmodule Vigil.Store do
   # the caller's process rather than behind the writer's mailbox for the
   # reason bd7e842 removed the other one: a clock read on the far side of the
   # writer can land in a different minute than the response it belongs to.
-  def call(:lint, %{} = params), do: request(:lint, with_now(params))
-  def call(:current, %{} = params), do: request(:current, with_now(params))
-  def call(:reload, %{} = params), do: request(:reload, params)
-  def call(:skill_write, %{name: _, content: _} = params), do: request(:skill_write, params)
+  def call(store, :lint, %{} = params), do: request(store, :lint, with_now(params))
+  def call(store, :current, %{} = params), do: request(store, :current, with_now(params))
+  def call(store, :reload, %{} = params), do: request(store, :reload, params)
 
-  defp request(op, params), do: GenServer.call(__MODULE__, {op, params})
+  def call(store, :skill_write, %{name: _, content: _} = params),
+    do: request(store, :skill_write, params)
+
+  defp request(store, op, params), do: GenServer.call(store, {op, params})
 
   defp with_now(params), do: Map.put_new_lazy(params, :now, &Clock.now/0)
 
@@ -99,7 +120,7 @@ defmodule Vigil.Store do
   # table is public. A response already costs one call into this writer, the
   # tool's own; the envelope that goes on top of it must not cost a second,
   # which for a write tool would land after the write.
-  def snapshot(now), do: Events.snapshot(published_events(), now)
+  def snapshot(store \\ @default_name, now), do: Events.snapshot(published_events(store), now)
 
   # Where the vault is, for the two callers that need it without the mailbox:
   # `skill_list` and `skill_read` are answered in the caller's process
@@ -107,9 +128,10 @@ defmodule Vigil.Store do
   # every write and must not queue behind the push of the write before it.
   # Written once at init and never again — this process is bound to one vault
   # for its whole life.
-  def vault_path(), do: :ets.lookup_element(@published_table, :vault_path, 2)
+  def vault_path(store \\ @default_name), do: :ets.lookup_element(store, :vault_path, 2)
 
-  def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
+  def instructions_domains_text(store \\ @default_name),
+    do: GenServer.call(store, :instructions_domains_text)
 
   # No fallback for a missing table. It lives with this process, so its absence
   # means the writer is down — and the response is going to fail at the tool
@@ -119,30 +141,39 @@ defmodule Vigil.Store do
   # session's state, so an empty snapshot would be read as every active event
   # having finished, and the next response would report a phase change that
   # never happened.
-  defp published_events, do: :ets.lookup_element(@published_table, :events, 2)
+  defp published_events(store), do: :ets.lookup_element(store, :events, 2)
 
   ## GenServer
 
   @impl true
   def init(opts) do
+    # start_link/1 puts the name in, defaulted or supplied, so there is one
+    # statement of what it defaults to and this reads it.
+    name = Keyword.fetch!(opts, :name)
     vault_path = Keyword.fetch!(opts, :vault_path) |> Path.expand()
     exclude = Keyword.get(opts, :exclude, [])
     git_remote = Keyword.get(opts, :git_remote, "origin")
 
-    unless File.dir?(Path.join(vault_path, ".git")) do
-      raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
+    # The one default, in the one place that has configuration to build it
+    # from (docs/design.md, "Git is reached through a value"). Vigil.Skills
+    # has none and is handed this value; a caller that hands one in here is
+    # saying which git this vault has, and the repository check goes with the
+    # adapter that needs one rather than staying behind as a claim about a
+    # vault nobody is going to shell out into.
+    git = Keyword.get_lazy(opts, :git, fn -> over_repository!(vault_path) end)
+
+    if :ets.whereis(name) == :undefined do
+      :ets.new(name, [:set, :named_table, :public, read_concurrency: true])
     end
 
-    if :ets.whereis(@published_table) == :undefined do
-      :ets.new(@published_table, [:set, :named_table, :public, read_concurrency: true])
-    end
-
-    :ets.insert(@published_table, {:vault_path, vault_path})
+    :ets.insert(name, {:vault_path, vault_path})
 
     state = %{
+      table: name,
       vault_path: vault_path,
       exclude: exclude,
       git_remote: git_remote,
+      git: git,
       domains: %{},
       index: %Index{}
     }
@@ -155,6 +186,14 @@ defmodule Vigil.Store do
     end
 
     {:ok, state}
+  end
+
+  defp over_repository!(vault_path) do
+    unless File.dir?(Path.join(vault_path, ".git")) do
+      raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
+    end
+
+    Git.over_repository()
   end
 
   # One message shape for all of them: {operation, params}. The five reads and
@@ -200,21 +239,18 @@ defmodule Vigil.Store do
   ## Loading
 
   defp do_full_load(state) do
-    pull_result = Git.pull(state.vault_path, state.git_remote)
+    pull_result = state.git.pull.(state.vault_path, state.git_remote)
 
-    git_meta = Git.log_metadata(state.vault_path)
+    git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)
 
-    domain_dirs = VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
+    layout = layout(state)
 
-    log_warnings(Domains.mismatches(domains, domain_dirs))
-
-    files =
-      domain_dirs
-      |> Enum.flat_map(&VaultDiscovery.domain_files(state.vault_path, &1))
+    log_warnings(Domains.mismatches(domains, layout.domains))
 
     parsed_files =
-      files
+      layout
+      |> Layout.note_paths()
       |> Enum.map(&load_file(state.vault_path, &1, git_meta))
       |> Enum.reject(&is_nil/1)
 
@@ -222,7 +258,7 @@ defmodule Vigil.Store do
     sizes = Index.size(index)
 
     Logger.info(
-      "vigil: #{length(domain_dirs)} domains (#{Enum.join(domain_dirs, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
+      "vigil: #{length(layout.domains)} domains (#{Enum.join(layout.domains, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
     {put_index(%{state | domains: domains}, index), pull_result}
@@ -299,42 +335,32 @@ defmodule Vigil.Store do
     end
   end
 
-  defp list_domain_names(state), do: VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
-
   ## Vault facts for Vigil.Vault.Policy
 
   # Built fresh per write, and built by Vigil.Vault.Facts — the module that
   # defines the seam names both of its answer sets, so what the production one
   # claims is checkable without a git repository or a running writer. What is
-  # this module's is gathering the plain facts: which domains the vault has,
-  # which project directories exist, what _domains.yml says about naming.
+  # this module's is gathering the plain facts: the vault's layout, and what
+  # _domains.yml says about naming.
+  #
+  # The layout is read from disk per write rather than carried in the state,
+  # and deliberately: a project directory a write creates has to be there for
+  # the next write's gate, and a domain added on disk is writable without a
+  # reload. The load builds one of its own, out of the same function.
   #
   # `now` is the instant the write's own response's envelope was decided at
   # (Vigil.MCP.Envelope.for_tool/2), passed through rather than read here.
   defp facts(state, now) do
     Facts.over_vault(
       state.index,
-      %{
-        vault_path: state.vault_path,
-        domains: list_domain_names(state),
-        exclude: state.exclude,
-        project_dirs: project_dirs(state),
-        naming: naming_rules(state)
-      },
+      %{layout: layout(state), naming: naming_rules(state)},
       now
     )
   end
 
+  defp layout(state), do: Layout.over_vault(state.vault_path, state.exclude)
+
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
-
-  defp project_dirs(state) do
-    projects = Path.join(state.vault_path, "projects")
-
-    case File.ls(projects) do
-      {:ok, entries} -> Enum.filter(entries, &File.dir?(Path.join(projects, &1)))
-      {:error, _} -> []
-    end
-  end
 
   defp naming_rules(state), do: Domains.naming_rules(state.domains)
 
@@ -386,7 +412,7 @@ defmodule Vigil.Store do
   defp create_project_dir(_state, nil), do: :ok
 
   defp create_project_dir(state, project) do
-    Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
+    Commit.mkdir_p(Path.join(state.vault_path, Layout.project_dir(project)))
   end
 
   # Where a plan becomes an effect. Every effect is Vigil.Commit's — the write,
@@ -397,7 +423,7 @@ defmodule Vigil.Store do
   # push-failure message — and the plan's own report, merged into the success
   # map.
   defp execute(%Plan{action: {:write, path, content}} = plan, state) do
-    case Commit.write(state.vault_path, path, content, plan.message) do
+    case Commit.write(state.git, state.vault_path, path, content, plan.message) do
       {:ok, commit_meta} ->
         state = put_reparsed(state, path, commit_meta, "write")
 
@@ -413,7 +439,7 @@ defmodule Vigil.Store do
   end
 
   defp execute(%Plan{action: {:delete, path}} = plan, state) do
-    case Commit.delete(state.vault_path, path, plan.message) do
+    case Commit.delete(state.git, state.vault_path, path, plan.message) do
       :ok ->
         state = put_index(state, Index.remove(state.index, path))
 
@@ -436,7 +462,7 @@ defmodule Vigil.Store do
     # instead of a basename.
     backlinks_before = Index.backlinks(state.index, from)
 
-    case Commit.move(state.vault_path, from, to, plan.message) do
+    case Commit.move(state.git, state.vault_path, from, to, plan.message) do
       {:ok, commit_meta} ->
         state = move_reparsed(state, from, to, commit_meta)
         broken = backlinks_before -- Index.backlinks(state.index, to)
@@ -453,7 +479,7 @@ defmodule Vigil.Store do
   end
 
   defp push(state, success, failure_prefix) do
-    case Commit.push(state.vault_path, state.git_remote) do
+    case Commit.push(state.git, state.vault_path, state.git_remote) do
       :ok -> {{:ok, success}, state}
       {:error, out} -> {{:error, "#{failure_prefix}: #{out}"}, state}
     end
@@ -464,7 +490,7 @@ defmodule Vigil.Store do
   # of the three write outcomes — goes through here. Publishing inside the
   # writer is what makes the table safe to read anywhere else.
   defp put_index(state, index) do
-    :ets.insert(@published_table, {:events, Index.event_notes(index)})
+    :ets.insert(state.table, {:events, Index.event_notes(index)})
     %{state | index: index}
   end
 
@@ -546,6 +572,10 @@ defmodule Vigil.Store do
   # queue behind the push of the write before it.
 
   defp do_skill_write(name, content, state) do
-    Skills.write(name, content, %{vault_path: state.vault_path, git_remote: state.git_remote})
+    Skills.write(name, content, %{
+      vault_path: state.vault_path,
+      git_remote: state.git_remote,
+      git: state.git
+    })
   end
 end

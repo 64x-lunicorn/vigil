@@ -63,6 +63,34 @@ The main note of a project is named after the project:
 would then produce colliding wikilink slugs, since links resolve through the
 file stem.
 
+**One module answers "is this path a note".** `Vigil.Vault.Layout` is built
+once from the vault — its domain directories, the project directories inside
+`projects/`, and the `VIGIL_EXCLUDE` boundary — and classifies a path as a
+note in a domain, a skill, excluded, or nothing this vault holds. Two of those
+answers name what is missing, because the write gate words them differently: a
+domain that is not there gets the list of the ones that are, and a project
+directory that is not there is the one thing `create` may create. The write
+gate asks before a write and the load asks for every file it walks, so what
+vigil will write to and what it takes back are the same set of paths. The
+nesting rule above is stated there and nowhere else: it used to be written once
+in the write gate and once in discovery, agreeing by coincidence, so a second
+nesting domain would have been writable-but-undiscoverable or
+discoverable-but-unwritable depending on which of the two was edited.
+
+One path changed hands when the two statements became one. `projects/x.md` — a
+note directly in the nesting domain, outside any project — used to be
+writable, because the gate reached its "two segments, that is a note" branch
+before it reached the branch that knows `projects/` nests. Nothing ever loaded
+it: discovery has always looked exactly one level deeper there, so the note was
+written, committed, pushed, and never indexed or read back. It is refused now.
+That is the disagreement being closed rather than a rule being added — the
+nesting rule above already said where a note in `projects/` lives.
+
+Whether a path is *safe* is a different question and stays with
+`Vigil.Slug.safe_path/1`: traversal, absolute paths, backslashes, NUL bytes
+and dot- or underscore-prefixed segments are about a caller's manners, not
+about the shape of a vault.
+
 `journal/` is the only directory for chronological entries, and the only one
 with a special rule in search: it is hidden unless `domain: "journal"` is
 requested explicitly. Chronological entries would otherwise crowd out real
@@ -561,6 +589,15 @@ attributable to either the assistant or the human.
 `commit.gpgsign=false` is forced the same way. The service user has no signing
 key; an inherited `commit.gpgsign=true` would otherwise fail every single
 write.
+
+**One writer per vault, under a name its caller supplies.** `Vigil.Store`
+registers under its own module name by default, and that registration is the
+whole of how the MCP surface finds it: `Vigil.MCP.Tools`, `Vigil.MCP.Envelope`
+and `Vigil.MCP.Server` name no store. A caller that hands in a name gets a
+writer of its own, publishing through a table of that same name — which is
+what lets the vault-backed test files run in parallel, one writer per file,
+instead of the whole suite queueing behind a single registration. Principle 2
+is about a vault having one writer, not about a node having one.
 
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed

@@ -33,16 +33,14 @@ defmodule Vigil.OAuth.Flow do
     if redirect_uris == [] or not Enum.all?(redirect_uris, &RedirectUri.valid_candidate?/1) do
       {:error, "invalid_redirect_uri"}
     else
-      client_id = Vigil.Uuid.v4()
-      name = Map.get(json, "client_name", "Unbenannter Client")
-
-      Store.put_client(client_id, %{name: name, redirect_uris: redirect_uris, issued_at: now})
+      client =
+        Client.register(Map.get(json, "client_name", "Unbenannter Client"), redirect_uris, now)
 
       {:ok,
        %{
-         client_id: client_id,
-         client_name: name,
-         redirect_uris: redirect_uris,
+         client_id: client.client_id,
+         client_name: client.name,
+         redirect_uris: client.redirect_uris,
          grant_types: ["authorization_code", "refresh_token"],
          response_types: ["code"],
          token_endpoint_auth_method: "none",
@@ -173,7 +171,7 @@ defmodule Vigil.OAuth.Flow do
     aud = Code.audience_of(record)
 
     if target_ok?(params, aud) do
-      {:ok, Token.issue_pair(record, aud, now)}
+      {:ok, Token.issue_pair(record, now)}
     else
       {:error, 400, "invalid_target"}
     end
@@ -196,7 +194,7 @@ defmodule Vigil.OAuth.Flow do
         # deleted, recognised as a replay rather than mistaken for a token that
         # never existed.
         Token.spend_refresh(refresh_token, data, now)
-        {:ok, Token.issue_pair(data, data.aud, now)}
+        {:ok, Token.issue_pair(data, now)}
     end
   end
 
