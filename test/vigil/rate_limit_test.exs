@@ -34,6 +34,43 @@ defmodule Vigil.RateLimitTest do
     refute RateLimit.limited?("key-c", 1, now + 61)
   end
 
+  describe "budget/2" do
+    # Both surfaces read their budget from application config, so what counts
+    # as a budget is the limiter's question rather than each caller's.
+    setup do
+      on_exit(fn -> Application.delete_env(:vigil, :test_budget) end)
+      :ok
+    end
+
+    test "a positive integer is the budget" do
+      Application.put_env(:vigil, :test_budget, 42)
+      assert RateLimit.budget(:test_budget, 60) == 42
+    end
+
+    test "an unset key falls back to the default without complaining" do
+      log =
+        ExUnit.CaptureLog.capture_log(fn -> assert RateLimit.budget(:test_budget, 60) == 60 end)
+
+      assert log == ""
+    end
+
+    test "a value that is not a budget falls back to the default, loudly" do
+      for bad <- [0, -1, nil, "30", 1.5] do
+        Application.put_env(:vigil, :test_budget, bad)
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert RateLimit.budget(:test_budget, 60) == 60
+          end)
+
+        # A limit that is quietly not the one you configured is worse than a
+        # loud one: the operator has to be able to find out.
+        assert log =~ "test_budget"
+        assert log =~ "not a positive integer"
+      end
+    end
+  end
+
   test "different keys have independent budgets" do
     now = 1_700_000_000
     refute RateLimit.limited?("key-d1", 1, now)

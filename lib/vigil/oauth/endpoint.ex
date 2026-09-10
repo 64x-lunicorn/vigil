@@ -7,7 +7,6 @@ defmodule Vigil.OAuth.Endpoint do
   Every decision it makes is `Vigil.OAuth.Flow`'s.
   """
   use Plug.Router
-  require Logger
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow}
@@ -38,28 +37,13 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp configured_limits do
-    rpm = budget(:oauth_rate_limit_rpm, @default_rpm)
+    rpm = RateLimit.budget(:oauth_rate_limit_rpm, @default_rpm)
 
     %{
       authorize: rpm,
       token: rpm,
-      register: budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
+      register: RateLimit.budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
     }
-  end
-
-  # A budget that is not a positive number is not a budget. Falling back to the
-  # default keeps a mistyped environment variable from producing a limit that
-  # either refuses everything or crashes on the comparison — and says so, since
-  # a limit that is quietly not the one you configured is worse than a loud one.
-  defp budget(key, default) do
-    case Application.get_env(:vigil, key, default) do
-      rpm when is_integer(rpm) and rpm > 0 ->
-        rpm
-
-      other ->
-        Logger.warning("#{key} is #{inspect(other)}, not a positive integer — using #{default}")
-        default
-    end
   end
 
   ## Discovery

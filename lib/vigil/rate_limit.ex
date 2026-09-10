@@ -11,6 +11,7 @@ defmodule Vigil.RateLimit do
   observe the window by waiting a minute for it.
   """
   use GenServer
+  require Logger
 
   @table :vigil_rate_limits
   @window_seconds 60
@@ -28,6 +29,27 @@ defmodule Vigil.RateLimit do
 
   @doc "The window's length in seconds — what a refused caller has to wait out."
   def window_seconds, do: @window_seconds
+
+  @doc """
+  The budget configured under `key`, or `default` when what is there is not a
+  budget at all.
+
+  Both surfaces take their budget from application config, which means both can
+  be handed a mistyped environment variable. Falling back keeps that from
+  producing a limit that refuses everything or crashes on the comparison, and
+  the warning keeps it from being invisible: a limit that is quietly not the
+  one you configured is worse than a loud one.
+  """
+  def budget(key, default) do
+    case Application.get_env(:vigil, key, default) do
+      rpm when is_integer(rpm) and rpm > 0 ->
+        rpm
+
+      other ->
+        Logger.warning("#{key} is #{inspect(other)}, not a positive integer — using #{default}")
+        default
+    end
+  end
 
   @doc """
   True if `key` has exceeded `budget` requests for the fixed window

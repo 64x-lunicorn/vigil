@@ -9,6 +9,7 @@ defmodule Vigil.MCP.Server do
   alias Vigil.OAuth
 
   @protocol_version "2025-11-25"
+  @default_rpm 60
 
   plug(:match)
   plug(:dispatch)
@@ -23,7 +24,7 @@ defmodule Vigil.MCP.Server do
   def init(opts) do
     opts
     |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
-      Application.get_env(:vigil, :rate_limit_rpm, 60)
+      RateLimit.budget(:rate_limit_rpm, @default_rpm)
     end)
     |> Keyword.put_new_lazy(:oauth, fn -> Vigil.OAuth.Endpoint.init([]) end)
   end

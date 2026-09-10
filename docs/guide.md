@@ -421,6 +421,12 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
 
+Every budget above (`VIGIL_RATE_LIMIT_RPM` and the two OAuth ones) goes through
+one check: a value that is not a positive integer is refused, the default is
+used instead, and a warning names the setting. A limit that is quietly not the
+one you configured is worse than a loud one, so look for that warning in the
+journal after changing one.
+
 The last two only affect the instructions handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
 will keep writing German notes.
