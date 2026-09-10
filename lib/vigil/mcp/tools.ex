@@ -132,6 +132,7 @@ defmodule Vigil.MCP.Tools do
         "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
       write: true,
       call: :create,
+      now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -177,6 +178,7 @@ defmodule Vigil.MCP.Tools do
       description: "Appends content to an existing note.",
       write: true,
       call: :append,
+      now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -203,6 +205,7 @@ defmodule Vigil.MCP.Tools do
       description: "Replaces the body of exactly one chunk.",
       write: true,
       call: :replace_section,
+      now: true,
       params: [
         %{name: "id", type: :string, required: true, description: "path#heading-slug."},
         %{
@@ -225,6 +228,7 @@ defmodule Vigil.MCP.Tools do
         "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
       write: true,
       call: :rewrite_note,
+      now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -253,6 +257,7 @@ defmodule Vigil.MCP.Tools do
       description: "Removes a chunk including its heading.",
       write: true,
       call: :delete_section,
+      now: true,
       params: [
         %{name: "id", type: :string, required: true, description: "path#heading-slug."},
         %{
@@ -269,6 +274,7 @@ defmodule Vigil.MCP.Tools do
         "Sets type/starts/ends in the frontmatter of an existing note; the body is untouched.",
       write: true,
       call: :update_frontmatter,
+      now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -292,6 +298,7 @@ defmodule Vigil.MCP.Tools do
       description: "Permanently deletes a note. Destructive — requires confirm: true.",
       write: true,
       call: :delete_note,
+      now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -314,6 +321,7 @@ defmodule Vigil.MCP.Tools do
         "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
       write: true,
       call: :move_note,
+      now: true,
       params: [
         %{name: "from", type: :string, required: true, description: "Existing path."},
         %{name: "to", type: :string, required: true, description: "New path."},
