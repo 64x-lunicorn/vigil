@@ -35,18 +35,4 @@ defmodule Vigil.ClockTest do
       assert now.time_zone in ["Europe/Berlin", "Etc/UTC"]
     end
   end
-
-  describe "today/0" do
-    test "returns a Date derived from now/0" do
-      Application.put_env(:vigil, :tz, "Europe/Berlin")
-
-      assert Clock.today() == DateTime.to_date(Clock.now())
-    end
-
-    test "falls back to UTC's date when :tz is invalid rather than raising" do
-      Application.put_env(:vigil, :tz, "Not/AZone")
-
-      assert Clock.today() == Date.utc_today()
-    end
-  end
 end

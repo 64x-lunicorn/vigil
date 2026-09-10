@@ -16,8 +16,5 @@ defmodule Vigil.Clock do
     end
   end
 
-  @doc "The current date in the vault's configured timezone, falling back to UTC."
-  def today, do: DateTime.to_date(now())
-
   defp tz, do: Application.get_env(:vigil, :tz, @default_tz)
 end

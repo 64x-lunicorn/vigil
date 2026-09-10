@@ -432,6 +432,24 @@ defmodule Vigil.StoreTest do
                })
     end
 
+    # The write resolves `today` from the same instant its response's
+    # envelope was decided at (Vigil.MCP.Tools' `now:`), not a second clock
+    # read of its own — pinned across a day boundary rather than by waiting
+    # for midnight.
+    test "the naming suggestion's date comes from the write's own `now`, not the wall clock" do
+      now = ~U[2026-06-30 23:30:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+
+      assert {:error, msg} =
+               Store.call(:create, %{
+                 path: "journal/not-a-date.md",
+                 type: "reference",
+                 content: "# X\nx",
+                 now: now
+               })
+
+      assert msg =~ "journal/2026-07-01.md"
+    end
+
     test "a domain without a naming block is unaffected" do
       assert {:ok, _} =
                Store.call(:create, %{

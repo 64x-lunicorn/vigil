@@ -310,7 +310,13 @@ defmodule Vigil.Store do
   # (Vigil.Index.lookups/1), destructured rather than merged so that a lookup
   # the struct has no field for fails here, and Facts.new/1 requires the rest —
   # an unanswered question raises instead of opening the gate it guards.
-  defp facts(state) do
+  #
+  # `now` is the instant the write's own response's envelope was decided at
+  # (Vigil.MCP.Envelope.for_tool/2), passed in rather than read here — a
+  # second clock read behind the writer is what let a create at 23:59:59.9
+  # resolve `today` to a different day than the envelope heading the same
+  # response.
+  defp facts(state, now) do
     %{
       count_headings: count_headings,
       find_chunk: find_chunk,
@@ -323,7 +329,7 @@ defmodule Vigil.Store do
       exclude: state.exclude,
       project_dirs: project_dirs(state),
       naming: naming_rules(state),
-      today: Clock.today(),
+      today: DateTime.to_date(now),
       path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
       read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
       find_backlinks: fn path -> Index.backlinks(state.index, path) end,
@@ -361,8 +367,16 @@ defmodule Vigil.Store do
   # difference, this holds the sequence. Every failure before the effect
   # leaves the state untouched, said once here rather than at each site.
 
+  # `now` travels under the same key Vigil.MCP.Tools puts every declared
+  # instant under, but it is not one of the operation's declared parameters
+  # (docs/design.md, "The write path") — it is popped back out here so what
+  # Vigil.Vault.Policy and Vigil.Vault.Plan are handed is exactly the
+  # request the tool table describes, unchanged. A caller with no envelope
+  # to share (a test pinning a moment aside) gets the writer's own clock.
   defp write(op, request, state) do
-    with {:ok, resolved} <- Policy.check(op, request, facts(state)),
+    {now, request} = Map.pop(request, :now, Clock.now())
+
+    with {:ok, resolved} <- Policy.check(op, request, facts(state, now)),
          :ok <- ensure_directories(op, resolved, state),
          {:ok, current} <- current_content(op, resolved, state),
          {:ok, plan} <- Plan.build(op, resolved, request, current) do
