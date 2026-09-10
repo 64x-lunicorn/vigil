@@ -435,6 +435,53 @@ defmodule Vigil.OAuth.EndpointTest do
     assert List.last(results) == 429
   end
 
+  ## Issuer identification (RFC 9207)
+
+  test "the authorization response says which server issued it" do
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    conn =
+      post_form(
+        "/oauth/authorize",
+        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
+          "password" => @password,
+          "decision" => "allow"
+        })
+      )
+
+    assert conn.status == 302
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "iss") == @issuer
+    assert extract_query_param(location, "code") != nil
+  end
+
+  test "an error redirect says which server issued it too" do
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    conn =
+      post_form(
+        "/oauth/authorize",
+        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
+          "decision" => "deny"
+        })
+      )
+
+    assert conn.status == 302
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "access_denied"
+    assert extract_query_param(location, "iss") == @issuer
+  end
+
+  test "the metadata tells a client the iss parameter will be there" do
+    body = Jason.decode!(get_json("/.well-known/oauth-authorization-server").resp_body)
+
+    assert body["authorization_response_iss_parameter_supported"] == true
+  end
+
   ## Rate limits on the endpoints themselves
 
   test "the shipped budgets are per minute and per address, register the tightest" do

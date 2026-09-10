@@ -76,9 +76,21 @@ tokens for public clients MUST be sender-constrained or use refresh token
 rotation" — and detects replay as §4.14.2 requires. It does not *act* on the
 detection: the signal is generated and dropped. **Finding → #78.**
 
-**Does the authorization response carry `iss`?** No, and nothing depends on it.
-§4.4.2.1 wants the issuer identifier in the authorization response, via the
-`iss` parameter of RFC 9207. **Finding → #77.**
+**Does the authorization response carry `iss`?** Yes, on the success redirect
+and the error redirect alike — RFC 9207 §2 asks for both: "In authorization
+responses to the client, including error responses, an authorization server
+supporting this specification MUST indicate its identity by including the `iss`
+parameter in the authorization response." Every response leaves through one
+function, `redirect_with_query/3`, so there is no shape that can forget it, and
+`authorization_response_iss_parameter_supported` in the metadata is what tells
+a client it may reject a response that arrives without one.
+
+This is the mix-up defence. Without it a client that talks to more than one
+authorization server cannot tell which one answered, and can be induced to send
+a code minted by an attacker's server to vigil, or vigil's code to the
+attacker's token endpoint. §4.4.2.2 names the alternative — a distinct redirect
+URI per authorization server — but that is the client's choice to make, not
+something vigil can enforce. (§4.4.2.1)
 
 **What authenticates a client at the token endpoint?** Nothing —
 `token_endpoint_auth_methods_supported` is `["none"]` and there are no client
@@ -139,7 +151,7 @@ framing since the headers below (§4.16).
 
 | # | Gap | RFC 9700 | Answered by |
 |---|---|---|---|
-| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 | open |
+| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 | `iss` on both redirect shapes, advertised |
 | [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 | open |
 | [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — | `Vigil.RateLimit`, per address per endpoint |
 | [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 | `Vigil.OAuth.ClientAddr` |
@@ -199,7 +211,8 @@ token:
   "grant_types_supported": ["authorization_code", "refresh_token"],
   "code_challenge_methods_supported": ["S256"],
   "token_endpoint_auth_methods_supported": ["none"],
-  "client_id_metadata_document_supported": true
+  "client_id_metadata_document_supported": true,
+  "authorization_response_iss_parameter_supported": true
 }
 ```
 
@@ -316,6 +329,10 @@ sequenceDiagram
 
 The consent page requires the `VIGIL_AUTH_PASSWORD` every time. There is no
 session cookie after login — it happens rarely enough.
+
+Every redirect back to the client carries `iss`, the issuer identifier of
+RFC 9207, next to `code` (or `error`) and the `state` the client sent. See the
+mix-up answer in the RFC 9700 walk above.
 
 A loopback redirect address is called out on the consent page: any local
 process on that machine could impersonate the client.

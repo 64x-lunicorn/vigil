@@ -235,8 +235,21 @@ defmodule Vigil.OAuth.Endpoint do
     redirect_with_query(conn, redirect_uri, put_state(%{"error" => error_code}, state))
   end
 
+  # Every authorization response leaves through here, success and error alike,
+  # which is why `iss` is added here rather than at the two call sites. RFC 9207
+  # §2 asks for exactly that: "In authorization responses to the client,
+  # including error responses, an authorization server supporting this
+  # specification MUST indicate its identity by including the `iss` parameter
+  # in the authorization response."
+  #
+  # It is the mix-up defence of RFC 9700 §4.4.2.1. A client that talks to more
+  # than one authorization server otherwise cannot tell which one answered, and
+  # can be induced to send a code minted by an attacker's server to vigil, or
+  # vigil's code to the attacker's token endpoint. vigil's clients talk to one
+  # server today, so this closes a gap rather than an incident.
   defp redirect_with_query(conn, redirect_uri, query) do
     separator = if String.contains?(redirect_uri, "?"), do: "&", else: "?"
+    query = Map.put(query, "iss", OAuth.issuer())
 
     conn
     |> put_resp_header("location", redirect_uri <> separator <> URI.encode_query(query))

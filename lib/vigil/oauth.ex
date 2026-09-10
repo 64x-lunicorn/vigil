@@ -45,7 +45,11 @@ defmodule Vigil.OAuth do
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: ["none"],
-      client_id_metadata_document_supported: true
+      client_id_metadata_document_supported: true,
+      # RFC 9207. The parameter is on every authorization response either way;
+      # this is what tells a client it can rely on being there, and therefore
+      # that it may reject a response that arrives without it.
+      authorization_response_iss_parameter_supported: true
     }
   end
 end
