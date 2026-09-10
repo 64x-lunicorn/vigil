@@ -360,25 +360,19 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "snapshot/2" do
-    test "a vault with events returns active ids, near lists, and titles", %{index: index} do
-      during_event = ~U[2026-07-11 00:00:00Z]
-      snapshot = Index.snapshot(index, during_event)
+  describe "event_notes/1" do
+    test "returns the event-typed notes and nothing else", %{index: index} do
+      paths = index |> Index.event_notes() |> Enum.map(& &1.path)
 
-      assert MapSet.member?(snapshot.active_ids, "bike/via-carolina.md")
-      assert Enum.any?(snapshot.near.active, &(&1.id == "bike/via-carolina.md"))
-      assert snapshot.titles["bike/via-carolina.md"] == "Via Carolina"
+      assert "bike/via-carolina.md" in paths
+      assert Enum.all?(Index.event_notes(index), &(&1.type == :event))
+      refute Enum.empty?(Map.values(index.notes) -- Index.event_notes(index))
     end
 
-    test "a vault with no events returns empty ids, near lists, and titles", %{index: index} do
+    test "a vault with no events publishes nothing", %{index: index} do
       without_events = Index.remove(index, "bike/via-carolina.md")
-      now = ~U[2026-07-11 00:00:00Z]
 
-      assert Index.snapshot(without_events, now) == %{
-               active_ids: MapSet.new(),
-               near: %{active: [], upcoming: []},
-               titles: %{}
-             }
+      assert Index.event_notes(without_events) == []
     end
   end
 

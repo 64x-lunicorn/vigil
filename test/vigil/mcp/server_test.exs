@@ -171,6 +171,35 @@ defmodule Vigil.MCP.ServerTest do
     refute Map.has_key?(payload2, "_")
   end
 
+  # The one tool whose whole job is answering what time it is must not
+  # disagree with the envelope above it. Two halves: the call is made at the
+  # instant the envelope was decided at — pinned exactly, so it cannot pass by
+  # two clock reads happening to land in the same minute — and the response
+  # the router assembles carries both readings of that one instant.
+  test "current's reported time and its envelope come from the same instant", %{token: token} do
+    pinned = ~U[2026-07-09 11:20:00Z] |> DateTime.shift_zone!("Europe/Berlin")
+
+    assert {:ok, %{now: reported}} = Tools.dispatch("current", %{}, pinned)
+    assert reported == DateTime.to_iso8601(pinned)
+
+    conn =
+      post(
+        token,
+        %{
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: %{name: "current", arguments: %{}}
+        },
+        [{"mcp-session-id", "session-instant"}]
+      )
+
+    payload = Jason.decode!(hd(Jason.decode!(conn.resp_body)["result"]["content"])["text"])
+    {:ok, utc, offset} = DateTime.from_iso8601(payload["result"]["now"])
+
+    assert payload["_t"] == Calendar.strftime(DateTime.add(utc, offset, :second), "%H:%M")
+  end
+
   test "tool errors set isError and carry the message alongside an envelope", %{token: token} do
     conn = failing_create(token, "session-d", 4)
 

@@ -5,6 +5,11 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
   alias Vigil.MCP.Tools
 
+  # The instant the response's envelope was decided at. Only the two rows that
+  # declare `now:` are supposed to see it; every other assertion here is about
+  # a call that must not carry it.
+  @now ~U[2026-07-09 11:20:00Z]
+
   # Answers every `{op, params}` the way the tool layer's caller does — by
   # forwarding it to the test and replying with whatever the test asked for.
   # Nothing about a tool is known here: that is the point, since what dispatch
@@ -36,7 +41,7 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "search sends its declared operation with every declared parameter" do
       start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch("search", %{"query" => "tires"})
+      assert {:ok, :stub_result} = Tools.dispatch("search", %{"query" => "tires"}, @now)
 
       assert_receive {:store_call, {:search, params}}
 
@@ -52,20 +57,46 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "a parameterless tool sends an empty params map" do
       start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch("lint", %{})
-      assert_receive {:store_call, {:lint, %{}}}
+      assert {:ok, :stub_result} = Tools.dispatch("reload", %{}, @now)
+      assert_receive {:store_call, {:reload, %{}}}
+    end
+
+    # The instant is the response's, not one the operation reads for itself
+    # on the far side of the writer — which is how `current` came to report a
+    # time its own envelope could contradict. It travels with the params
+    # because the Store's tool-facing interface has one shape.
+    test "a tool declaring now: is handed the response's instant" do
+      start_store()
+
+      assert {:ok, :stub_result} = Tools.dispatch("current", %{}, @now)
+      assert_receive {:store_call, {:current, %{now: @now}}}
+
+      assert {:ok, :stub_result} = Tools.dispatch("lint", %{}, @now)
+      assert_receive {:store_call, {:lint, %{now: @now}}}
+    end
+
+    test "a tool that declares no instant is not handed one" do
+      start_store()
+
+      Tools.dispatch("search", %{"query" => "tires"}, @now)
+      assert_receive {:store_call, {:search, params}}
+      refute Map.has_key?(params, :now)
     end
 
     test "move_note's two same-typed paths travel under the names the table gives them" do
       start_store({:ok, %{moved: true}})
 
       assert {:ok, %{moved: true}} =
-               Tools.dispatch("move_note", %{
-                 "from" => "training/a.md",
-                 "to" => "training/b.md",
-                 "confirm" => true,
-                 "skill_key" => skill_key()
-               })
+               Tools.dispatch(
+                 "move_note",
+                 %{
+                   "from" => "training/a.md",
+                   "to" => "training/b.md",
+                   "confirm" => true,
+                   "skill_key" => skill_key()
+                 },
+                 @now
+               )
 
       assert_receive {:store_call, {:move_note, params}}
       assert params.from == "training/a.md"
@@ -77,11 +108,15 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "search's type and prefer are atoms, not the strings the schema publishes" do
       start_store()
 
-      Tools.dispatch("search", %{
-        "query" => "tires",
-        "type" => "decision",
-        "prefer" => "reference"
-      })
+      Tools.dispatch(
+        "search",
+        %{
+          "query" => "tires",
+          "type" => "decision",
+          "prefer" => "reference"
+        },
+        @now
+      )
 
       assert_receive {:store_call, {:search, params}}
       assert params.type == :decision
@@ -91,24 +126,28 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "links' direction default converts on the same path a supplied value does" do
       start_store()
 
-      Tools.dispatch("links", %{"id" => "bike/x.md"})
+      Tools.dispatch("links", %{"id" => "bike/x.md"}, @now)
       assert_receive {:store_call, {:links, %{direction: :both, depth: 1}}}
 
-      Tools.dispatch("links", %{"id" => "bike/x.md", "direction" => "out"})
+      Tools.dispatch("links", %{"id" => "bike/x.md", "direction" => "out"}, @now)
       assert_receive {:store_call, {:links, %{direction: :out}}}
     end
 
     test "create's type is converted too, not left a string for one clause only" do
       start_store({:ok, %{created: true}})
 
-      Tools.dispatch("create", %{
-        "path" => "bike/x.md",
-        "type" => "event",
-        "content" => "# X",
-        "starts" => "2026-01-01T00:00:00Z",
-        "ends" => "2026-01-02T00:00:00Z",
-        "skill_key" => skill_key()
-      })
+      Tools.dispatch(
+        "create",
+        %{
+          "path" => "bike/x.md",
+          "type" => "event",
+          "content" => "# X",
+          "starts" => "2026-01-01T00:00:00Z",
+          "ends" => "2026-01-02T00:00:00Z",
+          "skill_key" => skill_key()
+        },
+        @now
+      )
 
       assert_receive {:store_call, {:create, params}}
       assert params.type == :event
@@ -117,11 +156,15 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "update_frontmatter's type is converted on the same rule" do
       start_store({:ok, %{updated: true}})
 
-      Tools.dispatch("update_frontmatter", %{
-        "path" => "bike/x.md",
-        "type" => "reference",
-        "skill_key" => skill_key()
-      })
+      Tools.dispatch(
+        "update_frontmatter",
+        %{
+          "path" => "bike/x.md",
+          "type" => "reference",
+          "skill_key" => skill_key()
+        },
+        @now
+      )
 
       assert_receive {:store_call, {:update_frontmatter, params}}
       assert params.type == :reference
@@ -132,12 +175,16 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "create's params carry no skill_key" do
       start_store({:ok, %{created: true}})
 
-      Tools.dispatch("create", %{
-        "path" => "bike/x.md",
-        "type" => "reference",
-        "content" => "# X",
-        "skill_key" => skill_key()
-      })
+      Tools.dispatch(
+        "create",
+        %{
+          "path" => "bike/x.md",
+          "type" => "reference",
+          "content" => "# X",
+          "skill_key" => skill_key()
+        },
+        @now
+      )
 
       assert_receive {:store_call, {:create, params}}
       refute Map.has_key?(params, :skill_key)
@@ -146,11 +193,15 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "skill_write's params carry no skill_key either" do
       start_store({:ok, %{written: true}})
 
-      Tools.dispatch("skill_write", %{
-        "name" => "x",
-        "content" => "---\nname: x\n---\n# X\n",
-        "skill_key" => skill_key()
-      })
+      Tools.dispatch(
+        "skill_write",
+        %{
+          "name" => "x",
+          "content" => "---\nname: x\n---\n# X\n",
+          "skill_key" => skill_key()
+        },
+        @now
+      )
 
       assert_receive {:store_call, {:skill_write, params}}
       assert Map.keys(params) |> Enum.sort() == [:content, :name]
@@ -161,19 +212,20 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "an operation that cannot fail answers with its value, which becomes {:ok, value}" do
       start_store([%{id: "bike/x.md#a"}])
 
-      assert Tools.dispatch("search", %{"query" => "tires"}) == {:ok, [%{id: "bike/x.md#a"}]}
+      assert Tools.dispatch("search", %{"query" => "tires"}, @now) ==
+               {:ok, [%{id: "bike/x.md#a"}]}
     end
 
     test "an operation that can fail answers with a result tuple, passed through unchanged" do
       start_store({:error, "no such note"})
 
-      assert Tools.dispatch("read", %{"id" => "bike/nope.md"}) == {:error, "no such note"}
+      assert Tools.dispatch("read", %{"id" => "bike/nope.md"}, @now) == {:error, "no such note"}
     end
 
     test "an {:ok, value} answer is not wrapped twice" do
       start_store({:ok, %{title: "X"}})
 
-      assert Tools.dispatch("read", %{"id" => "bike/x.md"}) == {:ok, %{title: "X"}}
+      assert Tools.dispatch("read", %{"id" => "bike/x.md"}, @now) == {:ok, %{title: "X"}}
     end
   end
 end

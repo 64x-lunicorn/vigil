@@ -167,14 +167,16 @@ defmodule Vigil.MCP.Server do
 
       Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
 
+      {envelope, now} = Envelope.for_tool(session_id, name)
+
       result =
         if scope == OAuth.read_scope() and Tools.write_tool?(name) do
           {:error, "Read-only token: write access denied."}
         else
-          Tools.dispatch(name, arguments)
+          Tools.dispatch(name, arguments, now)
         end
 
-      body = build_tool_call_result(name, result, session_id)
+      body = build_tool_call_result(result, envelope)
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: body})
     end)
   end
@@ -201,14 +203,19 @@ defmodule Vigil.MCP.Server do
   # The envelope is attached around both outcomes rather than inside the
   # success branch, so "every tool response carries exactly one of `_`, `_t` or
   # `_!`" (docs/design.md, "The time envelope") is structurally true instead of
-  # true in one of two branches. An error advances the session's state for the
-  # same reason: a failed first call is still a call the session made, and
-  # repeating the long first form on the next one would be a lie about which
-  # response is first.
-  defp build_tool_call_result(name, result, session_id) do
-    now = Vigil.Clock.now()
-    envelope = Envelope.for_tool(session_id, name, now, Store.snapshot(now))
-
+  # true in one of two branches. It is obtained before the call because the
+  # instant it was decided at is the one the call itself is then made with,
+  # and a response has exactly one. The envelope therefore describes the
+  # vault as the request found it, not as the call left it: a write that puts
+  # an event into or out of its window is reported on the session's next
+  # response rather than on its own — a lag the envelope can afford, where
+  # the alternative cannot: deciding after the call costs either a second
+  # clock read or an instant the router holds on the envelope's behalf, and
+  # those are the two things this stopped doing. An error advances the
+  # session's state too: a failed first call is still a call the session
+  # made, and repeating the long first form on the next one would be a lie
+  # about which response is first.
+  defp build_tool_call_result(result, envelope) do
     case result do
       {:ok, value} ->
         %{content: [text_content(%{result: value}, envelope)]}
