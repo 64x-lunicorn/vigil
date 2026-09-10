@@ -10,7 +10,15 @@ defmodule Vigil.StoreExcludeTest do
   setup do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: ["work"], git_remote: "origin"})
+
+    start_supervised!(
+      {Store,
+       vault_path: vault,
+       exclude: ["work"],
+       git_remote: "origin",
+       git: Vigil.Git.CommitLog.new(vault)}
+    )
+
     %{vault: vault}
   end
 

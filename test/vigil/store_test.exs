@@ -8,11 +8,27 @@ defmodule Vigil.StoreTest do
   # every real call, so `Store.call(:search, ...)` requires one rather than defaulting.
   defp search(params), do: Store.call(:search, Map.put_new(params, :limit, 10))
 
+  # Every Store in this file reaches git through the commit log
+  # (docs/design.md, "Git is reached through a value"). What these tests
+  # assert is the write path's — what lands on disk, what the index says
+  # afterwards, what a failure reads like — and git_test.exs is where git is
+  # held to its contract. `git_remote: "nonexistent-remote"` is how a push
+  # failure is provoked, exactly as it was against a repository.
+  defp start_store(vault, opts \\ []) do
+    start_supervised!(
+      {Store,
+       vault_path: vault,
+       exclude: Keyword.get(opts, :exclude, []),
+       git_remote: Keyword.get(opts, :git_remote, "origin"),
+       git: CommitLog.new(vault)}
+    )
+  end
+
   setup do
-    {vault, remote} = Vigil.FixtureVault.build(remote: true)
+    vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
-    %{vault: vault, remote: remote}
+    start_store(vault)
+    %{vault: vault}
   end
 
   # Ranking, filtering, journal-hiding and hub-attachment are Vigil.Index's
@@ -75,7 +91,7 @@ defmodule Vigil.StoreTest do
   end
 
   describe "create" do
-    test "creates file, commits as vigil, pushes, and updates the index", %{vault: vault} do
+    test "creates the file, pushes, and updates the index", %{vault: vault} do
       assert {:ok, %{path: "bike/new.md", pushed: true}} =
                Store.call(:create, %{
                  path: "bike/new.md",
@@ -86,9 +102,6 @@ defmodule Vigil.StoreTest do
       assert File.exists?(Path.join(vault, "bike/new.md"))
       {:ok, result} = Store.call(:read, %{id: "bike/new.md", backlinks: false})
       assert result.title == "New"
-
-      {out, 0} = System.cmd("git", ["log", "-1", "--format=%an"], cd: vault)
-      assert String.trim(out) == "vigil"
     end
 
     # File-exists, H1, frontmatter and event starts/ends rules are pure
@@ -384,7 +397,7 @@ defmodule Vigil.StoreTest do
       vault: vault
     } do
       :ok = stop_supervised(Store)
-      start_supervised!({Store, vault_path: vault, exclude: ["bike"], git_remote: "origin"})
+      start_store(vault, exclude: ["bike"])
 
       now = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
       snapshot = Store.snapshot(now)
@@ -834,7 +847,7 @@ defmodule Vigil.StoreTest do
       vault: vault
     } do
       :ok = stop_supervised(Store)
-      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+      start_store(vault, git_remote: "nonexistent-remote")
 
       assert %{reloaded: true, pull_failed: reason} = Store.call(:reload, %{})
       assert is_binary(reason)
@@ -896,7 +909,7 @@ defmodule Vigil.StoreTest do
   describe "write-path robustness" do
     test "push failure is returned as an error; read and search keep working", %{vault: vault} do
       :ok = stop_supervised(Store)
-      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+      start_store(vault, git_remote: "nonexistent-remote")
 
       assert {:error, msg} =
                Store.call(:create, %{
@@ -918,7 +931,7 @@ defmodule Vigil.StoreTest do
     # or no push.
     test "a delete whose push fails still leaves the index without the note", %{vault: vault} do
       :ok = stop_supervised(Store)
-      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+      start_store(vault, git_remote: "nonexistent-remote")
 
       assert {:error, msg} =
                Store.call(:delete_note, %{path: "bike/terra-speed.md", confirm: true})
@@ -931,7 +944,7 @@ defmodule Vigil.StoreTest do
 
     test "a move whose push fails still leaves the index at the new path", %{vault: vault} do
       :ok = stop_supervised(Store)
-      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+      start_store(vault, git_remote: "nonexistent-remote")
 
       assert {:error, msg} =
                Store.call(:move_note, %{

@@ -16,12 +16,15 @@ defmodule Vigil.GitTest do
   """
 
   setup do
-    {vault, remote} = Vigil.FixtureVault.build(remote: true)
+    vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    {:ok, vault: vault, remote: remote}
+    {:ok, vault: vault}
   end
 
-  defp real_git(_context), do: {:ok, git: Git.over_repository()}
+  # The one repository the suite still builds, and it is built here.
+  defp real_git(%{vault: vault}) do
+    {:ok, git: Git.over_repository(), remote: Vigil.GitRepo.init(vault, remote: true)}
+  end
 
   defp commit_log(%{vault: vault}) do
     {git, log} = CommitLog.recording(vault, remote: "origin")

@@ -13,9 +13,14 @@ defmodule Vigil.MCP.EnvelopeTest do
   # to the next, read the clock once, and fetch the snapshot that instant is
   # decided against out of the vault the Store actually holds.
   setup do
-    {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+    vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+
+    start_supervised!(
+      {Store,
+       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+    )
+
     start_supervised!(Envelope)
     %{vault: vault}
   end
@@ -94,7 +99,11 @@ defmodule Vigil.MCP.EnvelopeTest do
     stop_supervised!(Vigil.Store)
     assert_raise ArgumentError, fn -> Envelope.for_tool("session-4", "search") end
 
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+    start_supervised!(
+      {Store,
+       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+    )
+
     assert {%{"_t" => _}, _} = Envelope.for_tool("session-4", "search")
   end
 

@@ -220,7 +220,11 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     setup do
       vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-      start_supervised!({Vigil.Store, vault_path: vault, exclude: [], git_remote: "origin"})
+
+      start_supervised!(
+        {Vigil.Store,
+         vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+      )
 
       writer = Process.whereis(Vigil.Store)
       :sys.suspend(writer)
