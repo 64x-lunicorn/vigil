@@ -1,9 +1,10 @@
 defmodule Vigil.StoreTest do
   # async: true, and what makes it possible is the writer registering under a
   # name this file supplies rather than under its own module (docs/design.md,
-  # "The write path" — one writer per vault, not one per node). Production
-  # registers under `Vigil.Store`, which is what the MCP surface finds it by;
-  # the files that go through that surface are the ones that stay serialized.
+  # "The write path", "One writer per vault, under a name its caller
+  # supplies"). Production registers under `Vigil.Store`, which is what the MCP
+  # surface finds it by; the files that go through that surface are the ones
+  # that stay serialized.
   use ExUnit.Case, async: true
 
   alias Vigil.Git.CommitLog

@@ -40,27 +40,16 @@ defmodule Vigil.Git.CommitLog do
   @doc """
   A `Vigil.Git` over `vault_path`, and the log behind it.
 
-  Options:
-
-    * `remote:` — the remote name `push` and `pull` succeed for, `nil` for a
-      vault with none. Anything else answers the error git answers.
-    * `at:` — the instant every commit it records is made under.
-    * `initial_at:` / `initial_author:` — who committed the files the vault
-      already has, and when.
+  One option, `remote:` — the remote name `push` and `pull` succeed for, `nil`
+  for a vault with none configured. Anything else answers the error git
+  answers, which is how a test provokes a push failure.
   """
   @spec recording(Path.t(), keyword()) :: {Git.t(), pid()}
   def recording(vault_path, opts \\ []) do
     remote = Keyword.get(opts, :remote, "origin")
-    at = Keyword.get(opts, :at, @commit_at)
+    at = @commit_at
 
-    initial =
-      seed(
-        vault_path,
-        Keyword.get(opts, :initial_at, @initial_at),
-        Keyword.get(opts, :initial_author, @initial_author)
-      )
-
-    {:ok, log} = Agent.start_link(fn -> %{metadata: initial, calls: []} end)
+    {:ok, log} = Agent.start_link(fn -> %{metadata: seed(vault_path), calls: []} end)
 
     git =
       Git.new(
@@ -162,12 +151,13 @@ defmodule Vigil.Git.CommitLog do
   # Everything the vault holds when the adapter is built, as one commit by
   # whoever put it there. Without it every note in every test would carry a
   # `created_at` of `nil`.
-  defp seed(vault_path, at, author) do
+  defp seed(vault_path) do
     Path.join(vault_path, "**")
     |> Path.wildcard(match_dot: false)
     |> Enum.filter(&File.regular?/1)
     |> Map.new(fn abs ->
-      {Path.relative_to(abs, vault_path), %{created_at: at, updated_at: at, last_author: author}}
+      {Path.relative_to(abs, vault_path),
+       %{created_at: @initial_at, updated_at: @initial_at, last_author: @initial_author}}
     end)
   end
 end

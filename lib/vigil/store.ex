@@ -147,7 +147,9 @@ defmodule Vigil.Store do
 
   @impl true
   def init(opts) do
-    name = Keyword.get(opts, :name, @default_name)
+    # start_link/1 puts the name in, defaulted or supplied, so there is one
+    # statement of what it defaults to and this reads it.
+    name = Keyword.fetch!(opts, :name)
     vault_path = Keyword.fetch!(opts, :vault_path) |> Path.expand()
     exclude = Keyword.get(opts, :exclude, [])
     git_remote = Keyword.get(opts, :git_remote, "origin")
@@ -410,7 +412,7 @@ defmodule Vigil.Store do
   defp create_project_dir(_state, nil), do: :ok
 
   defp create_project_dir(state, project) do
-    Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
+    Commit.mkdir_p(Path.join(state.vault_path, Layout.project_dir(project)))
   end
 
   # Where a plan becomes an effect. Every effect is Vigil.Commit's — the write,

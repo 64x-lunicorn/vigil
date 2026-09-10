@@ -527,7 +527,7 @@ defmodule Vigil.Vault.Policy do
     |> Enum.flat_map(&facts.find_similar.(&1, domain, @search_depth))
     |> Enum.filter(&(&1.score >= @names_the_note_score))
     |> Enum.uniq_by(& &1.id)
-    |> Enum.reject(&same_project_folder?(&1.id, path, domain))
+    |> Enum.reject(&same_project_folder?(&1.id, path))
   end
 
   defp search_terms(basename) do
@@ -539,17 +539,13 @@ defmodule Vigil.Vault.Policy do
     Enum.uniq([basename | segments])
   end
 
-  defp same_project_folder?(candidate_id, path, "projects") do
-    candidate_path = candidate_id |> String.split("#") |> hd()
-    project_of(candidate_path) != nil and project_of(candidate_path) == project_of(path)
-  end
+  # Which paths lie in a project folder is the layout's question, like every
+  # other one about the shape of a path (docs/design.md, "Domains are
+  # directories"): a note outside the nesting domain lies in no project, so
+  # two of them are never in the same one.
+  defp same_project_folder?(candidate_id, path) do
+    project = candidate_id |> String.split("#") |> hd() |> Layout.project_of()
 
-  defp same_project_folder?(_candidate_id, _path, _domain), do: false
-
-  defp project_of(path) do
-    case String.split(path, "/") do
-      ["projects", project | _] -> project
-      _ -> nil
-    end
+    project != nil and project == Layout.project_of(path)
   end
 end

@@ -35,8 +35,7 @@ defmodule Vigil.Vault.AbsentFacts do
     Facts.new(
       Keyword.merge(
         [
-          layout:
-            Layout.new(vault_path: "/nonexistent", domains: [], exclude: [], project_dirs: []),
+          layout: layout(),
           naming: %{},
           today: ~D[1970-01-01],
           path_exists?: fn _path -> false end,
