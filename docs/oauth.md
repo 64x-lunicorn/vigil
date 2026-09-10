@@ -95,10 +95,23 @@ covers the authorization server. `Vigil.MCP.RateLimit` is per access token and
 guards `/mcp` only. `Vigil.OAuth.Store.rate_limited?/2` has one caller,
 `Flow.consent/4`, so it counts wrong consent passwords and nothing else:
 `/oauth/register`, `/oauth/authorize` and `/oauth/token` are unlimited.
-**Finding → #79.** And the one limit that exists is keyed on `conn.remote_ip`,
-which behind the deployment's proxy is the proxy — one global bucket, so
-exhausting it locks out the owner rather than the attacker.
-**Finding → #81.** (§4.13)
+**Finding → #79.**
+
+**Which address is a limit keyed on, behind a proxy?** Whatever
+`Vigil.OAuth.ClientAddr` says, which is `conn.remote_ip` until the deployment
+says otherwise. A forwarded header is written by whoever sent the request
+unless something in front of vigil overwrites it, so believing one
+unconditionally would turn a per-address limit into no limit at all. §4.13
+states the condition first: "A reverse proxy MUST therefore sanitize any
+inbound requests to ensure the authenticity and integrity of all header values
+relevant for the security of the application servers". vigil therefore reads a
+header only when told its name *and* told which peers may set it
+(`VIGIL_TRUSTED_PROXY_HEADER`, `VIGIL_TRUSTED_PROXIES`), takes the rightmost
+hop it did not add itself, and falls back to the peer on anything it cannot
+account for — an untrusted peer, an unparseable hop, a list that is entirely
+its own proxies. Both settings are empty by default, so a deployment that has
+not been told about its proxy keeps the single global bucket it always had
+rather than silently getting worse. (§4.13)
 
 Two things the walk confirmed in passing: the authorization server never
 redirects to an unregistered `redirect_uri` — an untrusted client or URI gets a
@@ -107,15 +120,15 @@ framing since the headers below (§4.16).
 
 ### What the walk found
 
-| # | Gap | RFC 9700 |
-|---|---|---|
-| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 |
-| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 |
-| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — |
-| [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 |
+| # | Gap | RFC 9700 | Answered by |
+|---|---|---|---|
+| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 | open |
+| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 | open |
+| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — | open |
+| [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 | `Vigil.OAuth.ClientAddr` |
 
-None of them is an incident on the current deployment, where Cloudflare Access
-is in front of the endpoint. They are the defences that are absent behind it.
+None of them was an incident on the current deployment, where Cloudflare Access
+is in front of the endpoint. They are the defences that were absent behind it.
 
 ---
 

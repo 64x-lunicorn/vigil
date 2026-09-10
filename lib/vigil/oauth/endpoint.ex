@@ -9,10 +9,22 @@ defmodule Vigil.OAuth.Endpoint do
   use Plug.Router
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{ConsentPage, Flow}
+  alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow}
 
   plug(:match)
   plug(:dispatch)
+
+  # Resolves what the deployment says about its proxy once, when the router is
+  # initialized, rather than re-parsing a CIDR list on every request.
+  @impl true
+  def init(opts), do: Keyword.put_new_lazy(opts, :client_addr, &ClientAddr.config/0)
+
+  @impl true
+  def call(conn, opts) do
+    conn
+    |> put_private(:vigil_client_addr, opts[:client_addr] || ClientAddr.config())
+    |> super(opts)
+  end
 
   ## Discovery
 
@@ -164,7 +176,9 @@ defmodule Vigil.OAuth.Endpoint do
   defp put_state(query, ""), do: query
   defp put_state(query, state), do: Map.put(query, "state", state)
 
-  defp client_ip(conn), do: conn.remote_ip |> :inet.ntoa() |> List.to_string()
+  # Which address the consent limit is counted against. `Vigil.OAuth.ClientAddr`
+  # owns the decision; this only says where the configuration was put.
+  defp client_ip(conn), do: ClientAddr.of(conn, conn.private.vigil_client_addr)
 
   defp send_json(conn, status, payload) do
     conn

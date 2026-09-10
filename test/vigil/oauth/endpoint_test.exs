@@ -396,6 +396,78 @@ defmodule Vigil.OAuth.EndpointTest do
     assert List.last(results) == 429
   end
 
+  ## The address the limit is keyed on
+
+  test "behind a trusted proxy the consent limit is counted per forwarded client" do
+    trust_proxy!("cf-connecting-ip", ["203.0.113.0/24"])
+    params = wrong_password_params()
+
+    # Five failures exhaust this client's budget and the sixth is refused...
+    for _ <- 1..5 do
+      assert consent_as(params, {203, 0, 113, 7}, "198.51.100.9").status == 200
+    end
+
+    assert consent_as(params, {203, 0, 113, 7}, "198.51.100.9").status == 429
+
+    # ...and the next client through the same proxy still has its own.
+    assert consent_as(params, {203, 0, 113, 7}, "198.51.100.20").status == 200
+  end
+
+  test "a forwarded header from an untrusted peer buys the caller nothing" do
+    trust_proxy!("cf-connecting-ip", ["203.0.113.0/24"])
+    params = wrong_password_params()
+
+    # The peer is not the proxy, so claiming a fresh address on every attempt
+    # does not get a fresh budget: all six land in the peer's own bucket.
+    results =
+      for i <- 1..6, do: consent_as(params, {192, 0, 2, 5}, "198.51.100.#{i}").status
+
+    assert Enum.take(results, 5) == [200, 200, 200, 200, 200]
+    assert List.last(results) == 429
+  end
+
+  test "with no proxy configured the header is ignored and the peer is the bucket" do
+    params = wrong_password_params()
+
+    results =
+      for i <- 1..6, do: consent_as(params, {203, 0, 113, 7}, "198.51.100.#{i}").status
+
+    assert List.last(results) == 429
+  end
+
+  defp wrong_password_params do
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
+      "password" => "falsch",
+      "decision" => "allow"
+    })
+  end
+
+  defp consent_as(params, peer, forwarded) do
+    conn(:post, "/oauth/authorize", URI.encode_query(params))
+    |> put_req_header("content-type", "application/x-www-form-urlencoded")
+    |> put_req_header("cf-connecting-ip", forwarded)
+    |> Map.put(:remote_ip, peer)
+    |> call()
+  end
+
+  defp trust_proxy!(header, cidrs) do
+    previous = [
+      trusted_proxy_header: Application.get_env(:vigil, :trusted_proxy_header),
+      trusted_proxies: Application.get_env(:vigil, :trusted_proxies)
+    ]
+
+    Application.put_env(:vigil, :trusted_proxy_header, header)
+    Application.put_env(:vigil, :trusted_proxies, cidrs)
+
+    on_exit(fn ->
+      for {k, v} <- previous, do: Application.put_env(:vigil, k, v)
+    end)
+  end
+
   ## Response headers on the HTML
 
   # The consent page is the only HTML vigil serves and the only place a human

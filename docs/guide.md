@@ -371,6 +371,9 @@ flowchart TB
    every write tool.
 5. **Rate limiting** per access token, fixed window.
 
+Which address the per-address limits count against is a configured question,
+not a guess: see [the two proxy settings](#the-two-proxy-settings-and-why-they-default-to-unset).
+
 The systemd unit runs with `ProtectSystem=strict`, `ProtectHome=true`,
 `PrivateTmp=true`, `NoNewPrivileges=true`, and `/var/lib/vigil` as the only
 writable path.
@@ -393,6 +396,8 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_RESOURCE` | `http://localhost:4000/mcp` | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |
 | `VIGIL_STATE_DIR` | `tmp/oauth_state` | directory for the three `:dets` files |
+| `VIGIL_TRUSTED_PROXY_HEADER` | unset | header carrying the real client address, e.g. `CF-Connecting-IP` |
+| `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
 | `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
@@ -401,6 +406,44 @@ All settings come from environment variables in `/etc/vigil/env`
 The last two only affect the instructions handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
 will keep writing German notes.
+
+### The two proxy settings, and why they default to unset
+
+vigil's rate limits are keyed per client address, and `conn.remote_ip` — the
+peer of the TCP connection — is the proxy, not the client, in the deployment
+above. Left alone, that makes every limit one global bucket: stricter than
+intended rather than weaker, and exhaustible by anyone who can reach
+`/oauth/authorize`.
+
+Reading `X-Forwarded-For` is not the fix on its own. The header is written by
+whoever sent the request unless something in front of vigil overwrites it, so
+believing it unconditionally turns a global limit into no limit at all — every
+attempt simply claims a new address. So vigil believes a header only when told
+which one and told which peers may set it:
+
+```
+VIGIL_TRUSTED_PROXY_HEADER=CF-Connecting-IP
+VIGIL_TRUSTED_PROXIES=173.245.48.0/20,103.21.244.0/22
+```
+
+**Set both or neither.** A header name without a trusted peer is ignored, and
+a trusted peer without a header name has nothing to read. With neither set,
+behaviour is exactly what it was before the settings existed.
+
+**Setting them wrong is worse than leaving them unset.** If `VIGIL_TRUSTED_PROXIES`
+includes an address that is not in fact a sanitizing proxy — the whole of
+`0.0.0.0/0`, say, or a range vigil is reachable from directly — then any caller
+in that range gets a fresh rate-limit bucket per request just by naming a new
+address. Put the proxy's own addresses there and nothing else. For Cloudflare
+that is the published
+[IP ranges](https://www.cloudflare.com/ips/), and the header to name is
+`CF-Connecting-IP`, which Cloudflare overwrites rather than appends to.
+
+When several hops are listed, vigil takes the rightmost one it did not add
+itself: proxies append what they saw, so anything further left is a claim from
+outside. A hop that is not an address at all stops the walk and the peer is
+used instead — otherwise a caller could inject garbage to push the walk onto a
+value it chose.
 
 ---
 
