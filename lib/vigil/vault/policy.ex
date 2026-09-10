@@ -97,12 +97,15 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # The confirm gate comes last, for the same reason the section ops check the
+  # path first: a write the policy will refuse outright must be refused, not
+  # quoted back in a confirmation prompt. `delete_note("skills/tdd.md",
+  # confirm: false)` used to answer "permanently deletes skills/tdd.md" for a
+  # path that is not deletable at all.
   def check(:delete_note, request, facts) do
-    path = Map.fetch!(request, :path)
-    backlinks = facts.find_backlinks.(path)
-
-    with :ok <- require_confirm(confirm?(request), delete_description(path, backlinks)),
-         {:ok, path} <- existing_note(path, facts) do
+    with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
+         backlinks = facts.find_backlinks.(path),
+         :ok <- require_confirm(confirm?(request), delete_description(path, backlinks)) do
       {:ok, %{path: path, backlinks: backlinks}}
     end
   end
@@ -136,12 +139,14 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # Confirm last, as on `:delete_note`: a move to `skills/` or out of an
+  # excluded domain answers "Invalid path" rather than quoting the path back
+  # in a prompt for a write that will be refused on the next turn.
   def check(:move_note, request, facts) do
     from = Map.fetch!(request, :from)
     to = Map.fetch!(request, :to)
 
-    with :ok <- require_confirm(confirm?(request), "moves #{from} to #{to}"),
-         :ok <- path_sanity(from),
+    with :ok <- path_sanity(from),
          {:ok, from_candidate, _changed?} <- normalize(from),
          {:ok, normalized_from} <- existing_note(from_candidate, facts),
          content = note_content(normalized_from, facts),
@@ -150,7 +155,8 @@ defmodule Vigil.Vault.Policy do
          :ok <- path_sanity(normalized_to),
          {:ok, domain, create_dir} <- writable_path(normalized_to, facts, false),
          :ok <- naming_convention(normalized_to, domain, content, facts),
-         :ok <- refute_exists(normalized_to, facts) do
+         :ok <- refute_exists(normalized_to, facts),
+         :ok <- require_confirm(confirm?(request), "moves #{from} to #{to}") do
       {:ok,
        %{
          from: normalized_from,

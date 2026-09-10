@@ -118,12 +118,12 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:delete_note, params}, _from, state) do
-    {result, new_state} = do_delete_note(params, state)
+    {result, new_state} = write(:delete_note, params, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:move_note, params}, _from, state) do
-    {result, new_state} = do_move_note(params, state)
+    {result, new_state} = write(:move_note, params, state)
     {:reply, result, new_state}
   end
 
@@ -320,7 +320,7 @@ defmodule Vigil.Store do
 
   ## The write path
   #
-  # Six operations, one sequence: ask the policy, read the note, shape the
+  # Eight operations, one sequence: ask the policy, read the note, shape the
   # write, then perform it. Only the last step is an effect, and only the two
   # middle steps differ between operations — Vigil.Vault.Plan holds the
   # difference, this holds the sequence. Every failure before the effect
@@ -345,9 +345,11 @@ defmodule Vigil.Store do
 
   defp prepare(_op, _resolved, _state), do: :ok
 
-  # A create has no current content by definition; every other operation is a
-  # transformation of what the note already says.
-  defp current_content(:create, _resolved, _state), do: {:ok, nil}
+  # A create has no current content by definition, and the two git-level
+  # operations never look at it; every other operation is a transformation of
+  # what the note already says.
+  defp current_content(op, _resolved, _state) when op in [:create, :delete_note, :move_note],
+    do: {:ok, nil}
 
   defp current_content(_op, resolved, state),
     do: read_existing_file(abs(state, resolved.path))
@@ -358,131 +360,90 @@ defmodule Vigil.Store do
     Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
   end
 
-  # Where a plan becomes an effect: write, commit, reparse into the index,
-  # push (docs/design.md, "The write path"). The plan's own report — what only
-  # that operation knows about its result — is merged into the success map.
-  defp execute(%Plan{} = plan, state) do
-    {result, new_state} = write_and_commit(state, plan.path, plan.content, plan.message)
-
-    case result do
-      {:ok, ok_map} -> {{:ok, Map.merge(ok_map, plan.report)}, new_state}
-      other -> {other, new_state}
-    end
-  end
-
-  ## delete
-
-  defp do_delete_note(params, state) do
-    with {:ok, %{path: path, backlinks: backlinks}} <-
-           Policy.check(:delete_note, params, facts(state)) do
-      case Git.remove_commit(state.vault_path, path, "delete: #{path}") do
-        :ok ->
-          case Git.push(state.vault_path, state.git_remote) do
-            :ok ->
-              new_index = Index.remove(state.index, path)
-              new_state = %{state | index: new_index}
-
-              result =
-                {:ok, %{path: path, deleted: true, pushed: true, broken_backlinks: backlinks}}
-
-              {result, new_state}
-
-            {:error, out} ->
-              {{:error, "Deletion committed locally, but push failed: #{out}"}, state}
-          end
-
-        {:error, out} ->
-          {{:error, "git rm/commit failed: #{out}"}, state}
-      end
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## move_note
-
-  defp do_move_note(params, state) do
-    with {:ok, resolved} <- Policy.check(:move_note, params, facts(state)) do
-      do_move_note_to(state, resolved.from, resolved.to)
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  defp do_move_note_to(state, normalized_from, normalized_to) do
-    backlinks_before = Index.backlinks(state.index, normalized_from)
-    commit_message = "move: #{normalized_from} -> #{normalized_to}"
-
-    case Git.move_commit(state.vault_path, normalized_from, normalized_to, commit_message) do
+  # Where a plan becomes an effect. One order for all three actions
+  # (docs/design.md, "The write path"): perform it, commit, reparse into the
+  # index, then push. What differs is what the object is — which is why each
+  # clause names its own push-failure message — and the plan's own report,
+  # merged into the success map.
+  defp execute(%Plan{action: {:write, path, content}} = plan, state) do
+    case Commit.write(state.vault_path, path, content, plan.message) do
       {:ok, commit_meta} ->
-        case Git.push(state.vault_path, state.git_remote) do
-          :ok ->
-            new_index =
-              case reparse(state, normalized_to, commit_meta, "move") do
-                {:ok, file} -> Index.move(state.index, normalized_from, file)
-                :error -> state.index
-              end
+        state = put_reparsed(state, path, commit_meta, "write")
 
-            new_state = %{state | index: new_index}
-            # Backlink report — a diff of incoming references before and
-            # after the move rather than an ad-hoc scan. A source chunk that
-            # resolved before and no longer shows up in the (rebuilt)
-            # incoming references of the target now points nowhere — for
-            # example because it referenced an explicit path instead of a
-            # basename.
-            backlinks_after = Index.backlinks(new_index, normalized_to)
-
-            result =
-              {:ok,
-               %{
-                 from: normalized_from,
-                 to: normalized_to,
-                 pushed: true,
-                 broken_backlinks: backlinks_before -- backlinks_after
-               }}
-
-            {result, new_state}
-
-          {:error, out} ->
-            {{:error, "Move committed locally, but push failed: #{out}"}, state}
-        end
-
-      {:error, out} ->
-        {{:error, "git mv/commit failed: #{out}"}, state}
-    end
-  end
-
-  ## shared write path
-
-  # The write effect belongs to Vigil.Commit; what this adds is the note-shaped
-  # part around it — the reparse between commit and push (docs/design.md, "The
-  # write path"), which would be wrong for a skill.
-  defp write_and_commit(state, rel_path, full_content, message) do
-    case Commit.write(state.vault_path, rel_path, full_content, message) do
-      {:ok, commit_meta} ->
-        index =
-          case reparse(state, rel_path, commit_meta, "write") do
-            {:ok, file} -> Index.put(state.index, file)
-            :error -> state.index
-          end
-
-        new_state = %{state | index: index}
-
-        case Git.push(new_state.vault_path, new_state.git_remote) do
-          :ok ->
-            {{:ok, %{path: rel_path, pushed: true}}, new_state}
-
-          {:error, out} ->
-            {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
-        end
+        push(
+          state,
+          Map.merge(%{path: path, pushed: true}, plan.report),
+          "Change saved and committed locally, but push failed"
+        )
 
       {:error, msg} ->
         {{:error, msg}, state}
     end
   end
 
+  defp execute(%Plan{action: {:delete, path}} = plan, state) do
+    case Git.remove_commit(state.vault_path, path, plan.message) do
+      :ok ->
+        state = %{state | index: Index.remove(state.index, path)}
+
+        push(
+          state,
+          Map.merge(%{path: path, deleted: true, pushed: true}, plan.report),
+          "Deletion committed locally, but push failed"
+        )
+
+      {:error, out} ->
+        {{:error, "git rm/commit failed: #{out}"}, state}
+    end
+  end
+
+  defp execute(%Plan{action: {:move, from, to}} = plan, state) do
+    # Backlink report — a diff of incoming references before and after the
+    # move rather than an ad-hoc scan. A source chunk that resolved before and
+    # no longer shows up in the (rebuilt) incoming references of the target now
+    # points nowhere — for example because it referenced an explicit path
+    # instead of a basename.
+    backlinks_before = Index.backlinks(state.index, from)
+
+    case Git.move_commit(state.vault_path, from, to, plan.message) do
+      {:ok, commit_meta} ->
+        state = move_reparsed(state, from, to, commit_meta)
+        broken = backlinks_before -- Index.backlinks(state.index, to)
+
+        push(
+          state,
+          Map.merge(%{from: from, to: to, pushed: true, broken_backlinks: broken}, plan.report),
+          "Move committed locally, but push failed"
+        )
+
+      {:error, out} ->
+        {{:error, "git mv/commit failed: #{out}"}, state}
+    end
+  end
+
+  defp push(state, success, failure_prefix) do
+    case Git.push(state.vault_path, state.git_remote) do
+      :ok -> {{:ok, success}, state}
+      {:error, out} -> {{:error, "#{failure_prefix}: #{out}"}, state}
+    end
+  end
+
+  defp put_reparsed(state, path, commit_meta, verb) do
+    case reparse(state, path, commit_meta, verb) do
+      {:ok, file} -> %{state | index: Index.put(state.index, file)}
+      :error -> state
+    end
+  end
+
+  defp move_reparsed(state, from, to, commit_meta) do
+    case reparse(state, to, commit_meta, "move") do
+      {:ok, file} -> %{state | index: Index.move(state.index, from, file)}
+      :error -> state
+    end
+  end
+
   # Used by the write paths that read a note's current content before
-  # transforming it (append, rewrite_note, edit_and_commit, update_frontmatter).
+  # transforming it — every operation but create, delete_note and move_note.
   # A read failure here happens before anything is written, so it is
   # reported back to the caller as an ordinary error tuple rather than
   # crashing the GenServer.
@@ -493,8 +454,8 @@ defmodule Vigil.Store do
     end
   end
 
-  # Used by reparse/4: the write or move itself has already succeeded (and been
-  # committed/pushed) by the time it runs. A read failure here must not crash
+  # Used by reparse/4: the write or move itself has already succeeded and been
+  # committed by the time it runs. A read failure here must not crash
   # the GenServer and take down unrelated calls — it only means the index
   # stays stale for `rel_path` until the next reload, so the failure is logged
   # rather than propagated.

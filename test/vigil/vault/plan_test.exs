@@ -34,6 +34,9 @@ defmodule Vigil.Vault.PlanTest do
 
   defp fueling, do: chunk("bike/terra-speed.md#fueling", "Fueling", 6, 7)
 
+  # Every content-shaped plan writes; the bytes are what differ.
+  defp written(%Plan{action: {:write, _path, content}}), do: content
+
   describe "create" do
     test "frontmatter is built in front of the content, and the message quotes the H1" do
       resolved = %{
@@ -46,8 +49,7 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:create, resolved, %{content: "# New\n\nbody"}, nil)
 
-      assert plan.path == "bike/new.md"
-      assert plan.content == "---\ntype: reference\n---\n# New\n\nbody\n"
+      assert plan.action == {:write, "bike/new.md", "---\ntype: reference\n---\n# New\n\nbody\n"}
       assert plan.message == "create: bike/new.md — # New"
       assert plan.report == %{}
     end
@@ -63,8 +65,8 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:create, resolved, %{content: "# Race\n"}, nil)
 
-      assert plan.content =~ "starts: 2026-05-01T08:00:00Z"
-      assert plan.content =~ "ends: 2026-05-01T18:00:00Z"
+      assert written(plan) =~ "starts: 2026-05-01T08:00:00Z"
+      assert written(plan) =~ "ends: 2026-05-01T18:00:00Z"
     end
 
     test "a normalized path is reported back, so the caller learns where the note landed" do
@@ -102,7 +104,7 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:append, resolved, %{content: "Extra."}, @note)
 
-      assert String.ends_with?(plan.content, "Gearing body.\n\nExtra.\n")
+      assert String.ends_with?(written(plan), "Gearing body.\n\nExtra.\n")
       assert plan.message == "append: bike/terra-speed.md — Extra."
     end
 
@@ -111,7 +113,7 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:append, resolved, %{content: "More."}, @note)
 
-      assert plan.content =~ "Old body.\nMore.\n\n## Gearing"
+      assert written(plan) =~ "Old body.\nMore.\n\n## Gearing"
     end
 
     test "in a new section at the end of the file" do
@@ -119,7 +121,7 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:append, resolved, %{content: "Tubeless."}, @note)
 
-      assert String.ends_with?(plan.content, "\n## Tyres\nTubeless.\n")
+      assert String.ends_with?(written(plan), "\n## Tyres\nTubeless.\n")
     end
   end
 
@@ -129,8 +131,8 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:replace_section, resolved, %{content: "New body."}, @note)
 
-      assert plan.content =~ "## Fueling\nNew body.\n\n## Gearing"
-      refute plan.content =~ "Old body."
+      assert written(plan) =~ "## Fueling\nNew body.\n\n## Gearing"
+      refute written(plan) =~ "Old body."
       assert plan.message == "replace_section: bike/terra-speed.md#fueling"
     end
 
@@ -139,8 +141,8 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:delete_section, resolved, %{}, @note)
 
-      refute plan.content =~ "Fueling"
-      assert plan.content =~ "## Gearing"
+      refute written(plan) =~ "Fueling"
+      assert written(plan) =~ "## Gearing"
       assert plan.message == "delete_section: bike/terra-speed.md#fueling"
     end
 
@@ -161,7 +163,7 @@ defmodule Vigil.Vault.PlanTest do
       assert {:ok, plan} =
                Plan.build(:rewrite_note, resolved, %{content: "# T\n\nAll new."}, @note)
 
-      assert plan.content == "---\ntype: reference\n---\n# T\n\nAll new.\n"
+      assert written(plan) == "---\ntype: reference\n---\n# T\n\nAll new.\n"
       assert plan.message == "rewrite_note: bike/terra-speed.md"
     end
 
@@ -184,8 +186,8 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:update_frontmatter, resolved, %{}, @note)
 
-      assert String.starts_with?(plan.content, "---\ntype: decision\n---\n")
-      assert plan.content =~ "## Fueling\nOld body."
+      assert String.starts_with?(written(plan), "---\ntype: decision\n---\n")
+      assert written(plan) =~ "## Fueling\nOld body."
       assert plan.message == "update_frontmatter: bike/terra-speed.md"
     end
 
@@ -199,8 +201,8 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:update_frontmatter, resolved, %{}, @note)
 
-      assert plan.content =~ "starts: 2026-05-01T08:00:00Z"
-      assert plan.content =~ "ends: 2026-05-01T18:00:00Z"
+      assert written(plan) =~ "starts: 2026-05-01T08:00:00Z"
+      assert written(plan) =~ "ends: 2026-05-01T18:00:00Z"
     end
 
     test "a note whose frontmatter cannot be split is an error" do
@@ -223,7 +225,34 @@ defmodule Vigil.Vault.PlanTest do
     }
 
     assert {:ok, plan} = Plan.build(:create, resolved, %{content: "# T\n\nbody\n\n\n"}, nil)
-    assert String.ends_with?(plan.content, "body\n")
-    refute String.ends_with?(plan.content, "\n\n")
+    assert String.ends_with?(written(plan), "body\n")
+    refute String.ends_with?(written(plan), "\n\n")
+  end
+
+  describe "the git-level operations" do
+    test "delete_note plans a removal and reports the backlinks it is about to break" do
+      resolved = %{path: "bike/terra-speed.md", backlinks: ["bike/via-carolina.md"]}
+
+      assert {:ok, plan} = Plan.build(:delete_note, resolved, %{confirm: true}, nil)
+
+      assert plan.action == {:delete, "bike/terra-speed.md"}
+      assert plan.message == "delete: bike/terra-speed.md"
+      assert plan.report == %{broken_backlinks: ["bike/via-carolina.md"]}
+    end
+
+    test "move_note plans a move; which references it broke is the executor's to say" do
+      resolved = %{from: "bike/terra-speed.md", to: "bike/terra-40c.md"}
+
+      assert {:ok, plan} = Plan.build(:move_note, resolved, %{confirm: true}, nil)
+
+      assert plan.action == {:move, "bike/terra-speed.md", "bike/terra-40c.md"}
+      assert plan.message == "move: bike/terra-speed.md -> bike/terra-40c.md"
+      assert plan.report == %{}
+    end
+
+    test "neither reads the note's content" do
+      assert {:ok, _} = Plan.build(:delete_note, %{path: "bike/x.md", backlinks: []}, %{}, nil)
+      assert {:ok, _} = Plan.build(:move_note, %{from: "bike/a.md", to: "bike/b.md"}, %{}, nil)
+    end
   end
 end

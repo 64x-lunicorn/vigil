@@ -235,6 +235,39 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:delete_note, %{path: "bike/x.md", confirm: true}, f)
     end
 
+    # The confirm gate used to run before the path check, so a delete the
+    # policy refuses outright was quoted back in a confirmation prompt — and
+    # the boundary tests above never caught it, because both pass confirm: true.
+    test "a path the policy refuses is refused, not offered for confirmation" do
+      f = facts(path_exists?: fn _ -> true end)
+
+      for path <- ["skills/tdd.md", "work/secret.md", "../../etc/passwd"] do
+        assert {:error, "Invalid path"} =
+                 Policy.check(:delete_note, %{path: path, confirm: false}, f)
+      end
+    end
+
+    test "a move to or from a path the policy refuses is refused, not offered" do
+      f = facts(path_exists?: fn _ -> true end)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(
+                 :move_note,
+                 %{from: "bike/a.md", to: "skills/a.md", confirm: false},
+                 f
+               )
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:move_note, %{from: "bike/a.md", to: "work/a.md", confirm: false}, f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(
+                 :move_note,
+                 %{from: "../../etc/passwd", to: "bike/a.md", confirm: false},
+                 f
+               )
+    end
+
     test "move_note requires confirm" do
       f = facts(path_exists?: fn p -> p == "bike/a.md" end)
 

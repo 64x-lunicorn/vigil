@@ -1046,6 +1046,20 @@ defmodule Vigil.StoreTest do
       assert File.exists?(Path.join(vault, "skills/tdd.md"))
     end
 
+    # Without confirm the answer used to be a confirmation prompt quoting the
+    # path back — for a write the policy refuses on the next turn either way.
+    test "delete_note without confirm answers Invalid path, not a prompt" do
+      assert {:error, "Invalid path"} = Store.delete_note(%{path: "skills/tdd.md"})
+    end
+
+    test "move_note without confirm answers Invalid path, not a prompt" do
+      assert {:error, "Invalid path"} =
+               Store.move_note(%{from: "bike/terra-speed.md", to: "skills/pwned.md"})
+
+      assert {:error, "Invalid path"} =
+               Store.move_note(%{from: "skills/tdd.md", to: "bike/pwned.md"})
+    end
+
     test "a skill never becomes searchable through a write" do
       Store.append(%{path: "skills/tdd.md", content: "INJECTEDWORD"})
       assert search(%{query: "INJECTEDWORD"}) == []

@@ -1,33 +1,47 @@
 defmodule Vigil.Vault.Plan do
   @moduledoc """
-  What a write turns into before anything happens: the file to write, the
-  bytes to write into it, and the commit message to write them under.
+  What a write turns into before anything happens: the action to perform and
+  the commit message to perform it under.
 
   The third pure module of the write path, and the one that ties the other two
   together. `Vigil.Vault.Policy` decides *whether* a write is allowed and what
   it resolves to; `Vigil.Vault.Edit` produces *what* a chunk-shaped edit turns
   a note's content into; `Plan` turns a resolved decision plus the note's
-  current content into the whole write, for every content-shaped operation.
+  current content into the whole write. All eight write operations go through
+  it.
 
-  It performs no effect: it reads no file, touches no git, and knows nothing
-  about `Vigil.Store`'s state. `Vigil.Store` reads the note, hands the content
-  over, and executes what comes back — write the file, commit, reparse into
-  the index, then push (`docs/design.md`, "The write path"). That order used
-  to be restated at every write site; the plan is what let it be stated once.
+  Three actions, because there are three shapes of write:
+
+    * `{:write, path, content}` — the six content-shaped operations, which
+      differ only in the bytes they produce.
+    * `{:delete, path}` and `{:move, from, to}` — the two git-level
+      operations, which produce no content at all.
+
+  A plan performs no effect: it reads no file, touches no git, and knows
+  nothing about `Vigil.Store`'s state. `Vigil.Store` reads the note, hands the
+  content over, and executes what comes back — perform the action, commit,
+  reparse into the index, then push (`docs/design.md`, "The write path"). That
+  order used to be restated at every write site; the plan is what let it be
+  stated once.
 
   A plan's `report` carries what only this operation knows about its own
-  result — `path_normalized_from` on a create whose path was normalized —
-  merged into the write's success map by whoever executes it.
+  result — `path_normalized_from` on a create whose path was normalized, the
+  backlinks a delete is about to break — merged into the success map by
+  whoever executes it. What only the *effect* knows stays with the executor.
   """
 
   alias Vigil.{Markdown, Vault.Edit}
 
-  @enforce_keys [:path, :content, :message]
-  defstruct [:path, :content, :message, report: %{}]
+  @enforce_keys [:action, :message]
+  defstruct [:action, :message, report: %{}]
+
+  @type action ::
+          {:write, String.t(), String.t()}
+          | {:delete, String.t()}
+          | {:move, String.t(), String.t()}
 
   @type t :: %__MODULE__{
-          path: String.t(),
-          content: String.t(),
+          action: action,
           message: String.t(),
           report: map()
         }
@@ -39,11 +53,14 @@ defmodule Vigil.Vault.Plan do
           | :rewrite_note
           | :delete_section
           | :update_frontmatter
+          | :delete_note
+          | :move_note
 
   @doc """
   Builds the plan for `op` from the policy's `resolved` decision, the caller's
   `request`, and `current` — the note's content as it stands on disk, or `nil`
-  for `:create`, which has no current content by definition.
+  for the operations that do not read it: `:create`, which has no current
+  content by definition, and the two git-level ones, which never look at it.
 
   Returns `{:ok, plan}`, or `{:error, message}` when the content cannot be
   shaped: an edit whose chunk is gone, or a note whose frontmatter block is
@@ -58,8 +75,8 @@ defmodule Vigil.Vault.Plan do
 
     {:ok,
      %__MODULE__{
-       path: resolved.path,
-       content: Markdown.normalize_trailing_newline(frontmatter <> content),
+       action:
+         {:write, resolved.path, Markdown.normalize_trailing_newline(frontmatter <> content)},
        message: "create: #{resolved.path} — #{first_line(content)}",
        report: normalized_from(resolved.normalized_from)
      }}
@@ -118,8 +135,29 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
+  # The backlinks are the policy's answer, looked up before anything is
+  # deleted — after the effect there is nothing left to ask about.
+  def build(:delete_note, resolved, _request, _current) do
+    {:ok,
+     %__MODULE__{
+       action: {:delete, resolved.path},
+       message: "delete: #{resolved.path}",
+       report: %{broken_backlinks: resolved.backlinks}
+     }}
+  end
+
+  # Which references the move actually broke is a diff across the effect, so
+  # it belongs to whoever performs it, not here.
+  def build(:move_note, resolved, _request, _current) do
+    {:ok,
+     %__MODULE__{
+       action: {:move, resolved.from, resolved.to},
+       message: "move: #{resolved.from} -> #{resolved.to}"
+     }}
+  end
+
   defp plan(path, content, message) do
-    %__MODULE__{path: path, content: content, message: message}
+    %__MODULE__{action: {:write, path, content}, message: message}
   end
 
   defp normalized_from(nil), do: %{}
