@@ -20,7 +20,6 @@ defmodule Vigil.Vault.AbsentFacts do
     Facts.new(
       Keyword.merge(
         [
-          vault_path: "/vault",
           domains: [],
           exclude: [],
           project_dirs: [],

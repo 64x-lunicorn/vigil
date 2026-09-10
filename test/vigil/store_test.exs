@@ -332,15 +332,23 @@ defmodule Vigil.StoreTest do
       assert Enum.any?(result.active, &(&1.id == "bike/via-carolina.md"))
     end
 
-    test "invalid event (ends < starts) never appears in current" do
-      {:ok, _} =
-        Store.call(:create, %{
-          path: "bike/kaputt.md",
-          type: "event",
-          content: "# Kaputt\nx",
-          starts: "2026-07-10T10:00:00+02:00",
-          ends: "2026-07-09T10:00:00+02:00"
-        })
+    # An event whose ends precedes its starts cannot reach the index through
+    # vigil at all: the write gate refuses it (Vigil.Vault.Frontmatter owns
+    # the rule, Vigil.Parser applies the same one to what it reads). The note
+    # that used to be written here and then quietly downgraded to `reference`
+    # on the way into the index is the disagreement that owner closed.
+    test "an event whose ends precedes its starts never reaches the index", %{vault: vault} do
+      assert {:error, msg} =
+               Store.call(:create, %{
+                 path: "bike/kaputt.md",
+                 type: "event",
+                 content: "# Kaputt\nx",
+                 starts: "2026-07-10T10:00:00+02:00",
+                 ends: "2026-07-09T10:00:00+02:00"
+               })
+
+      assert msg =~ "ends must not be before starts"
+      refute File.exists?(Path.join(vault, "bike/kaputt.md"))
 
       now = ~U[2026-07-10 08:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
       result = Store.call(:current, %{now: now})

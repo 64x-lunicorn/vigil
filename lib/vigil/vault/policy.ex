@@ -20,7 +20,7 @@ defmodule Vigil.Vault.Policy do
   """
 
   alias Vigil.{Index, Markdown, Slug}
-  alias Vigil.Vault.{Decision, Facts}
+  alias Vigil.Vault.{Decision, Facts, Frontmatter}
 
   @type op ::
           :create
@@ -191,7 +191,6 @@ defmodule Vigil.Vault.Policy do
     last = List.last(parts)
 
     cond do
-      not within_vault?(path, facts) -> @invalid_path
       not String.ends_with?(last, ".md") -> @invalid_path
       first == "skills" -> @invalid_path
       first in facts.exclude -> @invalid_path
@@ -200,10 +199,6 @@ defmodule Vigil.Vault.Policy do
       length(parts) == 3 and first == "projects" -> domain_rules(first, parts, facts, create_dirs)
       true -> @invalid_path
     end
-  end
-
-  defp within_vault?(path, facts) do
-    String.starts_with?(Path.expand(path, facts.vault_path), facts.vault_path <> "/")
   end
 
   defp domain_rules(domain, parts, facts, create_dirs) do
@@ -316,9 +311,7 @@ defmodule Vigil.Vault.Policy do
         :ok
 
       naming ->
-        with :ok <- naming_pattern(path, domain, naming, content, facts) do
-          naming_max_depth(path, domain, naming)
-        end
+        naming_pattern(path, domain, naming, content, facts)
     end
   end
 
@@ -331,18 +324,6 @@ defmodule Vigil.Vault.Policy do
       {:error,
        "The name \"#{scope_string}\" does not match the schema for domain #{domain}.\n" <>
          "#{naming.hint}\nSuggestion: #{naming_suggestion(path, domain, naming, content, facts)}"}
-    end
-  end
-
-  defp naming_max_depth(_path, _domain, %{max_depth: nil}), do: :ok
-
-  defp naming_max_depth(path, domain, %{max_depth: max_depth}) do
-    depth = path |> naming_scope_string(domain, :relpath) |> String.split("/") |> length()
-
-    if depth <= max_depth do
-      :ok
-    else
-      {:error, "Invalid path. Domain #{domain} allows at most #{max_depth} nesting level(s)."}
     end
   end
 
@@ -431,42 +412,30 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # The frontmatter rule itself is `Vigil.Vault.Frontmatter`'s, so that the
+  # write gate and the reader that indexes what it wrote cannot disagree about
+  # what a valid note is. What stays here is the refusal: the sentence the
+  # caller is handed back.
   defp type_and_times(request) do
     type = Map.fetch!(request, :type)
     starts = Map.get(request, :starts)
     ends = Map.get(request, :ends)
 
-    type_atom =
-      case type do
-        "reference" -> :reference
-        "decision" -> :decision
-        "event" -> :event
-        t when is_atom(t) -> t
-        _ -> nil
-      end
-
-    cond do
-      type_atom == nil ->
-        {:error, "Invalid type"}
-
-      type_atom == :event and (is_nil(starts) or is_nil(ends)) ->
-        {:error, "starts/ends are required for type: event"}
-
-      type_atom != :event and (not is_nil(starts) or not is_nil(ends)) ->
-        {:error, "starts/ends are only allowed for type: event"}
-
-      type_atom == :event ->
-        with {:ok, s, _} <- DateTime.from_iso8601(starts),
-             {:ok, e, _} <- DateTime.from_iso8601(ends) do
-          {:ok, type_atom, s, e}
-        else
-          _ -> {:error, "starts/ends must be valid ISO8601 timestamps with an offset"}
-        end
-
-      true ->
-        {:ok, type_atom, nil, nil}
+    case Frontmatter.check(type, starts, ends) do
+      {:ok, %Frontmatter{type: type, starts: starts, ends: ends}} -> {:ok, type, starts, ends}
+      {:error, problem} -> {:error, refusal(problem)}
     end
   end
+
+  defp refusal(:type_missing), do: "Invalid type"
+  defp refusal({:unknown_type, _value}), do: "Invalid type"
+  defp refusal(:times_missing), do: "starts/ends are required for type: event"
+  defp refusal(:times_not_allowed), do: "starts/ends are only allowed for type: event"
+
+  defp refusal(:times_unparsable),
+    do: "starts/ends must be valid ISO8601 timestamps with an offset"
+
+  defp refusal(:ends_before_starts), do: "ends must not be before starts"
 
   ## Destructive-operation gates
 

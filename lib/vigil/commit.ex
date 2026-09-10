@@ -1,13 +1,18 @@
 defmodule Vigil.Commit do
   @moduledoc """
-  The write effect: create the directory, write the file, commit it.
+  The write effect: what it takes to make a change to the vault.
 
-  Vigil is the vault's only writer (`docs/design.md`, principle 2), and this is
-  the one place that carries the write out. Notes and skills both come through
-  here; what happens around it does not. `Vigil.Store` reparses the written
-  file into the index between commit and push, which would be wrong for a
-  skill — skills are never notes — and push stays with each caller, because the
-  two push-failure messages describe different objects and legitimately differ.
+  Write a file, delete one, move one, create a directory, push — and the
+  wording for a POSIX error. Vigil is the vault's only writer (`docs/design.md`,
+  principle 2), and this is the one place that carries a change out. Notes and
+  skills both come through here.
+
+  What happens *around* the effect does not. `Vigil.Store` sequences it —
+  perform, commit, reparse into the index, push — and that order is stated
+  where a plan is executed, not here. The reparse would be wrong for a skill,
+  since skills are never notes, and each caller renders its own push failure,
+  because the messages name different objects: a change, a deletion, a move, a
+  skill.
 
   Deliberately not under `Vigil.Vault.*`. The same precedent already applies to
   `Vigil.Markdown`, which owns the trailing-newline rule precisely because
@@ -41,6 +46,45 @@ defmodule Vigil.Commit do
       end
     end
   end
+
+  @doc """
+  Removes `rel_path` from the vault and commits the removal under `message`.
+
+  Nothing comes back but the verdict: the file is gone, so there is no note to
+  reparse and no metadata a caller could put on one.
+  """
+  @spec delete(String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  def delete(vault_path, rel_path, message) do
+    case Git.remove_commit(vault_path, rel_path, message) do
+      :ok -> :ok
+      {:error, out} -> {:error, "git rm/commit failed: #{out}"}
+    end
+  end
+
+  @doc """
+  Moves `from` to `to` inside the vault and commits both paths under `message`.
+
+  Returns the commit metadata for the note at its new path.
+  """
+  @spec move(String.t(), String.t(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, String.t()}
+  def move(vault_path, from, to, message) do
+    case Git.move_commit(vault_path, from, to, message) do
+      {:ok, commit_meta} -> {:ok, commit_meta}
+      {:error, out} -> {:error, "git mv/commit failed: #{out}"}
+    end
+  end
+
+  @doc """
+  Pushes the vault's commits to `remote`.
+
+  The failure comes back as git wrote it, unwrapped: what was committed
+  locally but not pushed is a change, a deletion, a move or a skill, and the
+  caller is the one that knows which — so the sentence in front of it is the
+  caller's (`docs/design.md`, "The write path").
+  """
+  @spec push(String.t(), String.t()) :: :ok | {:error, String.t()}
+  def push(vault_path, remote), do: Git.push(vault_path, remote)
 
   @doc """
   Creates `path` and every missing parent, or says why it could not.

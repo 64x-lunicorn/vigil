@@ -347,6 +347,58 @@ defmodule Vigil.VaultCheckTest do
     refute Enum.any?(messages, &String.contains?(&1, "'domaina'"))
   end
 
+  # The drift check reads the file through Vigil.Vault.Domains, the module
+  # design.md designates as its one reader. It used to do its own YAML read
+  # and swallow every failure as "no keys", so a broken file was reported as a
+  # vault whose every domain is unknown to the runtime — a report on a file it
+  # had not read, in the voice of one it had.
+  test "B4: an unparsable _domains.yml is reported as unreadable, not as drift", %{vault: vault} do
+    File.write!(Path.join(vault, "_domains.yml"), "domaina: [unterminated\n")
+
+    messages = VaultCheck.run(vault).b4_domain_drift |> Enum.map(& &1.message)
+
+    assert Enum.any?(messages, &(&1 =~ "_domains.yml is not parsable"))
+    refute Enum.any?(messages, &String.contains?(&1, "is unknown to the runtime"))
+    refute Enum.any?(messages, &String.contains?(&1, "is configured but does not exist"))
+  end
+
+  test "B4: a _domains.yml that cannot be read is reported as unreadable", %{vault: vault} do
+    path = Path.join(vault, "_domains.yml")
+    File.rm!(path)
+    File.mkdir_p!(path)
+
+    messages = VaultCheck.run(vault).b4_domain_drift |> Enum.map(& &1.message)
+
+    assert Enum.any?(messages, &(&1 =~ "_domains.yml could not be read"))
+    refute Enum.any?(messages, &String.contains?(&1, "is unknown to the runtime"))
+  end
+
+  # A file that is not there is not a file that could not be read: design.md
+  # says a missing _domains.yml costs the domain descriptions and nothing
+  # else, and vault adoption depends on being told which domains have no entry
+  # in it (scripts/init.sh appends exactly those).
+  test "B4: a missing _domains.yml still reports every domain as unknown", %{vault: vault} do
+    File.rm!(Path.join(vault, "_domains.yml"))
+
+    messages = VaultCheck.run(vault).b4_domain_drift |> Enum.map(& &1.message)
+
+    assert Enum.any?(messages, &(&1 =~ "'domaina' exists in the vault but is unknown"))
+    assert Enum.any?(messages, &(&1 =~ "'domainb' exists in the vault but is unknown"))
+  end
+
+  test "B4: a naming rule the runtime had to ignore is reported", %{vault: vault} do
+    File.write!(Path.join(vault, "_domains.yml"), """
+    domaina:
+      naming:
+        pattern: '([unclosed'
+    domainb: "B"
+    """)
+
+    messages = VaultCheck.run(vault).b4_domain_drift |> Enum.map(& &1.message)
+
+    assert Enum.any?(messages, &(&1 =~ "naming.pattern for 'domaina' is not a valid regex"))
+  end
+
   test "B6: heading threshold, word threshold, duplicate headings, sentence headings", %{
     vault: vault
   } do

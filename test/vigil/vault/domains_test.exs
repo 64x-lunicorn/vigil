@@ -46,7 +46,6 @@ defmodule Vigil.Vault.DomainsTest do
           scope: relpath
           suggestion: date
           hint: "Journal notes are named YYYY-MM-DD.md"
-          max_depth: 2
       """
 
       assert {%{"journal" => naming}, []} = Domains.parse(yaml)
@@ -54,8 +53,7 @@ defmodule Vigil.Vault.DomainsTest do
       assert %Naming{
                scope: :relpath,
                suggestion: :date,
-               hint: "Journal notes are named YYYY-MM-DD.md",
-               max_depth: 2
+               hint: "Journal notes are named YYYY-MM-DD.md"
              } = naming
 
       assert Regex.match?(naming.pattern, "2026-09-09.md")
@@ -92,16 +90,6 @@ defmodule Vigil.Vault.DomainsTest do
       """
 
       assert {%{"bike" => %Naming{hint: ""}}, []} = Domains.parse(yaml)
-    end
-
-    test "max_depth is nil when absent" do
-      yaml = """
-      bike:
-        naming:
-          pattern: '.*'
-      """
-
-      assert {%{"bike" => %Naming{max_depth: nil}}, []} = Domains.parse(yaml)
     end
 
     test "a naming block without a pattern constrains nothing, so it is not a rule" do

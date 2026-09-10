@@ -130,6 +130,23 @@ defmodule Vigil.ParserTest do
     assert file.type == :reference
   end
 
+  test "event whose ends precedes its starts is treated as reference" do
+    content = """
+    ---
+    type: event
+    starts: 2026-07-12T20:00:00+02:00
+    ends: 2026-07-10T17:00:00+02:00
+    ---
+    # E
+    text
+    """
+
+    {:ok, file} = Parser.parse("x/e.md", content, %{})
+    assert file.type == :reference
+    assert file.starts == nil
+    assert file.ends == nil
+  end
+
   # A chunk ends at its last non-blank line. The blank lines between two
   # sections belong to neither — they are punctuation between chunks, so a
   # write that replaces a body cannot eat them (docs/design.md, "How a file is

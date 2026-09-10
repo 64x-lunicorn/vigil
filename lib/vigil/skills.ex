@@ -12,7 +12,7 @@ defmodule Vigil.Skills do
   Takes `vault_path`/`git_remote` as plain arguments — no GenServer, no ETS.
   """
 
-  alias Vigil.{Commit, Git, Markdown, SkillKey}
+  alias Vigil.{Commit, Markdown, SkillKey}
 
   @doc "Lists skills (name + description) found under `vault_path`/skills/."
   def list(vault_path) do
@@ -110,11 +110,12 @@ defmodule Vigil.Skills do
     end
   end
 
-  # Push stays here rather than in Vigil.Commit: the two push-failure messages
-  # in the project describe different objects — a skill, and a change to the
-  # vault — and saying so is the point of having two.
+  # The push is Vigil.Commit's, like the write above it; the sentence in front
+  # of the failure is this module's. The push-failure messages in the project
+  # describe different objects — a skill, and a change, a deletion or a move to
+  # the vault — and saying so is the point of having four.
   defp push(name, vault_path, git_remote) do
-    case Git.push(vault_path, git_remote) do
+    case Commit.push(vault_path, git_remote) do
       :ok -> {:ok, %{name: name, pushed: true}}
       {:error, out} -> {:error, "Skill saved locally, but push failed: #{out}"}
     end

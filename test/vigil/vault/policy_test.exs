@@ -10,7 +10,6 @@ defmodule Vigil.Vault.PolicyTest do
   defp facts(overrides \\ []) do
     AbsentFacts.answering_nothing(
       [
-        vault_path: "/vault",
         domains: ["bike", "journal", "projects", "training"],
         exclude: ["work"],
         project_dirs: ["vigil"],
@@ -138,6 +137,18 @@ defmodule Vigil.Vault.PolicyTest do
                create("bike/x.md", type: "event", starts: "yesterday", ends: "tomorrow")
 
       assert msg =~ "ISO8601"
+    end
+
+    test "an event whose ends precedes its starts is refused" do
+      assert {:error, msg} =
+               create("bike/x.md",
+                 type: "event",
+                 starts: "2026-06-02T10:00:00+01:00",
+                 ends: "2026-06-01T10:00:00+01:00"
+               )
+
+      assert msg =~ "ends"
+      assert msg =~ "starts"
     end
 
     test "a valid event yields parsed timestamps" do
@@ -614,8 +625,7 @@ defmodule Vigil.Vault.PolicyTest do
               pattern: ~r/^\d{4}-\d{2}-\d{2}\.md$/,
               scope: :filename,
               hint: "journal notes are named by date",
-              suggestion: :date,
-              max_depth: nil
+              suggestion: :date
             }
           }
         )
@@ -640,8 +650,7 @@ defmodule Vigil.Vault.PolicyTest do
               pattern: ~r/^never-matches$/,
               scope: :filename,
               hint: "use a slug",
-              suggestion: :slug,
-              max_depth: nil
+              suggestion: :slug
             }
           }
         )
@@ -654,30 +663,6 @@ defmodule Vigil.Vault.PolicyTest do
                )
 
       assert msg =~ "Suggestion: bike/cafe-overview.md"
-    end
-
-    test "max_depth limits nesting inside a domain" do
-      f =
-        facts(
-          naming: %{
-            "projects" => %{
-              pattern: ~r/.*/,
-              scope: :relpath,
-              hint: "",
-              suggestion: :slug,
-              max_depth: 1
-            }
-          }
-        )
-
-      assert {:error, msg} =
-               Policy.check(
-                 :create,
-                 %{path: "projects/vigil/x.md", type: "reference", content: "# T\nx"},
-                 f
-               )
-
-      assert msg =~ "allows at most 1 nesting level"
     end
   end
 
@@ -743,6 +728,24 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:update_frontmatter, %{path: "bike/x.md", type: "event"}, f)
 
       assert msg =~ "starts/ends"
+    end
+
+    # Both write shapes that carry frontmatter ask the same owner, so a note
+    # cannot be edited into a state `create` would have refused.
+    test "an event whose ends precedes its starts is rejected the same way" do
+      f = facts(path_exists?: fn _ -> true end)
+
+      assert {:error, "ends must not be before starts"} =
+               Policy.check(
+                 :update_frontmatter,
+                 %{
+                   path: "bike/x.md",
+                   type: "event",
+                   starts: "2026-06-02T10:00:00+01:00",
+                   ends: "2026-06-01T10:00:00+01:00"
+                 },
+                 f
+               )
     end
   end
 
