@@ -394,6 +394,10 @@ defmodule Vigil.Vault.Policy do
   # section on the next parse, into two chunks one of which nobody asked for.
   # The other two targets append at the end of the file, where a heading opens
   # a section rather than cutting one in half, and are left alone.
+  #
+  # "Heading" means what the parser means by it: a `##` line inside a fenced
+  # block splits nothing, and appending a code sample to an existing section
+  # is an ordinary thing to want.
   defp appended_content({:section, _chunk}, content) do
     refute_headings(
       content,
@@ -404,10 +408,10 @@ defmodule Vigil.Vault.Policy do
   defp appended_content(_target, _content), do: :ok
 
   defp refute_headings(content, message) do
-    if Enum.any?(Markdown.split_lines(content), &Markdown.heading?/1) do
-      {:error, message}
-    else
+    if Markdown.headings(content) == [] do
       :ok
+    else
+      {:error, message}
     end
   end
 
@@ -475,6 +479,11 @@ defmodule Vigil.Vault.Policy do
   # the existing sections OR more than 20 headings; below that rewrite_note
   # goes through without it. The baseline is what vigil has indexed for the
   # note the policy resolved, asked for here rather than handed in.
+  #
+  # Both sides count the same way: the index has no chunk for a heading inside
+  # a fenced block, and `Markdown.count_headings/1` does not count one either.
+  # Counting them on the way in would judge the new content against a baseline
+  # it does not share.
   defp shrink_threshold(path, content, confirm, facts) do
     old_count = facts.count_headings.(path)
     removed = old_count - Markdown.count_headings(content)

@@ -117,6 +117,12 @@ defmodule Vigil.Vault.RulesTest do
       assert Rules.heading_slug_changes("# Café Title\n\nbody\n") == []
     end
 
+    # A heading inside a fence has no chunk id, so a slug change cannot break a
+    # reference to it — reporting it overstates the blast radius.
+    test "a heading inside a fenced block is not part of the blast radius" do
+      assert Rules.heading_slug_changes("# T\n\n```markdown\n## Café Overview\n```\n") == []
+    end
+
     test "a heading with no derivable slug reports new: nil" do
       assert [%{text: "———", new: nil}] = Rules.heading_slug_changes("## ———\n")
     end

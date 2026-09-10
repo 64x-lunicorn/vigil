@@ -135,9 +135,6 @@ defmodule Vigil.Markdown do
     end
   end
 
-  @doc "True for an H2–H4 line."
-  def heading?(line), do: Regex.match?(@heading_re, line)
-
   @doc "The trimmed title of an H1 line, `nil` for anything else."
   def h1(line) do
     case Regex.run(@h1_re, line) do
@@ -153,22 +150,23 @@ defmodule Vigil.Markdown do
     |> Enum.find_value(&h1/1)
   end
 
-  @doc "Every H2–H4 in `content` as `{rank, text}`, in document order."
+  @doc """
+  Every H2–H4 in `content` as `{rank, text}`, in document order.
+
+  Through `read/1`, so a heading inside a fenced block is not one: what this
+  answers is what the index has chunks for.
+  """
   def headings(content) do
     content
-    |> split_lines()
-    |> Enum.flat_map(fn line ->
-      case heading(line) do
-        nil -> []
-        h -> [h]
-      end
+    |> read()
+    |> Enum.flat_map(fn
+      %{kind: {:heading, rank, text}} -> [{rank, text}]
+      _other -> []
     end)
   end
 
-  @doc "How many H2–H4 headings `content` has."
-  def count_headings(content) do
-    content |> split_lines() |> Enum.count(&heading?/1)
-  end
+  @doc "How many H2–H4 headings `content` has, fenced code excluded."
+  def count_headings(content), do: content |> headings() |> length()
 
   @doc "True when `content`, ignoring leading whitespace, opens with an H1."
   def starts_with_h1?(content) do

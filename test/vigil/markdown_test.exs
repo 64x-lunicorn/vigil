@@ -33,14 +33,6 @@ defmodule Vigil.MarkdownTest do
     end
   end
 
-  describe "heading?/1" do
-    test "agrees with heading/1" do
-      assert Markdown.heading?("## X")
-      refute Markdown.heading?("# X")
-      refute Markdown.heading?("text")
-    end
-  end
-
   describe "h1/1 and first_h1/1" do
     test "h1 extracts the trimmed title" do
       assert Markdown.h1("# Café Overview ") == "Café Overview"
@@ -57,11 +49,19 @@ defmodule Vigil.MarkdownTest do
     test "counts H2 through H4 only" do
       assert Markdown.count_headings("# A\n## B\n### C\n#### D\n##### E\n") == 3
     end
+
+    test "a heading inside a fenced block is not counted" do
+      assert Markdown.count_headings("# A\n## B\n\n```markdown\n## Example\n```\n") == 1
+    end
   end
 
   describe "headings/1" do
     test "returns rank and text in document order" do
       assert Markdown.headings("# A\n## B\ntext\n### C\n") == [{2, "B"}, {3, "C"}]
+    end
+
+    test "a heading inside a fenced block is a line of a code sample, not a heading" do
+      assert Markdown.headings("## Real\n\n~~~\n## Sample\n~~~\n") == [{2, "Real"}]
     end
   end
 
