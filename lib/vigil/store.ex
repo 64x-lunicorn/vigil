@@ -90,15 +90,15 @@ defmodule Vigil.Store do
   def domain_names(), do: GenServer.call(__MODULE__, :domain_names)
   def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
 
-  # No table means this writer is not up — the tool call about to be made will
-  # fail on its own, and the envelope in front of it must not crash first with
-  # a worse error than the one the caller is going to get anyway.
-  defp published_events do
-    case :ets.whereis(@events_table) do
-      :undefined -> []
-      table -> :ets.lookup_element(table, :events, 2, [])
-    end
-  end
+  # No fallback for a missing table. It lives with this process, so its absence
+  # means the writer is down — and the response is going to fail at the tool
+  # call regardless, exactly as it did when the snapshot was a call into a
+  # process that was not there. Answering "no events" instead would be worse
+  # than failing: Vigil.MCP.Envelope records what it decided against as the
+  # session's state, so an empty snapshot would be read as every active event
+  # having finished, and the next response would report a phase change that
+  # never happened.
+  defp published_events, do: :ets.lookup_element(@events_table, :events, 2)
 
   ## GenServer
 

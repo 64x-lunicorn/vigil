@@ -203,12 +203,18 @@ defmodule Vigil.MCP.Server do
   # The envelope is attached around both outcomes rather than inside the
   # success branch, so "every tool response carries exactly one of `_`, `_t` or
   # `_!`" (docs/design.md, "The time envelope") is structurally true instead of
-  # true in one of two branches. It is obtained before the call rather than
-  # after it for the same reason: an envelope the caller already holds cannot
-  # be skipped by an outcome, and the instant it was decided at is what the
-  # call itself is made with. An error advances the session's state too: a
-  # failed first call is still a call the session made, and repeating the long
-  # first form on the next one would be a lie about which response is first.
+  # true in one of two branches. It is obtained before the call because the
+  # instant it was decided at is the one the call itself is then made with,
+  # and a response has exactly one. The envelope therefore describes the
+  # vault as the request found it, not as the call left it: a write that puts
+  # an event into or out of its window is reported on the session's next
+  # response rather than on its own — a lag the envelope can afford, where
+  # the alternative cannot: deciding after the call costs either a second
+  # clock read or an instant the router holds on the envelope's behalf, and
+  # those are the two things this stopped doing. An error advances the
+  # session's state too: a failed first call is still a call the session
+  # made, and repeating the long first form on the next one would be a lie
+  # about which response is first.
   defp build_tool_call_result(result, envelope) do
     case result do
       {:ok, value} ->

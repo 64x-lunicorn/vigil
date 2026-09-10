@@ -72,6 +72,32 @@ defmodule Vigil.MCP.EnvelopeTest do
     assert {%{"_t" => _}, _} = Envelope.for_tool("session-3", "search")
   end
 
+  # An empty snapshot is not an answer, it is a different vault: whatever the
+  # envelope decides against is recorded as the session's state, so answering
+  # "no events" while the writer is down would be read as every active event
+  # having finished, and the next response would report a phase change that
+  # never happened.
+  test "with the writer down a response fails rather than recording an empty vault", %{
+    vault: vault
+  } do
+    {_envelope, now} = Envelope.for_tool("session-4", "search")
+
+    create_event!(
+      "bike/laufend.md",
+      "Laufend",
+      DateTime.add(now, -3600),
+      DateTime.add(now, 3600)
+    )
+
+    assert {%{"_!" => "Laufend now active"}, _} = Envelope.for_tool("session-4", "search")
+
+    stop_supervised!(Vigil.Store)
+    assert_raise ArgumentError, fn -> Envelope.for_tool("session-4", "search") end
+
+    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
+    assert {%{"_t" => _}, _} = Envelope.for_tool("session-4", "search")
+  end
+
   test "the table is public, so no response pays a call into the owning process" do
     assert :ets.info(:vigil_sessions, :protection) == :public
     assert :ets.info(:vigil_sessions, :owner) == Process.whereis(Envelope)
