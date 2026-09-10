@@ -374,6 +374,52 @@ defmodule Vigil.IndexTest do
     end
   end
 
+  describe "put/2 and move/3 own created_at" do
+    @later %{
+      created_at: ~U[2026-06-01 09:00:00Z],
+      updated_at: ~U[2026-06-01 09:00:00Z],
+      last_author: "vigil"
+    }
+
+    defp reparsed(rel_path, meta) do
+      content = File.read!(Path.join(@fixtures, rel_path))
+      {:ok, file} = Parser.parse(rel_path, content, meta)
+      file
+    end
+
+    test "replacing a note the index holds keeps its creation date", %{index: index} do
+      rewritten = Index.put(index, reparsed("bike/via-carolina.md", @later))
+
+      note = Index.note(rewritten, "bike/via-carolina.md")
+      assert note.created_at == @git_meta.created_at
+      assert note.updated_at == @later.updated_at
+    end
+
+    test "the note's chunks keep it too", %{index: index} do
+      rewritten = Index.put(index, reparsed("bike/via-carolina.md", @later))
+
+      {:ok, chunk} = Index.read(rewritten, "bike/via-carolina.md#fueling", false)
+      assert chunk.created_at == DateTime.to_iso8601(@git_meta.created_at)
+    end
+
+    test "a note the index has not seen takes the commit metadata's value", %{index: index} do
+      {:ok, fresh} = Parser.parse("bike/fresh.md", "# Fresh\n\nbody\n", @later)
+
+      assert Index.note(Index.put(index, fresh), "bike/fresh.md").created_at ==
+               @later.created_at
+    end
+
+    test "a move carries the creation date from the source path", %{index: index} do
+      content = File.read!(Path.join(@fixtures, "bike/via-carolina.md"))
+      {:ok, moved} = Parser.parse("training/via-carolina.md", content, @later)
+
+      after_move = Index.move(index, "bike/via-carolina.md", moved)
+
+      assert Index.note(after_move, "bike/via-carolina.md") == nil
+      assert Index.note(after_move, "training/via-carolina.md").created_at == @git_meta.created_at
+    end
+  end
+
   describe "lookups/1 count_headings" do
     test "counts chunks with a heading, ignoring the pre-heading chunk", %{index: index} do
       assert Index.lookups(index).count_headings.("bike/via-carolina.md") == 3

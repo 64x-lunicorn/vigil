@@ -72,28 +72,79 @@ defmodule Vigil.Index do
     rebuild_links(%__MODULE__{notes: notes, chunks: chunks})
   end
 
-  @doc "Replaces one note's chunks with a freshly parsed file, then rebuilds the link index in full."
+  @doc """
+  Replaces one note's chunks with a freshly parsed file, then rebuilds the link
+  index in full.
+
+  Creation date = first commit (`docs/design.md`, principle 3), and a write is
+  never a note's first commit — so a note the index already holds at that path
+  keeps the `created_at` it has, and only a note the index has not seen takes
+  the value the parsed file carries.
+  """
   def put(index, parsed_file) do
-    {note, file_chunks} = index_file(parsed_file)
-    old_chunk_ids = old_chunk_ids(index, note.path)
+    index
+    |> replace(parsed_file.path, parsed_file)
+    |> rebuild_links()
+  end
 
-    notes = Map.put(index.notes, note.path, note)
-    chunks = index.chunks |> Map.drop(old_chunk_ids) |> Map.merge(file_chunks)
+  @doc """
+  Moves a note: the file parsed at its destination replaces the note at `from`,
+  which is removed.
 
-    rebuild_links(%{index | notes: notes, chunks: chunks})
+  A move needs its own entry point because the carry-over crosses paths — the
+  old note is at the source and the new one at the destination — so `put/2`'s
+  same-path rule cannot see it. Removal and carry-over belong to one function
+  for that reason.
+  """
+  def move(index, from, parsed_file) do
+    index
+    |> replace(from, parsed_file)
+    |> drop(from)
+    |> rebuild_links()
   end
 
   @doc "Removes a note and its chunks, then rebuilds the link index in full."
   def remove(index, path) do
-    case old_chunk_ids(index, path) do
-      [] ->
-        rebuild_links(%{index | notes: Map.delete(index.notes, path)})
+    index
+    |> drop(path)
+    |> rebuild_links()
+  end
 
-      chunk_ids ->
-        notes = Map.delete(index.notes, path)
-        chunks = Map.drop(index.chunks, chunk_ids)
-        rebuild_links(%{index | notes: notes, chunks: chunks})
+  # Puts `parsed_file` at its own path, carrying `created_at` over from
+  # whatever the index holds at `previous_path` — the same path for a write,
+  # the source path for a move.
+  defp replace(index, previous_path, parsed_file) do
+    {note, file_chunks} =
+      parsed_file
+      |> index_file()
+      |> carry_created_at(index, previous_path)
+
+    notes = Map.put(index.notes, note.path, note)
+    chunks = index.chunks |> Map.drop(old_chunk_ids(index, note.path)) |> Map.merge(file_chunks)
+
+    %{index | notes: notes, chunks: chunks}
+  end
+
+  # The date a note was created is a fact about the vault's history, not about
+  # the write in front of us: the commit metadata a write carries describes
+  # that write. So a `created_at` the index already holds always wins.
+  defp carry_created_at({note, chunks}, index, previous_path) do
+    case Map.get(index.notes, previous_path) do
+      %Note{created_at: %DateTime{} = created_at} ->
+        {%{note | created_at: created_at},
+         Map.new(chunks, fn {id, chunk} -> {id, %{chunk | created_at: created_at}} end)}
+
+      _ ->
+        {note, chunks}
     end
+  end
+
+  defp drop(index, path) do
+    %{
+      index
+      | notes: Map.delete(index.notes, path),
+        chunks: Map.drop(index.chunks, old_chunk_ids(index, path))
+    }
   end
 
   defp old_chunk_ids(index, path) do

@@ -520,7 +520,12 @@ defmodule Vigil.Store do
       {:ok, commit_meta} ->
         case Git.push(state.vault_path, state.git_remote) do
           :ok ->
-            new_index = reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
+            new_index =
+              case reparse(state, normalized_to, commit_meta, "move") do
+                {:ok, file} -> Index.move(state.index, normalized_from, file)
+                :error -> state.index
+              end
+
             new_state = %{state | index: new_index}
             # Backlink report — a diff of incoming references before and
             # after the move rather than an ad-hoc scan. A source chunk that
@@ -550,32 +555,6 @@ defmodule Vigil.Store do
     end
   end
 
-  defp reparse_moved_file(state, from, to, commit_meta) do
-    existing_created_at =
-      case Index.note(state.index, from) do
-        %Index.Note{created_at: created_at} -> created_at
-        nil -> nil
-      end
-
-    created_at = existing_created_at || commit_meta.updated_at
-
-    case read_for_reparse(state.vault_path, to, "move") do
-      {:ok, content} ->
-        meta = %{
-          created_at: created_at,
-          updated_at: commit_meta.updated_at,
-          last_author: commit_meta.last_author
-        }
-
-        {:ok, file} = Parser.parse(to, content, meta)
-
-        state.index |> Index.remove(from) |> Index.put(file)
-
-      :error ->
-        state.index
-    end
-  end
-
   ## shared write path
 
   defp write_and_commit(state, rel_path, abs_path, full_content, message) do
@@ -583,7 +562,13 @@ defmodule Vigil.Store do
          :ok <- safe_write(abs_path, full_content) do
       case Git.add_commit(state.vault_path, rel_path, message) do
         {:ok, commit_meta} ->
-          new_state = %{state | index: reparse_file(state, rel_path, commit_meta)}
+          index =
+            case reparse(state, rel_path, commit_meta, "write") do
+              {:ok, file} -> Index.put(state.index, file)
+              :error -> state.index
+            end
+
+          new_state = %{state | index: index}
 
           case Git.push(new_state.vault_path, new_state.git_remote) do
             :ok ->
@@ -640,11 +625,11 @@ defmodule Vigil.Store do
     end
   end
 
-  # Used by reparse_file/reparse_moved_file: the write or move itself has
-  # already succeeded (and been committed/pushed) by the time these run. A
-  # read failure here must not crash the GenServer and take down unrelated
-  # calls — it only means the index stays stale for `rel_path` until the
-  # next reload, so the failure is logged rather than propagated.
+  # Used by reparse/4: the write or move itself has already succeeded (and been
+  # committed/pushed) by the time it runs. A read failure here must not crash
+  # the GenServer and take down unrelated calls — it only means the index
+  # stays stale for `rel_path` until the next reload, so the failure is logged
+  # rather than propagated.
   defp read_for_reparse(vault_path, rel_path, verb) do
     case File.read(Path.join(vault_path, rel_path)) do
       {:ok, content} ->
@@ -656,29 +641,24 @@ defmodule Vigil.Store do
     end
   end
 
-  defp reparse_file(state, rel_path, commit_meta) do
-    existing_created_at =
-      case Index.note(state.index, rel_path) do
-        %Index.Note{created_at: created_at} -> created_at
-        nil -> nil
-      end
-
-    created_at = existing_created_at || commit_meta.updated_at
-
-    case read_for_reparse(state.vault_path, rel_path, "write") do
+  # The file as it now stands on disk, reparsed. `created_at` is deliberately
+  # not computed here: "creation date = first commit" (docs/design.md,
+  # principle 3) is the index's invariant, and it preserves the value it
+  # already holds for the note (Vigil.Index.put/2, Vigil.Index.move/3). What
+  # this hands over is the write's own commit metadata.
+  defp reparse(state, rel_path, commit_meta, verb) do
+    case read_for_reparse(state.vault_path, rel_path, verb) do
       {:ok, content} ->
         meta = %{
-          created_at: created_at,
+          created_at: commit_meta.updated_at,
           updated_at: commit_meta.updated_at,
           last_author: commit_meta.last_author
         }
 
-        {:ok, file} = Parser.parse(rel_path, content, meta)
-
-        Index.put(state.index, file)
+        Parser.parse(rel_path, content, meta)
 
       :error ->
-        state.index
+        :error
     end
   end
 

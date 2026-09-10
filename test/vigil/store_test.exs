@@ -745,6 +745,63 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # Creation date = first commit (docs/design.md, principle 3). A write is
+  # never a note's first commit, and the index is what keeps that true —
+  # Vigil.Index.put/2 would otherwise reset created_at to the write's own
+  # commit time, on every write path at once.
+  describe "created_at survives a write" do
+    defp created_at(path) do
+      {:ok, note} = Store.read(path, false)
+      note.created_at
+    end
+
+    test "append, rewrite_note and move_note all leave it alone" do
+      before = created_at("bike/via-carolina.md")
+      assert is_binary(before)
+
+      assert {:ok, _} = Store.append(%{path: "bike/via-carolina.md", content: "One more line."})
+      assert created_at("bike/via-carolina.md") == before
+
+      assert {:ok, _} =
+               Store.rewrite_note(%{
+                 path: "bike/via-carolina.md",
+                 content: "# Via Carolina\n\n## Fueling\nbaseline.\n\n## Gear\nFrame bag.",
+                 confirm: true
+               })
+
+      assert created_at("bike/via-carolina.md") == before
+
+      assert {:ok, _} =
+               Store.move_note(%{
+                 from: "bike/via-carolina.md",
+                 to: "training/via-carolina.md",
+                 confirm: true
+               })
+
+      assert created_at("training/via-carolina.md") == before
+    end
+
+    test "a note created now takes the creation date of its own commit" do
+      assert {:ok, _} =
+               Store.create(%{
+                 path: "bike/brand-new.md",
+                 type: "reference",
+                 content: "# New\n\nx"
+               })
+
+      assert is_binary(created_at("bike/brand-new.md"))
+    end
+
+    test "a full reload still reports the git creation date" do
+      before = created_at("bike/via-carolina.md")
+
+      assert {:ok, _} = Store.append(%{path: "bike/via-carolina.md", content: "Another line."})
+      assert %{reloaded: true} = Store.reload()
+
+      assert created_at("bike/via-carolina.md") == before
+    end
+  end
+
   describe "reload" do
     test "reload re-reads the vault and reports success" do
       assert %{reloaded: true} = Store.reload()
