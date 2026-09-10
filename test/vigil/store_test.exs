@@ -86,48 +86,11 @@ defmodule Vigil.StoreTest do
       assert String.trim(out) == "vigil"
     end
 
-    test "fails if file already exists" do
-      assert {:error, msg} =
-               Store.call(:create, %{
-                 path: "bike/terra-speed.md",
-                 type: "reference",
-                 content: "# X\ntext"
-               })
-
-      assert msg =~ "already exists"
-    end
-
-    test "content without H1 is rejected" do
-      assert {:error, _} =
-               Store.call(:create, %{
-                 path: "bike/no-h1.md",
-                 type: "reference",
-                 content: "no h1 here"
-               })
-    end
-
-    test "content with its own frontmatter is rejected" do
-      assert {:error, _} =
-               Store.call(:create, %{
-                 path: "bike/own-frontmatter.md",
-                 type: "reference",
-                 content: "---\ntype: reference\n---\n# X\ntext"
-               })
-    end
-
-    test "event requires starts/ends; other types forbid them" do
-      assert {:error, _} =
-               Store.call(:create, %{path: "bike/ev.md", type: "event", content: "# E\nx"})
-
-      assert {:error, _} =
-               Store.call(:create, %{
-                 path: "bike/ref.md",
-                 type: "reference",
-                 content: "# R\nx",
-                 starts: "2026-01-01T00:00:00+01:00"
-               })
-    end
-
+    # File-exists, H1, frontmatter and event starts/ends rules are pure
+    # refusals asserted against Vigil.Vault.Policy directly (policy_test.exs,
+    # "existence rules" and "content and type rules on :create") — they touch
+    # neither the filesystem nor git, so the store test no longer restates
+    # them.
     test "duplicate detection blocks similarly-titled note in same domain, force bypasses it" do
       assert {:error, msg} =
                Store.call(:create, %{
@@ -180,28 +143,15 @@ defmodule Vigil.StoreTest do
                })
     end
 
-    test "duplicate detection still fires across different project folders" do
-      assert {:error, msg} =
-               Store.call(:create, %{
-                 path: "projects/other/vigil-copy.md",
-                 type: "reference",
-                 content: "# vigil Copy\nA different project note.",
-                 create_dirs: true
-               })
+    # "duplicate detection still fires across different project folders" moved
+    # to policy_test.exs, "a strong match in a different project folder is
+    # still a duplicate" — pure refusal, no filesystem or git touched.
 
-      assert msg =~ "duplicates"
-    end
-
-    test "create_dirs creates a missing project folder, absent flag rejects it" do
-      assert {:error, msg} =
-               Store.call(:create, %{
-                 path: "projects/new/x.md",
-                 type: "reference",
-                 content: "# X\nx"
-               })
-
-      assert msg =~ "Project directory does not exist"
-
+    # The refusal half ("Project directory does not exist") is
+    # policy_test.exs, "an unknown project directory is rejected without
+    # create_dirs". What stays here is what only the real store can show:
+    # create_dirs actually creates the directory on disk.
+    test "create_dirs creates a missing project folder" do
       assert {:ok, _} =
                Store.call(:create, %{
                  path: "projects/new/x.md",
@@ -235,42 +185,11 @@ defmodule Vigil.StoreTest do
       refute File.dir?(Path.join(vault, "unknown-domain"))
     end
 
-    test "unknown domain is rejected with a domain list" do
-      assert {:error, msg} =
-               Store.call(:create, %{
-                 path: "unknown-domain/x.md",
-                 type: "reference",
-                 content: "# X\nx"
-               })
-
-      assert msg =~ "bike"
-    end
-
-    test "projects allows exactly one extra level, other domains do not" do
-      assert {:ok, _} =
-               Store.call(:create, %{
-                 path: "projects/vigil/x.md",
-                 type: "reference",
-                 content: "# X\nx"
-               })
-
-      assert {:error, _} =
-               Store.call(:create, %{
-                 path: "projects/new/x.md",
-                 type: "reference",
-                 content: "# X\nx"
-               })
-
-      assert {:error, _} =
-               Store.call(:create, %{
-                 path: "projects/vigil/docs/x.md",
-                 type: "reference",
-                 content: "# X\nx"
-               })
-
-      assert {:error, _} =
-               Store.call(:create, %{path: "gear/sub/x.md", type: "reference", content: "# X\nx"})
-    end
+    # "unknown domain is rejected with a domain list" moved to
+    # policy_test.exs, "an unknown domain names the ones that exist".
+    #
+    # "projects allows exactly one extra level, other domains do not" moved
+    # to policy_test.exs, "notes nest one level deep, except under projects".
 
     test "[[vigil-ranking]] in vigil.md resolves to projects/vigil/vigil-ranking.md" do
       {:ok, result} = Store.call(:read, %{id: "projects/vigil/vigil.md", backlinks: true})
@@ -394,24 +313,14 @@ defmodule Vigil.StoreTest do
       end
     end
 
-    test "a section id that normalizes into skills/ is still Invalid path" do
-      assert {:error, "Invalid path"} =
-               Store.call(:replace_section, %{id: "Skills/tdd.md#x", content: "text"})
-    end
-
-    test "an id naming skills/ is Invalid path, not Not found" do
-      assert {:error, "Invalid path"} =
-               Store.call(:replace_section, %{id: "skills/tdd.md#x", content: "text"})
-
-      assert {:error, "Invalid path"} = Store.call(:delete_section, %{id: "skills/tdd.md#x"})
-    end
-
-    test "a missing section in a writable note is Not found" do
-      assert {:error, msg} =
-               Store.call(:replace_section, %{id: "bike/via-carolina.md#nope", content: "text"})
-
-      assert msg =~ "Not found"
-    end
+    # "a section id that normalizes into skills/ is still Invalid path" and
+    # "an id naming skills/ is Invalid path, not Not found" moved to
+    # policy_test.exs, "the writable-path rules still apply to a section
+    # id" — extended to cover replace_section, both raw and normalized.
+    #
+    # "a missing section in a writable note is Not found" is already proven
+    # there too, in "an unknown section is reported as unknown, not as bad
+    # content".
   end
 
   describe "current" do
@@ -475,41 +384,12 @@ defmodule Vigil.StoreTest do
     end
   end
 
-  describe "path security" do
-    test "path traversal and absolute paths are rejected without touching disk" do
-      for bad_path <- ["../../etc/passwd", "/etc/passwd", "bike/../../x.md"] do
-        assert {:error, msg} =
-                 Store.call(:create, %{path: bad_path, type: "reference", content: "# X\nx"})
-
-        assert msg == "Invalid path"
-      end
-    end
-
-    test "writing into skills/ via create is rejected" do
-      assert {:error, "Invalid path"} =
-               Store.call(:create, %{path: "skills/x.md", type: "reference", content: "# X\nx"})
-    end
-
-    test "dot-prefixed path segments are rejected everywhere, not just the first" do
-      assert {:error, "Invalid path"} =
-               Store.call(:create, %{
-                 path: "projects/.evil/x.md",
-                 type: "reference",
-                 content: "# X\nx",
-                 create_dirs: true
-               })
-    end
-
-    test "underscore-prefixed path segments are rejected the same way as dot-prefixed ones" do
-      assert {:error, "Invalid path"} =
-               Store.call(:create, %{
-                 path: "projects/_evil/x.md",
-                 type: "reference",
-                 content: "# X\nx",
-                 create_dirs: true
-               })
-    end
-  end
+  # Traversal/absolute paths, skills/, and dot- or underscore-prefixed
+  # segments are pure refusals with nothing to touch on disk or in git —
+  # policy_test.exs, "path rules on :create", proves all four without a
+  # vault. That includes the sharpest one: a test whose own name promised
+  # "without touching disk" while building a git repository and a bare
+  # remote to prove it.
 
   describe "naming conventions and path normalization" do
     test "an unclean path is slugified; success carries path_normalized_from", %{vault: vault} do
@@ -536,19 +416,11 @@ defmodule Vigil.StoreTest do
       refute Map.has_key?(result, :path_normalized_from)
     end
 
-    test "journal's naming.pattern rejects a non-date filename and suggests today's date" do
-      assert {:error, msg} =
-               Store.call(:create, %{
-                 path: "journal/some-note.md",
-                 type: "reference",
-                 content: "# X\nx"
-               })
-
-      assert msg =~ "does not match the schema"
-      assert msg =~ "YYYY-MM-DD"
-      today = Date.utc_today() |> Date.to_iso8601()
-      assert msg =~ "journal/#{today}.md"
-    end
+    # "journal's naming.pattern rejects a non-date filename and suggests
+    # today's date" moved to policy_test.exs, "naming conventions", "a
+    # filename that does not match the domain pattern is rejected with a
+    # suggestion" — same rule, a mocked journal naming block in place of the
+    # real one.
 
     test "journal's naming.pattern accepts a conforming date filename" do
       assert {:ok, _} =
@@ -736,10 +608,9 @@ defmodule Vigil.StoreTest do
       assert search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
 
-    test "enforces the same starts/ends rules as create" do
-      assert {:error, _} =
-               Store.call(:update_frontmatter, %{path: "bike/terra-speed.md", type: "event"})
-    end
+    # "enforces the same starts/ends rules as create" moved to
+    # policy_test.exs, "update_frontmatter enforces the same content rules
+    # as create".
   end
 
   describe "delete" do
@@ -1169,44 +1040,17 @@ defmodule Vigil.StoreTest do
   # retype or delete a skill through a note tool — and the skill was then
   # parsed and indexed as a searchable note.
   describe "skills/ is not reachable through the note write tools" do
-    test "append cannot write into skills/", %{vault: vault} do
-      assert {:error, "Invalid path"} =
-               Store.call(:append, %{path: "skills/tdd.md", content: "INJECTED"})
-
-      refute File.read!(Path.join(vault, "skills/tdd.md")) =~ "INJECTED"
-    end
-
-    test "rewrite_note cannot overwrite a skill" do
-      assert {:error, "Invalid path"} =
-               Store.call(:rewrite_note, %{path: "skills/tdd.md", content: "# Pwned\n\nbody\n"})
-    end
-
-    test "update_frontmatter cannot retype a skill" do
-      assert {:error, "Invalid path"} =
-               Store.call(:update_frontmatter, %{path: "skills/tdd.md", type: "decision"})
-    end
-
-    test "delete_note cannot delete a skill", %{vault: vault} do
-      assert {:error, "Invalid path"} =
-               Store.call(:delete_note, %{path: "skills/tdd.md", confirm: true})
-
-      assert File.exists?(Path.join(vault, "skills/tdd.md"))
-    end
-
-    # Without confirm the answer used to be a confirmation prompt quoting the
-    # path back — for a write the policy refuses on the next turn either way.
-    test "delete_note without confirm answers Invalid path, not a prompt" do
-      assert {:error, "Invalid path"} = Store.call(:delete_note, %{path: "skills/tdd.md"})
-    end
-
-    test "move_note without confirm answers Invalid path, not a prompt" do
-      assert {:error, "Invalid path"} =
-               Store.call(:move_note, %{from: "bike/terra-speed.md", to: "skills/pwned.md"})
-
-      assert {:error, "Invalid path"} =
-               Store.call(:move_note, %{from: "skills/tdd.md", to: "bike/pwned.md"})
-    end
-
+    # append/rewrite_note/update_frontmatter/delete_note into skills/, both
+    # confirm-gated delete_note and move_note answering "Invalid path" rather
+    # than a confirmation prompt, and move_note laundering in either
+    # direction — all pure refusals, none touching disk or git — are proven
+    # against Vigil.Vault.Policy directly in policy_test.exs: "the
+    # writable-path rules apply to every write, not just create", "a path
+    # the policy refuses is refused, not offered for confirmation", "a move
+    # to or from a path the policy refuses is refused, not offered", and
+    # "move_note cannot launder a note across the boundary". What stays here
+    # is the one thing only the real store and a real index can show: even
+    # attempted, a skill never leaks into search.
     test "a skill never becomes searchable through a write" do
       Store.call(:append, %{path: "skills/tdd.md", content: "INJECTEDWORD"})
       assert search(%{query: "INJECTEDWORD"}) == []

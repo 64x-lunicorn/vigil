@@ -499,6 +499,24 @@ defmodule Vigil.Vault.PolicyTest do
                )
     end
 
+    test "a strong match in a different project folder is still a duplicate" do
+      f =
+        facts(
+          find_similar: fn _q, _d, _depth ->
+            [%{id: "projects/other/vigil-copy.md", score: 20}]
+          end
+        )
+
+      assert {:error, msg} =
+               Policy.check(
+                 :create,
+                 %{path: "projects/vigil/vigil-notes.md", type: "reference", content: "# T\nx"},
+                 f
+               )
+
+      assert msg =~ "Possible duplicates found: projects/other/vigil-copy.md"
+    end
+
     # The gate used to derive its terms from the basename's `-` segments and
     # keep only the ones longer than three characters, so a name made only of
     # short segments produced no terms at all: `find_similar` was never asked,
@@ -706,6 +724,25 @@ defmodule Vigil.Vault.PolicyTest do
       f = facts(find_chunk: fn _ -> %{heading: "H", path: "bike/x.md"} end)
       assert {:error, "Invalid path"} = Policy.check(:delete_section, %{id: "skills/tdd.md#h"}, f)
       assert {:error, "Invalid path"} = Policy.check(:delete_section, %{id: "work/x.md#h"}, f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:replace_section, %{id: "skills/tdd.md#h", content: "text"}, f)
+
+      # A section id normalizes before the writable-path check runs, so a
+      # messy segment that resolves into skills/ is caught the same way.
+      assert {:error, "Invalid path"} =
+               Policy.check(:replace_section, %{id: "Skills/tdd.md#h", content: "text"}, f)
+    end
+  end
+
+  describe "update_frontmatter enforces the same content rules as create" do
+    test "an event type without starts/ends is rejected the same way" do
+      f = facts(path_exists?: fn _ -> true end)
+
+      assert {:error, msg} =
+               Policy.check(:update_frontmatter, %{path: "bike/x.md", type: "event"}, f)
+
+      assert msg =~ "starts/ends"
     end
   end
 
