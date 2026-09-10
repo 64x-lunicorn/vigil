@@ -164,14 +164,9 @@ defmodule Vigil.OAuth.Store do
   def reset_rate_limit(ip), do: :ets.delete(@rate_limits, ip)
 
   def sweep_rate_limits(now) do
-    :ets.foldl(
-      fn {ip, _count, window_start}, acc ->
-        if now - window_start > @rate_limit_window, do: [ip | acc], else: acc
-      end,
-      [],
-      @rate_limits
-    )
-    |> Enum.each(&:ets.delete(@rate_limits, &1))
+    sweep_table(@rate_limits, fn {_ip, _count, window_start} ->
+      now - window_start > @rate_limit_window
+    end)
   end
 
   ## CIMD cache (1h TTL, ephemeral)
@@ -190,19 +185,24 @@ defmodule Vigil.OAuth.Store do
   @doc """
   Drops CIMD cache entries whose hour is up.
 
-  This table is keyed on the `client_id` URL a client supplies, so it grows on
-  input from outside and is bounded by nothing. Registration is rate-limited,
-  which bounds the *rate* of growth but not the total.
+  This table is keyed on the `client_id` URL a client supplies, and it is
+  filled from `GET /oauth/authorize`, which is not rate-limited — so it grows
+  on input from outside and nothing bounds either the rate or the total. This
+  sweep is the only thing that keeps it finite. See issue #79.
   """
   def sweep_cimd_cache(now) do
+    sweep_table(@cimd_cache, fn {_url, _doc, expires_at} -> expires_at <= now end)
+  end
+
+  # Collect first, delete after: deleting inside the fold would mutate the
+  # table being walked.
+  defp sweep_table(table, expired?) do
     :ets.foldl(
-      fn {url, _doc, expires_at}, acc ->
-        if expires_at <= now, do: [url | acc], else: acc
-      end,
+      fn entry, acc -> if expired?.(entry), do: [elem(entry, 0) | acc], else: acc end,
       [],
-      @cimd_cache
+      table
     )
-    |> Enum.each(&:ets.delete(@cimd_cache, &1))
+    |> Enum.each(&:ets.delete(table, &1))
   end
 
   ## Janitor sweeps

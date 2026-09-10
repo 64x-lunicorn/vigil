@@ -75,17 +75,17 @@ defmodule Vigil.OAuth.Cimd do
 
     case resolve.(host, :inet) do
       {:ok, ip} ->
-        reject_private(ip)
+        if_public(ip)
 
       {:error, _} ->
         case resolve.(host, :inet6) do
-          {:ok, ip} -> reject_private(ip)
+          {:ok, ip} -> if_public(ip)
           {:error, _} -> :error
         end
     end
   end
 
-  defp reject_private(ip), do: if(private_ip?(ip), do: :error, else: {:ok, ip})
+  defp if_public(ip), do: if(private_ip?(ip), do: :error, else: {:ok, ip})
 
   # An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is an IPv4 address wearing an
   # eight-element tuple: it matches neither the IPv6 loopback clause nor
@@ -103,7 +103,7 @@ defmodule Vigil.OAuth.Cimd do
   defp private_ip?({169, 254, _, _}), do: true
   defp private_ip?({172, b, _, _}) when b >= 16 and b <= 31, do: true
   defp private_ip?({192, 168, _, _}), do: true
-  defp private_ip?({198, b, _, _}) when b == 18 or b == 19, do: true
+  defp private_ip?({198, b, _, _}) when b >= 18 and b <= 19, do: true
   defp private_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
   defp private_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
   defp private_ip?({a, _, _, _, _, _, _, _}) when a >= 0xFC00 and a <= 0xFDFF, do: true
@@ -112,20 +112,29 @@ defmodule Vigil.OAuth.Cimd do
 
   ## The request
 
-  # The URL's host never reaches the socket: the connection is made to `ip`,
-  # the address the guard decided on, and the host travels as the Host header
-  # and as the TLS server name.
   defp http_get(uri, ip) do
     :inets.start()
     :ssl.start()
 
-    request = {connect_url(uri, ip), [{~c"host", String.to_charlist(host_header(uri))}]}
     options = [sync: false, stream: :self, body_format: :binary]
 
-    case :httpc.request(:get, request, http_options(uri.host), options) do
+    case :httpc.request(:get, request_for(uri, ip), http_options(uri.host), options) do
       {:ok, ref} -> read_capped(ref)
       _ -> :error
     end
+  end
+
+  @doc """
+  The `:httpc` request for fetching `uri` from the address `ip`.
+
+  This is where "the address the guard checked is the address connected to"
+  actually happens, so it is public and asserted on directly: the URL names the
+  address, never the host, and the host travels as the `Host` header instead —
+  and as the TLS server name, via `http_options/1`. Everything else about the
+  URL has to survive the rewrite: the path, the query and a non-default port.
+  """
+  def request_for(uri, ip) do
+    {connect_url(uri, ip), [{~c"host", String.to_charlist(host_header(uri))}]}
   end
 
   defp connect_url(uri, ip) do
@@ -209,6 +218,12 @@ defmodule Vigil.OAuth.Cimd do
       {:http, {^ref, {:error, _reason}}} ->
         :error
     after
+      # A backstop, not the deadline. This `after` is per-message, so a body
+      # trickled a byte at a time would reset it forever — but `:httpc`'s own
+      # `timeout:` bounds the whole request even in streaming mode, verified
+      # against a server sending one chunk every two seconds: it answered
+      # `{:error, :timeout}` after 5s and 3 bytes. This clause is what catches
+      # `:httpc` going away without saying so.
       @timeout -> refuse(ref, cancel)
     end
   end

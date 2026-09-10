@@ -99,9 +99,9 @@ defmodule Vigil.OAuth.JanitorTest do
   end
 
   test "the CIMD cache is swept at all" do
-    # The table is keyed on the client_id URL a client supplies, so it grows on
-    # input from outside and nothing used to act on its expiry. Registration is
-    # rate-limited, which bounds the rate of growth but not the total.
+    # The table is keyed on the client_id URL a client supplies and is filled
+    # from GET /oauth/authorize, which is not rate-limited, so nothing used to
+    # act on its expiry and nothing bounds the rate either. See issue #79.
     start_janitor(interval: :timer.minutes(5), now: fn -> @now end)
 
     for i <- 1..50 do

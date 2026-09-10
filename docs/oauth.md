@@ -298,7 +298,7 @@ JavaScript, and one inline `<style>` block — so the policy denies everything
 and carves out exactly that block, by nonce rather than by `'unsafe-inline'`.
 
 ```http
-Content-Security-Policy: default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; style-src 'nonce-<per-response>'
+Content-Security-Policy: default-src 'none'; base-uri 'none'; frame-ancestors 'none'; style-src 'nonce-<per-response>'
 X-Frame-Options: DENY
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
@@ -308,13 +308,25 @@ Referrer-Policy: no-referrer
 |---|---|
 | `frame-ancestors 'none'` + `X-Frame-Options: DENY` | The page cannot be framed, so an attacker cannot steer a click onto **Allow**. The second is for clients that predate the first. |
 | `Referrer-Policy: no-referrer` | The consent page's URL carries `client_id`, `redirect_uri`, `state` and `code_challenge`. It stops leaking. |
-| `form-action 'self'` | The password POST cannot be redirected off this origin. |
+| `base-uri 'none'` | An injected `<base>` cannot re-point the one relative URL on the page, the form's own action. |
 | `default-src 'none'` + `nosniff` | Closes the distance between "renders no external assets today" and "renders no external assets". |
 
-The nonce is fresh per response and is generated in `Vigil.OAuth.Endpoint`;
-`Vigil.OAuth.ConsentPage` stamps the same value on its `<style>` tag. The two
-have to agree, so neither moves without the other. The HTML error page gets the
-same headers minus `style-src`, having no style at all.
+**`form-action 'self'` is deliberately absent.** The password POST does land on
+this origin, but its answer is a 302 to the client's `redirect_uri`, which is
+another origin by definition. Whether `form-action` applies to a redirect
+*after* a submission is
+[debated](https://github.com/w3c/webappsec-csp/issues/8), and MDN warns that
+"browser implementations of this aspect are inconsistent (e.g., Firefox 57
+doesn't block the redirects whereas Chrome 63 does)". So the directive can break
+the Allow button in the more likely of the two browsers, and it guards nothing
+here: the form's action is a literal in the template with nowhere for input to
+reach it. A `Plug.Test` assertion could not catch the breakage either, since it
+only ever observes the 302.
+
+`Vigil.OAuth.ConsentPage` both mints the nonce and stamps it on its `<style>`
+tag, so one module owns what the value is; `Vigil.OAuth.Endpoint` only names it
+in the header. The HTML error page gets the same headers minus `style-src`,
+having no style at all.
 
 The escaping on the page is separate and unchanged: `client_name`, the redirect
 host, the error text and every hidden field value are HTML-escaped, because

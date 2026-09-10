@@ -49,6 +49,18 @@ defmodule Vigil.OAuth.ConsentPage do
   """
 
   @doc """
+  A fresh CSP nonce for one response.
+
+  Minted here rather than by the caller because this module is what stamps it
+  on the `<style>` tag, so the shape of the value and its one use stay
+  together. Url-safe base64, so it carries nothing an HTML attribute or a CSP
+  source expression would have to escape — which is why `render/1` is right not
+  to run it through `escape/1`. Fresh per response: a nonce reused across
+  responses is one an attacker can learn from the first and spend on the next.
+  """
+  def nonce, do: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+
+  @doc """
   Renders the consent page. `client_name` and hidden field values are treated
   as untrusted (client-registration-controlled) and HTML-escaped.
 
@@ -75,8 +87,6 @@ defmodule Vigil.OAuth.ConsentPage do
       loopback: loopback,
       error: Map.get(params, :error) && escape(params.error),
       hidden_fields: escaped_hidden,
-      # url-safe base64, so it carries nothing an HTML attribute or a CSP
-      # source expression would have to escape.
       nonce: nonce
     ]
 

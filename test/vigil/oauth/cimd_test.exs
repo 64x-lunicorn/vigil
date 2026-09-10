@@ -398,6 +398,59 @@ defmodule Vigil.OAuth.CimdTest do
     end
   end
 
+  ## The pinned connection
+
+  describe "request_for/2" do
+    # Every `fetch` test above swaps in a fake request, so those only prove the
+    # guard *hands the address on*. This is the other half: what the production
+    # request actually does with it.
+
+    defp request_for(url, ip) do
+      {connect_url, headers} = Cimd.request_for(URI.parse(url), ip)
+
+      {List.to_string(connect_url),
+       Enum.map(headers, fn {k, v} -> {to_string(k), to_string(v)} end)}
+    end
+
+    test "the URL names the checked address and never the host" do
+      {url, _headers} = request_for(@url, @public)
+
+      assert url == "https://93.184.216.34:443/metadata.json"
+      refute url =~ "client.example.org"
+    end
+
+    test "the host travels as the Host header instead" do
+      {_url, headers} = request_for(@url, @public)
+
+      assert {"host", "client.example.org"} in headers
+    end
+
+    test "an IPv6 address is bracketed before it can carry a port" do
+      {url, _headers} = request_for(@url, {0x2606, 0x2800, 0, 0, 0, 0, 0, 1})
+
+      assert url == "https://[2606:2800::1]:443/metadata.json"
+    end
+
+    test "the path and the query survive the rewrite" do
+      {url, _headers} = request_for("https://client.example.org/a/b.json?x=1&y=2", @public)
+
+      assert url == "https://93.184.216.34:443/a/b.json?x=1&y=2"
+    end
+
+    test "a URL with no path still names one" do
+      {url, _headers} = request_for("https://client.example.org", @public)
+
+      assert url == "https://93.184.216.34:443/"
+    end
+
+    test "a non-default port is kept, and joins the Host header" do
+      {url, headers} = request_for("https://client.example.org:8443/m", @public)
+
+      assert url == "https://93.184.216.34:8443/m"
+      assert {"host", "client.example.org:8443"} in headers
+    end
+  end
+
   ## The request options
 
   describe "http_options/1" do

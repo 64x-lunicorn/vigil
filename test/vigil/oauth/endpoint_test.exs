@@ -435,7 +435,11 @@ defmodule Vigil.OAuth.EndpointTest do
     assert "default-src 'none'" in directives
     assert "frame-ancestors 'none'" in directives
     assert "base-uri 'none'" in directives
-    assert "form-action 'self'" in directives
+
+    # form-action is deliberately absent: its treatment of the redirect that
+    # answers the Allow POST is not interoperable, and it guards nothing here.
+    # See Vigil.OAuth.Endpoint.html_security_headers/1.
+    refute Enum.any?(directives, &String.starts_with?(&1, "form-action"))
 
     # The page's one style block, and nothing else. No 'unsafe-inline'
     # anywhere: an injected <style> without the nonce does not run.

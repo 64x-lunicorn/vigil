@@ -119,7 +119,7 @@ defmodule Vigil.OAuth.Endpoint do
       "scope" => ctx.scope
     }
 
-    nonce = style_nonce()
+    nonce = ConsentPage.nonce()
 
     html =
       ConsentPage.render(%{
@@ -196,13 +196,25 @@ defmodule Vigil.OAuth.Endpoint do
       cannot steer a click onto Allow.
     * `Referrer-Policy: no-referrer` stops the URL leaking. The consent page's
       URL carries `client_id`, `redirect_uri`, `state` and `code_challenge`.
-    * `form-action 'self'` keeps the password POST on this origin.
     * `X-Content-Type-Options: nosniff` and `default-src 'none'` close the
       distance between "renders no external assets today" and "renders no
       external assets".
+    * `base-uri 'none'` keeps an injected `<base>` from re-pointing the one
+      relative URL on the page, the form's own action.
 
-  The nonce half lives on `Vigil.OAuth.ConsentPage`'s `<style>` tag; the two
-  have to name the same value.
+  Deliberately absent: `form-action 'self'`. The password POST does land on
+  this origin, but its answer is a 302 to the client's `redirect_uri`, which is
+  another origin by definition — and whether `form-action` applies to a
+  redirect *after* a submission is, in MDN's words, "debated and browser
+  implementations of this aspect are inconsistent (e.g., Firefox 57 doesn't
+  block the redirects whereas Chrome 63 does)". So the directive can break the
+  Allow button in the more likely browser, and it guards nothing here: the
+  form's action is a literal in the template with nowhere for input to reach
+  it. A `Plug.Test` assertion cannot see this failure either, since it only
+  ever observes the 302.
+
+  The nonce half lives on `Vigil.OAuth.ConsentPage`, which both mints the value
+  and stamps it on its `<style>` tag; this function only names it.
   """
   def html_security_headers(nonce) do
     [
@@ -213,17 +225,10 @@ defmodule Vigil.OAuth.Endpoint do
     ]
   end
 
-  defp content_security_policy(nonce) do
-    ["default-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'"]
-    |> then(fn directives ->
-      if nonce, do: directives ++ ["style-src 'nonce-#{nonce}'"], else: directives
-    end)
-    |> Enum.join("; ")
-  end
+  defp content_security_policy(nil), do: base_policy()
+  defp content_security_policy(nonce), do: base_policy() <> "; style-src 'nonce-#{nonce}'"
 
-  # Fresh per response: a nonce reused across responses is a nonce an attacker
-  # can learn from one and spend on the next.
-  defp style_nonce, do: 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+  defp base_policy, do: "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
   defp error_html(message) do
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>vigil — error</title></head>" <>
