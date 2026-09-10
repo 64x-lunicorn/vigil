@@ -36,7 +36,9 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
     end
 
     files =
-      Vigil.VaultDiscovery.discover_files!(vault_path, Application.get_env(:vigil, :exclude, []))
+      vault_path
+      |> Vigil.Vault.Layout.over_vault!(Application.get_env(:vigil, :exclude, []))
+      |> Vigil.Vault.Layout.note_paths()
 
     differences = Vigil.Vault.Rules.slug_changes(vault_path, files)
 

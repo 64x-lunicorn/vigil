@@ -12,7 +12,22 @@ defmodule Vigil.Vault.AbsentFacts do
   the policy is meant to find.
   """
 
-  alias Vigil.Vault.Facts
+  alias Vigil.Vault.{Facts, Layout}
+
+  @doc """
+  A layout for a vault that is not on disk: the domains, exclusions and
+  project directories a test wants the policy to see, over a vault path
+  nothing reads.
+  """
+  @spec layout(Enumerable.t()) :: Layout.t()
+  def layout(fields \\ []) do
+    Layout.new(
+      Keyword.merge(
+        [vault_path: "/nonexistent", domains: [], exclude: [], project_dirs: []],
+        Enum.to_list(fields)
+      )
+    )
+  end
 
   @doc "A `Facts` answering nothing, with `overrides` applied on top."
   @spec answering_nothing(Enumerable.t()) :: Facts.t()
@@ -20,9 +35,8 @@ defmodule Vigil.Vault.AbsentFacts do
     Facts.new(
       Keyword.merge(
         [
-          domains: [],
-          exclude: [],
-          project_dirs: [],
+          layout:
+            Layout.new(vault_path: "/nonexistent", domains: [], exclude: [], project_dirs: []),
           naming: %{},
           today: ~D[1970-01-01],
           path_exists?: fn _path -> false end,

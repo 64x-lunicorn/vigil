@@ -10,11 +10,10 @@ defmodule Vigil.Store do
     Index,
     Parser,
     Git,
-    Skills,
-    VaultDiscovery
+    Skills
   }
 
-  alias Vigil.Vault.{Decision, Domains, Facts, Plan, Policy}
+  alias Vigil.Vault.{Decision, Domains, Facts, Layout, Plan, Policy}
 
   # The name a writer registers under, and — the same atom — the name of the
   # table it publishes through. Production registers under this module and
@@ -243,16 +242,13 @@ defmodule Vigil.Store do
     git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)
 
-    domain_dirs = VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
+    layout = layout(state)
 
-    log_warnings(Domains.mismatches(domains, domain_dirs))
-
-    files =
-      domain_dirs
-      |> Enum.flat_map(&VaultDiscovery.domain_files(state.vault_path, &1))
+    log_warnings(Domains.mismatches(domains, layout.domains))
 
     parsed_files =
-      files
+      layout
+      |> Layout.note_paths()
       |> Enum.map(&load_file(state.vault_path, &1, git_meta))
       |> Enum.reject(&is_nil/1)
 
@@ -260,7 +256,7 @@ defmodule Vigil.Store do
     sizes = Index.size(index)
 
     Logger.info(
-      "vigil: #{length(domain_dirs)} domains (#{Enum.join(domain_dirs, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
+      "vigil: #{length(layout.domains)} domains (#{Enum.join(layout.domains, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
     {put_index(%{state | domains: domains}, index), pull_result}
@@ -337,42 +333,32 @@ defmodule Vigil.Store do
     end
   end
 
-  defp list_domain_names(state), do: VaultDiscovery.domain_dirs(state.vault_path, state.exclude)
-
   ## Vault facts for Vigil.Vault.Policy
 
   # Built fresh per write, and built by Vigil.Vault.Facts — the module that
   # defines the seam names both of its answer sets, so what the production one
   # claims is checkable without a git repository or a running writer. What is
-  # this module's is gathering the plain facts: which domains the vault has,
-  # which project directories exist, what _domains.yml says about naming.
+  # this module's is gathering the plain facts: the vault's layout, and what
+  # _domains.yml says about naming.
+  #
+  # The layout is read from disk per write rather than carried in the state,
+  # and deliberately: a project directory a write creates has to be there for
+  # the next write's gate, and a domain added on disk is writable without a
+  # reload. The load builds one of its own, out of the same function.
   #
   # `now` is the instant the write's own response's envelope was decided at
   # (Vigil.MCP.Envelope.for_tool/2), passed through rather than read here.
   defp facts(state, now) do
     Facts.over_vault(
       state.index,
-      %{
-        vault_path: state.vault_path,
-        domains: list_domain_names(state),
-        exclude: state.exclude,
-        project_dirs: project_dirs(state),
-        naming: naming_rules(state)
-      },
+      %{layout: layout(state), naming: naming_rules(state)},
       now
     )
   end
 
+  defp layout(state), do: Layout.over_vault(state.vault_path, state.exclude)
+
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
-
-  defp project_dirs(state) do
-    projects = Path.join(state.vault_path, "projects")
-
-    case File.ls(projects) do
-      {:ok, entries} -> Enum.filter(entries, &File.dir?(Path.join(projects, &1)))
-      {:error, _} -> []
-    end
-  end
 
   defp naming_rules(state), do: Domains.naming_rules(state.domains)
 

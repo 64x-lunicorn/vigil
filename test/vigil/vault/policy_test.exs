@@ -10,9 +10,12 @@ defmodule Vigil.Vault.PolicyTest do
   defp facts(overrides \\ []) do
     AbsentFacts.answering_nothing(
       [
-        domains: ["bike", "journal", "projects", "training"],
-        exclude: ["work"],
-        project_dirs: ["vigil"],
+        layout:
+          AbsentFacts.layout(
+            domains: ["bike", "journal", "projects", "training"],
+            exclude: ["work"],
+            project_dirs: ["vigil"]
+          ),
         today: ~D[2026-09-09]
       ] ++ overrides
     )

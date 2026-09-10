@@ -63,6 +63,22 @@ The main note of a project is named after the project:
 would then produce colliding wikilink slugs, since links resolve through the
 file stem.
 
+**One module answers "is this path a note".** `Vigil.Vault.Layout` is built
+once from the vault — its domain directories, the project directories inside
+`projects/`, and the `VIGIL_EXCLUDE` boundary — and classifies a path as a
+note in a domain, a skill, excluded, or nothing this vault holds. The write
+gate asks it before a write and the load asks it for every file it walks, so
+what vigil will write to and what it takes back are the same set of paths. The
+nesting rule above is stated there and nowhere else: it used to be written once
+in the write gate and once in discovery, agreeing by coincidence, so a second
+nesting domain would have been writable-but-undiscoverable or
+discoverable-but-unwritable depending on which of the two was edited.
+
+Whether a path is *safe* is a different question and stays with
+`Vigil.Slug.safe_path/1`: traversal, absolute paths, backslashes, NUL bytes
+and dot- or underscore-prefixed segments are about a caller's manners, not
+about the shape of a vault.
+
 `journal/` is the only directory for chronological entries, and the only one
 with a special rule in search: it is hidden unless `domain: "journal"` is
 requested explicitly. Chronological entries would otherwise crowd out real

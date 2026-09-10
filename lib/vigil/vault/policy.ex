@@ -20,7 +20,7 @@ defmodule Vigil.Vault.Policy do
   """
 
   alias Vigil.{Index, Markdown, Slug}
-  alias Vigil.Vault.{Decision, Facts, Frontmatter}
+  alias Vigil.Vault.{Decision, Facts, Frontmatter, Layout}
 
   @type op ::
           :create
@@ -185,38 +185,30 @@ defmodule Vigil.Vault.Policy do
 
   ## Which paths are writable notes
 
+  # Which paths are notes is Vigil.Vault.Layout's question, and the same value
+  # answers it for vault discovery — so what this gate lets in is what a load
+  # takes back. What is left here is what to *say* about each answer, and the
+  # one thing the layout does not decide: whether a missing project directory
+  # is refused or created, which only `:create` may ask for.
   defp writable_path(path, facts, create_dirs) do
-    parts = String.split(path, "/")
-    first = hd(parts)
-    last = List.last(parts)
-
-    cond do
-      not String.ends_with?(last, ".md") -> @invalid_path
-      first == "skills" -> @invalid_path
-      first in facts.exclude -> @invalid_path
-      Slug.reserved_segment?(first) -> @invalid_path
-      length(parts) == 2 -> domain_rules(first, parts, facts, create_dirs)
-      length(parts) == 3 and first == "projects" -> domain_rules(first, parts, facts, create_dirs)
-      true -> @invalid_path
-    end
-  end
-
-  defp domain_rules(domain, parts, facts, create_dirs) do
-    cond do
-      domain not in facts.domains ->
-        {:error, "Invalid path. Available domains: #{Enum.join(facts.domains, ", ")}"}
-
-      length(parts) < 3 ->
+    case Layout.classify(facts.layout, path) do
+      {:note, domain} ->
         {:ok, domain, nil}
 
-      true ->
-        project = Enum.at(parts, 1)
+      {:missing_project, domain, project} ->
+        if create_dirs,
+          do: {:ok, domain, project},
+          else: {:error, "Invalid path. Project directory does not exist: #{project}"}
 
-        cond do
-          project in facts.project_dirs -> {:ok, domain, nil}
-          create_dirs -> {:ok, domain, project}
-          true -> {:error, "Invalid path. Project directory does not exist: #{project}"}
-        end
+      {:unknown_domain, _domain} ->
+        {:error, "Invalid path. Available domains: #{Enum.join(facts.layout.domains, ", ")}"}
+
+      # A path under `skills/`, in an excluded domain, or shaped like nothing
+      # this vault holds. All three are refused without naming anything: an
+      # excluded domain must not be confirmed to exist by the wording of a
+      # refusal (docs/design.md, "`VIGIL_EXCLUDE` is the hard boundary").
+      _ ->
+        @invalid_path
     end
   end
 

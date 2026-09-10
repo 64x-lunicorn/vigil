@@ -38,7 +38,7 @@ defmodule Vigil.Vault.PlanTest do
   defp facts(overrides) do
     AbsentFacts.answering_nothing(
       [
-        domains: ["bike"],
+        layout: AbsentFacts.layout(domains: ["bike"]),
         path_exists?: fn path -> path == @path end,
         read_note: fn _path -> {:ok, @note} end
       ] ++ overrides

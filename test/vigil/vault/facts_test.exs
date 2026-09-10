@@ -73,10 +73,7 @@ defmodule Vigil.Vault.FactsTest do
     defp facts_over(notes, vault_overrides \\ [], now \\ ~U[2026-01-01 10:00:00Z]) do
       vault =
         Enum.into(vault_overrides, %{
-          vault_path: "/nonexistent",
-          domains: ["gear"],
-          exclude: [],
-          project_dirs: [],
+          layout: AbsentFacts.layout(domains: ["gear"]),
           naming: %{}
         })
 
@@ -89,15 +86,18 @@ defmodule Vigil.Vault.FactsTest do
     test "the plain answers are the vault's own" do
       facts =
         facts_over([],
-          domains: ["gear", "training"],
-          exclude: ["private"],
-          project_dirs: ["vigil"],
+          layout:
+            AbsentFacts.layout(
+              domains: ["gear", "training"],
+              exclude: ["private"],
+              project_dirs: ["vigil"]
+            ),
           naming: %{"journal" => %{pattern: :date}}
         )
 
-      assert facts.domains == ["gear", "training"]
-      assert facts.exclude == ["private"]
-      assert facts.project_dirs == ["vigil"]
+      assert facts.layout.domains == ["gear", "training"]
+      assert facts.layout.exclude == ["private"]
+      assert facts.layout.project_dirs == ["vigil"]
       assert facts.naming == %{"journal" => %{pattern: :date}}
     end
 
@@ -206,7 +206,7 @@ defmodule Vigil.Vault.FactsTest do
       File.write!(Path.join(tmp, "gear/terra-speed.md"), "# Terra Speed\n")
       on_exit(fn -> File.rm_rf(tmp) end)
 
-      facts = facts_over([], vault_path: tmp)
+      facts = facts_over([], layout: AbsentFacts.layout(vault_path: tmp, domains: ["gear"]))
 
       assert facts.path_exists?.("gear/terra-speed.md")
       refute facts.path_exists?.("gear/nope.md")

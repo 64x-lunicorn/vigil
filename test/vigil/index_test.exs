@@ -1,7 +1,8 @@
 defmodule Vigil.IndexTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.{Index, Parser, VaultDiscovery}
+  alias Vigil.{Index, Parser}
+  alias Vigil.Vault.Layout
 
   @fixtures Path.expand("../fixtures/vault", __DIR__)
   @git_meta %{
@@ -46,7 +47,8 @@ defmodule Vigil.IndexTest do
 
   defp parsed_fixture_files do
     @fixtures
-    |> VaultDiscovery.discover_files()
+    |> Layout.over_vault()
+    |> Layout.note_paths()
     |> Enum.map(&parse/1)
   end
 
