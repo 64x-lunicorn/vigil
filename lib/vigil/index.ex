@@ -645,10 +645,12 @@ defmodule Vigil.Index do
   @doc "%{now:, active:, upcoming:, recently_past:} from `Vigil.Events`, over the index's event-typed notes."
   def current(index, now), do: Events.current(event_notes(index), now)
 
-  @doc "%{active_ids:, near:, titles:} from `Vigil.Events`, over the index's event-typed notes."
-  def snapshot(index, now), do: Events.snapshot(event_notes(index), now)
-
-  defp event_notes(index) do
+  @doc """
+  The index's event-typed notes — the only part of the index the time envelope
+  decides against. `Vigil.Store` publishes this list so the envelope can be
+  computed without a call into the writer.
+  """
+  def event_notes(index) do
     index.notes |> Map.values() |> Enum.filter(&(&1.type == :event))
   end
 

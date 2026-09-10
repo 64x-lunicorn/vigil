@@ -167,14 +167,16 @@ defmodule Vigil.MCP.Server do
 
       Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
 
+      {envelope, now} = Envelope.for_tool(session_id, name)
+
       result =
         if scope == OAuth.read_scope() and Tools.write_tool?(name) do
           {:error, "Read-only token: write access denied."}
         else
-          Tools.dispatch(name, arguments)
+          Tools.dispatch(name, arguments, now)
         end
 
-      body = build_tool_call_result(name, result, session_id)
+      body = build_tool_call_result(result, envelope)
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: body})
     end)
   end
@@ -201,14 +203,13 @@ defmodule Vigil.MCP.Server do
   # The envelope is attached around both outcomes rather than inside the
   # success branch, so "every tool response carries exactly one of `_`, `_t` or
   # `_!`" (docs/design.md, "The time envelope") is structurally true instead of
-  # true in one of two branches. An error advances the session's state for the
-  # same reason: a failed first call is still a call the session made, and
-  # repeating the long first form on the next one would be a lie about which
-  # response is first.
-  defp build_tool_call_result(name, result, session_id) do
-    now = Vigil.Clock.now()
-    envelope = Envelope.for_tool(session_id, name, now, Store.snapshot(now))
-
+  # true in one of two branches. It is obtained before the call rather than
+  # after it for the same reason: an envelope the caller already holds cannot
+  # be skipped by an outcome, and the instant it was decided at is what the
+  # call itself is made with. An error advances the session's state too: a
+  # failed first call is still a call the session made, and repeating the long
+  # first form on the next one would be a lie about which response is first.
+  defp build_tool_call_result(result, envelope) do
     case result do
       {:ok, value} ->
         %{content: [text_content(%{result: value}, envelope)]}

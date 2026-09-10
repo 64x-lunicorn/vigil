@@ -6,6 +6,7 @@ defmodule Vigil.Store do
   alias Vigil.{
     Clock,
     Commit,
+    Events,
     Index,
     Parser,
     Git,
@@ -14,6 +15,8 @@ defmodule Vigil.Store do
   }
 
   alias Vigil.Vault.{Decision, Domains, Facts, Plan, Policy}
+
+  @events_table :vigil_events
 
   ## Public API
 
@@ -73,12 +76,29 @@ defmodule Vigil.Store do
     :move_note
   ]
 
-  # Not tool-facing: the time envelope Vigil.MCP.Server attaches to every tool
-  # result, and the two answers about the vault's domains that the same server
-  # puts into its `initialize` response.
-  def snapshot(now), do: GenServer.call(__MODULE__, {:snapshot, now})
+  # Not tool-facing: the time envelope Vigil.MCP.Envelope attaches to every
+  # tool result, and the two answers about the vault's domains that the same
+  # server puts into its `initialize` response.
+  #
+  # The snapshot is computed in the caller, out of the event notes this module
+  # publishes on every index change — the same reason Vigil.MCP.Envelope's own
+  # table is public. A response already costs one call into this writer, the
+  # tool's own; the envelope that goes on top of it must not cost a second,
+  # which for a write tool would land after the write.
+  def snapshot(now), do: Events.snapshot(published_events(), now)
+
   def domain_names(), do: GenServer.call(__MODULE__, :domain_names)
   def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
+
+  # No table means this writer is not up — the tool call about to be made will
+  # fail on its own, and the envelope in front of it must not crash first with
+  # a worse error than the one the caller is going to get anyway.
+  defp published_events do
+    case :ets.whereis(@events_table) do
+      :undefined -> []
+      table -> :ets.lookup_element(table, :events, 2, [])
+    end
+  end
 
   ## GenServer
 
@@ -90,6 +110,10 @@ defmodule Vigil.Store do
 
     unless File.dir?(Path.join(vault_path, ".git")) do
       raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
+    end
+
+    if :ets.whereis(@events_table) == :undefined do
+      :ets.new(@events_table, [:set, :named_table, :public, read_concurrency: true])
     end
 
     state = %{
@@ -133,8 +157,11 @@ defmodule Vigil.Store do
     {:reply, result, new_state}
   end
 
-  # `now` is the seam Vigil.Clock fills in; no tool declares it, and the tests
-  # that pin a moment pass it.
+  # `now` is the response's instant, put here by Vigil.MCP.Tools for the two
+  # rows that declare `now:` — the same instant their envelope was decided at,
+  # so `current` cannot report a time its own envelope contradicts. The
+  # fallback covers a caller with no envelope to share it — a test pinning a
+  # moment.
   def handle_call({:lint, params}, _from, state) do
     {:reply, Index.lint(state.index, Map.get(params, :now) || Clock.now()), state}
   end
@@ -158,10 +185,6 @@ defmodule Vigil.Store do
 
   def handle_call({:skill_write, params}, _from, state) do
     {:reply, do_skill_write(params.name, params.content, state), state}
-  end
-
-  def handle_call({:snapshot, now}, _from, state) do
-    {:reply, Index.snapshot(state.index, now), state}
   end
 
   def handle_call(:domain_names, _from, state) do
@@ -203,7 +226,7 @@ defmodule Vigil.Store do
       "vigil: #{length(domain_dirs)} domains (#{Enum.join(domain_dirs, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
-    {%{state | domains: domains, index: index}, pull_result}
+    {put_index(%{state | domains: domains}, index), pull_result}
   end
 
   defp load_file(vault_path, rel_path, git_meta) do
@@ -397,7 +420,7 @@ defmodule Vigil.Store do
   defp execute(%Plan{action: {:delete, path}} = plan, state) do
     case Git.remove_commit(state.vault_path, path, plan.message) do
       :ok ->
-        state = %{state | index: Index.remove(state.index, path)}
+        state = put_index(state, Index.remove(state.index, path))
 
         push(
           state,
@@ -441,16 +464,25 @@ defmodule Vigil.Store do
     end
   end
 
+  # The one place the index is replaced, so the published event notes cannot
+  # fall behind it: every path that changes the index — the full load and each
+  # of the three write outcomes — goes through here. Publishing inside the
+  # writer is what makes the table safe to read anywhere else.
+  defp put_index(state, index) do
+    :ets.insert(@events_table, {:events, Index.event_notes(index)})
+    %{state | index: index}
+  end
+
   defp put_reparsed(state, path, commit_meta, verb) do
     case reparse(state, path, commit_meta, verb) do
-      {:ok, file} -> %{state | index: Index.put(state.index, file)}
+      {:ok, file} -> put_index(state, Index.put(state.index, file))
       :error -> state
     end
   end
 
   defp move_reparsed(state, from, to, commit_meta) do
     case reparse(state, to, commit_meta, "move") do
-      {:ok, file} -> %{state | index: Index.move(state.index, from, file)}
+      {:ok, file} -> put_index(state, Index.move(state.index, from, file))
       :error -> state
     end
   end

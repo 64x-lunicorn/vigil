@@ -3,8 +3,8 @@ defmodule Vigil.MCP.Tools do
   Every MCP tool's contract, declared once.
 
   `@tools` is the single source of truth: name, description, the `write`
-  flag, the `call` the tool makes, and each parameter's name, type, and
-  whether it is required. Three things are generated from it — `definitions/0`
+  flag, the `call` the tool makes, whether that call resolves an instant
+  (`now:`), and each parameter's name, type, and whether it is required. Three things are generated from it — `definitions/0`
   (the JSON schema handed to the client on `tools/list`), the argument
   validation `dispatch/2` runs on `tools/call`, and the `Store.call/2` that
   follows it. A schema, its validation and the call they describe cannot drift
@@ -52,11 +52,12 @@ defmodule Vigil.MCP.Tools do
         }
 
   @type tool_spec :: %{
-          name: String.t(),
-          description: String.t(),
-          write: boolean(),
-          call: atom(),
-          params: [param_spec]
+          required(:name) => String.t(),
+          required(:description) => String.t(),
+          required(:write) => boolean(),
+          required(:call) => atom(),
+          required(:params) => [param_spec],
+          optional(:now) => boolean()
         }
 
   @tools [
@@ -336,6 +337,7 @@ defmodule Vigil.MCP.Tools do
         "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
       write: false,
       call: :lint,
+      now: true,
       params: []
     },
     %{
@@ -343,6 +345,7 @@ defmodule Vigil.MCP.Tools do
       description: "Returns the current time plus active and nearby events.",
       write: false,
       call: :current,
+      now: true,
       params: []
     },
     %{
@@ -463,7 +466,8 @@ defmodule Vigil.MCP.Tools do
   defp find_tool(name), do: Enum.find(@tools, &(&1.name == name))
 
   @doc """
-  Dispatches a `tools/call` to the Store.
+  Dispatches a `tools/call` to the Store at `now`, the instant the response's
+  envelope was decided at.
 
   Validates `args` against the declared tool's parameters first — a
   violation (wrong type, off-enum value, missing or empty required
@@ -471,9 +475,16 @@ defmodule Vigil.MCP.Tools do
   reached, naming every violation rather than only the first. Undeclared
   parameters are ignored. What is left is the call the row declares.
   Returns `{:ok, result}` or `{:error, message}`.
+
+  A row's `now:` marks an operation that resolves an instant. It is handed
+  the response's, under the `:now` key the Store already reads, rather than
+  reading a clock of its own inside the writer — which is how `current` came
+  to report a time its own envelope could contradict across a minute
+  boundary. `now` has no default here: an instant a caller forgot to pass is
+  a second clock read, which is the thing being removed.
   """
-  @spec dispatch(String.t(), map()) :: {:ok, term()} | {:error, String.t()}
-  def dispatch(name, args) do
+  @spec dispatch(String.t(), map(), DateTime.t()) :: {:ok, term()} | {:error, String.t()}
+  def dispatch(name, args, now) do
     case find_tool(name) do
       nil ->
         {:error, "Unknown tool: #{name}"}
@@ -481,10 +492,14 @@ defmodule Vigil.MCP.Tools do
       tool ->
         with :ok <- maybe_require_skill_key(tool, args),
              {:ok, params} <- validate_params(tool.params, args) do
-          tool.call |> Store.call(Map.delete(params, @skill_key)) |> to_result()
+          params = params |> Map.delete(@skill_key) |> maybe_put_now(tool, now)
+          tool.call |> Store.call(params) |> to_result()
         end
     end
   end
+
+  defp maybe_put_now(params, %{now: true}, now), do: Map.put(params, :now, now)
+  defp maybe_put_now(params, _tool, _now), do: params
 
   defp maybe_require_skill_key(%{write: true}, args), do: require_skill_key(args)
   defp maybe_require_skill_key(%{write: false}, _args), do: :ok

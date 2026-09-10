@@ -1,57 +1,75 @@
 defmodule Vigil.MCP.EnvelopeTest do
   # Vigil.MCP.Envelope is a named singleton also started by ServerTest, so
-  # this stays async: false to avoid a name collision with it — nothing here
-  # needs a vault, Store, or git fixture any more, which was the real cost.
+  # this stays async: false to avoid a name collision with it.
   use ExUnit.Case, async: false
 
   alias Vigil.MCP.Envelope
+  alias Vigil.Store
 
+  # What the envelope *says* is Vigil.MCP.Envelope.Decision's, and
+  # DecisionTest pins every form it can take against a hand-built snapshot.
+  # What is left for this module — and so for this file — is the three things
+  # Decision cannot do for itself: carry a session's state from one response
+  # to the next, read the clock once, and fetch the snapshot that instant is
+  # decided against out of the vault the Store actually holds.
   setup do
+    {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+    on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
     start_supervised!(Envelope)
-    :ok
+    %{vault: vault}
   end
 
-  @now ~U[2026-07-09 11:20:00Z] |> DateTime.shift_zone!("Europe/Berlin")
-  @later DateTime.add(@now, 60)
-
-  defp snapshot(opts \\ []) do
-    %{
-      active_ids: Keyword.get(opts, :active_ids, MapSet.new()),
-      near: Keyword.get(opts, :near, %{active: [], upcoming: []}),
-      titles: Keyword.get(opts, :titles, %{})
-    }
+  defp create_event!(path, title, starts, ends) do
+    {:ok, _} =
+      Store.call(:create, %{
+        path: path,
+        type: :event,
+        content: "# #{title}\n\nBody.\n",
+        starts: DateTime.to_iso8601(starts),
+        ends: DateTime.to_iso8601(ends),
+        force: false,
+        create_dirs: false
+      })
   end
 
-  test "first call gets '_', second unchanged call gets '_t'" do
-    assert %{"_" => line} = Envelope.for_tool("session-1", "search", @now, snapshot())
-    assert line =~ ~r/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}\.\d{2}\. \d{2}:\d{2}/
-
-    assert %{"_t" => time} = Envelope.for_tool("session-1", "search", @later, snapshot())
-    assert time =~ ~r/^\d{2}:\d{2}$/
+  test "the session's state is carried from one response to the next" do
+    assert {%{"_" => _}, _now} = Envelope.for_tool("session-1", "search")
+    assert {%{"_t" => _}, _now} = Envelope.for_tool("session-1", "search")
   end
 
-  test "current always gets '_t' and still counts as the session's first call" do
-    assert %{"_t" => _} = Envelope.for_tool("session-2", "current", @now, snapshot())
-    assert %{"_t" => _} = Envelope.for_tool("session-2", "search", @later, snapshot())
+  test "two parallel sessions have independent envelope state" do
+    assert {%{"_" => _}, _} = Envelope.for_tool("session-a", "search")
+    assert {%{"_" => _}, _} = Envelope.for_tool("session-b", "search")
+    assert {%{"_t" => _}, _} = Envelope.for_tool("session-a", "search")
+    assert {%{"_t" => _}, _} = Envelope.for_tool("session-b", "search")
   end
 
-  test "a phase change during the session is reported as '_!'" do
-    assert %{"_" => _} = Envelope.for_tool("session-3", "search", @now, snapshot())
+  test "the instant it returns is the one it decided the envelope at" do
+    {%{"_t" => _}, now} = Envelope.for_tool("session-2", "current")
 
-    active_ids = MapSet.new(["bike/phasentest.md"])
-    titles = %{"bike/phasentest.md" => "Phasentest"}
-    near = %{active: [%{id: "bike/phasentest.md", ends_in: "1h"}], upcoming: []}
+    assert %DateTime{} = now
+    assert {%{"_t" => time}, later} = Envelope.for_tool("session-2", "current")
+    assert time == Calendar.strftime(later, "%H:%M")
+    assert DateTime.compare(later, now) != :lt
+  end
 
-    result =
-      Envelope.for_tool(
-        "session-3",
-        "search",
-        @later,
-        snapshot(active_ids: active_ids, titles: titles, near: near)
-      )
+  # The snapshot is fetched here, not handed in: an event that becomes active
+  # between two responses of the same session is one this module has to
+  # notice on its own — including the note's title, which only the vault
+  # knows.
+  test "it decides against the vault's events as they are at that moment" do
+    assert {%{"_" => _}, now} = Envelope.for_tool("session-3", "search")
 
-    assert %{"_!" => text} = result
-    assert text =~ "now active"
+    create_event!(
+      "bike/phasentest.md",
+      "Phasentest",
+      DateTime.add(now, -3600),
+      DateTime.add(now, 3600)
+    )
+
+    assert {%{"_!" => "Phasentest now active"}, _} = Envelope.for_tool("session-3", "search")
+    assert {%{"_t" => _}, _} = Envelope.for_tool("session-3", "search")
   end
 
   test "the table is public, so no response pays a call into the owning process" do
@@ -59,10 +77,11 @@ defmodule Vigil.MCP.EnvelopeTest do
     assert :ets.info(:vigil_sessions, :owner) == Process.whereis(Envelope)
   end
 
-  test "two parallel sessions have independent envelope state" do
-    assert %{"_" => _} = Envelope.for_tool("session-a", "search", @now, snapshot())
-    assert %{"_" => _} = Envelope.for_tool("session-b", "search", @now, snapshot())
-    assert %{"_t" => _} = Envelope.for_tool("session-a", "search", @later, snapshot())
-    assert %{"_t" => _} = Envelope.for_tool("session-b", "search", @later, snapshot())
+  # The other half of the same claim: the snapshot the envelope is decided
+  # against is read out of a public table too, so a response costs one call
+  # into the writer — the tool's own — and not a second one behind it.
+  test "the events the snapshot is built from are published, not asked for" do
+    assert :ets.info(:vigil_events, :protection) == :public
+    assert :ets.info(:vigil_events, :owner) == Process.whereis(Store)
   end
 end
