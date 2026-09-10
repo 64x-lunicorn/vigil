@@ -666,10 +666,12 @@ defmodule Vigil.MCP.ServerTest do
     assert OAuth.Store.get_token(expired) == :error
   end
 
-  # `dispatch_tool/2` is the one frame nothing else looks at: validation runs
-  # before it, and the write path's own defenses (Facts, Decision, Plan) all
-  # sit after it. Driving every declared tool once through the MCP surface is
-  # the only way its clauses execute at all.
+  # The call `dispatch/2` builds is the one frame nothing else looks at:
+  # validation runs before it, and the write path's own defenses (Facts,
+  # Decision, Plan) all sit after it. Now that it comes from `@tools` rather
+  # than from a clause per tool, driving every declared tool once through the
+  # MCP surface is what proves each row's `call:` and parameter names are the
+  # ones its Store operation actually accepts.
   #
   # The list is checked against `Tools.definitions/0` first, so a tool added to
   # `@tools` without an entry here fails the suite instead of quietly going

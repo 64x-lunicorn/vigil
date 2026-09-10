@@ -326,10 +326,30 @@ one write including a complete index rebuild ~115 ms.
 ## MCP tool schemas are authoritative
 
 `Vigil.MCP.Tools` declares each tool once — name, description, the `write`
-flag, and its parameters' names, types and required-ness — in a single table.
-The JSON schema published on `tools/list` and the argument validation
-`dispatch/2` runs on `tools/call` are both generated from that table, so they
-cannot drift out of agreement the way hand-written twins do.
+flag, the `Store` operation it calls, and its parameters' names, types and
+required-ness — in a single table. Three things are generated from it: the
+JSON schema published on `tools/list`, the argument validation `dispatch/2`
+runs on `tools/call`, and the `Vigil.Store.call/2` that follows. They cannot
+drift out of agreement the way hand-written twins do, and adding a tool is
+adding a row.
+
+**The call is the table's third product.** A row's `call:` names the
+operation; its parameters travel under the names the table gives them. The one
+exception is `skill_key`, which is a parameter of no operation — it carries the
+SkillKey of the Security model's layer 4, the gate reads it, and it does not
+travel. An enum's internal form is the atom of the same name, derived once from
+the values the table already declares rather than restated in each tool's
+dispatch; that restatement is what let `search` convert its `type` while
+`create` passed the same enum through as a string. Whether an answer is lifted
+into `{:ok, value}` is read off the shape the Store returns — an operation that
+cannot fail answers with its value, one that can answers with a result tuple —
+rather than from a flag in the table that would be free to disagree with it.
+
+What the table cannot supply is the `Vigil.Store.call/2` head, which is a
+contract rather than a restatement (see "The write path"), or an entry in the
+dispatch coverage the suite drives every declared tool through. A row whose
+`call:` names no operation compiles and publishes; that coverage is what fails
+it, so the last step of adding a tool is exercising it there.
 
 Every declared parameter is validated against the schema the server itself
 publishes. A violation — a wrong type, an off-enum value, an out-of-range
