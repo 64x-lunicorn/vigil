@@ -199,3 +199,57 @@ Translating it literally would have made the assistant start writing English
 notes into a German vault. It is now configurable via `VIGIL_VAULT_OWNER` and
 `VIGIL_VAULT_LANGUAGE`, defaulting to English, which also removed the last
 hardcoded personal detail from the codebase.
+
+---
+
+## Decomposing the Store
+
+`Vigil.Store` had been the process, the index, the rules and the write
+orchestrator at once. It was pulled apart module by module — the link index,
+events and skills first, then `Vigil.Index` as a plain value, `Vigil.Vault.Domains`,
+`Vigil.Vault.Edit`, one declaration table for the MCP tools, and finally
+`Vigil.Vault.Policy` as the single write gate.
+
+This round finished that work, and what it found is the part worth recording:
+every remaining seam was a place where a rule had **two owners or none**.
+
+**A rule with no owner opens the gate it guards.** `Vigil.Vault.Facts` gave
+every question a default meaning "nothing there", and each of those defaults
+sat on the permissive side of the gate it fed — zero headings switch the
+`rewrite_note` shrink gate off, a path that does not exist lets `create` past
+its existence refusal, no similar notes switch duplicate detection off. Adding
+a question and forgetting to wire it would have opened a gate with no test
+failing, because the policy tests inherited exactly those defaults. `Facts` now
+has none: it answers or it raises.
+
+**A rule with two owners drifts, and the drift picks a side.** `lint` and the
+vault doctor both reported duplicate headings and disagreed. The parser settled
+it: its chunk-id uniquifier keys on the slug of the heading text alone, so
+`## A / ### B` and `## C / ### B` really do produce `b` and `b-2`. `lint`
+grouped by the heading chain and therefore under-reported exactly the notes
+whose chunk ids are unstable — the one breaking change this project has no
+answer to. "Overlong" was two different rules the same way: 40 chunks to one
+reader, 30 headings or 2000 words to the other.
+
+**A bound stated anywhere but in the declaration is not a bound.** Both of the
+MCP tools' bounded integers had escaped the table, in opposite directions:
+`limit` said "max 25" in prose and was enforced as a silent clamp, so a caller
+asking for 100 got 25 and was told nothing; `depth` was a real error, raised
+three modules and one `GenServer.call` away. The table now carries ranges, and
+an out-of-range value is refused where every other violation is.
+
+**The test that cannot fail hides the bug.** `Vigil.Vault.Policy` ran the
+confirm gate *before* the path check on `delete_note` and `move_note`, so
+`delete_note("skills/tdd.md", confirm: false)` answered "permanently deletes
+skills/tdd.md from the vault" — a destructive-operation prompt for a write the
+policy refuses outright on the next turn. Both boundary tests passed
+`confirm: true`, so neither could ever see it.
+
+The last extraction was the write orchestration itself. A resolved decision
+plus the note's current content now becomes a `Vigil.Vault.Plan` — an action
+and a commit message — and `Vigil.Store` is left with the sequence and the
+effect. The write order the design mandates was restated at eight call sites;
+it is stated once now, where a plan is executed. The practical payoff is the
+same one the index extraction had: `test/vigil/store_test.exs` no longer has to
+grow to cover a write rule, because the rule can be exercised without a vault,
+a git repository or a running GenServer.

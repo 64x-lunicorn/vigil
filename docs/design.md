@@ -424,7 +424,10 @@ write.
 
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
-write must not cost read access to everything else.
+write must not cost read access to everything else. A caller that breaks a
+declared contract outright — a `search` without a `limit`, a `links` with a
+depth the tool table does not allow — is matched in `Vigil.Store`'s client
+functions, so it fails in its own process rather than in the writer's.
 
 The write effect itself — create the directory, write the file, commit it, and
 the wording for a POSIX error — belongs to `Vigil.Commit`, and notes and skills
@@ -432,8 +435,9 @@ both go through it. It sits at the top level rather than under
 `Vigil.Vault.*` for the same reason `Vigil.Markdown` does: skills are never
 notes and must not depend on a note-shaped module. What stays with each caller
 is what differs — `Vigil.Store` reparses the written file into the index
-between commit and push, which would index a skill as a note, and the two
-push-failure messages describe different objects.
+between commit and push, which would index a skill as a note, and each write
+action's push-failure message names its own object: a change, a deletion, a
+move, a skill.
 
 ---
 
