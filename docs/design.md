@@ -377,9 +377,20 @@ pointed. The path check on the id's own path part still runs first, so an id
 naming `skills/` or an excluded domain answers "Invalid path" rather than
 "Not found".
 
-Order matters: write the file, commit, reparse into the index, then push. If
-the push fails the local commit stays and the tool returns an error saying the
-change is committed locally but not pushed. Nothing is rolled back.
+**The write path returns a plan; the process executes it.** For the six
+content-shaped operations — `create`, `append`, `replace_section`,
+`rewrite_note`, `delete_section`, `update_frontmatter` — a resolved decision
+plus the note's current content becomes a `Vigil.Vault.Plan`: the file to
+write, the bytes to write into it, and the commit message to write them under.
+Building one performs no effect and reads no file, so every one of those
+operations can be exercised without a vault, a git repository or a running
+GenServer. `Vigil.Store` is left with the sequence — ask the policy, read the
+note, build the plan, execute it — and the effect.
+
+Order matters: write the file, commit, reparse into the index, then push. It is
+stated once, where a plan is executed. If the push fails the local commit stays
+and the tool returns an error saying the change is committed locally but not
+pushed. Nothing is rolled back.
 
 Commit author is `vigil <vigil@local>`, set with `-c` on the call rather than
 in the repository config, so manual commits keep the human's identity. That
