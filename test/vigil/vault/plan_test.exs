@@ -38,7 +38,6 @@ defmodule Vigil.Vault.PlanTest do
   defp facts(overrides) do
     AbsentFacts.answering_nothing(
       [
-        vault_path: "/vault",
         domains: ["bike"],
         path_exists?: fn path -> path == @path end,
         read_note: fn _path -> {:ok, @note} end

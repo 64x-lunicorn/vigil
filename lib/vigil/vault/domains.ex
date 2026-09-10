@@ -23,14 +23,13 @@ defmodule Vigil.Vault.Domains do
     that contract is stated somewhere rather than inferred from a bare map.
     """
 
-    defstruct [:pattern, :scope, :hint, :suggestion, :max_depth]
+    defstruct [:pattern, :scope, :hint, :suggestion]
 
     @type t :: %__MODULE__{
             pattern: Regex.t(),
             scope: :filename | :relpath,
             hint: String.t(),
-            suggestion: :date | :slug,
-            max_depth: pos_integer() | nil
+            suggestion: :date | :slug
           }
   end
 
@@ -131,8 +130,7 @@ defmodule Vigil.Vault.Domains do
            scope: parse_scope(Map.get(naming, "scope")),
            hint: Map.get(naming, "hint", Map.get(naming, "hinweis", "")),
            suggestion:
-             parse_suggestion(Map.get(naming, "suggestion", Map.get(naming, "vorschlag"))),
-           max_depth: Map.get(naming, "max_depth")
+             parse_suggestion(Map.get(naming, "suggestion", Map.get(naming, "vorschlag")))
          }, []}
 
       {:error, warning} ->

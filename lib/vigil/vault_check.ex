@@ -11,9 +11,9 @@ defmodule Vigil.VaultCheck do
   no knowledge of vault content and deliberately live in `scripts/init.sh`.
   """
 
-  alias Vigil.{Markdown, Parser, Slug, VaultDiscovery}
+  alias Vigil.{Commit, Markdown, Parser, Slug, VaultDiscovery}
   alias Vigil.Parser.Chunk
-  alias Vigil.Vault.Rules
+  alias Vigil.Vault.{Domains, Rules}
 
   @max_basisname_laenge 60
   @max_frontmatter_bytes 1024
@@ -227,29 +227,54 @@ defmodule Vigil.VaultCheck do
 
   ## Domain drift
 
+  # Reading the file is the doctor's job; understanding it is
+  # Vigil.Vault.Domains', the one reader design.md designates for it. Only the
+  # rendering is the doctor's, as in B3 — and it stays the doctor's wording
+  # because scripts/init.sh reads these messages to decide which entries vault
+  # adoption appends.
+  #
+  # A file that could not be read or parsed produces one finding saying so and
+  # no drift at all. Drift measured against keys nobody read is one false
+  # "unknown to the runtime" per domain — a report on a file the doctor could
+  # not read, in the voice of one it had read.
   defp b4_drift(vault_path, domain_dirs) do
-    domains_yml_keys =
-      case YamlElixir.read_from_file(Path.join(vault_path, "_domains.yml")) do
-        {:ok, map} when is_map(map) -> Map.keys(map)
-        _ -> []
-      end
+    case File.read(Path.join(vault_path, "_domains.yml")) do
+      {:ok, text} ->
+        {domains, warnings} = Domains.parse(text)
 
-    dirs_without_config =
-      domain_dirs
-      |> Enum.reject(&(&1 in domains_yml_keys))
-      |> Enum.map(fn d ->
-        %{message: "domain '#{d}' exists in the vault but is unknown to the runtime"}
-      end)
+        case Enum.split_with(warnings, &match?({:unparsable, _}, &1)) do
+          {[], rule_warnings} ->
+            findings(rule_warnings, &Domains.format/1) ++ drift(domains, domain_dirs)
 
-    config_without_dirs =
-      domains_yml_keys
-      |> Enum.reject(&(&1 in domain_dirs))
-      |> Enum.map(fn d ->
-        %{message: "domain '#{d}' is configured but does not exist in the vault"}
-      end)
+          {unparsable, _rule_warnings} ->
+            findings(unparsable, &Domains.format/1)
+        end
 
-    dirs_without_config ++ config_without_dirs
+      # Absent is not unreadable. A missing file costs the domain descriptions
+      # and nothing else (docs/design.md, "`_domains.yml` is a description, not
+      # configuration"), and vault adoption depends on being told which domains
+      # have no entry in it yet — which is what an empty file answers.
+      {:error, :enoent} ->
+        drift(%{}, domain_dirs)
+
+      {:error, reason} ->
+        [%{message: "_domains.yml could not be read: #{Commit.fs_error(reason)}"}]
+    end
   end
+
+  defp drift(domains, domain_dirs) do
+    domains
+    |> Domains.mismatches(domain_dirs)
+    |> findings(&drift_message/1)
+  end
+
+  defp findings(warnings, render), do: Enum.map(warnings, &%{message: render.(&1)})
+
+  defp drift_message({:directory_without_key, dir}),
+    do: "domain '#{dir}' exists in the vault but is unknown to the runtime"
+
+  defp drift_message({:key_without_directory, key}),
+    do: "domain '#{key}' is configured but does not exist in the vault"
 
   ## Section separators
 

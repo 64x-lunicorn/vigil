@@ -25,7 +25,6 @@ defmodule Vigil.Vault.Facts do
   """
 
   @enforce_keys [
-    :vault_path,
     # Discovered domain directories (see Vigil.VaultDiscovery).
     :domains,
     # VIGIL_EXCLUDE — the hard boundary.

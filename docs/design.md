@@ -161,10 +161,27 @@ type: reference | decision | event
 - **`decision`** — always ages. Facts about the vault owner, choices they made.
   An implicit expiry date without one being stored; `lint` flags stale ones.
 - **`event`** — passes through phases. Only `event` may additionally carry
-  `starts` and `ends` (ISO 8601 **with offset**).
+  `starts` and `ends` (ISO 8601 **with offset**), both or neither, and `ends`
+  is not before `starts`.
 
 No `status`, no `valid_until`, no `provenance`, no `tags`. Each of those is
 either derivable or was deliberately rejected.
+
+**`Vigil.Vault.Frontmatter` owns that rule.** It takes a type and the raw
+`starts`/`ends` beside it and answers with the parsed values or with a typed
+problem. A caller renders that verdict in its own register rather than
+restating the rule: `Vigil.Vault.Policy` renders it as the refusal the write
+gate hands back. `Vigil.Parser` and the doctor still state the rule themselves
+and are to be moved onto the owner.
+
+The owner exists because the three statements had drifted. The write gate had
+no ordering rule at all, so it accepted an event whose `ends` preceded its
+`starts` — and the parser then downgraded that same note to `reference` when
+it indexed it. The file on disk said `type: event`, the index said
+`reference`, `current` never saw it, and the doctor reported the note vigil
+itself had just written. Vigil is the vault's only writer (principle 2), which
+is what makes a write path that can produce a note its own reader refuses
+indefensible: there is no second writer to blame it on.
 
 **Parsing is defensive.** Missing frontmatter, unparsable YAML, a missing or
 invalid `type` — all produce a warning with path and reason, and the note is
@@ -279,7 +296,6 @@ journal:
     scope: filename        # or: relpath
     suggestion: date       # or: slug — shapes the error message
     hint: "Journal notes are named YYYY-MM-DD.md"
-    max_depth: 1           # optional — path segments allowed inside the domain
 ```
 
 `pattern` is the only required key: a `naming` block without one constrains
@@ -502,15 +518,16 @@ depth the tool table does not allow, a `read` without an id — is matched in
 `Vigil.Store.call/2`'s heads, so it fails in its own process rather than in
 the writer's.
 
-The write effect itself — create the directory, write the file, commit it, and
-the wording for a POSIX error — belongs to `Vigil.Commit`, and notes and skills
-both go through it. It sits at the top level rather than under
-`Vigil.Vault.*` for the same reason `Vigil.Markdown` does: skills are never
-notes and must not depend on a note-shaped module. What stays with each caller
-is what differs — `Vigil.Store` reparses the written file into the index
-between commit and push, which would index a skill as a note, and each write
-action's push-failure message names its own object: a change, a deletion, a
-move, a skill.
+The write effect itself belongs to `Vigil.Commit`: writing a file, deleting
+one, moving one, pushing, and the wording for a POSIX error — everything it
+takes to make a change to the vault, in one place, for notes and skills alike.
+It sits at the top level rather than under `Vigil.Vault.*` for the same reason
+`Vigil.Markdown` does: skills are never notes and must not depend on a
+note-shaped module. What stays with each caller is what differs — the order
+above, which `Vigil.Store` states where it executes a plan; the reparse
+between commit and push, which would index a skill as a note; and each write
+action's push-failure message, which names its own object: a change, a
+deletion, a move, a skill.
 
 ---
 
@@ -581,6 +598,16 @@ counts and which threshold was crossed.
 
 **A sentence-shaped heading** is longer than 60 characters or ends in `.`, `!`
 or `?`. A signal, not proof.
+
+**The doctor reads `_domains.yml` through `Vigil.Vault.Domains`**, the same
+parser the server loads its naming rules with, and renders the typed warnings
+it gets back in its own wording — the drift messages `scripts/init.sh` matches
+on. A file it could not read or parse produces one finding saying so and no
+drift at all: drift measured against keys nobody read is one false "unknown to
+the runtime" per domain, which is a report on a file the doctor could not
+read, in the voice of one it had. A file that is merely *absent* is not that
+case — it costs the descriptions and nothing else, and every domain directory
+is reported as having no entry yet, which is what vault adoption appends from.
 
 **A slug diff covers filenames and headings.** Both halves of "what would this
 slug change break" are answered in one place — one walk over the vault in

@@ -324,7 +324,6 @@ defmodule Vigil.Store do
     } = Index.lookups(state.index)
 
     Facts.new(
-      vault_path: state.vault_path,
       domains: list_domain_names(state),
       exclude: state.exclude,
       project_dirs: project_dirs(state),
@@ -410,11 +409,13 @@ defmodule Vigil.Store do
     Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
   end
 
-  # Where a plan becomes an effect. One order for all three actions
-  # (docs/design.md, "The write path"): perform it, commit, reparse into the
-  # index, then push. What differs is what the object is — which is why each
-  # clause names its own push-failure message — and the plan's own report,
-  # merged into the success map.
+  # Where a plan becomes an effect. Every effect is Vigil.Commit's — the write,
+  # the delete, the move and the push — and the order they run in is this
+  # module's, stated once for all three actions (docs/design.md, "The write
+  # path"): perform it, commit, reparse into the index, then push. What differs
+  # is what the object is — which is why each clause names its own
+  # push-failure message — and the plan's own report, merged into the success
+  # map.
   defp execute(%Plan{action: {:write, path, content}} = plan, state) do
     case Commit.write(state.vault_path, path, content, plan.message) do
       {:ok, commit_meta} ->
@@ -432,7 +433,7 @@ defmodule Vigil.Store do
   end
 
   defp execute(%Plan{action: {:delete, path}} = plan, state) do
-    case Git.remove_commit(state.vault_path, path, plan.message) do
+    case Commit.delete(state.vault_path, path, plan.message) do
       :ok ->
         state = put_index(state, Index.remove(state.index, path))
 
@@ -442,8 +443,8 @@ defmodule Vigil.Store do
           "Deletion committed locally, but push failed"
         )
 
-      {:error, out} ->
-        {{:error, "git rm/commit failed: #{out}"}, state}
+      {:error, msg} ->
+        {{:error, msg}, state}
     end
   end
 
@@ -455,7 +456,7 @@ defmodule Vigil.Store do
     # instead of a basename.
     backlinks_before = Index.backlinks(state.index, from)
 
-    case Git.move_commit(state.vault_path, from, to, plan.message) do
+    case Commit.move(state.vault_path, from, to, plan.message) do
       {:ok, commit_meta} ->
         state = move_reparsed(state, from, to, commit_meta)
         broken = backlinks_before -- Index.backlinks(state.index, to)
@@ -466,13 +467,13 @@ defmodule Vigil.Store do
           "Move committed locally, but push failed"
         )
 
-      {:error, out} ->
-        {{:error, "git mv/commit failed: #{out}"}, state}
+      {:error, msg} ->
+        {{:error, msg}, state}
     end
   end
 
   defp push(state, success, failure_prefix) do
-    case Git.push(state.vault_path, state.git_remote) do
+    case Commit.push(state.vault_path, state.git_remote) do
       :ok -> {{:ok, success}, state}
       {:error, out} -> {{:error, "#{failure_prefix}: #{out}"}, state}
     end
