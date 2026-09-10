@@ -311,13 +311,35 @@ defmodule Vigil.OAuth.CimdTest do
     test "a declared content-length over the cap is refused before a byte of body is read" do
       ref = make_ref()
       headers = [{~c"content-length", ~c"65537"}]
-      stream(ref, [{:stream_start, headers}, {:stream, "never read"}, {:stream_end, []}])
+
+      # The body that follows is *under* the cap. An implementation that read
+      # it and then measured would answer {:ok, "small"}; refusing on the
+      # declared length is the only way to reach :error here.
+      stream(ref, [{:stream_start, headers}, {:stream, "small"}, {:stream_end, []}])
 
       assert :error = Cimd.read_capped(ref, cancel_to_test())
       assert_received {:cancelled, ^ref}
+    end
 
-      # The body messages are still queued: nothing read them.
-      assert_received {:http, {^ref, :stream, "never read"}}
+    test "a refusal leaves no :httpc messages behind in the mailbox" do
+      ref = make_ref()
+      chunk = String.duplicate("a", 32_768)
+
+      stream(ref, [
+        {:stream_start, []},
+        {:stream, chunk},
+        {:stream, chunk},
+        {:stream, chunk},
+        {:stream_end, []}
+      ])
+
+      assert :error = Cimd.read_capped(ref, cancel_to_test())
+
+      # cancel_request/1 is asynchronous, so what was already in flight still
+      # arrives. Left queued it would accumulate in a connection process that
+      # serves more than one request.
+      refute_received {:http, {^ref, _}}
+      refute_received {:http, {^ref, _, _}}
     end
 
     test "a declared content-length at the cap is read" do
@@ -344,10 +366,12 @@ defmodule Vigil.OAuth.CimdTest do
       ])
 
       assert :error = Cimd.read_capped(ref, cancel_to_test())
-      assert_received {:cancelled, ^ref}
 
-      # The third chunk crossed the cap, so the fourth message was never reached.
-      assert_received {:http, {^ref, :stream_end, []}}
+      # `cancel` is only reached from the size check inside the read loop:
+      # arriving at stream_end returns {:ok, body} whatever the size. So a
+      # cancellation here is proof the cap was enforced during the read rather
+      # than measured after it.
+      assert_received {:cancelled, ^ref}
     end
 
     test "a 206 is refused: the fetch asked for no range" do

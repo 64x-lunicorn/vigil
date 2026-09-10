@@ -215,7 +215,21 @@ defmodule Vigil.OAuth.Cimd do
 
   defp refuse(ref, cancel) do
     cancel.(ref)
+    flush(ref)
     :error
+  end
+
+  # `:httpc.cancel_request/1` is asynchronous: chunks already in flight still
+  # arrive. Left behind they accumulate in a connection process that serves
+  # more than one request — on the one path where how much arrives is the
+  # other party's choice.
+  defp flush(ref) do
+    receive do
+      {:http, {^ref, _}} -> flush(ref)
+      {:http, {^ref, _, _}} -> flush(ref)
+    after
+      0 -> :ok
+    end
   end
 
   # `:httpc` streams 200 and 206 alike and the stream_start message carries no
