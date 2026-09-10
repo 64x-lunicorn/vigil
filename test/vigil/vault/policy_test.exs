@@ -1,18 +1,21 @@
 defmodule Vigil.Vault.PolicyTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.Vault.{Facts, Policy}
+  alias Vigil.Vault.{AbsentFacts, Policy}
 
+  # Every fact the policy could look up answers "nothing there" unless a test
+  # names it — see Vigil.Vault.AbsentFacts. The vault this stands in for has
+  # four domains, one excluded domain and one project directory, and nothing
+  # in it.
   defp facts(overrides \\ []) do
-    struct!(
-      %Facts{
+    AbsentFacts.answering_nothing(
+      [
         vault_path: "/vault",
         domains: ["bike", "journal", "projects", "training"],
         exclude: ["work"],
         project_dirs: ["vigil"],
         today: ~D[2026-09-09]
-      },
-      overrides
+      ] ++ overrides
     )
   end
 
@@ -230,6 +233,39 @@ defmodule Vigil.Vault.PolicyTest do
 
       assert {:ok, %{path: "bike/x.md"}} =
                Policy.check(:delete_note, %{path: "bike/x.md", confirm: true}, f)
+    end
+
+    # The confirm gate used to run before the path check, so a delete the
+    # policy refuses outright was quoted back in a confirmation prompt — and
+    # the boundary tests above never caught it, because both pass confirm: true.
+    test "a path the policy refuses is refused, not offered for confirmation" do
+      f = facts(path_exists?: fn _ -> true end)
+
+      for path <- ["skills/tdd.md", "work/secret.md", "../../etc/passwd"] do
+        assert {:error, "Invalid path"} =
+                 Policy.check(:delete_note, %{path: path, confirm: false}, f)
+      end
+    end
+
+    test "a move to or from a path the policy refuses is refused, not offered" do
+      f = facts(path_exists?: fn _ -> true end)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(
+                 :move_note,
+                 %{from: "bike/a.md", to: "skills/a.md", confirm: false},
+                 f
+               )
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:move_note, %{from: "bike/a.md", to: "work/a.md", confirm: false}, f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(
+                 :move_note,
+                 %{from: "../../etc/passwd", to: "bike/a.md", confirm: false},
+                 f
+               )
     end
 
     test "move_note requires confirm" do
@@ -462,17 +498,6 @@ defmodule Vigil.Vault.PolicyTest do
                )
 
       assert msg =~ "allows at most 1 nesting level"
-    end
-  end
-
-  describe "safe_path/1" do
-    test "the read paths get the traversal rule without the write rules" do
-      assert Policy.safe_path("bike/x.md") == :ok
-      assert Policy.safe_path("work/secret.md") == :ok
-      assert Policy.safe_path("skills/tdd.md") == :ok
-      assert Policy.safe_path("../../etc/passwd") == {:error, "Invalid path"}
-      assert Policy.safe_path("/etc/passwd") == {:error, "Invalid path"}
-      assert Policy.safe_path(".hidden/x.md") == {:error, "Invalid path"}
     end
   end
 

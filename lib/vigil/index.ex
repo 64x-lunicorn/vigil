@@ -15,9 +15,8 @@ defmodule Vigil.Index do
   """
 
   alias Vigil.{Events, LinkIndex, Parser, Search, Slug}
-  alias Vigil.Vault.{Policy, Rules}
+  alias Vigil.Vault.Rules
 
-  @overlong_note_chunk_threshold 40
   @stale_decision_days 180
 
   defmodule Note do
@@ -247,7 +246,7 @@ defmodule Vigil.Index do
     domain = Map.get(params, :domain)
     type_filter = Map.get(params, :type)
     prefer = Map.get(params, :prefer)
-    limit = Map.get(params, :limit, 10)
+    limit = Map.fetch!(params, :limit)
 
     index.chunks
     |> Map.values()
@@ -311,7 +310,7 @@ defmodule Vigil.Index do
   def read(index, id, backlinks?) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- Policy.safe_path(path_part) do
+    with :ok <- Slug.safe_path(path_part) do
       if String.contains?(id, "#") do
         case lookup_chunk(index, id, path_part) do
           {:ok, chunk} -> {:ok, chunk_result(index, chunk, backlinks?)}
@@ -435,14 +434,16 @@ defmodule Vigil.Index do
   link to an existing note with a missing fragment names the fragment),
   incoming references, direction `:out`/`:in`/`:both`, depth 1, depth 2
   adding each directly connected note's own depth-1 view with no further
-  recursion, any other depth an error, and the same lenient id resolution
-  `read/3` uses.
+  recursion, and the same lenient id resolution `read/3` uses.
+
+  `depth` is bounded where it is declared — `Vigil.MCP.Tools`' table publishes
+  `1..2` and refuses anything else before the call reaches the Store — so this
+  function is not the place a deeper value is caught.
   """
   def links(index, id, direction, depth) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- Policy.safe_path(path_part),
-         :ok <- validate_depth(depth) do
+    with :ok <- Slug.safe_path(path_part) do
       if String.contains?(id, "#") do
         case lookup_chunk(index, id, path_part) do
           {:ok, chunk} -> {:ok, build_links_result(index, chunk.id, [chunk.id], direction, depth)}
@@ -457,13 +458,8 @@ defmodule Vigil.Index do
             {:error, "Not found: #{id}"}
         end
       end
-    else
-      {:error, msg} -> {:error, msg}
     end
   end
-
-  defp validate_depth(d) when d in [1, 2], do: :ok
-  defp validate_depth(_), do: {:error, "depth must be 1 or 2 (no deeper value allowed)"}
 
   defp build_links_result(index, id, chunk_ids, direction, depth) do
     base = %{id: id}
@@ -559,9 +555,10 @@ defmodule Vigil.Index do
 
   @doc """
   Answers the `lint` tool's five findings: duplicate headings, sentence-like
-  headings (via `Vigil.Vault.Rules`), orphaned links (broken outgoing links,
-  labelled with their fragment where present), overlong notes past the
-  chunk threshold, and decision notes stale relative to `now`.
+  headings, orphaned links (broken outgoing links, labelled with their
+  fragment where present), overlong notes and decision notes stale relative to
+  `now`. All four vault-hygiene definitions come from `Vigil.Vault.Rules`, so
+  `mix vigil.vault_check` reports the same notes for the same reasons.
   """
   def lint(index, now) do
     notes = Map.values(index.notes)
@@ -571,18 +568,32 @@ defmodule Vigil.Index do
       duplicate_headings: lint_duplicate_headings(chunks),
       sentence_headings: lint_sentence_headings(chunks),
       orphaned_links: lint_orphaned_links(index),
-      overlong_notes: lint_overlong_notes(notes),
+      overlong_notes: lint_overlong_notes(index, notes),
       stale_decisions: lint_stale_decisions(notes, now)
     }
   end
 
+  # Per note, because that is the scope a chunk id is unique in — and what
+  # collides is the heading text's slug, not the heading chain
+  # (Vigil.Vault.Rules). The ids locate every chunk in the collision.
   defp lint_duplicate_headings(chunks) do
     chunks
-    |> Enum.filter(& &1.heading)
-    |> Enum.group_by(&{&1.path, &1.heading_path})
-    |> Enum.filter(fn {_key, group} -> length(group) > 1 end)
-    |> Enum.map(fn {{path, heading_path}, group} ->
-      %{path: path, heading_path: heading_path, ids: Enum.map(group, & &1.id)}
+    |> Enum.group_by(& &1.path)
+    |> Enum.sort_by(fn {path, _group} -> path end)
+    |> Enum.flat_map(fn {path, note_chunks} ->
+      note_chunks
+      # index.chunks is a map, so the note's own order has to be restored
+      # before grouping — the ids a finding lists are read in file order.
+      |> Enum.sort_by(& &1.heading_line)
+      |> Rules.duplicate_headings()
+      |> Enum.map(fn %{slug: slug, chunks: group} ->
+        %{
+          path: path,
+          slug: slug,
+          headings: group |> Enum.map(& &1.heading) |> Enum.uniq(),
+          ids: Enum.map(group, & &1.id)
+        }
+      end)
     end)
   end
 
@@ -601,10 +612,23 @@ defmodule Vigil.Index do
     |> Enum.uniq()
   end
 
-  defp lint_overlong_notes(notes) do
+  # "Overlong" is Vigil.Vault.Rules' definition, the same one Vigil.VaultCheck
+  # reports: headings and words, so the finding says which axis is the problem
+  # rather than only that there is one.
+  defp lint_overlong_notes(index, notes) do
     notes
-    |> Enum.filter(fn n -> length(n.chunk_ids) > @overlong_note_chunk_threshold end)
-    |> Enum.map(fn n -> %{path: n.path, chunk_count: length(n.chunk_ids)} end)
+    |> Enum.map(fn note -> {note, Rules.note_length(note_chunks(index, note))} end)
+    |> Enum.filter(fn {_note, length} -> Rules.overlong?(length) end)
+    |> Enum.map(fn {note, length} -> Map.put(length, :path, note.path) end)
+  end
+
+  defp note_chunks(index, note) do
+    Enum.flat_map(note.chunk_ids, fn id ->
+      case Map.fetch(index.chunks, id) do
+        {:ok, chunk} -> [chunk]
+        :error -> []
+      end
+    end)
   end
 
   defp lint_stale_decisions(notes, now) do

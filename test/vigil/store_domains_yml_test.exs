@@ -4,6 +4,10 @@ defmodule Vigil.StoreDomainsYmlTest do
 
   alias Vigil.Store
 
+  # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
+  # every real call, so Store.search/1 requires one rather than defaulting.
+  defp search(params), do: Store.search(Map.put_new(params, :limit, 10))
+
   defp git_init_empty(tmp) do
     File.mkdir_p!(tmp)
     File.write!(Path.join(tmp, ".gitkeep"), "")
@@ -39,7 +43,7 @@ defmodule Vigil.StoreDomainsYmlTest do
     on_exit(fn -> File.rm_rf(tmp) end)
 
     start_supervised!({Store, vault_path: tmp, exclude: [], git_remote: "origin"})
-    assert Store.search(%{query: "irgendwas"}) == []
+    assert search(%{query: "irgendwas"}) == []
     assert Store.domain_names() == []
   end
 
@@ -60,7 +64,7 @@ defmodule Vigil.StoreDomainsYmlTest do
     File.chmod!(path, 0o644)
 
     assert log =~ "cannot read _domains.yml"
-    assert Store.search(%{query: "tires"}) != []
+    assert search(%{query: "tires"}) != []
   end
 
   # Which mismatches are reported, and how they are worded, is Vigil.Vault.Domains'

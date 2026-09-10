@@ -58,13 +58,11 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
   end
 
   defp file_differences(vault_path, rel_path) do
-    basename = Path.basename(rel_path, ".md")
-
     file_diff =
-      case {Vigil.Slug.legacy_slugify(basename), Vigil.Slug.slugify(basename)} do
-        {old, {:ok, new}} when old != new -> [{"file", rel_path, old, new}]
-        {old, {:error, _}} -> [{"file", rel_path, old, :error}]
-        _ -> []
+      case Vigil.Vault.Rules.filename_slug_change(rel_path) do
+        nil -> []
+        %{old: old, new: nil} -> [{"file", rel_path, old, :error}]
+        %{old: old, new: new} -> [{"file", rel_path, old, new}]
       end
 
     heading_diffs =
@@ -78,7 +76,7 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
 
   defp heading_differences(rel_path, content) do
     content
-    |> Vigil.Vault.Rules.slug_changes()
+    |> Vigil.Vault.Rules.heading_slug_changes()
     |> Enum.map(fn
       %{text: text, old: old, new: nil} -> {"heading #{rel_path}", text, old, :error}
       %{text: text, old: old, new: new} -> {"heading #{rel_path}", text, old, new}

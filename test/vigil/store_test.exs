@@ -3,6 +3,10 @@ defmodule Vigil.StoreTest do
 
   alias Vigil.Store
 
+  # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
+  # every real call, so Store.search/1 requires one rather than defaulting.
+  defp search(params), do: Store.search(Map.put_new(params, :limit, 10))
+
   setup do
     {vault, remote} = Vigil.FixtureVault.build(remote: true)
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
@@ -15,7 +19,7 @@ defmodule Vigil.StoreTest do
   # wiring smoke test: Store.search/1 reaches the index and shapes the result.
   describe "search" do
     test "a term in domain bike returns ranked hits with previews, no bodies" do
-      results = Store.search(%{query: "tires", domain: "bike"})
+      results = search(%{query: "tires", domain: "bike"})
       assert results != []
       refute Map.has_key?(hd(results), :body)
       assert Enum.all?(results, &(String.length(&1.preview) <= 121))
@@ -630,7 +634,7 @@ defmodule Vigil.StoreTest do
 
       {:ok, result} = Store.read("bike/terra-speed.md", false)
       assert result.type == :decision
-      assert Store.search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
+      assert search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
 
     test "enforces the same starts/ends rules as create" do
@@ -649,7 +653,7 @@ defmodule Vigil.StoreTest do
 
       refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
       assert {:error, _} = Store.read("bike/terra-speed.md", false)
-      refute Store.search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
+      refute search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
 
     test "reports broken backlinks in the same call when confirm is passed up front" do
@@ -728,8 +732,8 @@ defmodule Vigil.StoreTest do
 
   describe "skills isolation" do
     test "skills never appear in search, have no index chunk, no backlinks" do
-      assert Store.search(%{query: "TDD"}) == []
-      assert Store.search(%{query: "Failing Test"}) == []
+      assert search(%{query: "TDD"}) == []
+      assert search(%{query: "Failing Test"}) == []
     end
 
     # Thin end-to-end wiring check: skill_list/skill_read/skill_write reach
@@ -757,7 +761,7 @@ defmodule Vigil.StoreTest do
 
       {:ok, %{content: content}} = Store.skill_read("new")
       assert content =~ "1. one"
-      assert Store.search(%{query: "one"}) == []
+      assert search(%{query: "one"}) == []
     end
   end
 
@@ -821,7 +825,7 @@ defmodule Vigil.StoreTest do
   describe "reload" do
     test "reload re-reads the vault and reports success" do
       assert %{reloaded: true} = Store.reload()
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
     end
 
     test "reload with an unreachable remote reports pull_failed but still reparses", %{
@@ -832,7 +836,7 @@ defmodule Vigil.StoreTest do
 
       assert %{reloaded: true, pull_failed: reason} = Store.reload()
       assert is_binary(reason)
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
     end
   end
 
@@ -847,8 +851,41 @@ defmodule Vigil.StoreTest do
       assert msg =~ "push failed"
       assert File.exists?(Path.join(vault, "bike/new.md"))
 
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
       assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+    end
+
+    # The index is updated between commit and push for every write action
+    # (docs/design.md, "The write path"), the git-level ones included: the note
+    # is gone from the repository, so it must be gone from the index too, push
+    # or no push.
+    test "a delete whose push fails still leaves the index without the note", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+
+      assert {:error, msg} =
+               Store.delete_note(%{path: "bike/terra-speed.md", confirm: true})
+
+      assert msg =~ "Deletion committed locally, but push failed"
+      refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      refute search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
+    end
+
+    test "a move whose push fails still leaves the index at the new path", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
+
+      assert {:error, msg} =
+               Store.move_note(%{
+                 from: "bike/terra-speed.md",
+                 to: "bike/terra-40c.md",
+                 confirm: true
+               })
+
+      assert msg =~ "Move committed locally, but push failed"
+      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      assert {:ok, _} = Store.read("bike/terra-40c.md", false)
     end
 
     test "writing into a read-only domain directory returns a precise error, store stays alive",
@@ -879,7 +916,7 @@ defmodule Vigil.StoreTest do
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
       assert {:ok, _} = Store.read("bike/via-carolina.md", false)
     end
 
@@ -895,7 +932,7 @@ defmodule Vigil.StoreTest do
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
       assert {:ok, _} = Store.read("bike/via-carolina.md", false)
     end
 
@@ -911,7 +948,7 @@ defmodule Vigil.StoreTest do
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
       assert {:ok, _} = Store.read("bike/via-carolina.md", false)
     end
 
@@ -932,7 +969,7 @@ defmodule Vigil.StoreTest do
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
       assert {:ok, _} = Store.read("bike/terra-speed.md", false)
     end
 
@@ -947,7 +984,7 @@ defmodule Vigil.StoreTest do
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
-      assert Store.search(%{query: "tires"}) != []
+      assert search(%{query: "tires"}) != []
       assert {:ok, _} = Store.read("bike/terra-speed.md", false)
     end
   end
@@ -1042,9 +1079,23 @@ defmodule Vigil.StoreTest do
       assert File.exists?(Path.join(vault, "skills/tdd.md"))
     end
 
+    # Without confirm the answer used to be a confirmation prompt quoting the
+    # path back — for a write the policy refuses on the next turn either way.
+    test "delete_note without confirm answers Invalid path, not a prompt" do
+      assert {:error, "Invalid path"} = Store.delete_note(%{path: "skills/tdd.md"})
+    end
+
+    test "move_note without confirm answers Invalid path, not a prompt" do
+      assert {:error, "Invalid path"} =
+               Store.move_note(%{from: "bike/terra-speed.md", to: "skills/pwned.md"})
+
+      assert {:error, "Invalid path"} =
+               Store.move_note(%{from: "skills/tdd.md", to: "bike/pwned.md"})
+    end
+
     test "a skill never becomes searchable through a write" do
       Store.append(%{path: "skills/tdd.md", content: "INJECTEDWORD"})
-      assert Store.search(%{query: "INJECTEDWORD"}) == []
+      assert search(%{query: "INJECTEDWORD"}) == []
     end
   end
 end

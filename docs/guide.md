@@ -67,6 +67,7 @@ flowchart LR
     K --> T
     T --> S["Vigil.Store<br/>GenServer"]
     S -->|every write| V{"Vigil.Vault.Policy"}
+    V -->|decision| PL["Vigil.Vault.Plan<br/>what the write becomes"]
     S <--> E[("Vigil.Index<br/>notes · chunks · links")]
     S --> G["Vigil.Git"]
     G <--> R[("Vault repo<br/>Markdown + Git")]
@@ -111,12 +112,12 @@ sequenceDiagram
     Cl->>T: create(path, content, skill_key)
     T->>T: SkillKey valid? scope allows writes?
     T->>St: create
-    St->>St: normalize path → validate → check naming rules
-    St->>St: duplicate check
+    St->>St: Policy — normalize, validate, naming rules, duplicates
+    St->>St: Plan — frontmatter, content, commit message
     St->>Git: write file, add, commit (as vigil)
+    St->>St: reparse file, rebuild link index
     Git->>Up: push
     alt push succeeded
-        St->>St: reparse file, rebuild link index
         St-->>Cl: {path, pushed: true}
     else push failed
         St-->>Cl: error — committed locally, not pushed
@@ -251,6 +252,11 @@ token gets an explicit error. "Key" means the call must carry a current
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content | `{name, pushed}` | RW | ✓ |
+
+`limit` is 1–25 (default 10) and `depth` is 1 or 2. A value outside the range
+is a tool error naming the range, not a silently clamped result: a caller told
+it got 25 hits of the 100 it asked for could not tell that from having asked
+for 25.
 
 ### Paths are normalized, not rejected
 
@@ -489,20 +495,38 @@ against a throwaway fixture vault without needing root or a real
 ```
 lib/vigil/
 ├── application.ex       # supervisor
-├── store.ex             # GenServer — loading, writes, mailbox around Vigil.Index
+├── store.ex             # GenServer — loading, the write sequence, the mailbox
+├── index.ex             # notes, chunks and links as one plain value
 ├── parser.ex            # file → frontmatter + chunks + raw links
-├── slug.ex              # the single canonical slug implementation
+├── link_index.ex        # resolves [[…]] and path links into an out/in index
+├── markdown.ex          # the one reading of a note: headings, frontmatter, how a file ends
+├── slug.ex              # the single canonical slug implementation, and path safety
 ├── search.ex            # pure ranking functions
+├── events.ex            # the event windows behind current and snapshot
+├── clock.ex             # the vault's one notion of "now"
+├── time_fmt.ex          # duration wording for the time envelope
+├── commit.ex            # the write effect: mkdir, write, add, commit
 ├── git.ex               # System.cmd wrapper: add/commit/push/pull/log/rm/mv
+├── skills.ex            # skills/ — one repository, two systems
 ├── skill_key.ex         # rotating HMAC attestation token
+├── uuid.ex              # UUIDv4 for the OAuth layer
 ├── vault_discovery.ex   # pure file discovery, no GenServer
 ├── vault_check.ex       # read-only vault doctor
+├── vault/               # the vault's own rules, all of them pure
+│   ├── policy.ex        # whether a write is allowed — one gate, check/3
+│   ├── plan.ex          # what a write becomes: an action and a commit message
+│   ├── edit.ex          # what a chunk-shaped edit turns content into
+│   ├── facts.ex         # the questions the policy asks the vault
+│   ├── domains.ex       # _domains.yml, as a value
+│   └── rules.ex         # the hygiene rules lint and the doctor share
 ├── oauth/               # authorization server: dets store, DCR, CIMD, PKCE
 └── mcp/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints
-    ├── tools.ex         # tool definitions, dispatch, SkillKey gate
+    ├── tools.ex         # one table per tool: schema, validation, dispatch
     ├── rate_limit.ex    # fixed-window rate limit per token
-    └── envelope.ex      # time envelope, session delta tracking
+    ├── envelope.ex      # time envelope, session delta tracking
+    └── envelope/
+        └── decision.ex  # which envelope a response carries, as a pure function
 
 lib/mix/tasks/
 ├── vigil.seed_token.ex  # seed a long-lived OAuth access token
@@ -542,6 +566,11 @@ notes.
 a pure HMAC over secret and time, independent of any skill existing. Without
 this, bootstrapping deadlocks: `skill_write` needs a key, and on a fresh vault
 there is no conventions skill to read one from.
+
+**An out-of-range `limit` is an error, not a clamp.** Asking for 100 hits used
+to return the best 25 and say nothing — and a caller cannot tell 25 of 100 from
+25 of 25. Every parameter bound is declared in the tool table, published in the
+schema the server itself hands out, and refused there.
 
 **`search` hides `journal/` unless asked.** A chronological log otherwise
 dominates every result set.

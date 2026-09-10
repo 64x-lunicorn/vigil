@@ -10,6 +10,11 @@ defmodule Vigil.IndexTest do
     last_author: "Daniel"
   }
 
+  # The `limit` the MCP table supplies on every real call. Vigil.MCP.Tools
+  # declares it (1..25, default 10) and refuses anything else, so search/2
+  # requires one rather than inventing a second default.
+  defp search(index, params), do: Index.search(index, Map.put_new(params, :limit, 10))
+
   defp parse(rel_path) do
     content = File.read!(Path.join(@fixtures, rel_path))
     {:ok, file} = Parser.parse(rel_path, content, @git_meta)
@@ -108,37 +113,37 @@ defmodule Vigil.IndexTest do
 
   describe "search/2" do
     test "domain filter is applied", %{index: index} do
-      assert Index.search(index, %{query: "raised bed", domain: "training"}) == []
+      assert search(index, %{query: "raised bed", domain: "training"}) == []
 
       assert [%{id: "garden/raised-bed.md"}] =
-               Index.search(index, %{query: "raised bed", domain: "garden"})
+               search(index, %{query: "raised bed", domain: "garden"})
     end
 
     test "type filter is applied", %{index: index} do
-      results = Index.search(index, %{query: "vigil", type: :decision})
+      results = search(index, %{query: "vigil", type: :decision})
       assert Enum.all?(results, &(&1.type == :decision))
       refute Enum.any?(results, &(&1.id == "projects/vigil/vigil.md"))
     end
 
     test "journal is hidden unless asked for by name", %{index: index} do
-      refute Index.search(index, %{query: "terra speed"})
+      refute search(index, %{query: "terra speed"})
              |> Enum.any?(&String.starts_with?(&1.id, "journal/"))
 
-      assert Index.search(index, %{query: "terra speed", domain: "journal"})
+      assert search(index, %{query: "terra speed", domain: "journal"})
              |> Enum.any?(&String.starts_with?(&1.id, "journal/"))
     end
 
     test "prefer boost ranks the preferred type first", %{index: index} do
-      results = Index.search(index, %{query: "vigil", prefer: :decision})
+      results = search(index, %{query: "vigil", prefer: :decision})
       assert Enum.at(results, 0).type == :decision
     end
 
     test "empty result is an empty list, not an error", %{index: index} do
-      assert Index.search(index, %{query: "nowhereatall"}) == []
+      assert search(index, %{query: "nowhereatall"}) == []
     end
 
     test "hub is present when exactly one other note links to the hit's note", %{index: index} do
-      results = Index.search(index, %{query: "tubeless", domain: "bike"})
+      results = search(index, %{query: "tubeless", domain: "bike"})
       hit = Enum.find(results, &(&1.id =~ "terra-speed"))
       assert hit.hub == "bike/via-carolina.md"
     end
@@ -147,7 +152,7 @@ defmodule Vigil.IndexTest do
       {:ok, file} = Parser.parse("bike/unlinked.md", "# Unlinked Tubeless\ntext", @git_meta)
       updated = Index.put(index, file)
 
-      results = Index.search(updated, %{query: "unlinked tubeless"})
+      results = search(updated, %{query: "unlinked tubeless"})
       hit = Enum.find(results, &(&1.id =~ "unlinked"))
       refute Map.has_key?(hit, :hub)
     end
@@ -162,7 +167,7 @@ defmodule Vigil.IndexTest do
 
       updated = Index.put(index, second_linker)
 
-      results = Index.search(updated, %{query: "tubeless", domain: "bike"})
+      results = search(updated, %{query: "tubeless", domain: "bike"})
       hit = Enum.find(results, &(&1.id =~ "terra-speed"))
       refute Map.has_key?(hit, :hub)
     end
@@ -240,11 +245,6 @@ defmodule Vigil.IndexTest do
       assert Enum.any?(neighbor.incoming, &(&1.source == "bike/via-carolina.md"))
     end
 
-    test "depth 3 is an error", %{index: index} do
-      assert {:error, msg} = Index.links(index, "bike/via-carolina.md", :both, 3)
-      assert msg =~ "depth"
-    end
-
     test "lenient path resolution", %{index: index} do
       {:ok, result} = Index.links(index, "bike/Via Carolina!!.md", :out, 1)
       assert result.id == "bike/via-carolina.md"
@@ -263,7 +263,27 @@ defmodule Vigil.IndexTest do
       updated = Index.put(index, file)
       report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
 
-      assert Enum.any?(report.duplicate_headings, &(&1.path == "bike/messy.md"))
+      assert [finding] = Enum.filter(report.duplicate_headings, &(&1.path == "bike/messy.md"))
+      assert finding.slug == "duplicate"
+      assert finding.headings == ["Duplicate"]
+      assert finding.ids == ["bike/messy.md#duplicate", "bike/messy.md#duplicate-2"]
+    end
+
+    # What collides is the heading text's slug, not the heading chain: these
+    # two really do become #b and #b-2. Grouping by the chain reported nothing.
+    test "same heading under two different H2s is a duplicate", %{index: index} do
+      {:ok, file} =
+        Parser.parse(
+          "bike/chains.md",
+          "# Chains\n\n## A\n\n### B\nOne.\n\n## C\n\n### B\nTwo.\n",
+          @git_meta
+        )
+
+      updated = Index.put(index, file)
+      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+
+      assert [finding] = Enum.filter(report.duplicate_headings, &(&1.path == "bike/chains.md"))
+      assert finding.ids == ["bike/chains.md#b", "bike/chains.md#b-2"]
     end
 
     test "sentence-like headings", %{index: index} do
@@ -294,13 +314,31 @@ defmodule Vigil.IndexTest do
       assert "via-carolina#does-not-exist" in report.orphaned_links
     end
 
-    test "overlong notes past the chunk threshold", %{index: index} do
-      headings = for n <- 1..45, do: "## Section #{n}\nContent #{n}."
+    # The same definition Vigil.VaultCheck reports, owned by Vigil.Vault.Rules:
+    # headings and words, not a chunk count.
+    test "overlong notes name the axis that was crossed", %{index: index} do
+      headings = for n <- 1..31, do: "## Section #{n}\nContent #{n}."
       content = "# Many\n\n" <> Enum.join(headings, "\n\n")
       {:ok, file} = Parser.parse("bike/many.md", content, @git_meta)
 
       updated = Index.put(index, file)
       report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+
+      assert [finding] = Enum.filter(report.overlong_notes, &(&1.path == "bike/many.md"))
+      assert finding.headings == 31
+      assert finding.over_heading_threshold
+      refute finding.over_word_threshold
+      assert finding.words > 0
+    end
+
+    test "a note with 35 headings is overlong to lint, as it already was to the doctor",
+         %{index: index} do
+      headings = for n <- 1..35, do: "## Section #{n}\nContent #{n}."
+
+      {:ok, file} =
+        Parser.parse("bike/many.md", "# Many\n\n" <> Enum.join(headings, "\n\n"), @git_meta)
+
+      report = index |> Index.put(file) |> Index.lint(~U[2026-01-01 10:00:00Z])
 
       assert Enum.any?(report.overlong_notes, &(&1.path == "bike/many.md"))
     end

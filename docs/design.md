@@ -241,6 +241,12 @@ Three layers guard every write, in this order.
 no path segment starting with `.` or `_`. Checked before *and* after
 normalization.
 
+The rule lives in `Vigil.Slug`, beside the normalization it is applied under,
+and both sides ask it: `Vigil.Vault.Policy` before a write, `Vigil.Index`
+before a read. It is not a permission check — `skills/tdd.md` passes it — which
+is why `read` and `links` can apply it without inheriting the write rules, and
+why a reader may still reach a note in a domain that is no longer writable.
+
 **2. Normalization.** `Vigil.Slug` produces one canonical form: NFC, trim,
 lowercase, explicit transliteration (`ä`→`ae`, `ø`→`oe`, `ß`→`ss`, …), generic
 diacritic stripping, non-alphanumeric runs to a single hyphen, collapse and
@@ -320,13 +326,21 @@ The JSON schema published on `tools/list` and the argument validation
 cannot drift out of agreement the way hand-written twins do.
 
 Every declared parameter is validated against the schema the server itself
-publishes. A violation — a wrong type, an off-enum value, a missing or empty
-required parameter — is a tool error naming what was expected, not a
-substituted default. A caller who claims `type: "bogus"` gets told so, rather
-than receiving unfiltered results it believes were filtered. Undeclared
+publishes. A violation — a wrong type, an off-enum value, an out-of-range
+integer, a missing or empty required parameter — is a tool error naming what
+was expected, not a substituted default. A caller who claims `type: "bogus"`
+gets told so, rather than receiving unfiltered results it believes were
+filtered. Undeclared
 parameters are ignored: the schemas do not set `additionalProperties: false`,
 and rejecting extras a client legitimately sent would fail callers over
 something the server never declared.
+
+A bound is part of that declaration, not a correction applied afterwards.
+Integer parameters carry a range in the table (`limit` is `1..25`, `depth` is
+`1..2`), the range is published as `minimum`/`maximum`, and a value outside it
+is refused there. Nothing downstream clamps: `limit: 100` is an error, not a
+quiet 25, because a caller told it received the 25 best hits of 100 asked for
+cannot tell that from having asked for 25.
 
 ---
 
@@ -342,6 +356,15 @@ nothing. It asks the vault questions through `Vigil.Vault.Facts` — whether a
 path exists, what a note contains, which chunk an id resolves to — and where a
 decision authorises an effect it says so in its result rather than performing
 it. Asking never changes the vault.
+
+`Facts` is a purity seam, and it answers or it raises. Every one of its
+questions guards a gate, and every "nothing there" answer sits on the
+permissive side of the gate it feeds: headings that count as zero switch the
+shrink gate off, a path that does not exist lets `create` past its existence
+refusal, no similar notes switches duplicate detection off. So no field has a
+default. A question added and left unwired stops the write at construction
+rather than opening the gate it was meant to guard; a test that wants an absent
+fact names it.
 
 The point of one gate is that there is no second way in. The rules used to be
 private helpers in `Vigil.Store` that only `create` and `move_note` called, so
@@ -369,9 +392,26 @@ pointed. The path check on the id's own path part still runs first, so an id
 naming `skills/` or an excluded domain answers "Invalid path" rather than
 "Not found".
 
-Order matters: write the file, commit, reparse into the index, then push. If
-the push fails the local commit stays and the tool returns an error saying the
-change is committed locally but not pushed. Nothing is rolled back.
+**The write path returns a plan; the process executes it.** A resolved
+decision plus the note's current content becomes a `Vigil.Vault.Plan`: the
+action to perform and the commit message to perform it under. Three actions,
+because there are three shapes of write — `{:write, path, content}` for the
+six content-shaped operations, `{:delete, path}` and `{:move, from, to}` for
+the two git-level ones. Building a plan performs no effect and reads no file,
+so every write operation can be exercised without a vault, a git repository or
+a running GenServer. `Vigil.Store` is left with the sequence — ask the policy,
+read the note, build the plan, execute it — and the effect.
+
+Order matters: perform the action, commit, reparse into the index, then push.
+It is stated once, where a plan is executed. If the push fails the local commit
+stays and the tool returns an error naming what is committed locally but not
+pushed — the change, the deletion, or the move. Nothing is rolled back.
+
+**Confirm is the last gate, not the first.** `delete_note` and `move_note`
+resolve their paths before asking for confirmation, so a path naming `skills/`,
+an excluded domain or a traversal answers "Invalid path" rather than quoting
+itself back in a destructive-operation prompt for a write that would be refused
+on the next turn.
 
 Commit author is `vigil <vigil@local>`, set with `-c` on the call rather than
 in the repository config, so manual commits keep the human's identity. That
@@ -384,7 +424,10 @@ write.
 
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
-write must not cost read access to everything else.
+write must not cost read access to everything else. A caller that breaks a
+declared contract outright — a `search` without a `limit`, a `links` with a
+depth the tool table does not allow — is matched in `Vigil.Store`'s client
+functions, so it fails in its own process rather than in the writer's.
 
 The write effect itself — create the directory, write the file, commit it, and
 the wording for a POSIX error — belongs to `Vigil.Commit`, and notes and skills
@@ -392,8 +435,9 @@ both go through it. It sits at the top level rather than under
 `Vigil.Vault.*` for the same reason `Vigil.Markdown` does: skills are never
 notes and must not depend on a note-shaped module. What stays with each caller
 is what differs — `Vigil.Store` reparses the written file into the index
-between commit and push, which would index a skill as a note, and the two
-push-failure messages describe different objects.
+between commit and push, which would index a skill as a note, and each write
+action's push-failure message names its own object: a change, a deletion, a
+move, a skill.
 
 ---
 
@@ -438,6 +482,36 @@ survives, one line narrower.
 These rules say nothing about repairing notes written before them. Files that
 already lost a separator stay as they are; principle 5 says the server reports
 and does not fix on its own initiative.
+
+---
+
+## Vault hygiene has one set of rules
+
+`lint` (through `Vigil.Index`) and `mix vigil.vault_check` (through
+`Vigil.VaultCheck`) both report on the shape of the vault, and they report to
+different readers: `lint` answers an assistant over MCP and is token-frugal,
+the doctor writes a JSON report for `jq`. The output shapes stay separate. The
+facts underneath do not — they were restated in both and drifted, and they live
+in `Vigil.Vault.Rules` now.
+
+**A duplicate heading is a duplicate *slug*.** Two headings collide when the
+slug of their heading text collides *within one note*, because that is what
+`Vigil.Parser`'s uniquifier keys its collision counter on: `## A / ### B` and
+`## C / ### B` really do produce `b` and `b-2`. Grouping by the heading chain
+instead under-reports exactly the notes whose chunk ids are unstable, which is
+the breaking change this project fears most (see "Known trade-offs").
+
+**An overlong note is 30 headings or 2000 words.** Two axes rather than a chunk
+count, because the pair says *why* the note is too long — many sections, or
+much prose — which is what the reader acts on. The `lint` finding carries both
+counts and which threshold was crossed.
+
+**A sentence-shaped heading** is longer than 60 characters or ends in `.`, `!`
+or `?`. A signal, not proof.
+
+**A slug diff covers filenames and headings.** Both halves of "what would this
+slug change break" are answered in one place, so `mix vigil.slug_diff` and the
+doctor cannot disagree about the blast radius.
 
 ---
 

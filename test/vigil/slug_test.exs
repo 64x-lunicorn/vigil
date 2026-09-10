@@ -66,6 +66,35 @@ defmodule Vigil.SlugTest do
     end
   end
 
+  describe "safe_path/1" do
+    test "accepts any vault-relative path, whatever the write rules say about it" do
+      assert Slug.safe_path("bike/x.md") == :ok
+      assert Slug.safe_path("work/secret.md") == :ok
+      assert Slug.safe_path("skills/tdd.md") == :ok
+    end
+
+    test "rejects traversal, absolute paths, backslashes and null bytes" do
+      assert Slug.safe_path("../../etc/passwd") == {:error, "Invalid path"}
+      assert Slug.safe_path("bike/../../etc/passwd") == {:error, "Invalid path"}
+      assert Slug.safe_path("/etc/passwd") == {:error, "Invalid path"}
+      assert Slug.safe_path("bike\\x.md") == {:error, "Invalid path"}
+      assert Slug.safe_path("bike/x" <> <<0>> <> ".md") == {:error, "Invalid path"}
+    end
+
+    test "rejects a hidden or reserved segment anywhere in the path" do
+      assert Slug.safe_path(".hidden/x.md") == {:error, "Invalid path"}
+      assert Slug.safe_path("bike/.git/x.md") == {:error, "Invalid path"}
+      assert Slug.safe_path("_domains.yml") == {:error, "Invalid path"}
+      assert Slug.safe_path("bike/_draft.md") == {:error, "Invalid path"}
+    end
+
+    test "reserved_segment?/1 is the same rule for a single segment" do
+      assert Slug.reserved_segment?(".git")
+      assert Slug.reserved_segment?("_domains.yml")
+      refute Slug.reserved_segment?("bike")
+    end
+  end
+
   describe "legacy_slugify/1 (migration comparison only)" do
     test "deletes untransliterated diacritics instead of transliterating them" do
       assert Slug.legacy_slugify("café") == "caf"

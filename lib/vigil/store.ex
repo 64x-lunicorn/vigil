@@ -7,22 +7,29 @@ defmodule Vigil.Store do
     Clock,
     Commit,
     Index,
-    Markdown,
     Parser,
     Git,
     Skills,
     VaultDiscovery
   }
 
-  alias Vigil.Vault.{Domains, Edit, Facts, Policy}
+  alias Vigil.Vault.{Domains, Facts, Plan, Policy}
 
   ## Public API
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  def search(params), do: GenServer.call(__MODULE__, {:search, params})
+  # `limit` is required, and matched in the head so a caller that omits it
+  # fails in its own process rather than in the single writer's. Vigil.MCP.Tools
+  # declares the bound (1..25, default 10) and supplies a value on every call.
+  def search(%{limit: _} = params), do: GenServer.call(__MODULE__, {:search, params})
   def read(id, backlinks?), do: GenServer.call(__MODULE__, {:read, id, backlinks?})
-  def links(id, direction, depth), do: GenServer.call(__MODULE__, {:links, id, direction, depth})
+  # Depth is bounded where it is declared (Vigil.MCP.Tools, 1..2). Matched here
+  # too, so a caller outside that contract fails in its own process rather than
+  # reaching the single writer with a depth nothing downstream checks.
+  def links(id, direction, depth) when depth in [1, 2],
+    do: GenServer.call(__MODULE__, {:links, id, direction, depth})
+
   def create(params), do: GenServer.call(__MODULE__, {:create, params})
   def append(params), do: GenServer.call(__MODULE__, {:append, params})
 
@@ -89,42 +96,42 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:create, params}, _from, state) do
-    {result, new_state} = do_create(params, state)
+    {result, new_state} = write(:create, params, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:append, params}, _from, state) do
-    {result, new_state} = do_append(params, state)
+    {result, new_state} = write(:append, params, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:replace_section, id, content}, _from, state) do
-    {result, new_state} = do_replace_section(id, content, state)
+    {result, new_state} = write(:replace_section, %{id: id, content: content}, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:rewrite_note, params}, _from, state) do
-    {result, new_state} = do_rewrite_note(params, state)
+    {result, new_state} = write(:rewrite_note, params, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:delete_section, id}, _from, state) do
-    {result, new_state} = do_delete_section(id, state)
+    {result, new_state} = write(:delete_section, %{id: id}, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:update_frontmatter, params}, _from, state) do
-    {result, new_state} = do_update_frontmatter(params, state)
+    {result, new_state} = write(:update_frontmatter, params, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:delete_note, params}, _from, state) do
-    {result, new_state} = do_delete_note(params, state)
+    {result, new_state} = write(:delete_note, params, state)
     {:reply, result, new_state}
   end
 
   def handle_call({:move_note, params}, _from, state) do
-    {result, new_state} = do_move_note(params, state)
+    {result, new_state} = write(:move_note, params, state)
     {:reply, result, new_state}
   end
 
@@ -275,12 +282,19 @@ defmodule Vigil.Store do
   ## Vault facts for Vigil.Vault.Policy
 
   # Built fresh per write. The function fields are the adapters at the policy's
-  # seam: in production they read the filesystem and the index, in
-  # Vigil.Vault.PolicyTest they are literals. The index answers some of them
-  # itself (Vigil.Index.lookups/1); struct!/2 is what merges them, so a lookup
-  # the struct has no field for raises here rather than being carried silently.
+  # seam: here they read the filesystem and the index, in Vigil.Vault.PolicyTest
+  # they are literals. The index answers three of them itself
+  # (Vigil.Index.lookups/1), destructured rather than merged so that a lookup
+  # the struct has no field for fails here, and Facts.new/1 requires the rest —
+  # an unanswered question raises instead of opening the gate it guards.
   defp facts(state) do
-    base = %Facts{
+    %{
+      count_headings: count_headings,
+      find_chunk: find_chunk,
+      find_section: find_section
+    } = Index.lookups(state.index)
+
+    Facts.new(
       vault_path: state.vault_path,
       domains: list_domain_names(state),
       exclude: state.exclude,
@@ -292,10 +306,11 @@ defmodule Vigil.Store do
       find_backlinks: fn path -> Index.backlinks(state.index, path) end,
       find_similar: fn query, domain ->
         Index.search(state.index, %{query: query, domain: domain, limit: 25})
-      end
-    }
-
-    struct!(base, Index.lookups(state.index))
+      end,
+      count_headings: count_headings,
+      find_chunk: find_chunk,
+      find_section: find_section
+    )
   end
 
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
@@ -311,281 +326,133 @@ defmodule Vigil.Store do
 
   defp naming_rules(state), do: Domains.naming_rules(state.domains)
 
+  ## The write path
+  #
+  # Eight operations, one sequence: ask the policy, read the note, shape the
+  # write, then perform it. Only the last step is an effect, and only the two
+  # middle steps differ between operations — Vigil.Vault.Plan holds the
+  # difference, this holds the sequence. Every failure before the effect
+  # leaves the state untouched, said once here rather than at each site.
+
+  defp write(op, request, state) do
+    with {:ok, resolved} <- Policy.check(op, request, facts(state)),
+         :ok <- ensure_directories(op, resolved, state),
+         {:ok, current} <- current_content(op, resolved, state),
+         {:ok, plan} <- Plan.build(op, resolved, request, current) do
+      execute(plan, state)
+    else
+      {:error, msg} -> {{:error, msg}, state}
+    end
+  end
+
   # The policy decides that a project directory may be created; creating it is
-  # this module's job. write_and_commit/5 would mkdir_p the parent anyway, but
-  # doing it here keeps a filesystem failure attributable to the directory.
+  # this module's job, and only `:create` can ask for one. Vigil.Commit would
+  # mkdir_p the parent anyway, but doing it here keeps a filesystem failure
+  # attributable to the directory.
+  defp ensure_directories(:create, resolved, state),
+    do: create_project_dir(state, resolved.create_project_dir)
+
+  defp ensure_directories(_op, _resolved, _state), do: :ok
+
+  # A create has no current content by definition, and the two git-level
+  # operations never look at it; every other operation is a transformation of
+  # what the note already says.
+  defp current_content(op, _resolved, _state) when op in [:create, :delete_note, :move_note],
+    do: {:ok, nil}
+
+  defp current_content(_op, resolved, state),
+    do: read_existing_file(abs(state, resolved.path))
+
   defp create_project_dir(_state, nil), do: :ok
 
   defp create_project_dir(state, project) do
     Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
   end
 
-  ## create
+  # Where a plan becomes an effect. One order for all three actions
+  # (docs/design.md, "The write path"): perform it, commit, reparse into the
+  # index, then push. What differs is what the object is — which is why each
+  # clause names its own push-failure message — and the plan's own report,
+  # merged into the success map.
+  defp execute(%Plan{action: {:write, path, content}} = plan, state) do
+    case Commit.write(state.vault_path, path, content, plan.message) do
+      {:ok, commit_meta} ->
+        state = put_reparsed(state, path, commit_meta, "write")
 
-  defp do_create(params, state) do
-    content = Map.fetch!(params, :content)
-
-    with {:ok, resolved} <- Policy.check(:create, params, facts(state)),
-         :ok <- create_project_dir(state, resolved.create_project_dir) do
-      frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
-      full_content = Markdown.normalize_trailing_newline(frontmatter <> content)
-
-      {result, new_state} =
-        write_and_commit(
+        push(
           state,
-          resolved.path,
-          full_content,
-          "create: #{resolved.path} — #{first_line(content)}"
+          Map.merge(%{path: path, pushed: true}, plan.report),
+          "Change saved and committed locally, but push failed"
         )
-
-      result =
-        case {result, resolved.normalized_from} do
-          {{:ok, ok_map}, nil} -> {:ok, ok_map}
-          {{:ok, ok_map}, from} -> {:ok, Map.put(ok_map, :path_normalized_from, from)}
-          {other, _} -> other
-        end
-
-      {result, new_state}
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  defp build_frontmatter(type, starts, ends) do
-    lines = ["---", "type: #{type}"]
-
-    lines =
-      if type == :event do
-        lines ++ ["starts: #{DateTime.to_iso8601(starts)}", "ends: #{DateTime.to_iso8601(ends)}"]
-      else
-        lines
-      end
-
-    Enum.join(lines ++ ["---", ""], "\n")
-  end
-
-  defp first_line(content) do
-    content
-    |> String.split("\n")
-    |> Enum.find(&(String.trim(&1) != ""))
-    |> to_string()
-    |> String.slice(0, 50)
-  end
-
-  ## append
-
-  defp do_append(params, state) do
-    content = Map.fetch!(params, :content)
-
-    with {:ok, %{path: path, target: target}} <- Policy.check(:append, params, facts(state)) do
-      edit_and_commit(
-        state,
-        path,
-        "append: #{path} — #{first_line(content)}",
-        &Edit.append(&1, target, content)
-      )
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## replace_section
-
-  defp do_replace_section(id, content, state) do
-    with {:ok, %{path: path, chunk: chunk}} <-
-           Policy.check(:replace_section, %{id: id, content: content}, facts(state)) do
-      edit_and_commit(
-        state,
-        path,
-        "replace_section: #{chunk.id}",
-        &Edit.replace_body(&1, chunk, content)
-      )
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## rewrite_note
-
-  defp do_rewrite_note(params, state) do
-    content = Map.fetch!(params, :content)
-
-    with {:ok, %{path: path}} <- Policy.check(:rewrite_note, params, facts(state)),
-         abs_path = abs(state, path),
-         {:ok, original} <- read_existing_file(abs_path) do
-      case Markdown.split_frontmatter(original) do
-        {:ok, frontmatter, _old_body} ->
-          new_content = Markdown.normalize_trailing_newline(frontmatter <> content)
-          write_and_commit(state, path, new_content, "rewrite_note: #{path}")
-
-        {:error, msg} ->
-          {{:error, msg}, state}
-      end
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## delete_section
-
-  defp do_delete_section(id, state) do
-    with {:ok, %{path: path, chunk: chunk}} <-
-           Policy.check(:delete_section, %{id: id}, facts(state)) do
-      edit_and_commit(state, path, "delete_section: #{chunk.id}", &Edit.delete_section(&1, chunk))
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  # Reads the note, hands its content to `Vigil.Vault.Edit` via `edit_fun`,
-  # and commits the result. The line arithmetic lives in `Edit`, which is
-  # authoritative for it because vigil is the only writer (docs/design.md,
-  # "One writer").
-  defp edit_and_commit(state, path, message, edit_fun) do
-    abs_path = abs(state, path)
-
-    with {:ok, original} <- read_existing_file(abs_path),
-         {:ok, new_content} <- edit_fun.(original) do
-      write_and_commit(state, path, new_content, message)
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## update_frontmatter
-
-  defp do_update_frontmatter(params, state) do
-    with {:ok, resolved} <- Policy.check(:update_frontmatter, params, facts(state)),
-         path = resolved.path,
-         abs_path = abs(state, path),
-         {:ok, original} <- read_existing_file(abs_path) do
-      case Markdown.split_frontmatter(original) do
-        {:ok, _old_frontmatter, body} ->
-          new_frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
-          new_content = Markdown.normalize_trailing_newline(new_frontmatter <> body)
-          write_and_commit(state, path, new_content, "update_frontmatter: #{path}")
-
-        {:error, msg} ->
-          {{:error, msg}, state}
-      end
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## delete
-
-  defp do_delete_note(params, state) do
-    with {:ok, %{path: path, backlinks: backlinks}} <-
-           Policy.check(:delete_note, params, facts(state)) do
-      case Git.remove_commit(state.vault_path, path, "delete: #{path}") do
-        :ok ->
-          case Git.push(state.vault_path, state.git_remote) do
-            :ok ->
-              new_index = Index.remove(state.index, path)
-              new_state = %{state | index: new_index}
-
-              result =
-                {:ok, %{path: path, deleted: true, pushed: true, broken_backlinks: backlinks}}
-
-              {result, new_state}
-
-            {:error, out} ->
-              {{:error, "Deletion committed locally, but push failed: #{out}"}, state}
-          end
-
-        {:error, out} ->
-          {{:error, "git rm/commit failed: #{out}"}, state}
-      end
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  ## move_note
-
-  defp do_move_note(params, state) do
-    with {:ok, resolved} <- Policy.check(:move_note, params, facts(state)) do
-      do_move_note_to(state, resolved.from, resolved.to)
-    else
-      {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  defp do_move_note_to(state, normalized_from, normalized_to) do
-    backlinks_before = Index.backlinks(state.index, normalized_from)
-    commit_message = "move: #{normalized_from} -> #{normalized_to}"
-
-    case Git.move_commit(state.vault_path, normalized_from, normalized_to, commit_message) do
-      {:ok, commit_meta} ->
-        case Git.push(state.vault_path, state.git_remote) do
-          :ok ->
-            new_index =
-              case reparse(state, normalized_to, commit_meta, "move") do
-                {:ok, file} -> Index.move(state.index, normalized_from, file)
-                :error -> state.index
-              end
-
-            new_state = %{state | index: new_index}
-            # Backlink report — a diff of incoming references before and
-            # after the move rather than an ad-hoc scan. A source chunk that
-            # resolved before and no longer shows up in the (rebuilt)
-            # incoming references of the target now points nowhere — for
-            # example because it referenced an explicit path instead of a
-            # basename.
-            backlinks_after = Index.backlinks(new_index, normalized_to)
-
-            result =
-              {:ok,
-               %{
-                 from: normalized_from,
-                 to: normalized_to,
-                 pushed: true,
-                 broken_backlinks: backlinks_before -- backlinks_after
-               }}
-
-            {result, new_state}
-
-          {:error, out} ->
-            {{:error, "Move committed locally, but push failed: #{out}"}, state}
-        end
-
-      {:error, out} ->
-        {{:error, "git mv/commit failed: #{out}"}, state}
-    end
-  end
-
-  ## shared write path
-
-  # The write effect belongs to Vigil.Commit; what this adds is the note-shaped
-  # part around it — the reparse between commit and push (docs/design.md, "The
-  # write path"), which would be wrong for a skill.
-  defp write_and_commit(state, rel_path, full_content, message) do
-    case Commit.write(state.vault_path, rel_path, full_content, message) do
-      {:ok, commit_meta} ->
-        index =
-          case reparse(state, rel_path, commit_meta, "write") do
-            {:ok, file} -> Index.put(state.index, file)
-            :error -> state.index
-          end
-
-        new_state = %{state | index: index}
-
-        case Git.push(new_state.vault_path, new_state.git_remote) do
-          :ok ->
-            {{:ok, %{path: rel_path, pushed: true}}, new_state}
-
-          {:error, out} ->
-            {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
-        end
 
       {:error, msg} ->
         {{:error, msg}, state}
     end
   end
 
+  defp execute(%Plan{action: {:delete, path}} = plan, state) do
+    case Git.remove_commit(state.vault_path, path, plan.message) do
+      :ok ->
+        state = %{state | index: Index.remove(state.index, path)}
+
+        push(
+          state,
+          Map.merge(%{path: path, deleted: true, pushed: true}, plan.report),
+          "Deletion committed locally, but push failed"
+        )
+
+      {:error, out} ->
+        {{:error, "git rm/commit failed: #{out}"}, state}
+    end
+  end
+
+  defp execute(%Plan{action: {:move, from, to}} = plan, state) do
+    # Backlink report — a diff of incoming references before and after the
+    # move rather than an ad-hoc scan. A source chunk that resolved before and
+    # no longer shows up in the (rebuilt) incoming references of the target now
+    # points nowhere — for example because it referenced an explicit path
+    # instead of a basename.
+    backlinks_before = Index.backlinks(state.index, from)
+
+    case Git.move_commit(state.vault_path, from, to, plan.message) do
+      {:ok, commit_meta} ->
+        state = move_reparsed(state, from, to, commit_meta)
+        broken = backlinks_before -- Index.backlinks(state.index, to)
+
+        push(
+          state,
+          Map.merge(%{from: from, to: to, pushed: true, broken_backlinks: broken}, plan.report),
+          "Move committed locally, but push failed"
+        )
+
+      {:error, out} ->
+        {{:error, "git mv/commit failed: #{out}"}, state}
+    end
+  end
+
+  defp push(state, success, failure_prefix) do
+    case Git.push(state.vault_path, state.git_remote) do
+      :ok -> {{:ok, success}, state}
+      {:error, out} -> {{:error, "#{failure_prefix}: #{out}"}, state}
+    end
+  end
+
+  defp put_reparsed(state, path, commit_meta, verb) do
+    case reparse(state, path, commit_meta, verb) do
+      {:ok, file} -> %{state | index: Index.put(state.index, file)}
+      :error -> state
+    end
+  end
+
+  defp move_reparsed(state, from, to, commit_meta) do
+    case reparse(state, to, commit_meta, "move") do
+      {:ok, file} -> %{state | index: Index.move(state.index, from, file)}
+      :error -> state
+    end
+  end
+
   # Used by the write paths that read a note's current content before
-  # transforming it (append, rewrite_note, edit_and_commit, update_frontmatter).
+  # transforming it — every operation but create, delete_note and move_note.
   # A read failure here happens before anything is written, so it is
   # reported back to the caller as an ordinary error tuple rather than
   # crashing the GenServer.
@@ -596,8 +463,8 @@ defmodule Vigil.Store do
     end
   end
 
-  # Used by reparse/4: the write or move itself has already succeeded (and been
-  # committed/pushed) by the time it runs. A read failure here must not crash
+  # Used by reparse/4: the write or move itself has already succeeded and been
+  # committed by the time it runs. A read failure here must not crash
   # the GenServer and take down unrelated calls — it only means the index
   # stays stale for `rel_path` until the next reload, so the failure is logged
   # rather than propagated.

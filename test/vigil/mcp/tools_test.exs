@@ -25,16 +25,24 @@ defmodule Vigil.MCP.ToolsTest do
       refute Map.has_key?(props.domain, :minLength)
       assert props.type.enum == ["reference", "decision", "event"]
       assert props.prefer.enum == ["reference", "decision", "event"]
-      assert props.limit.type == "integer"
+
+      assert props.limit == %{
+               type: "integer",
+               minimum: 1,
+               maximum: 25,
+               description: "Maximum number of hits (default 10)."
+             }
     end
 
-    test "links: direction carries the out/in/both enum, depth is an integer" do
+    test "links: direction carries the out/in/both enum, depth publishes its range" do
       [links] = Enum.filter(Tools.definitions(), &(&1.name == "links"))
       props = links.inputSchema.properties
 
       assert links.inputSchema.required == ["id"]
       assert props.direction.enum == ["out", "in", "both"]
       assert props.depth.type == "integer"
+      assert props.depth.minimum == 1
+      assert props.depth.maximum == 2
     end
 
     test "create: path/type/content/skill_key are required, type carries the enum" do
@@ -107,7 +115,27 @@ defmodule Vigil.MCP.ToolsTest do
     test "limit: \"abc\" is a tool error, not a 500" do
       assert {:error, message} = Tools.dispatch("search", %{"query" => "tires", "limit" => "abc"})
       assert message =~ "Invalid parameter limit"
-      assert message =~ "an integer"
+      assert message =~ "an integer between 1 and 25"
+    end
+
+    # The bound used to be a silent clamp in Vigil.Search: limit: 100 returned
+    # 25 hits and said nothing, limit: -5 returned none. A declared bound is
+    # refused in the same shape as an off-enum string.
+    test "a limit outside 1..25 is refused rather than clamped" do
+      for out_of_range <- [100, 26, 0, -5] do
+        assert {:error, message} =
+                 Tools.dispatch("search", %{"query" => "tires", "limit" => out_of_range})
+
+        assert message =~ "Invalid parameter limit: expected an integer between 1 and 25"
+      end
+    end
+
+    test "a depth outside 1..2 is refused before the Store is reached" do
+      assert {:error, message} = Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 3})
+      assert message =~ "Invalid parameter depth: expected an integer between 1 and 2"
+
+      assert {:error, message} = Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 0})
+      assert message =~ "Invalid parameter depth"
     end
 
     test "an off-enum value is a tool error naming the allowed values" do

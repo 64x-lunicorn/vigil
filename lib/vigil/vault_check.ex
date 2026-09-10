@@ -14,8 +14,6 @@ defmodule Vigil.VaultCheck do
   alias Vigil.{Markdown, Parser, Slug, VaultDiscovery}
   alias Vigil.Vault.Rules
 
-  @max_headings 30
-  @max_words 2000
   @max_basisname_laenge 60
   @max_frontmatter_bytes 1024
 
@@ -210,18 +208,10 @@ defmodule Vigil.VaultCheck do
   defp b3_diff(files, vault_path) do
     changes =
       Enum.flat_map(files, fn rel_path ->
-        basename = Path.basename(rel_path, ".md")
-
         file_diff =
-          case {Slug.legacy_slugify(basename), Slug.slugify(basename)} do
-            {old, {:ok, new}} when old != new ->
-              [%{kind: "file", path: rel_path, old: old, new: new}]
-
-            {old, {:error, _}} ->
-              [%{kind: "file", path: rel_path, old: old, new: nil}]
-
-            _ ->
-              []
+          case Rules.filename_slug_change(rel_path) do
+            nil -> []
+            %{old: old, new: new} -> [%{kind: "file", path: rel_path, old: old, new: new}]
           end
 
         heading_diffs =
@@ -238,7 +228,7 @@ defmodule Vigil.VaultCheck do
 
   defp b3_heading_diffs(rel_path, content) do
     content
-    |> Rules.slug_changes()
+    |> Rules.heading_slug_changes()
     |> Enum.map(fn %{old: old, new: new} ->
       %{kind: "heading", path: rel_path, old: old, new: new}
     end)
@@ -308,38 +298,26 @@ defmodule Vigil.VaultCheck do
 
   defp b6_checks(path, parsed_file) do
     heading_chunks = Enum.filter(parsed_file.chunks, & &1.heading)
-    heading_count = length(heading_chunks)
-
-    word_count =
-      parsed_file.chunks
-      |> Enum.map(& &1.body)
-      |> Enum.join(" ")
-      |> String.split(~r/\s+/, trim: true)
-      |> length()
+    note_length = Rules.note_length(parsed_file.chunks)
 
     duplicates =
-      heading_chunks
-      |> Enum.group_by(& &1.heading)
-      |> Enum.filter(fn {_h, group} -> length(group) > 1 end)
-      |> Enum.map(fn {heading, group} -> %{heading: heading, count: length(group)} end)
+      parsed_file.chunks
+      |> Rules.duplicate_headings()
+      |> Enum.map(fn %{chunks: [first | _] = group} ->
+        %{heading: first.heading, count: length(group)}
+      end)
 
     sentence_headings =
       heading_chunks
       |> Enum.filter(fn c -> Rules.sentence_heading?(c.heading) end)
       |> Enum.map(& &1.heading)
 
-    if heading_count > @max_headings or word_count > @max_words or duplicates != [] or
-         sentence_headings != [] do
+    if Rules.overlong?(note_length) or duplicates != [] or sentence_headings != [] do
       [
-        %{
-          path: path,
-          headings: heading_count,
-          words: word_count,
-          over_heading_threshold: heading_count > @max_headings,
-          over_word_threshold: word_count > @max_words,
-          duplicate_headings: duplicates,
-          sentence_headings: sentence_headings
-        }
+        note_length
+        |> Map.put(:path, path)
+        |> Map.put(:duplicate_headings, duplicates)
+        |> Map.put(:sentence_headings, sentence_headings)
       ]
     else
       []
