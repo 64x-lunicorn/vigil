@@ -14,8 +14,6 @@ defmodule Vigil.VaultCheck do
   alias Vigil.{Markdown, Parser, Slug, VaultDiscovery}
   alias Vigil.Vault.Rules
 
-  @max_headings 30
-  @max_words 2000
   @max_basisname_laenge 60
   @max_frontmatter_bytes 1024
 
@@ -308,14 +306,7 @@ defmodule Vigil.VaultCheck do
 
   defp b6_checks(path, parsed_file) do
     heading_chunks = Enum.filter(parsed_file.chunks, & &1.heading)
-    heading_count = length(heading_chunks)
-
-    word_count =
-      parsed_file.chunks
-      |> Enum.map(& &1.body)
-      |> Enum.join(" ")
-      |> String.split(~r/\s+/, trim: true)
-      |> length()
+    note_length = Rules.note_length(parsed_file.chunks)
 
     duplicates =
       parsed_file.chunks
@@ -329,18 +320,12 @@ defmodule Vigil.VaultCheck do
       |> Enum.filter(fn c -> Rules.sentence_heading?(c.heading) end)
       |> Enum.map(& &1.heading)
 
-    if heading_count > @max_headings or word_count > @max_words or duplicates != [] or
-         sentence_headings != [] do
+    if Rules.overlong?(note_length) or duplicates != [] or sentence_headings != [] do
       [
-        %{
-          path: path,
-          headings: heading_count,
-          words: word_count,
-          over_heading_threshold: heading_count > @max_headings,
-          over_word_threshold: word_count > @max_words,
-          duplicate_headings: duplicates,
-          sentence_headings: sentence_headings
-        }
+        note_length
+        |> Map.put(:path, path)
+        |> Map.put(:duplicate_headings, duplicates)
+        |> Map.put(:sentence_headings, sentence_headings)
       ]
     else
       []

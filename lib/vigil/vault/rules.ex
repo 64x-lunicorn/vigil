@@ -20,6 +20,47 @@ defmodule Vigil.Vault.Rules do
       String.ends_with?(heading, [".", "!", "?"])
   end
 
+  # A note past either of these is asking to be split. Two axes, because the
+  # pair says *why* the note is too long — many sections, or much prose —
+  # which is what the reader acts on.
+  @max_headings 30
+  @max_words 2000
+
+  @doc """
+  How long one note is, and whether that makes it overlong.
+
+  Takes the note's chunks — anything carrying a `:heading` and a `:body` —
+  and returns `%{headings:, words:, over_heading_threshold:,
+  over_word_threshold:}`. A note is overlong past #{@max_headings} headings or
+  #{@max_words} words; `overlong?/1` says whether either was crossed.
+
+  The counts come back whether or not a threshold was crossed, because a
+  caller reporting a note for another reason still wants to say how long it
+  is.
+  """
+  def note_length(chunks) do
+    headings = Enum.count(chunks, & &1.heading)
+
+    words =
+      chunks
+      |> Enum.map(& &1.body)
+      |> Enum.join(" ")
+      |> String.split(~r/\s+/, trim: true)
+      |> length()
+
+    %{
+      headings: headings,
+      words: words,
+      over_heading_threshold: headings > @max_headings,
+      over_word_threshold: words > @max_words
+    }
+  end
+
+  @doc "True when a `note_length/1` result crossed either threshold."
+  def overlong?(%{over_heading_threshold: over_headings, over_word_threshold: over_words}) do
+    over_headings or over_words
+  end
+
   @doc """
   The headings within one note that collide in its chunk-id space.
 

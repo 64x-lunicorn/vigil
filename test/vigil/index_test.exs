@@ -314,13 +314,31 @@ defmodule Vigil.IndexTest do
       assert "via-carolina#does-not-exist" in report.orphaned_links
     end
 
-    test "overlong notes past the chunk threshold", %{index: index} do
-      headings = for n <- 1..45, do: "## Section #{n}\nContent #{n}."
+    # The same definition Vigil.VaultCheck reports, owned by Vigil.Vault.Rules:
+    # headings and words, not a chunk count.
+    test "overlong notes name the axis that was crossed", %{index: index} do
+      headings = for n <- 1..31, do: "## Section #{n}\nContent #{n}."
       content = "# Many\n\n" <> Enum.join(headings, "\n\n")
       {:ok, file} = Parser.parse("bike/many.md", content, @git_meta)
 
       updated = Index.put(index, file)
       report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+
+      assert [finding] = Enum.filter(report.overlong_notes, &(&1.path == "bike/many.md"))
+      assert finding.headings == 31
+      assert finding.over_heading_threshold
+      refute finding.over_word_threshold
+      assert finding.words > 0
+    end
+
+    test "a note with 35 headings is overlong to lint, as it already was to the doctor",
+         %{index: index} do
+      headings = for n <- 1..35, do: "## Section #{n}\nContent #{n}."
+
+      {:ok, file} =
+        Parser.parse("bike/many.md", "# Many\n\n" <> Enum.join(headings, "\n\n"), @git_meta)
+
+      report = index |> Index.put(file) |> Index.lint(~U[2026-01-01 10:00:00Z])
 
       assert Enum.any?(report.overlong_notes, &(&1.path == "bike/many.md"))
     end

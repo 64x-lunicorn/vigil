@@ -17,7 +17,6 @@ defmodule Vigil.Index do
   alias Vigil.{Events, LinkIndex, Parser, Search, Slug}
   alias Vigil.Vault.Rules
 
-  @overlong_note_chunk_threshold 40
   @stale_decision_days 180
 
   defmodule Note do
@@ -556,9 +555,10 @@ defmodule Vigil.Index do
 
   @doc """
   Answers the `lint` tool's five findings: duplicate headings, sentence-like
-  headings (via `Vigil.Vault.Rules`), orphaned links (broken outgoing links,
-  labelled with their fragment where present), overlong notes past the
-  chunk threshold, and decision notes stale relative to `now`.
+  headings, orphaned links (broken outgoing links, labelled with their
+  fragment where present), overlong notes and decision notes stale relative to
+  `now`. All four vault-hygiene definitions come from `Vigil.Vault.Rules`, so
+  `mix vigil.vault_check` reports the same notes for the same reasons.
   """
   def lint(index, now) do
     notes = Map.values(index.notes)
@@ -568,7 +568,7 @@ defmodule Vigil.Index do
       duplicate_headings: lint_duplicate_headings(chunks),
       sentence_headings: lint_sentence_headings(chunks),
       orphaned_links: lint_orphaned_links(index),
-      overlong_notes: lint_overlong_notes(notes),
+      overlong_notes: lint_overlong_notes(index, notes),
       stale_decisions: lint_stale_decisions(notes, now)
     }
   end
@@ -609,10 +609,23 @@ defmodule Vigil.Index do
     |> Enum.uniq()
   end
 
-  defp lint_overlong_notes(notes) do
+  # "Overlong" is Vigil.Vault.Rules' definition, the same one Vigil.VaultCheck
+  # reports: headings and words, so the finding says which axis is the problem
+  # rather than only that there is one.
+  defp lint_overlong_notes(index, notes) do
     notes
-    |> Enum.filter(fn n -> length(n.chunk_ids) > @overlong_note_chunk_threshold end)
-    |> Enum.map(fn n -> %{path: n.path, chunk_count: length(n.chunk_ids)} end)
+    |> Enum.map(fn note -> {note, Rules.note_length(note_chunks(index, note))} end)
+    |> Enum.filter(fn {_note, length} -> Rules.overlong?(length) end)
+    |> Enum.map(fn {note, length} -> Map.put(length, :path, note.path) end)
+  end
+
+  defp note_chunks(index, note) do
+    Enum.flat_map(note.chunk_ids, fn id ->
+      case Map.fetch(index.chunks, id) do
+        {:ok, chunk} -> [chunk]
+        :error -> []
+      end
+    end)
   end
 
   defp lint_stale_decisions(notes, now) do

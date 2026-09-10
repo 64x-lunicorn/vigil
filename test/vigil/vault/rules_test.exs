@@ -22,6 +22,48 @@ defmodule Vigil.Vault.RulesTest do
     end
   end
 
+  describe "note_length/1 and overlong?/1" do
+    defp note_of(heading_count, words_per_body) do
+      body = String.duplicate("wort ", words_per_body)
+      sections = for n <- 1..heading_count, do: "## Section #{n}\n#{body}"
+      chunks("# T\n\n" <> Enum.join(sections, "\n\n"))
+    end
+
+    test "a note is clean at both thresholds and overlong one past either" do
+      at_headings = note_of(30, 1)
+      assert Rules.note_length(at_headings).headings == 30
+      refute Rules.note_length(at_headings).over_heading_threshold
+      refute Rules.overlong?(Rules.note_length(at_headings))
+
+      past_headings = note_of(31, 1)
+      assert Rules.note_length(past_headings).headings == 31
+      assert Rules.note_length(past_headings).over_heading_threshold
+      assert Rules.overlong?(Rules.note_length(past_headings))
+    end
+
+    test "the word threshold is the other axis, and is crossed on its own" do
+      at_words = note_of(1, 2000)
+      assert Rules.note_length(at_words).words == 2000
+      refute Rules.note_length(at_words).over_word_threshold
+      refute Rules.overlong?(Rules.note_length(at_words))
+
+      past_words = note_of(1, 2001)
+      assert Rules.note_length(past_words).words == 2001
+      assert Rules.note_length(past_words).over_word_threshold
+      refute Rules.note_length(past_words).over_heading_threshold
+      assert Rules.overlong?(Rules.note_length(past_words))
+    end
+
+    test "an empty note measures zero on both axes" do
+      assert Rules.note_length([]) == %{
+               headings: 0,
+               words: 0,
+               over_heading_threshold: false,
+               over_word_threshold: false
+             }
+    end
+  end
+
   describe "duplicate_headings/1" do
     # The case lint used to miss: grouped by heading chain, `## A / ### B` and
     # `## C / ### B` looked distinct — but the parser's uniquifier keys on the
