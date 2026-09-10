@@ -83,6 +83,9 @@ defmodule Vigil.Index do
 
   defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}
 
+  @typedoc "The whole index as one value: the notes, their chunks, and the links between them."
+  @type t :: %__MODULE__{}
+
   @doc "Builds an index from the vault's parsed files."
   def build(parsed_files) do
     {notes, chunks} =

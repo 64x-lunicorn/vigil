@@ -14,15 +14,22 @@ defmodule Vigil.Vault.Facts do
   appears. With it, the policy performs no effect and can be decided in a test
   with no vault behind it.
 
-  There is one production adapter set (`Vigil.Store` builds it, over the
-  filesystem and the index) and one test builder. Neither is a default: every
-  field is required, because each of these questions guards a gate and every
+  There are two adapter sets and both are named here: `over_vault/2` answers
+  over the vault's filesystem and its index, and `Vigil.Vault.AbsentFacts`
+  answers "nothing there" to everything. Building the production one is a pure
+  function of an index and the vault's plain facts, so what it claims is
+  checkable without a git repository or a running writer — it used to be a
+  private closure inside `Vigil.Store`'s `GenServer`, reachable only by
+  performing a real write. Neither set is a default: every field is required,
+  because each of these questions guards a gate and every
   "nothing there" answer sits on the permissive side of the one it feeds. A
   `count_headings` that answers `0` turns the `rewrite_note` shrink gate off;
   a `path_exists?` that answers `false` lets `:create` past its existence
   refusal; a `find_similar` that answers `[]` switches duplicate detection off.
   A field that is not supplied must therefore raise, not answer.
   """
+
+  alias Vigil.Index
 
   @enforce_keys [
     # Discovered domain directories (see Vigil.VaultDiscovery).
@@ -69,4 +76,69 @@ defmodule Vigil.Vault.Facts do
   """
   @spec new(Enumerable.t()) :: t
   def new(fields), do: struct!(__MODULE__, fields)
+
+  @typedoc """
+  The vault's plain facts, as the caller gathered them: the domains it has,
+  what `_domains.yml` says about naming, which project directories exist, and
+  where on disk it is. Everything here is a fact about the vault; the instant
+  the write belongs to is not one, and travels beside it.
+  """
+  @type vault :: %{
+          vault_path: Path.t(),
+          domains: [String.t()],
+          exclude: [String.t()],
+          project_dirs: [String.t()],
+          naming: %{optional(String.t()) => map}
+        }
+
+  @doc """
+  The production answer set: `vault`'s plain facts as they were gathered, and
+  an adapter per question over `index` and the vault's filesystem.
+
+  Pure — it performs no effect, it builds the functions that will. `vault` is
+  matched rather than fetched from, so a caller that has not gathered one of
+  the plain facts fails in its own process on the head, the way a broken
+  contract does everywhere else here (docs/design.md, "The write path").
+
+  `now` is the instant the write's own response's envelope was decided at
+  (`Vigil.MCP.Envelope.for_tool/2`) and `today` is that instant's own date, in
+  that instant's own zone. It is derived from what was handed in rather than
+  read from a clock here — see docs/design.md, "The write path", for what a
+  second clock read behind the writer cost.
+  """
+  @spec over_vault(Index.t(), vault, DateTime.t()) :: t
+  def over_vault(
+        %Index{} = index,
+        %{
+          vault_path: vault_path,
+          domains: domains,
+          exclude: exclude,
+          project_dirs: project_dirs,
+          naming: naming
+        },
+        %DateTime{} = now
+      ) do
+    new(
+      domains: domains,
+      exclude: exclude,
+      project_dirs: project_dirs,
+      naming: naming,
+      today: DateTime.to_date(now),
+      path_exists?: fn path -> File.exists?(Path.join(vault_path, path)) end,
+      read_note: fn path -> File.read(Path.join(vault_path, path)) end,
+      find_backlinks: fn path -> Index.backlinks(index, path) end,
+      # The depth comes from the policy, which is where the duplicate gate's
+      # sensitivity is stated — terms, depth and threshold together. An adapter
+      # that chose its own would be a third module deciding how sensitive the
+      # gate is. No `prefer`, and deliberately: the policy's threshold is
+      # `Index.strength(:title)`, which means "the query names this note" only
+      # for a search with no preferred type.
+      find_similar: fn query, domain, depth ->
+        Index.search(index, %{query: query, domain: domain, limit: depth})
+      end,
+      count_headings: fn path -> Index.count_headings(index, path) end,
+      find_chunk: fn id -> Index.find_chunk(index, id) end,
+      find_section: fn path, heading -> Index.find_section(index, path, heading) end
+    )
+  end
 end
