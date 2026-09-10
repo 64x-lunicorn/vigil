@@ -396,6 +396,154 @@ defmodule Vigil.OAuth.EndpointTest do
     assert List.last(results) == 429
   end
 
+  ## Response headers on the HTML
+
+  # The consent page is the only HTML vigil serves and the only place a human
+  # types a password, so the headers on it are worth asserting rather than
+  # hoping for.
+
+  defp consent_page do
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+
+    get_query(
+      "/oauth/authorize",
+      authorize_query(client["client_id"], "https://claude.ai/api/mcp/auth_callback", challenge)
+    )
+  end
+
+  defp header(conn, name) do
+    case get_resp_header(conn, name) do
+      [value] -> value
+      [] -> nil
+    end
+  end
+
+  defp csp_directives(conn) do
+    conn
+    |> header("content-security-policy")
+    |> String.split(";", trim: true)
+    |> Enum.map(&String.trim/1)
+  end
+
+  test "the consent page denies by default and permits only what it uses" do
+    conn = consent_page()
+    assert conn.status == 200
+
+    directives = csp_directives(conn)
+
+    assert "default-src 'none'" in directives
+    assert "frame-ancestors 'none'" in directives
+    assert "base-uri 'none'" in directives
+
+    # form-action is deliberately absent: its treatment of the redirect that
+    # answers the Allow POST is not interoperable, and it guards nothing here.
+    # See Vigil.OAuth.Endpoint.html_security_headers/1.
+    refute Enum.any?(directives, &String.starts_with?(&1, "form-action"))
+
+    # The page's one style block, and nothing else. No 'unsafe-inline'
+    # anywhere: an injected <style> without the nonce does not run.
+    assert Enum.any?(directives, &String.starts_with?(&1, "style-src 'nonce-"))
+    refute conn |> header("content-security-policy") =~ "unsafe-inline"
+  end
+
+  test "the consent page carries the three headers a password form deserves" do
+    conn = consent_page()
+
+    assert header(conn, "x-content-type-options") == "nosniff"
+    assert header(conn, "referrer-policy") == "no-referrer"
+    # frame-ancestors covers modern clients; this covers the ones that predate it.
+    assert header(conn, "x-frame-options") == "DENY"
+  end
+
+  test "the nonce in the policy is the nonce on the page, and is fresh each time" do
+    conn = consent_page()
+
+    [nonce] =
+      Regex.run(~r/style-src 'nonce-([^']+)'/, header(conn, "content-security-policy"))
+      |> tl()
+
+    assert conn.resp_body =~ ~s(<style nonce="#{nonce}">)
+
+    second = consent_page()
+
+    [other] =
+      Regex.run(~r/style-src 'nonce-([^']+)'/, header(second, "content-security-policy")) |> tl()
+
+    refute other == nonce
+  end
+
+  test "the page renders no external asset and runs no script, as the policy claims" do
+    # `default-src 'none'` is only honest while this stays true. The URLs in
+    # the hidden fields are data, not asset references, so the check is for
+    # the things that would actually load something.
+    body = consent_page().resp_body
+
+    refute body =~ "<script"
+    refute body =~ "<link"
+    refute body =~ "<img"
+    refute body =~ "src="
+    refute body =~ "url("
+  end
+
+  test "the error variant still renders and still carries the headers" do
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    conn =
+      post_form(
+        "/oauth/authorize",
+        Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
+          "password" => "falsch",
+          "decision" => "allow"
+        })
+      )
+
+    assert conn.status == 200
+    assert conn.resp_body =~ "Wrong password"
+
+    [nonce] =
+      Regex.run(~r/style-src 'nonce-([^']+)'/, header(conn, "content-security-policy")) |> tl()
+
+    assert conn.resp_body =~ ~s(<style nonce="#{nonce}">)
+    assert header(conn, "x-frame-options") == "DENY"
+    assert header(conn, "referrer-policy") == "no-referrer"
+  end
+
+  test "the loopback-warning variant still renders and still carries the headers" do
+    {201, client} = register(["http://localhost/callback"])
+    {_verifier, challenge} = pkce_pair()
+
+    conn =
+      get_query(
+        "/oauth/authorize",
+        authorize_query(client["client_id"], "http://localhost:3118/callback", challenge)
+      )
+
+    assert conn.status == 200
+    assert conn.resp_body =~ "loopback redirect address"
+
+    assert header(conn, "x-frame-options") == "DENY"
+    assert header(conn, "x-content-type-options") == "nosniff"
+    assert csp_directives(conn) |> Enum.member?("frame-ancestors 'none'")
+  end
+
+  test "the HTML error page refuses framing too, and needs no style-src" do
+    conn = get_query("/oauth/authorize", authorize_query("nobody", "https://evil.tld/cb", "x"))
+
+    assert conn.status == 400
+
+    directives = csp_directives(conn)
+    assert "default-src 'none'" in directives
+    assert "frame-ancestors 'none'" in directives
+    refute Enum.any?(directives, &String.starts_with?(&1, "style-src"))
+
+    assert header(conn, "x-frame-options") == "DENY"
+    assert header(conn, "x-content-type-options") == "nosniff"
+    assert header(conn, "referrer-policy") == "no-referrer"
+  end
+
   ## Persistence
 
   test "a token survives an OAuth.Store restart against the same state dir", %{

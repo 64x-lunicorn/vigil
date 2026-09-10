@@ -206,3 +206,11 @@ version in the workflow `env:` blocks. When bumping gitleaks, update
 **Loosening a ratchet.** Lower a `.credo.exs` threshold whenever a refactor
 makes room for it; remove a `.dialyzer_ignore.exs` entry when the finding is
 fixed — CI will tell you if you forget, because the filter becomes unused.
+
+**zizmor's severity floor is a ratchet too.** It runs at `--min-severity=low`
+because the workflows are clean at low today. A threshold set above the current
+state suppresses everything underneath it without saying so; the one finding
+not worth acting on carries an inline `# zizmor: ignore[...]` with the reason
+written beside it in `release.yml`. Because the version is pinned, new findings
+arrive only with a deliberate bump — which is the moment to fix them or write
+down why not.

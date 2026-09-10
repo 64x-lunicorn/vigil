@@ -31,6 +31,94 @@ Code.
 
 ---
 
+## Walked against RFC 9700
+
+vigil is a hand-written OAuth 2.1 authorization server, so at some point
+somebody has to walk it against
+[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html), *Best Current Practice
+for OAuth 2.0 Security*. This section is the result, so the next reviewer does
+not re-derive it. Each answer is the behaviour of the code, not an intention.
+
+**Is `code_challenge` required, and is `plain` refused?** Yes and yes.
+`Vigil.OAuth.Flow.authorize_details/1` rejects a missing or empty
+`code_challenge` with `invalid_request`, and requires
+`code_challenge_method` to be exactly `S256` — so `plain` is refused, and so is
+an *absent* method, which RFC 7636 would otherwise default to `plain`. The
+verifier is checked at the token endpoint with
+`Plug.Crypto.secure_compare/2`. This is stricter than §2.1.1 asks: "Authorization
+servers MUST support PKCE", and "MUST mitigate PKCE downgrade attacks by
+ensuring that a token request containing a `code_verifier` parameter is accepted
+only if a `code_challenge` parameter was present in the authorization request"
+— here there is no request without one. (§2.1.1, §4.8)
+
+**Can a code be redeemed by another client, and is `redirect_uri` re-checked
+at the token endpoint?** No, and yes. `grant/2` compares both the stored
+`client_id` and the stored `redirect_uri` against the token request and answers
+`invalid_grant` on either mismatch. The code is deleted on lookup — `take_code/1`
+— so it is one-time even on the failing paths. What that binding does *not* do
+is authenticate: every client here is public (see below), so `client_id` is
+asserted rather than proven, and PKCE is the actual defence against code
+injection. (§4.5.3.1)
+
+**What binds the authorization response to the request that started it, and
+what if `state` is absent?** `state` is echoed when the client sends one and
+omitted when it does not; vigil never invents one. The binding to the browser
+session is the client's to hold, and §4.7.1 says PKCE is enough for it: "PKCE
+provides robust protection against CSRF attacks even in the presence of an
+attacker that can read the authorization response", and "the same protection is
+provided by PKCE or the OpenID Connect nonce value". Since PKCE is mandatory
+here, a client that omits `state` is not thereby unprotected. (§4.7.1)
+
+**Are refresh tokens rotated, and what happens on a second presentation?**
+Rotated: the presented token is deleted before the new pair is minted, so a
+replay finds nothing and gets `invalid_grant`. That meets §2.2.2 — "Refresh
+tokens for public clients MUST be sender-constrained or use refresh token
+rotation" — and detects replay as §4.14.2 requires. It does not *act* on the
+detection: the signal is generated and dropped. **Finding → #78.**
+
+**Does the authorization response carry `iss`?** No, and nothing depends on it.
+§4.4.2.1 wants the issuer identifier in the authorization response, via the
+`iss` parameter of RFC 9207. **Finding → #77.**
+
+**What authenticates a client at the token endpoint?** Nothing —
+`token_endpoint_auth_methods_supported` is `["none"]` and there are no client
+secrets, by design for a single-user deployment. The consequence for the
+loopback clients the consent page warns about is bounded by PKCE: a local
+process that races the redirect and grabs the code still cannot redeem it
+without the `code_verifier`, which never leaves the real client. The warning on
+the consent page is about a different thing — that any local process can *ask*
+for consent while looking like the client. (§2.5, and RFC 8252 §8.3)
+
+**Is the rate limit per client, per address, or global — and what does an
+attacker gain by exhausting it for someone else?** Neither of the two limits
+covers the authorization server. `Vigil.MCP.RateLimit` is per access token and
+guards `/mcp` only. `Vigil.OAuth.Store.rate_limited?/2` has one caller,
+`Flow.consent/4`, so it counts wrong consent passwords and nothing else:
+`/oauth/register`, `/oauth/authorize` and `/oauth/token` are unlimited.
+**Finding → #79.** And the one limit that exists is keyed on `conn.remote_ip`,
+which behind the deployment's proxy is the proxy — one global bucket, so
+exhausting it locks out the owner rather than the attacker.
+**Finding → #81.** (§4.13)
+
+Two things the walk confirmed in passing: the authorization server never
+redirects to an unregistered `redirect_uri` — an untrusted client or URI gets a
+400 HTML page and no `Location` at all (§4.11.2) — and the consent page refuses
+framing since the headers below (§4.16).
+
+### What the walk found
+
+| # | Gap | RFC 9700 |
+|---|---|---|
+| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 |
+| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 |
+| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — |
+| [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 |
+
+None of them is an incident on the current deployment, where Cloudflare Access
+is in front of the endpoint. They are the defences that are absent behind it.
+
+---
+
 ## Endpoints
 
 All served by `Vigil.OAuth.Endpoint`, which `Vigil.MCP.Server` forwards to for
@@ -124,14 +212,39 @@ Redirect URIs are validated at registration: each must be `https://`, or
 
 If `client_id` is an `https://` URL, the document is fetched and validated:
 
-1. Fetch over HTTPS, 5 s timeout, 64 KB maximum.
+1. Fetch over HTTPS, 5 s timeout, 64 KB maximum. The cap is applied **during**
+   the read — a declared `Content-Length` over it ends the request before any
+   body is read, and an undeclared body is counted as it arrives and cancelled
+   on the chunk that crosses the cap — so an oversized response is never
+   buffered in full.
 2. `client_id` inside the document must equal the URL exactly.
 3. Required fields present: `client_id`, `client_name`, `redirect_uris`.
 4. Result cached for one hour.
 
-**SSRF protection:** HTTPS only, redirects are not followed, and the resolved
-IP must not fall into `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
-`192.168.0.0/16`, `169.254.0.0/16`, `::1` or `fc00::/7`.
+**SSRF protection.** HTTPS only, and redirects are not followed, so a 302 into
+the private range cannot be followed either.
+
+The host is resolved **once**. That address is checked, and the socket is then
+opened against *that address* rather than against the URL. This is what closes
+DNS rebinding: a guard that resolves, approves, and then hands the URL to an
+HTTP client which resolves again is bypassed by an attacker who controls the
+host's DNS and answers the two lookups differently — a public address for the
+guard, `127.0.0.1` for the connection. With one lookup there is no second
+answer to give.
+
+Pinning the address costs nothing in certificate verification. The host travels
+as the `Host` header and as `server_name_indication`, which in OTP's `:ssl` is
+both the SNI extension and the reference identity the hostname check runs
+against — so TLS is still verified against the system trust store, for the name
+in the `client_id`, not for the address.
+
+The address must not fall into any of:
+
+| Family | Refused |
+|---|---|
+| IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.18.0.0/15` (benchmarking) |
+| IPv6 | `::`, `::1`, `fc00::/7` (unique local), `fe80::/10` (link-local) |
+| IPv4-mapped IPv6 | `::ffff:a.b.c.d` is unfolded to `a.b.c.d` first, so every IPv4 row above covers its mapped form |
 
 ---
 
@@ -176,6 +289,48 @@ session cookie after login — it happens rarely enough.
 
 A loopback redirect address is called out on the consent page: any local
 process on that machine could impersonate the client.
+
+### Response headers on the consent page
+
+It is the only HTML vigil serves and the only place a human types a password.
+It also has almost nothing to allow — no template directory, no assets, no
+JavaScript, and one inline `<style>` block — so the policy denies everything
+and carves out exactly that block, by nonce rather than by `'unsafe-inline'`.
+
+```http
+Content-Security-Policy: default-src 'none'; base-uri 'none'; frame-ancestors 'none'; style-src 'nonce-<per-response>'
+X-Frame-Options: DENY
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+```
+
+| Header | What it buys |
+|---|---|
+| `frame-ancestors 'none'` + `X-Frame-Options: DENY` | The page cannot be framed, so an attacker cannot steer a click onto **Allow**. The second is for clients that predate the first. |
+| `Referrer-Policy: no-referrer` | The consent page's URL carries `client_id`, `redirect_uri`, `state` and `code_challenge`. It stops leaking. |
+| `base-uri 'none'` | An injected `<base>` cannot re-point the one relative URL on the page, the form's own action. |
+| `default-src 'none'` + `nosniff` | Closes the distance between "renders no external assets today" and "renders no external assets". |
+
+**`form-action 'self'` is deliberately absent.** The password POST does land on
+this origin, but its answer is a 302 to the client's `redirect_uri`, which is
+another origin by definition. Whether `form-action` applies to a redirect
+*after* a submission is
+[debated](https://github.com/w3c/webappsec-csp/issues/8), and MDN warns that
+"browser implementations of this aspect are inconsistent (e.g., Firefox 57
+doesn't block the redirects whereas Chrome 63 does)". So the directive can break
+the Allow button in the more likely of the two browsers, and it guards nothing
+here: the form's action is a literal in the template with nowhere for input to
+reach it. A `Plug.Test` assertion could not catch the breakage either, since it
+only ever observes the 302.
+
+`Vigil.OAuth.ConsentPage` both mints the nonce and stamps it on its `<style>`
+tag, so one module owns what the value is; `Vigil.OAuth.Endpoint` only names it
+in the header. The HTML error page gets the same headers minus `style-src`,
+having no style at all.
+
+The escaping on the page is separate and unchanged: `client_name`, the redirect
+host, the error text and every hidden field value are HTML-escaped, because
+`client_name` is whatever a client registered.
 
 ---
 
@@ -235,9 +390,19 @@ Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
 `:dets.sync/1` after every write — the write rate is low enough that it does
 not matter, and a token lost to a crash costs one re-authorization.
 
-`Vigil.OAuth.Janitor` runs every five minutes and deletes expired codes,
-expired access and refresh tokens, and rate-limit counters older than 15
-minutes. No cron, no job library — just `Process.send_after/3`.
+`Vigil.OAuth.Janitor` runs every five minutes and sweeps all four tables:
+expired authorization codes, expired access and refresh tokens, rate-limit
+counters older than 15 minutes, and CIMD cache entries whose hour is up. No
+cron, no job library — just `Process.send_after/3`.
+
+The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
+client supplies, and it is filled from `GET /oauth/authorize`, which is not
+rate-limited — so nothing bounds the rate at which it grows either. The sweep is
+what keeps it finite. See [#79](https://github.com/64x-lunicorn/vigil/issues/79).
+
+The interval and the instant are both arguments with production defaults, so a
+test can drive one sweep rather than wait five minutes for it. The instant is a
+function, not a value: the janitor outlives any single one.
 
 > **Note:** `:dets` is not safe for concurrent access from multiple OS
 > processes. Seeding a token while the service is running must go through

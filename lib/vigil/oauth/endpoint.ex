@@ -119,15 +119,18 @@ defmodule Vigil.OAuth.Endpoint do
       "scope" => ctx.scope
     }
 
+    nonce = ConsentPage.nonce()
+
     html =
       ConsentPage.render(%{
         client_name: ctx.client.name,
         redirect_uri: ctx.redirect_uri,
         hidden_fields: hidden,
-        error: error_message
+        error: error_message,
+        nonce: nonce
       })
 
-    send_html(conn, 200, html)
+    send_html(conn, 200, html, nonce)
   end
 
   ## Token
@@ -169,11 +172,63 @@ defmodule Vigil.OAuth.Endpoint do
     |> send_resp(status, Jason.encode!(payload))
   end
 
-  defp send_html(conn, status, html) do
+  defp send_html(conn, status, html, nonce \\ nil) do
     conn
     |> put_resp_content_type("text/html")
+    |> merge_resp_headers(html_security_headers(nonce))
     |> send_resp(status, html)
   end
+
+  @doc """
+  The response headers for the HTML vigil serves.
+
+  The consent page is the only HTML here and the only place a human types a
+  password, and it is unusually cheap to lock down: no template directory, no
+  assets, no JavaScript, and a single inline `<style>` block. So the policy
+  denies everything and permits exactly that one block, by nonce rather than
+  by `'unsafe-inline'` — an injected `<style>` without the nonce does not run.
+  Pass `nil` for the error page, which has no style at all.
+
+  What each one buys:
+
+    * `frame-ancestors 'none'`, with `X-Frame-Options: DENY` for clients that
+      predate it, stops the page being framed. An attacker who frames it
+      cannot steer a click onto Allow.
+    * `Referrer-Policy: no-referrer` stops the URL leaking. The consent page's
+      URL carries `client_id`, `redirect_uri`, `state` and `code_challenge`.
+    * `X-Content-Type-Options: nosniff` and `default-src 'none'` close the
+      distance between "renders no external assets today" and "renders no
+      external assets".
+    * `base-uri 'none'` keeps an injected `<base>` from re-pointing the one
+      relative URL on the page, the form's own action.
+
+  Deliberately absent: `form-action 'self'`. The password POST does land on
+  this origin, but its answer is a 302 to the client's `redirect_uri`, which is
+  another origin by definition — and whether `form-action` applies to a
+  redirect *after* a submission is, in MDN's words, "debated and browser
+  implementations of this aspect are inconsistent (e.g., Firefox 57 doesn't
+  block the redirects whereas Chrome 63 does)". So the directive can break the
+  Allow button in the more likely browser, and it guards nothing here: the
+  form's action is a literal in the template with nowhere for input to reach
+  it. A `Plug.Test` assertion cannot see this failure either, since it only
+  ever observes the 302.
+
+  The nonce half lives on `Vigil.OAuth.ConsentPage`, which both mints the value
+  and stamps it on its `<style>` tag; this function only names it.
+  """
+  def html_security_headers(nonce) do
+    [
+      {"content-security-policy", content_security_policy(nonce)},
+      {"x-frame-options", "DENY"},
+      {"x-content-type-options", "nosniff"},
+      {"referrer-policy", "no-referrer"}
+    ]
+  end
+
+  defp content_security_policy(nil), do: base_policy()
+  defp content_security_policy(nonce), do: base_policy() <> "; style-src 'nonce-#{nonce}'"
+
+  defp base_policy, do: "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
   defp error_html(message) do
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>vigil — error</title></head>" <>
