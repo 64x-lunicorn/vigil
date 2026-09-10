@@ -87,7 +87,7 @@ defmodule Vigil.Vault.PolicyTest do
     test "the create decision carries no domain: nothing writes one" do
       assert {:ok, resolved} = create("projects/vigil/x.md")
 
-      assert Enum.sort(Map.keys(resolved)) ==
+      assert Enum.sort(Map.keys(Map.from_struct(resolved))) ==
                [:create_project_dir, :ends, :normalized_from, :path, :starts, :type]
     end
   end
@@ -641,7 +641,7 @@ defmodule Vigil.Vault.PolicyTest do
                  f
                )
 
-      assert Enum.sort(Map.keys(resolved)) == [:from, :to]
+      assert Enum.sort(Map.keys(Map.from_struct(resolved))) == [:from, :to]
     end
   end
 end

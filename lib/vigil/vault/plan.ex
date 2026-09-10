@@ -30,7 +30,7 @@ defmodule Vigil.Vault.Plan do
   whoever executes it. What only the *effect* knows stays with the executor.
   """
 
-  alias Vigil.{Markdown, Vault.Edit}
+  alias Vigil.{Markdown, Vault.Decision, Vault.Edit}
 
   @enforce_keys [:action, :message]
   defstruct [:action, :message, report: %{}]
@@ -57,19 +57,24 @@ defmodule Vigil.Vault.Plan do
           | :move_note
 
   @doc """
-  Builds the plan for `op` from the policy's `resolved` decision, the caller's
+  Builds the plan for `op` from the policy's `decision`, the caller's
   `request`, and `current` — the note's content as it stands on disk, or `nil`
   for the operations that do not read it: `:create`, which has no current
   content by definition, and the two git-level ones, which never look at it.
+
+  Each clause matches the `Vigil.Vault.Decision` shape its operation is
+  decided in, rather than reaching into the keys it hopes are there: an
+  operation paired with a decision that cannot answer for it fails here, on
+  the clause, and not as a `KeyError` several frames into the writer.
 
   Returns `{:ok, plan}`, or `{:error, message}` when the content cannot be
   shaped: an edit whose chunk is gone, or a note whose frontmatter block is
   unparsable. Both are the caller's message to hand back verbatim.
   """
-  @spec build(op, map, map, String.t() | nil) :: {:ok, t} | {:error, String.t()}
-  def build(op, resolved, request, current)
+  @spec build(op, Decision.t(), map, String.t() | nil) :: {:ok, t} | {:error, String.t()}
+  def build(op, decision, request, current)
 
-  def build(:create, resolved, request, _current) do
+  def build(:create, %Decision.Create{} = resolved, request, _current) do
     content = Map.fetch!(request, :content)
     frontmatter = frontmatter(resolved.type, resolved.starts, resolved.ends)
 
@@ -82,7 +87,7 @@ defmodule Vigil.Vault.Plan do
      }}
   end
 
-  def build(:append, resolved, request, current) do
+  def build(:append, %Decision.Append{} = resolved, request, current) do
     content = Map.fetch!(request, :content)
 
     with {:ok, new_content} <- Edit.append(current, resolved.target, content) do
@@ -90,7 +95,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:replace_section, resolved, request, current) do
+  def build(:replace_section, %Decision.Section{} = resolved, request, current) do
     chunk = resolved.chunk
 
     with {:ok, new_content} <- Edit.replace_body(current, chunk, Map.fetch!(request, :content)) do
@@ -98,7 +103,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:delete_section, resolved, _request, current) do
+  def build(:delete_section, %Decision.Section{} = resolved, _request, current) do
     chunk = resolved.chunk
 
     with {:ok, new_content} <- Edit.delete_section(current, chunk) do
@@ -109,7 +114,7 @@ defmodule Vigil.Vault.Plan do
   # The frontmatter block is the half of the file a rewrite never touches, and
   # the body is the half update_frontmatter never touches. Both are the same
   # split, from opposite sides.
-  def build(:rewrite_note, resolved, request, current) do
+  def build(:rewrite_note, %Decision.RewriteNote{} = resolved, request, current) do
     with {:ok, frontmatter, _old_body} <- Markdown.split_frontmatter(current) do
       content = frontmatter <> Map.fetch!(request, :content)
 
@@ -122,7 +127,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:update_frontmatter, resolved, _request, current) do
+  def build(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
     with {:ok, _old_frontmatter, body} <- Markdown.split_frontmatter(current) do
       content = frontmatter(resolved.type, resolved.starts, resolved.ends) <> body
 
@@ -137,7 +142,7 @@ defmodule Vigil.Vault.Plan do
 
   # The backlinks are the policy's answer, looked up before anything is
   # deleted — after the effect there is nothing left to ask about.
-  def build(:delete_note, resolved, _request, _current) do
+  def build(:delete_note, %Decision.DeleteNote{} = resolved, _request, _current) do
     {:ok,
      %__MODULE__{
        action: {:delete, resolved.path},
@@ -148,7 +153,7 @@ defmodule Vigil.Vault.Plan do
 
   # Which references the move actually broke is a diff across the effect, so
   # it belongs to whoever performs it, not here.
-  def build(:move_note, resolved, _request, _current) do
+  def build(:move_note, %Decision.MoveNote{} = resolved, _request, _current) do
     {:ok,
      %__MODULE__{
        action: {:move, resolved.from, resolved.to},

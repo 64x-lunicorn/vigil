@@ -372,6 +372,15 @@ default. A question added and left unwired stops the write at construction
 rather than opening the gate it was meant to guard; a test that wants an absent
 fact names it.
 
+**The answer has a name too.** `check/3` returns one `Vigil.Vault.Decision`
+struct per write shape — a create decision, an append decision carrying its
+resolved target, a section decision carrying its resolved chunk, a delete
+decision carrying its backlinks, a move decision, a rewrite, a frontmatter
+update — each enforcing every field its operation needs, and
+`Vigil.Vault.Plan` matches the shape per clause rather than reaching into the
+keys it hopes are there. A decision that cannot answer for its operation
+fails where the mistake is, not as a `KeyError` inside the single writer.
+
 The point of one gate is that there is no second way in. The rules used to be
 private helpers in `Vigil.Store` that only `create` and `move_note` called, so
 `append`, `rewrite_note`, `update_frontmatter` and `delete_note` checked

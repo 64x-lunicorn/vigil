@@ -20,7 +20,7 @@ defmodule Vigil.Vault.Policy do
   """
 
   alias Vigil.{Markdown, Slug}
-  alias Vigil.Vault.Facts
+  alias Vigil.Vault.{Decision, Facts}
 
   @type op ::
           :create
@@ -37,12 +37,13 @@ defmodule Vigil.Vault.Policy do
   @doc """
   Decides `op` for `request` against `facts`.
 
-  Returns `{:ok, resolved}` — a map of what the caller needs and the policy
-  derived (the normalized path, parsed timestamps, a project directory to
-  create) — or `{:error, message}` with the message the caller is expected to
-  hand back verbatim.
+  Returns `{:ok, decision}` — one `Vigil.Vault.Decision` struct per write
+  shape, carrying what the policy derived and the caller needs: the normalized
+  path, the resolved target or chunk, parsed timestamps, a project directory
+  to create. Or `{:error, message}`, with the message the caller is expected
+  to hand back verbatim.
   """
-  @spec check(op, map, Facts.t()) :: {:ok, map} | {:error, String.t()}
+  @spec check(op, map, Facts.t()) :: {:ok, Decision.t()} | {:error, String.t()}
 
   def check(:create, request, facts) do
     path = Map.fetch!(request, :path)
@@ -58,7 +59,7 @@ defmodule Vigil.Vault.Policy do
          {:ok, type, starts, ends} <- type_and_times(request),
          :ok <- duplicates(normalized, domain, request, facts) do
       {:ok,
-       %{
+       %Decision.Create{
          path: normalized,
          normalized_from: if(changed?, do: path),
          create_project_dir: create_dir,
@@ -75,7 +76,7 @@ defmodule Vigil.Vault.Policy do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          {:ok, target} <- append_target(path, Map.get(request, :heading), facts),
          :ok <- appended_content(target, content) do
-      {:ok, %{path: path, target: target}}
+      {:ok, %Decision.Append{path: path, target: target}}
     end
   end
 
@@ -85,14 +86,14 @@ defmodule Vigil.Vault.Policy do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          :ok <- content_shape(content),
          :ok <- shrink_threshold(path, content, confirm?(request), facts) do
-      {:ok, %{path: path}}
+      {:ok, %Decision.RewriteNote{path: path}}
     end
   end
 
   def check(:update_frontmatter, request, facts) do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          {:ok, type, starts, ends} <- type_and_times(request) do
-      {:ok, %{path: path, type: type, starts: starts, ends: ends}}
+      {:ok, %Decision.UpdateFrontmatter{path: path, type: type, starts: starts, ends: ends}}
     end
   end
 
@@ -105,7 +106,7 @@ defmodule Vigil.Vault.Policy do
     with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
          backlinks = facts.find_backlinks.(path),
          :ok <- require_confirm(confirm?(request), delete_description(path, backlinks)) do
-      {:ok, %{path: path, backlinks: backlinks}}
+      {:ok, %Decision.DeleteNote{path: path, backlinks: backlinks}}
     end
   end
 
@@ -125,7 +126,7 @@ defmodule Vigil.Vault.Policy do
     with :ok <- section_id_writable(id, facts),
          {:ok, chunk} <- section_chunk(id, facts, "replaced"),
          :ok <- replacement_content(Map.fetch!(request, :content)) do
-      {:ok, %{path: chunk.path, chunk: chunk}}
+      {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
   end
 
@@ -134,7 +135,7 @@ defmodule Vigil.Vault.Policy do
 
     with :ok <- section_id_writable(id, facts),
          {:ok, chunk} <- section_chunk(id, facts, "deleted") do
-      {:ok, %{path: chunk.path, chunk: chunk}}
+      {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
   end
 
@@ -159,7 +160,7 @@ defmodule Vigil.Vault.Policy do
       # No project directory to create: the move asks `writable_path/3` with
       # directory creation switched off, and `Vigil.Store` creates one for
       # `:create` alone.
-      {:ok, %{from: normalized_from, to: normalized_to}}
+      {:ok, %Decision.MoveNote{from: normalized_from, to: normalized_to}}
     end
   end
 

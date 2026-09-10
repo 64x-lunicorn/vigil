@@ -13,7 +13,7 @@ defmodule Vigil.Store do
     VaultDiscovery
   }
 
-  alias Vigil.Vault.{Domains, Facts, Plan, Policy}
+  alias Vigil.Vault.{Decision, Domains, Facts, Plan, Policy}
 
   ## Public API
 
@@ -349,8 +349,8 @@ defmodule Vigil.Store do
   # this module's job, and only `:create` can ask for one. Vigil.Commit would
   # mkdir_p the parent anyway, but doing it here keeps a filesystem failure
   # attributable to the directory.
-  defp ensure_directories(:create, resolved, state),
-    do: create_project_dir(state, resolved.create_project_dir)
+  defp ensure_directories(:create, %Decision.Create{} = decision, state),
+    do: create_project_dir(state, decision.create_project_dir)
 
   defp ensure_directories(_op, _resolved, _state), do: :ok
 
