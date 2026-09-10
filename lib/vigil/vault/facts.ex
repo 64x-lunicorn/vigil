@@ -38,6 +38,10 @@ defmodule Vigil.Vault.Facts do
     :today,
     :path_exists?,
     :read_note,
+    # Notes in `domain` matching a term, best first, as deep as the caller
+    # asks (:create's duplicate gate). The gate's terms, depth and threshold
+    # are stated together in `Vigil.Vault.Policy`, so the depth arrives with
+    # the question rather than being chosen by whoever answers it.
     :find_similar,
     # H2–H4 headings a note currently has (rewrite_note's shrink gate).
     :count_headings,

@@ -37,7 +37,7 @@ defmodule Vigil.Vault.FactsTest do
 
       refute facts.path_exists?.("bike/x.md")
       assert facts.read_note.("bike/x.md") == :error
-      assert facts.find_similar.("terra", "bike") == []
+      assert facts.find_similar.("terra", "bike", 25) == []
       assert facts.count_headings.("bike/x.md") == 0
       assert facts.find_backlinks.("bike/x.md") == []
       assert facts.find_chunk.("bike/x.md#h") == nil

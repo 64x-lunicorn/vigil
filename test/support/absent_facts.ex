@@ -28,7 +28,7 @@ defmodule Vigil.Vault.AbsentFacts do
           today: ~D[1970-01-01],
           path_exists?: fn _path -> false end,
           read_note: fn _path -> :error end,
-          find_similar: fn _query, _domain -> [] end,
+          find_similar: fn _query, _domain, _depth -> [] end,
           count_headings: fn _path -> 0 end,
           find_backlinks: fn _path -> [] end,
           find_chunk: fn _id -> nil end,

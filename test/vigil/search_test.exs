@@ -107,4 +107,47 @@ defmodule Vigil.SearchTest do
 
     assert_raise KeyError, fn -> Search.run(items, "treffer", %{}) end
   end
+
+  # The scale a caller filters a score against. Vigil.Vault.Policy's duplicate
+  # gate keeps hits at strength(:title) and above, so these are load-bearing
+  # for a module outside this one: they are published rather than inferred.
+  describe "strength/1" do
+    test "each kind contributes what it is published as" do
+      title = item(%{file_title: "Terra"})
+      assert [%{score: score}] = run([title], "terra")
+      assert score == Search.strength(:title)
+
+      heading = item(%{heading_path: ["Terra"]})
+      assert [%{score: score}] = run([heading], "terra")
+      assert score == Search.strength(:heading)
+
+      once = item(%{body: "terra", body_downcased: "terra"})
+      assert [%{score: score}] = run([once], "terra")
+      assert score == Search.strength(:body_occurrence)
+
+      preferred = item(%{file_title: "Terra", type: :decision})
+      assert [%{score: score}] = run([preferred], "terra", %{prefer: :decision})
+      assert score == Search.strength(:title) + Search.strength(:preferred_type)
+    end
+
+    test "the body contributes at most its published maximum, however often it hits" do
+      body = String.duplicate("terra ", 20)
+      many = item(%{body: body, body_downcased: body})
+
+      assert [%{score: score}] = run([many], "terra")
+      assert score == Search.strength(:body_occurrences_max)
+    end
+
+    # Which is why strength(:title) is documented as "the query names this
+    # note", not as "the title matched": a heading hit with the body at its
+    # maximum reaches exactly the same score.
+    test "a heading hit with the body at its maximum reaches a title hit's score" do
+      body = String.duplicate("terra ", 20)
+      i = item(%{heading_path: ["Terra"], body: body, body_downcased: body})
+
+      assert [%{score: score}] = run([i], "terra")
+      assert score == Search.strength(:heading) + Search.strength(:body_occurrences_max)
+      assert score == Search.strength(:title)
+    end
+  end
 end

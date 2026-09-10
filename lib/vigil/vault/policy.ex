@@ -19,7 +19,7 @@ defmodule Vigil.Vault.Policy do
   each reach into `skills/` and into excluded domains.
   """
 
-  alias Vigil.{Markdown, Slug}
+  alias Vigil.{Markdown, Search, Slug}
   alias Vigil.Vault.{Decision, Facts}
 
   @type op ::
@@ -512,6 +512,35 @@ defmodule Vigil.Vault.Policy do
   end
 
   ## Duplicate detection
+  #
+  # The gate's sensitivity, stated here in one interface, in units a reader
+  # can act on. It used to be spread across three modules that did not mention
+  # each other: which terms were searched for (here), how deep each search
+  # went (an uncommented `limit: 25` in `Vigil.Store`'s adapter) and what the
+  # threshold meant (`Vigil.Search`, `@moduledoc false`, a bare `10` at the
+  # call site).
+  #
+  # @term_floor — how long a `-`-separated segment of the note's name has to
+  # be to be searched for on its own. A shorter one says too little: "gp"
+  # matches every GPS note in the domain. The note's whole name is a term
+  # regardless, so a name made only of short segments — home/weg.md,
+  # gear/rad.md, training/ftp.md, all live shapes in a German vault — is still
+  # asked about, and every unforced create asks the vault at least one
+  # question. The gate is never decided before `Facts` is reached.
+  #
+  # @search_depth — how many hits per term the vault is asked for, best first.
+  # Not a window over the domain: a note outside the best 25 for every one of
+  # its terms is not similar enough to be a candidate.
+  #
+  # @names_the_note_score — how strong a hit has to be to count as a
+  # candidate. Asked of `Vigil.Search` by name rather than repeated as an
+  # integer here: the scale is Search's, and so is the statement of what
+  # reaching this score does and does not prove. That statement holds for a
+  # search with no preferred type, which is what `find_similar` is — a
+  # `prefer` hint would lift a weaker hit to the same score.
+  @term_floor 4
+  @search_depth 25
+  @names_the_note_score Search.strength(:title)
 
   defp duplicates(path, domain, request, facts) do
     if Map.get(request, :force, false) == true do
@@ -533,12 +562,20 @@ defmodule Vigil.Vault.Policy do
   defp similar_notes(path, domain, facts) do
     path
     |> Path.basename(".md")
-    |> String.split("-")
-    |> Enum.filter(&(String.length(&1) > 3))
-    |> Enum.flat_map(&facts.find_similar.(&1, domain))
-    |> Enum.filter(&(&1.score >= 10))
+    |> search_terms()
+    |> Enum.flat_map(&facts.find_similar.(&1, domain, @search_depth))
+    |> Enum.filter(&(&1.score >= @names_the_note_score))
     |> Enum.uniq_by(& &1.id)
     |> Enum.reject(&same_project_folder?(&1.id, path, domain))
+  end
+
+  defp search_terms(basename) do
+    segments =
+      basename
+      |> String.split("-")
+      |> Enum.filter(&(String.length(&1) >= @term_floor))
+
+    Enum.uniq([basename | segments])
   end
 
   defp same_project_folder?(candidate_id, path, "projects") do

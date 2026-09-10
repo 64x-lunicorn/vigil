@@ -112,6 +112,21 @@ defmodule Vigil.StoreTest do
                })
     end
 
+    # The gate used to derive its search terms from the basename's segments
+    # longer than three characters, so a short name produced no terms, asked
+    # the index nothing, and passed. "bike/via.md" against a vault holding
+    # "Via Carolina" is the shape that got through.
+    test "a short name is checked too: a real duplicate is refused, a new note passes" do
+      assert {:error, msg} =
+               Store.create(%{path: "bike/via.md", type: "reference", content: "# Via\ntext"})
+
+      assert msg =~ "duplicates"
+      assert msg =~ "bike/via-carolina.md"
+
+      assert {:ok, _} =
+               Store.create(%{path: "bike/kvv.md", type: "reference", content: "# KVV\ntext"})
+    end
+
     test "duplicate detection does not fire within the same project folder" do
       assert {:ok, _} =
                Store.create(%{

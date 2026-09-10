@@ -407,6 +407,30 @@ pointed. The path check on the id's own path part still runs first, so an id
 naming `skills/` or an excluded domain answers "Invalid path" rather than
 "Not found".
 
+**The duplicate gate keys on the note's name.** Before `create` writes, the
+policy asks the vault for notes in the same domain that look like the one being
+created and refuses with the candidates named, unless the call passes
+`force: true`. What it searches for, how deep, and how strong a hit has to be
+are stated together in `Vigil.Vault.Policy`, because they are one decision:
+the terms are the note's whole name plus each `-`-separated segment of at least
+four characters, each term is asked for the best 25 hits in the domain, and a
+hit counts when it reaches `Vigil.Search.strength(:title)` — the score at which
+the query names a note rather than merely appearing in it. Notes inside the same
+project folder are never duplicates of each other.
+
+The whole name is always a term, and that is what keeps the gate closed. Terms
+derived from segments longer than three characters alone left `home/weg.md`,
+`gear/rad.md` and `training/ftp.md` — live shapes in a German vault — with no
+terms at all: `find_similar` was never asked, and the empty result read as
+"nothing similar". That is a permissive answer manufactured inside the policy,
+before any fact was asked, arriving through a door the `Facts` seam does not
+cover. Every unforced create now asks the vault at least one question. Where segments
+already qualify the name is the weakest of the terms — a segment is a substring
+of it, so wherever the name matches, each of its segments matches too and scores
+at least as high. What it costs there is one more query per create, and the one
+note it can still surface on its own: the one a broad segment's best 25 had no
+room for.
+
 **The write path returns a plan; the process executes it.** A resolved
 decision plus the note's current content becomes a `Vigil.Vault.Plan`: the
 action to perform and the commit message to perform it under. Three actions,
