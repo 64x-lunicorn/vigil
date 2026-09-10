@@ -1,11 +1,14 @@
 defmodule Vigil.StoreExcludeTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.Store
 
+  # One writer for this file, under a name of its own — see Vigil.StoreTest.
+  @store __MODULE__
+
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
-  # every real call, so `Store.call(:search, ...)` requires one rather than defaulting.
-  defp search(params), do: Store.call(:search, Map.put_new(params, :limit, 10))
+  # every real call, so `Store.call(@store, :search, ...)` requires one rather than defaulting.
+  defp search(params), do: Store.call(@store, :search, Map.put_new(params, :limit, 10))
 
   setup do
     vault = Vigil.FixtureVault.build()
@@ -16,7 +19,8 @@ defmodule Vigil.StoreExcludeTest do
        vault_path: vault,
        exclude: ["work"],
        git_remote: "origin",
-       git: Vigil.Git.CommitLog.new(vault)}
+       git: Vigil.Git.CommitLog.new(vault),
+       name: @store}
     )
 
     %{vault: vault}
@@ -31,10 +35,14 @@ defmodule Vigil.StoreExcludeTest do
     assert search(%{query: "excludedsearchword"}) == []
     assert search(%{query: "excludedsearchword", domain: "work"}) == []
 
-    assert {:error, _} = Store.call(:read, %{id: "work/secret.md", backlinks: false})
+    assert {:error, _} = Store.call(@store, :read, %{id: "work/secret.md", backlinks: false})
 
     assert {:error, _} =
-             Store.call(:create, %{path: "work/y.md", type: "reference", content: "# Y\nx"})
+             Store.call(@store, :create, %{
+               path: "work/y.md",
+               type: "reference",
+               content: "# Y\nx"
+             })
   end
 
   # Regression: before Vigil.Vault.Policy only create/2 and move_note/1
@@ -46,7 +54,7 @@ defmodule Vigil.StoreExcludeTest do
   describe "every write path honours the exclude boundary" do
     test "append cannot write into an excluded domain", %{vault: vault} do
       assert {:error, "Invalid path"} =
-               Store.call(:append, %{path: "work/secret.md", content: "INJECTED"})
+               Store.call(@store, :append, %{path: "work/secret.md", content: "INJECTED"})
 
       refute File.read!(Path.join(vault, "work/secret.md")) =~ "INJECTED"
     end
@@ -55,19 +63,22 @@ defmodule Vigil.StoreExcludeTest do
       before = File.read!(Path.join(vault, "work/secret.md"))
 
       assert {:error, "Invalid path"} =
-               Store.call(:rewrite_note, %{path: "work/secret.md", content: "# Pwned\n\nbody\n"})
+               Store.call(@store, :rewrite_note, %{
+                 path: "work/secret.md",
+                 content: "# Pwned\n\nbody\n"
+               })
 
       assert File.read!(Path.join(vault, "work/secret.md")) == before
     end
 
     test "update_frontmatter cannot touch an excluded domain" do
       assert {:error, "Invalid path"} =
-               Store.call(:update_frontmatter, %{path: "work/secret.md", type: "decision"})
+               Store.call(@store, :update_frontmatter, %{path: "work/secret.md", type: "decision"})
     end
 
     test "delete_note cannot delete from an excluded domain", %{vault: vault} do
       assert {:error, "Invalid path"} =
-               Store.call(:delete_note, %{path: "work/secret.md", confirm: true})
+               Store.call(@store, :delete_note, %{path: "work/secret.md", confirm: true})
 
       assert File.exists?(Path.join(vault, "work/secret.md"))
     end
@@ -77,14 +88,17 @@ defmodule Vigil.StoreExcludeTest do
     # "Not found" a missing section gets.
     test "the section ops reject an excluded domain as a path, not as a missing section" do
       assert {:error, "Invalid path"} =
-               Store.call(:replace_section, %{id: "work/secret.md#secret", content: "INJECTED"})
+               Store.call(@store, :replace_section, %{
+                 id: "work/secret.md#secret",
+                 content: "INJECTED"
+               })
 
       assert {:error, "Invalid path"} =
-               Store.call(:delete_section, %{id: "work/secret.md#secret"})
+               Store.call(@store, :delete_section, %{id: "work/secret.md#secret"})
     end
 
     test "an excluded note never becomes searchable through a write" do
-      Store.call(:append, %{path: "work/secret.md", content: "INJECTEDWORD"})
+      Store.call(@store, :append, %{path: "work/secret.md", content: "INJECTEDWORD"})
       assert search(%{query: "INJECTEDWORD"}) == []
       assert search(%{query: "INJECTEDWORD", domain: "work"}) == []
     end

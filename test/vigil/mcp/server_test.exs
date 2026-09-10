@@ -1,4 +1,7 @@
 defmodule Vigil.MCP.ServerTest do
+  # Not async: the whole MCP surface is named singletons — the envelope, the
+  # rate limiter, and the Store under its production registration, which is
+  # the name Vigil.MCP.Tools and Vigil.MCP.Server find the writer by.
   use ExUnit.Case, async: false
   use Plug.Test
 

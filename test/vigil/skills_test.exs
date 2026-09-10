@@ -1,5 +1,9 @@
 defmodule Vigil.SkillsTest do
-  use ExUnit.Case, async: false
+  # Nothing here is registered under a name: Vigil.Skills takes its vault, its
+  # remote and its git adapter as plain arguments, so every test in this file
+  # is independent of every other (docs/design.md, "skills/ — one repository,
+  # two systems").
+  use ExUnit.Case, async: true
 
   alias Vigil.Git.CommitLog
   alias Vigil.Skills

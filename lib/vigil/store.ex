@@ -16,15 +16,26 @@ defmodule Vigil.Store do
 
   alias Vigil.Vault.{Decision, Domains, Facts, Plan, Policy}
 
-  # What this process publishes for readers that must not queue behind it. It
-  # is written from inside the writer — at init for the vault path, on every
-  # index change for the event notes — which is what makes a public table safe
-  # to read anywhere else.
-  @published_table :vigil_store
+  # The name a writer registers under, and — the same atom — the name of the
+  # table it publishes through. Production registers under this module and
+  # nothing hands in another: `Vigil.MCP.Tools`, `Vigil.MCP.Envelope` and
+  # `Vigil.MCP.Server` find the writer by that name and name no other. A caller
+  # that supplies one gets a writer of its own, which is what lets the
+  # vault-backed test files run in parallel — one writer per file, rather than
+  # one for the whole suite to queue behind.
+  #
+  # What the table is for: readers that must not queue behind the writer. It is
+  # written from inside it — at init for the vault path, on every index change
+  # for the event notes — which is what makes a public table safe to read
+  # anywhere else.
+  @default_name __MODULE__
 
   ## Public API
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts) do
+    name = Keyword.get(opts, :name, @default_name)
+    GenServer.start_link(__MODULE__, Keyword.put(opts, :name, name), name: name)
+  end
 
   # Every tool-facing call has one shape: the operation, and a map of that
   # operation's parameters. What differs between two tools is the map, not the
@@ -43,19 +54,28 @@ defmodule Vigil.Store do
   # write goes through. Vigil.MCP.Tools declares every bound and default (`limit` 1..25
   # default 10, `depth` 1..2 default 1, `backlinks` default false) and
   # supplies a value on every call, so nothing here restates one.
-  def call(:search, %{limit: _} = params), do: request(:search, params)
-  def call(:read, %{id: _, backlinks: _} = params), do: request(:read, params)
+  def call(store \\ @default_name, op, params)
 
-  def call(:links, %{id: _, direction: _, depth: _} = params), do: request(:links, params)
+  def call(store, :search, %{limit: _} = params), do: request(store, :search, params)
+  def call(store, :read, %{id: _, backlinks: _} = params), do: request(store, :read, params)
 
-  def call(:create, %{} = params), do: request(:create, params)
-  def call(:append, %{} = params), do: request(:append, params)
-  def call(:replace_section, %{id: _, content: _} = params), do: request(:replace_section, params)
-  def call(:rewrite_note, %{} = params), do: request(:rewrite_note, params)
-  def call(:delete_section, %{id: _} = params), do: request(:delete_section, params)
-  def call(:update_frontmatter, %{} = params), do: request(:update_frontmatter, params)
-  def call(:delete_note, %{} = params), do: request(:delete_note, params)
-  def call(:move_note, %{} = params), do: request(:move_note, params)
+  def call(store, :links, %{id: _, direction: _, depth: _} = params),
+    do: request(store, :links, params)
+
+  def call(store, :create, %{} = params), do: request(store, :create, params)
+  def call(store, :append, %{} = params), do: request(store, :append, params)
+
+  def call(store, :replace_section, %{id: _, content: _} = params),
+    do: request(store, :replace_section, params)
+
+  def call(store, :rewrite_note, %{} = params), do: request(store, :rewrite_note, params)
+  def call(store, :delete_section, %{id: _} = params), do: request(store, :delete_section, params)
+
+  def call(store, :update_frontmatter, %{} = params),
+    do: request(store, :update_frontmatter, params)
+
+  def call(store, :delete_note, %{} = params), do: request(store, :delete_note, params)
+  def call(store, :move_note, %{} = params), do: request(store, :move_note, params)
   # The two rows that resolve an instant. Vigil.MCP.Tools puts the response's
   # envelope instant into the params of every row declaring `now:`, so in
   # production nothing is resolved here; the fallback covers a caller with no
@@ -63,12 +83,14 @@ defmodule Vigil.Store do
   # the caller's process rather than behind the writer's mailbox for the
   # reason bd7e842 removed the other one: a clock read on the far side of the
   # writer can land in a different minute than the response it belongs to.
-  def call(:lint, %{} = params), do: request(:lint, with_now(params))
-  def call(:current, %{} = params), do: request(:current, with_now(params))
-  def call(:reload, %{} = params), do: request(:reload, params)
-  def call(:skill_write, %{name: _, content: _} = params), do: request(:skill_write, params)
+  def call(store, :lint, %{} = params), do: request(store, :lint, with_now(params))
+  def call(store, :current, %{} = params), do: request(store, :current, with_now(params))
+  def call(store, :reload, %{} = params), do: request(store, :reload, params)
 
-  defp request(op, params), do: GenServer.call(__MODULE__, {op, params})
+  def call(store, :skill_write, %{name: _, content: _} = params),
+    do: request(store, :skill_write, params)
+
+  defp request(store, op, params), do: GenServer.call(store, {op, params})
 
   defp with_now(params), do: Map.put_new_lazy(params, :now, &Clock.now/0)
 
@@ -99,7 +121,7 @@ defmodule Vigil.Store do
   # table is public. A response already costs one call into this writer, the
   # tool's own; the envelope that goes on top of it must not cost a second,
   # which for a write tool would land after the write.
-  def snapshot(now), do: Events.snapshot(published_events(), now)
+  def snapshot(store \\ @default_name, now), do: Events.snapshot(published_events(store), now)
 
   # Where the vault is, for the two callers that need it without the mailbox:
   # `skill_list` and `skill_read` are answered in the caller's process
@@ -107,9 +129,10 @@ defmodule Vigil.Store do
   # every write and must not queue behind the push of the write before it.
   # Written once at init and never again — this process is bound to one vault
   # for its whole life.
-  def vault_path(), do: :ets.lookup_element(@published_table, :vault_path, 2)
+  def vault_path(store \\ @default_name), do: :ets.lookup_element(store, :vault_path, 2)
 
-  def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
+  def instructions_domains_text(store \\ @default_name),
+    do: GenServer.call(store, :instructions_domains_text)
 
   # No fallback for a missing table. It lives with this process, so its absence
   # means the writer is down — and the response is going to fail at the tool
@@ -119,12 +142,13 @@ defmodule Vigil.Store do
   # session's state, so an empty snapshot would be read as every active event
   # having finished, and the next response would report a phase change that
   # never happened.
-  defp published_events, do: :ets.lookup_element(@published_table, :events, 2)
+  defp published_events(store), do: :ets.lookup_element(store, :events, 2)
 
   ## GenServer
 
   @impl true
   def init(opts) do
+    name = Keyword.get(opts, :name, @default_name)
     vault_path = Keyword.fetch!(opts, :vault_path) |> Path.expand()
     exclude = Keyword.get(opts, :exclude, [])
     git_remote = Keyword.get(opts, :git_remote, "origin")
@@ -137,13 +161,14 @@ defmodule Vigil.Store do
     # vault nobody is going to shell out into.
     git = Keyword.get_lazy(opts, :git, fn -> over_repository!(vault_path) end)
 
-    if :ets.whereis(@published_table) == :undefined do
-      :ets.new(@published_table, [:set, :named_table, :public, read_concurrency: true])
+    if :ets.whereis(name) == :undefined do
+      :ets.new(name, [:set, :named_table, :public, read_concurrency: true])
     end
 
-    :ets.insert(@published_table, {:vault_path, vault_path})
+    :ets.insert(name, {:vault_path, vault_path})
 
     state = %{
+      table: name,
       vault_path: vault_path,
       exclude: exclude,
       git_remote: git_remote,
@@ -477,7 +502,7 @@ defmodule Vigil.Store do
   # of the three write outcomes — goes through here. Publishing inside the
   # writer is what makes the table safe to read anywhere else.
   defp put_index(state, index) do
-    :ets.insert(@published_table, {:events, Index.event_notes(index)})
+    :ets.insert(state.table, {:events, Index.event_notes(index)})
     %{state | index: index}
   end
 

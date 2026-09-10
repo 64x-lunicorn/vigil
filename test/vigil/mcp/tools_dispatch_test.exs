@@ -2,7 +2,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
   # The stub registers itself under `Vigil.Store`'s name, so this file cannot
   # run beside anything that starts the real one — including the one describe
   # below that starts the real Store itself, which is why nothing here is
-  # async.
+  # async. That name is production's registration, and the MCP surface reaches
+  # the writer by it and names no other; this file is one of the three that
+  # exercise it. The vault-backed files hand the Store a name of their own and
+  # run in parallel (Vigil.StoreTest).
   use ExUnit.Case, async: false
 
   alias Vigil.MCP.Tools
@@ -231,6 +234,15 @@ defmodule Vigil.MCP.ToolsDispatchTest do
       on_exit(fn -> if Process.alive?(writer), do: :sys.resume(writer) end)
 
       %{vault: vault}
+    end
+
+    # Production registration, exercised deliberately: nothing in the tool
+    # layer is told where the writer is, so a Store that did not register
+    # under its own module name would leave both skill reads with no vault
+    # path to answer from.
+    test "the tool layer finds the writer under its module name" do
+      assert Process.whereis(Vigil.Store)
+      assert Vigil.Store.vault_path() =~ "vigil_test_"
     end
 
     test "skill_list answers while the writer is suspended" do

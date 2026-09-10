@@ -1,12 +1,15 @@
 defmodule Vigil.StoreDomainsYmlTest do
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   import ExUnit.CaptureLog
 
   alias Vigil.Store
 
+  # One writer for this file, under a name of its own — see Vigil.StoreTest.
+  @store __MODULE__
+
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
-  # every real call, so `Store.call(:search, ...)` requires one rather than defaulting.
-  defp search(params), do: Store.call(:search, Map.put_new(params, :limit, 10))
+  # every real call, so `Store.call(@store, :search, ...)` requires one rather than defaulting.
+  defp search(params), do: Store.call(@store, :search, Map.put_new(params, :limit, 10))
 
   defp empty_vault(tmp) do
     File.mkdir_p!(tmp)
@@ -18,7 +21,11 @@ defmodule Vigil.StoreDomainsYmlTest do
   defp start_store(vault) do
     start_supervised!(
       {Store,
-       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+       vault_path: vault,
+       exclude: [],
+       git_remote: "origin",
+       git: Vigil.Git.CommitLog.new(vault),
+       name: @store}
     )
   end
 
@@ -34,7 +41,7 @@ defmodule Vigil.StoreDomainsYmlTest do
       end)
 
     assert log =~ "_domains.yml"
-    assert Store.instructions_domains_text() == ""
+    assert Store.instructions_domains_text(@store) == ""
   end
 
   test "empty vault starts without error and search returns an empty list" do
@@ -57,7 +64,7 @@ defmodule Vigil.StoreDomainsYmlTest do
 
     log =
       capture_log(fn ->
-        assert Store.instructions_domains_text() == ""
+        assert Store.instructions_domains_text(@store) == ""
       end)
 
     File.chmod!(path, 0o644)
@@ -81,6 +88,6 @@ defmodule Vigil.StoreDomainsYmlTest do
 
     assert log =~ "key 'phantom' has no matching directory"
 
-    assert Store.instructions_domains_text() =~ "bike:"
+    assert Store.instructions_domains_text(@store) =~ "bike:"
   end
 end
