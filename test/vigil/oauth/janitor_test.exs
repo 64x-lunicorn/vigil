@@ -2,19 +2,21 @@ defmodule Vigil.OAuth.JanitorTest do
   @moduledoc """
   The janitor's sweep, driven without waiting five minutes for it.
 
-  Both ephemeral tables are asserted by size rather than through the read
-  API: an expired entry already reads as absent, so only the table itself
-  shows whether the sweep reclaimed it. Unbounded growth is the whole point
-  of the CIMD half.
+  The ephemeral tables are asserted by size rather than through the read API:
+  an expired entry already reads as absent, so only the table itself shows
+  whether the sweep reclaimed it. Unbounded growth is the whole point of the
+  CIMD cache and of `Vigil.RateLimit`'s windows.
   """
 
   use ExUnit.Case, async: false
 
   alias Vigil.OAuth.{Janitor, Store, Token}
+  alias Vigil.RateLimit
 
   @now 1_700_000_000
   @rate_limits :oauth_rate_limits
   @cimd_cache :oauth_cimd_cache
+  @limiter_windows :vigil_rate_limits
 
   setup do
     Vigil.OAuthCase.setup!()
@@ -24,7 +26,8 @@ defmodule Vigil.OAuth.JanitorTest do
   ## Seeding
 
   # One entry that has expired at @now and one that has not, in each of the
-  # four tables the sweep walks.
+  # four tables `Vigil.OAuth.Store` owns. `Vigil.RateLimit`'s table is the
+  # fifth the sweep walks and is seeded by the tests that cover it.
   defp seed do
     Store.put_code("code-expired", code_attrs(@now))
     Store.put_code("code-live", code_attrs(@now + 60))
@@ -152,6 +155,48 @@ defmodule Vigil.OAuth.JanitorTest do
            ]
 
     assert :ets.info(@cimd_cache, :size) == 2
+  end
+
+  ## The limiter that is not the store's
+
+  test "the request limiter's elapsed windows are swept too" do
+    # `Vigil.RateLimit` is the one swept table `Vigil.OAuth.Store` does not
+    # own, and it is keyed entirely on what arrives from outside: a client
+    # address per authorization-server endpoint, and every access token ever
+    # presented at `/mcp`. Refresh rotation mints a new access token about
+    # every hour, so without this the table grows forever on ordinary traffic.
+    # The live window is here to be left alone: a sweep that took it would
+    # hand its caller a budget it has not waited out. `Vigil.RateLimitTest`
+    # pins that boundary to the second.
+    start_supervised!(RateLimit)
+    start_janitor(interval: :timer.minutes(5), now: fn -> @now end)
+
+    refute RateLimit.limited?({:oauth, :authorize, "198.51.100.3"}, 60, @now - 61)
+    refute RateLimit.limited?("access-token-rotated-away", 60, @now - 61)
+    refute RateLimit.limited?("access-token-in-use", 60, @now)
+
+    assert :ets.info(@limiter_windows, :size) == 3
+
+    sweep_now()
+
+    assert :ets.info(@limiter_windows, :size) == 1
+
+    assert [{"access-token-in-use", _count, _window}] =
+             :ets.lookup(@limiter_windows, "access-token-in-use")
+  end
+
+  test "a sweep with the limiter restarting has nothing to reclaim and takes nobody down" do
+    # The limiter's table is owned by the limiter's process, so between that
+    # process dying and its supervisor restarting it there is no table. The
+    # janitor is a sibling, not a dependant: it must survive that window.
+    start_janitor(interval: :timer.minutes(5), now: fn -> @now end)
+
+    assert :ets.whereis(@limiter_windows) == :undefined
+
+    janitor = Process.whereis(Janitor)
+    sweep_now()
+
+    assert Process.whereis(Janitor) == janitor
   end
 
   ## The interval

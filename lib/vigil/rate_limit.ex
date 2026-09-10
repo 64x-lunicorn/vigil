@@ -56,8 +56,10 @@ defmodule Vigil.RateLimit do
   containing `now`; otherwise records the request and returns false.
   """
   def limited?(key, budget, now) do
+    cutoff = cutoff(now)
+
     case :ets.lookup(@table, key) do
-      [{^key, count, window_start}] when now - window_start <= @window_seconds ->
+      [{^key, count, window_start}] when window_start >= cutoff ->
         if count >= budget do
           true
         else
@@ -70,4 +72,47 @@ defmodule Vigil.RateLimit do
         false
     end
   end
+
+  @doc """
+  Drops the windows that have elapsed at `now` and returns how many were
+  reclaimed.
+
+  The table is keyed on what arrives from outside — one row per client address
+  per authorization-server endpoint, and one per access token ever presented at
+  `/mcp`. Refresh rotation mints a new access token about every hour, so even
+  normal single-user traffic adds keys for tokens that no longer exist. The
+  budget bounds how fast rows arrive and this sweep bounds how many there are;
+  neither substitutes for the other.
+
+  Reclaiming is part of the limiter's interface rather than a caller's duty:
+  what counts as an elapsed window is the same fact `limited?/3` decides on,
+  and only one module should hold it. Only a window `limited?/3` would already
+  ignore is dropped, so a sweep can never let a caller past a limit it is still
+  subject to — reclaiming an elapsed row and starting a fresh window on the
+  next request are the same decision.
+
+  The table belongs to this module's process and is gone while that process is
+  restarting, so a sweep can arrive to no table at all. That is not an error to
+  report: the restart already dropped every window, so there is nothing left to
+  reclaim, and the janitor that asked must not go down over it. `limited?/3`
+  deliberately does not do the same: on the request path a missing table means
+  the limiter is not running, and crashing the request is the honest answer
+  where answering "not limited" would quietly serve every caller unlimited.
+  """
+  def sweep_expired(now) do
+    case :ets.whereis(@table) do
+      :undefined ->
+        0
+
+      table ->
+        cutoff = cutoff(now)
+        :ets.select_delete(table, [{{:_, :_, :"$1"}, [{:<, :"$1", cutoff}], [true]}])
+    end
+  end
+
+  # The one statement of where the current window begins. Both readers of it
+  # compare the same stored instant against it, so they cannot drift apart:
+  # `limited?/3` counts a window at or after the cutoff, and the sweep reclaims
+  # exactly the ones before it.
+  defp cutoff(now), do: now - @window_seconds
 end
