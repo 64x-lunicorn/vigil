@@ -199,6 +199,12 @@ sections belong to **neither**. They are punctuation between chunks, not the
 tail of the body above them — see "How a file is written" for why the boundary
 sits there.
 
+**A heading inside a fenced code block is not a heading.** A note may hold a
+Markdown sample, and the `##` lines in it belong to the sample, not to the
+note: they open no chunk and cut no section in half. One reading of the note
+(`Vigil.Markdown.read/1`) decides that once, for the chunker, the link
+extraction and the write gate alike.
+
 **The H1 creates no chunk** — it is the title of the file. Text between the H1
 and the first `##` (or text in a file with no headings at all) becomes a chunk
 whose id is the path with no fragment.

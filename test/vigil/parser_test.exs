@@ -248,6 +248,50 @@ defmodule Vigil.ParserTest do
     end
   end
 
+  describe "fenced blocks" do
+    test "a heading inside a fenced block opens no chunk and stays in the body of its own" do
+      file = parse("projects/vigil/vigil-mcp-config.md")
+
+      ids = Enum.map(file.chunks, & &1.id)
+
+      assert ids == [
+               "projects/vigil/vigil-mcp-config.md",
+               "projects/vigil/vigil-mcp-config.md#client-snippet",
+               "projects/vigil/vigil-mcp-config.md#troubleshooting"
+             ]
+
+      snippet =
+        Enum.find(file.chunks, &(&1.id == "projects/vigil/vigil-mcp-config.md#client-snippet"))
+
+      assert snippet.body =~ "## Fenced Example"
+      assert snippet.body =~ "Everything past the closing delimiter is prose again."
+      assert snippet.body_end_line == 18
+    end
+
+    test "a link inside a fenced block is no reference" do
+      file = parse("projects/vigil/vigil-mcp-config.md")
+
+      refute Enum.any?(file.chunks, fn chunk ->
+               Enum.any?(chunk.links, &(&1.raw == "fenced-target"))
+             end)
+    end
+
+    test "an H1 inside a fenced block is not the note's title" do
+      {:ok, file} =
+        Parser.parse("x/fenced.md", "# Real Title\n\n```\n# Not A Title\n```\n", %{})
+
+      assert file.title == "Real Title"
+      assert [%{id: "x/fenced.md"}] = file.chunks
+    end
+
+    test "a fence left unclosed swallows every heading below it" do
+      {:ok, file} =
+        Parser.parse("x/open.md", "# T\n\n## Real\n\n```\n## Never Closed\nmore\n", %{})
+
+      assert Enum.map(file.chunks, & &1.id) == ["x/open.md#real"]
+    end
+  end
+
   describe "extract_links/1" do
     test "links inside fenced code blocks and inline code are not extracted" do
       body = """
@@ -277,6 +321,19 @@ defmodule Vigil.ParserTest do
       assert Parser.extract_links(body) == [
                %{raw: "painpoints", fragment: nil},
                %{raw: "domain/note", fragment: "chunk-slug"}
+             ]
+    end
+
+    test "a tilde fence hides its links too, and an unclosed one hides the rest of the body" do
+      tildes = "See [[real]].\n~~~\n[[tilde-fake]]\n~~~\nAnd [[also-real]].\n"
+
+      assert Parser.extract_links(tildes) == [
+               %{raw: "real", fragment: nil},
+               %{raw: "also-real", fragment: nil}
+             ]
+
+      assert Parser.extract_links("See [[real]].\n```\n[[never-closed]]\n") == [
+               %{raw: "real", fragment: nil}
              ]
     end
 
