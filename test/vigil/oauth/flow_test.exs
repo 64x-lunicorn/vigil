@@ -435,6 +435,89 @@ defmodule Vigil.OAuth.FlowTest do
     end
   end
 
+  describe "authorize_request/3 — CIMD" do
+    # A client_id the flow cannot have registered via DCR, so resolving it
+    # only succeeds by going out to `net` — the join `Vigil.OAuth.Client`
+    # names. A fresh URL per test keeps each test's cache entry its own,
+    # since `Vigil.OAuth.Store`'s CIMD cache is a process-wide ETS table.
+    defp cimd_url, do: "https://cimd-#{System.unique_integer([:positive])}.example/metadata.json"
+
+    defp cimd_document(url, overrides) do
+      %{
+        "client_id" => url,
+        "client_name" => "CIMD Client",
+        "redirect_uris" => ["https://cimd-client.example/cb"]
+      }
+      |> Map.merge(overrides)
+      |> Jason.encode!()
+    end
+
+    defp cimd_net(opts) do
+      body = Keyword.get(opts, :body)
+      test = self()
+
+      %{
+        request: fn uri, ip ->
+          send(test, {:request, URI.to_string(uri), ip})
+          {:ok, body}
+        end,
+        resolve: fn _host, _family -> {:ok, {93, 184, 216, 34}} end
+      }
+    end
+
+    test "a CIMD client's redirect_uris are matched, through the flow" do
+      url = cimd_url()
+      net = cimd_net(body: cimd_document(url, %{}))
+      params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
+
+      assert {:ok, ctx} = Flow.authorize_request(params, 1_700_000_000, net)
+      assert ctx.client.client_id == url
+      assert ctx.client.redirect_uris == ["https://cimd-client.example/cb"]
+    end
+
+    test "the CIMD document's client_name is what the consent page renders" do
+      url = cimd_url()
+      net = cimd_net(body: cimd_document(url, %{"client_name" => "Claude Code"}))
+      params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
+
+      assert {:ok, ctx} = Flow.authorize_request(params, 1_700_000_000, net)
+      # `Vigil.OAuth.Endpoint.render_consent/2` renders exactly `ctx.client.name`.
+      assert ctx.client.name == "Claude Code"
+    end
+
+    test "a redirect_uri the CIMD document does not list is untrusted" do
+      url = cimd_url()
+      net = cimd_net(body: cimd_document(url, %{}))
+      params = authorize_params(url, %{"redirect_uri" => "https://evil.example/cb"})
+
+      assert {:error, :untrusted} = Flow.authorize_request(params, 1_700_000_000, net)
+    end
+
+    test "a second request inside the cache's hour does not fetch again" do
+      url = cimd_url()
+      net = cimd_net(body: cimd_document(url, %{}))
+      params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
+
+      assert {:ok, _} = Flow.authorize_request(params, 1_700_000_000, net)
+      assert_received {:request, _, _}
+
+      assert {:ok, _} = Flow.authorize_request(params, 1_700_003_599, net)
+      refute_received {:request, _, _}
+    end
+
+    test "a request after the cache's hour has elapsed fetches again" do
+      url = cimd_url()
+      net = cimd_net(body: cimd_document(url, %{}))
+      params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
+
+      assert {:ok, _} = Flow.authorize_request(params, 1_700_000_000, net)
+      assert_received {:request, _, _}
+
+      assert {:ok, _} = Flow.authorize_request(params, 1_700_003_601, net)
+      assert_received {:request, _, _}
+    end
+  end
+
   describe "issue_authorization_code/2" do
     test "the code is one-time: taking it twice fails" do
       {:ok, ctx} = Flow.authorize_request(authorize_params(client!()))

@@ -17,7 +17,7 @@ defmodule Vigil.OAuth.Flow do
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Client, RedirectUri, Store, Token}
+  alias Vigil.OAuth.{Cimd, Client, RedirectUri, Store, Token}
 
   @authorization_code_ttl 60
 
@@ -57,14 +57,19 @@ defmodule Vigil.OAuth.Flow do
   untrusted client or redirect URI must never be redirected to, a bad
   `code_challenge_method` is a local error page, and everything else is
   reported back to the client as a redirect.
+
+  `now` and `net` reach `Vigil.OAuth.Client.resolve/3` from here, so a CIMD
+  client can be driven through the whole authorization request with a test
+  adapter and an injected time — the production values are the defaults, so
+  `Vigil.OAuth.Endpoint` calling this with neither changes nothing.
   """
-  def authorize_request(params) do
+  def authorize_request(params, now \\ System.system_time(:second), net \\ Cimd.net()) do
     client_id = params["client_id"]
     redirect_uri = params["redirect_uri"]
 
     with true <- is_binary(client_id) and client_id != "",
          true <- is_binary(redirect_uri) and redirect_uri != "",
-         {:ok, client} <- Client.resolve(client_id),
+         {:ok, client} <- Client.resolve(client_id, now, net),
          true <- RedirectUri.matches?(client.redirect_uris, redirect_uri) do
       authorize_details(params, client, redirect_uri)
     else
