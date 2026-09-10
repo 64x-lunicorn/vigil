@@ -83,7 +83,7 @@ defmodule Vigil.MCP.ToolsTest do
     end
   end
 
-  describe "dispatch/2 validates before dispatch_tool/2 is reached" do
+  describe "dispatch/2 validates before the Store is reached" do
     test "an unknown tool is rejected without touching the Store" do
       assert Tools.dispatch("does_not_exist", %{}) == {:error, "Unknown tool: does_not_exist"}
     end

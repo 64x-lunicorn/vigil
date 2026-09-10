@@ -3,18 +3,19 @@ defmodule Vigil.MCP.Tools do
   Every MCP tool's contract, declared once.
 
   `@tools` is the single source of truth: name, description, the `write`
-  flag, and each parameter's name, type, and whether it is required. Two
-  things are generated from it — `definitions/0` (the JSON schema handed to
-  the client on `tools/list`) and the argument validation `dispatch/2` runs
-  before a call ever reaches `dispatch_tool/2`. A schema and its validation
-  cannot drift out of agreement when they are the same table.
+  flag, the `call` the tool makes, and each parameter's name, type, and
+  whether it is required. Three things are generated from it — `definitions/0`
+  (the JSON schema handed to the client on `tools/list`), the argument
+  validation `dispatch/2` runs on `tools/call`, and the `Store.call/2` that
+  follows it. A schema, its validation and the call they describe cannot drift
+  out of agreement when they are the same table. Adding a tool is adding a
+  row.
 
-  `dispatch_tool/2`'s clauses stay hand-written for now, but they are all the
-  same call: `Store.call/2` with an operation and a params map. What each
-  clause still says is the half the table does not declare yet — which
-  operation a tool runs, which of its parameters travel, and which enum
-  values become atoms — never how to parse or default an argument, because by
-  the time a clause is reached validation has run.
+  The call is a row's `call:` and its parameters: every declared parameter
+  travels under the name the table gives it, except `skill_key`, which
+  authorizes a write (AP-4) and belongs to no Store operation. Nothing is
+  parsed or defaulted at that point — by the time the call is built,
+  validation has run and every declared parameter has a value.
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
@@ -24,9 +25,19 @@ defmodule Vigil.MCP.Tools do
   validator does not enforce. The range is published as `minimum`/`maximum`
   and an out-of-range value is refused in the same shape as an off-enum
   string, before the Store's mailbox is reached.
+
+  An enum's internal form is the atom of the same name. The table declares the
+  values, so the mapping is derived from them rather than restated per tool —
+  which is what let `search` convert its `type` while `create` passed the same
+  enum through as a string.
   """
 
   alias Vigil.Store
+
+  # The one declared parameter that is not a parameter of any Store operation:
+  # it authorizes a write and is consumed by the gate below.
+  @skill_key :skill_key
+  @skill_key_name Atom.to_string(@skill_key)
 
   @type_enum ["reference", "decision", "event"]
 
@@ -44,6 +55,7 @@ defmodule Vigil.MCP.Tools do
           name: String.t(),
           description: String.t(),
           write: boolean(),
+          call: atom(),
           params: [param_spec]
         }
 
@@ -52,6 +64,7 @@ defmodule Vigil.MCP.Tools do
       name: "search",
       description: "Searches chunk bodies and headings for a phrase.",
       write: false,
+      call: :search,
       params: [
         %{name: "query", type: :string, required: true, description: "Exact search phrase."},
         %{name: "domain", type: :string, description: "Restrict results to this domain."},
@@ -74,6 +87,7 @@ defmodule Vigil.MCP.Tools do
       description:
         "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
       write: false,
+      call: :read,
       params: [
         %{
           name: "id",
@@ -94,6 +108,7 @@ defmodule Vigil.MCP.Tools do
       description:
         "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
       write: false,
+      call: :links,
       params: [
         %{name: "id", type: :string, required: true, description: "path, or path#heading-slug."},
         %{
@@ -115,6 +130,7 @@ defmodule Vigil.MCP.Tools do
       description:
         "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
       write: true,
+      call: :create,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -159,6 +175,7 @@ defmodule Vigil.MCP.Tools do
       name: "append",
       description: "Appends content to an existing note.",
       write: true,
+      call: :append,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -184,6 +201,7 @@ defmodule Vigil.MCP.Tools do
       name: "replace_section",
       description: "Replaces the body of exactly one chunk.",
       write: true,
+      call: :replace_section,
       params: [
         %{name: "id", type: :string, required: true, description: "path#heading-slug."},
         %{
@@ -205,6 +223,7 @@ defmodule Vigil.MCP.Tools do
       description:
         "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
       write: true,
+      call: :rewrite_note,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -232,6 +251,7 @@ defmodule Vigil.MCP.Tools do
       name: "delete_section",
       description: "Removes a chunk including its heading.",
       write: true,
+      call: :delete_section,
       params: [
         %{name: "id", type: :string, required: true, description: "path#heading-slug."},
         %{
@@ -247,6 +267,7 @@ defmodule Vigil.MCP.Tools do
       description:
         "Sets type/starts/ends in the frontmatter of an existing note; the body is untouched.",
       write: true,
+      call: :update_frontmatter,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -269,6 +290,7 @@ defmodule Vigil.MCP.Tools do
       name: "delete_note",
       description: "Permanently deletes a note. Destructive — requires confirm: true.",
       write: true,
+      call: :delete_note,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
         %{
@@ -290,6 +312,7 @@ defmodule Vigil.MCP.Tools do
       description:
         "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
       write: true,
+      call: :move_note,
       params: [
         %{name: "from", type: :string, required: true, description: "Existing path."},
         %{name: "to", type: :string, required: true, description: "New path."},
@@ -312,30 +335,35 @@ defmodule Vigil.MCP.Tools do
       description:
         "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
       write: false,
+      call: :lint,
       params: []
     },
     %{
       name: "current",
       description: "Returns the current time plus active and nearby events.",
       write: false,
+      call: :current,
       params: []
     },
     %{
       name: "reload",
       description: "Runs git pull and reparses the vault.",
       write: false,
+      call: :reload,
       params: []
     },
     %{
       name: "skill_list",
       description: "Lists available skills with their description, without bodies.",
       write: false,
+      call: :skill_list,
       params: []
     },
     %{
       name: "skill_read",
       description: "Reads the full content of a skill.",
       write: false,
+      call: :skill_read,
       params: [
         %{
           name: "name",
@@ -349,6 +377,7 @@ defmodule Vigil.MCP.Tools do
       name: "skill_write",
       description: "Creates or replaces a skill; only on explicit instruction.",
       write: true,
+      call: :skill_write,
       params: [
         %{
           name: "name",
@@ -371,6 +400,15 @@ defmodule Vigil.MCP.Tools do
       ]
     }
   ]
+
+  # Every enum value the table declares, paired with its internal form. Built
+  # once from `@tools` rather than written per tool, so an enum added to a row
+  # converts without a second edit somewhere else.
+  @enum_atoms for tool <- @tools,
+                  %{type: {:enum, values}} <- tool.params,
+                  value <- values,
+                  into: %{},
+                  do: {value, String.to_atom(value)}
 
   @doc "Tool definitions for `tools/list`, generated from `@tools`."
   @spec definitions() :: [map()]
@@ -429,9 +467,10 @@ defmodule Vigil.MCP.Tools do
 
   Validates `args` against the declared tool's parameters first — a
   violation (wrong type, off-enum value, missing or empty required
-  parameter) is reported as a tool error before `dispatch_tool/2` is ever
+  parameter) is reported as a tool error before the Store's mailbox is
   reached, naming every violation rather than only the first. Undeclared
-  parameters are ignored. Returns `{:ok, result}` or `{:error, message}`.
+  parameters are ignored. What is left is the call the row declares.
+  Returns `{:ok, result}` or `{:error, message}`.
   """
   @spec dispatch(String.t(), map()) :: {:ok, term()} | {:error, String.t()}
   def dispatch(name, args) do
@@ -442,7 +481,7 @@ defmodule Vigil.MCP.Tools do
       tool ->
         with :ok <- maybe_require_skill_key(tool, args),
              {:ok, params} <- validate_params(tool.params, args) do
-          dispatch_tool(name, params)
+          tool.call |> Store.call(Map.delete(params, @skill_key)) |> to_result()
         end
     end
   end
@@ -451,7 +490,7 @@ defmodule Vigil.MCP.Tools do
   defp maybe_require_skill_key(%{write: false}, _args), do: :ok
 
   defp require_skill_key(args) do
-    case Map.get(args, "skill_key") do
+    case Map.get(args, @skill_key_name) do
       key when is_binary(key) and key != "" ->
         if Vigil.SkillKey.valid?(key, Vigil.SkillKey.config()) do
           :ok
@@ -469,7 +508,7 @@ defmodule Vigil.MCP.Tools do
      "Missing or expired SkillKey. Call skill_read('vigil-vault-conventions') first to read the conventions and obtain the current key."}
   end
 
-  ## Argument validation — the table's other half.
+  ## Argument validation — the table's second product.
 
   defp validate_params(param_specs, args) do
     {values, errors} =
@@ -491,11 +530,23 @@ defmodule Vigil.MCP.Tools do
   # (or to a missing-required error) the same way `Map.fetch/2` would only
   # for the absent case.
   defp validate_param(spec, args) do
-    case Map.get(args, spec.name) do
-      nil -> default_or_missing(spec)
-      value -> check_type(spec, value)
-    end
+    resolved =
+      case Map.get(args, spec.name) do
+        nil -> default_or_missing(spec)
+        value -> check_type(spec, value)
+      end
+
+    with {:ok, value} <- resolved, do: {:ok, internal_form(spec, value)}
   end
+
+  # The declared form is what the schema publishes and what a violation is
+  # reported against; the internal form is what the vault speaks. An enum
+  # crosses over here — on the same path for a supplied value and for a
+  # default, so `direction`'s "both" arrives as `:both` like any other.
+  defp internal_form(%{type: {:enum, _}}, value) when is_binary(value),
+    do: Map.fetch!(@enum_atoms, value)
+
+  defp internal_form(_spec, value), do: value
 
   defp default_or_missing(spec) do
     if required?(spec) do
@@ -538,110 +589,14 @@ defmodule Vigil.MCP.Tools do
   defp type_error(spec, expected),
     do: {:error, "Invalid parameter #{spec.name}: expected #{expected}"}
 
-  ## Dispatch — what each tool uniquely knows about its `Store` call.
+  ## The Store's answer.
 
-  defp dispatch_tool("search", params) do
-    Store.call(:search, %{
-      query: params.query,
-      domain: params.domain,
-      type: type_atom(params.type),
-      prefer: type_atom(params.prefer),
-      limit: params.limit
-    })
-    |> ok()
-  end
-
-  defp dispatch_tool("read", params) do
-    Store.call(:read, %{id: params.id, backlinks: params.backlinks})
-  end
-
-  defp dispatch_tool("links", params) do
-    Store.call(:links, %{
-      id: params.id,
-      direction: direction_atom(params.direction),
-      depth: params.depth
-    })
-  end
-
-  defp dispatch_tool("create", params) do
-    Store.call(:create, %{
-      path: params.path,
-      type: params.type,
-      content: params.content,
-      starts: params.starts,
-      ends: params.ends,
-      force: params.force,
-      create_dirs: params.create_dirs
-    })
-  end
-
-  defp dispatch_tool("append", params) do
-    Store.call(:append, %{path: params.path, heading: params.heading, content: params.content})
-  end
-
-  defp dispatch_tool("replace_section", params) do
-    Store.call(:replace_section, %{id: params.id, content: params.content})
-  end
-
-  defp dispatch_tool("rewrite_note", params) do
-    Store.call(:rewrite_note, %{
-      path: params.path,
-      content: params.content,
-      confirm: params.confirm
-    })
-  end
-
-  defp dispatch_tool("delete_section", params) do
-    Store.call(:delete_section, %{id: params.id})
-  end
-
-  defp dispatch_tool("update_frontmatter", params) do
-    Store.call(:update_frontmatter, %{
-      path: params.path,
-      type: params.type,
-      starts: params.starts,
-      ends: params.ends
-    })
-  end
-
-  defp dispatch_tool("delete_note", params) do
-    Store.call(:delete_note, %{path: params.path, confirm: params.confirm})
-  end
-
-  defp dispatch_tool("move_note", params) do
-    Store.call(:move_note, %{from: params.from, to: params.to, confirm: params.confirm})
-  end
-
-  defp dispatch_tool("lint", _params) do
-    ok(Store.call(:lint, %{}))
-  end
-
-  defp dispatch_tool("current", _params) do
-    ok(Store.call(:current, %{}))
-  end
-
-  defp dispatch_tool("reload", _params) do
-    ok(Store.call(:reload, %{}))
-  end
-
-  defp dispatch_tool("skill_list", _params) do
-    ok(Store.call(:skill_list, %{}))
-  end
-
-  defp dispatch_tool("skill_read", params) do
-    Store.call(:skill_read, %{name: params.name})
-  end
-
-  defp dispatch_tool("skill_write", params) do
-    Store.call(:skill_write, %{name: params.name, content: params.content})
-  end
-
-  defp ok(value), do: {:ok, value}
-
-  defp type_atom(nil), do: nil
-  defp type_atom(value), do: String.to_existing_atom(value)
-
-  defp direction_atom("out"), do: :out
-  defp direction_atom("in"), do: :in
-  defp direction_atom("both"), do: :both
+  # An operation that cannot fail answers with its value; one that can answers
+  # with a result tuple. Which is which is a property of the operation, read
+  # off the shape it returns — a `raw: true` in the table would be a second
+  # statement of it, free to disagree with the Store, and removing that class
+  # of twin is what the table is for.
+  defp to_result({:ok, _} = result), do: result
+  defp to_result({:error, _} = result), do: result
+  defp to_result(value), do: {:ok, value}
 end
