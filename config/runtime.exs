@@ -40,6 +40,12 @@ config :vigil,
   auth_password: System.get_env("VIGIL_AUTH_PASSWORD"),
   skillkey_ttl_seconds: String.to_integer(System.get_env("VIGIL_SKILLKEY_TTL", "3600")),
   rate_limit_rpm: String.to_integer(System.get_env("VIGIL_RATE_LIMIT_RPM", "60")),
+  # The authorization server's own budgets, per client address per minute.
+  # Registration gets the tighter one: it is rare, and each call writes a
+  # `:dets` row and fsyncs it.
+  oauth_rate_limit_rpm: String.to_integer(System.get_env("VIGIL_OAUTH_RATE_LIMIT_RPM", "30")),
+  oauth_register_rate_limit_rpm:
+    String.to_integer(System.get_env("VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", "5")),
   # Shape the writing instructions the server hands to the MCP client. These
   # describe the *vault*, not the server: whose notes these are, and which
   # language they are written in. The server's own output is always English.

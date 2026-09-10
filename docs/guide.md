@@ -371,6 +371,21 @@ flowchart TB
    every write tool.
 5. **Rate limiting** per access token, fixed window.
 
+Layer 5 is the one to read carefully, because there are three limits and they
+cover different things:
+
+| Limit | Keyed on | Budget | Covers |
+|---|---|---|---|
+| `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM` per minute | every `/mcp` request, and only after the token validates |
+| `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` per minute | `/oauth/register`, `/oauth/authorize`, `/oauth/token` — all reachable without a token |
+| `Vigil.OAuth.Store` | client address | 5 per 15 minutes | wrong passwords on the consent form, and nothing else |
+
+The middle row is what bounds an unauthenticated caller: without it, `/authorize`
+would fetch a CIMD document from an address the caller chose as often as it
+liked, `/register` would write a `:dets` row and fsync per call, and `/token`
+would answer guesses for free. Cloudflare Access is what keeps those from being
+reachable at all on this deployment; the limits are the defence behind it.
+
 Which address the per-address limits count against is a configured question,
 not a guess: see [the two proxy settings](#the-two-proxy-settings-and-why-they-default-to-unset).
 
@@ -400,6 +415,8 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
 | `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
+| `VIGIL_OAUTH_RATE_LIMIT_RPM` | `30` | max `/oauth/authorize` and `/oauth/token` per minute per client address |
+| `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` | `5` | max `/oauth/register` per minute per client address |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
 
@@ -552,6 +569,7 @@ lib/vigil/
 ├── git.ex               # System.cmd wrapper: add/commit/push/pull/log/rm/mv
 ├── skills.ex            # skills/ — one repository, two systems
 ├── skill_key.ex         # rotating HMAC attestation token
+├── rate_limit.ex        # one fixed-window limit, shared by /mcp and OAuth
 ├── uuid.ex              # UUIDv4 for the OAuth layer
 ├── vault_discovery.ex   # pure file discovery, no GenServer
 ├── vault_check.ex       # read-only vault doctor
@@ -566,7 +584,6 @@ lib/vigil/
 └── mcp/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints
     ├── tools.ex         # one table per tool: schema, validation, dispatch
-    ├── rate_limit.ex    # fixed-window rate limit per token
     ├── envelope.ex      # time envelope, session delta tracking
     └── envelope/
         └── decision.ex  # which envelope a response carries, as a pure function

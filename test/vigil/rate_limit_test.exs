@@ -1,9 +1,9 @@
-defmodule Vigil.MCP.RateLimitTest do
-  # Vigil.MCP.RateLimit is a named singleton also started by ServerTest, so
+defmodule Vigil.RateLimitTest do
+  # Vigil.RateLimit is a named singleton also started by ServerTest, so
   # this stays async: false to avoid a name collision with it.
   use ExUnit.Case, async: false
 
-  alias Vigil.MCP.RateLimit
+  alias Vigil.RateLimit
 
   setup do
     start_supervised!(RateLimit)

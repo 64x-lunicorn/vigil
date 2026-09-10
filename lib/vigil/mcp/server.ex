@@ -3,7 +3,8 @@ defmodule Vigil.MCP.Server do
   use Plug.Router
   require Logger
 
-  alias Vigil.MCP.{Tools, Envelope, RateLimit}
+  alias Vigil.MCP.{Tools, Envelope}
+  alias Vigil.RateLimit
   alias Vigil.Store
   alias Vigil.OAuth
 

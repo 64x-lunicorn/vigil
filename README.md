@@ -38,7 +38,7 @@ inspect every change, and take them with you.
 | **History built in** | Every successful edit is committed and pushed. A failed push is reported, not disguised as success. |
 | **Connected knowledge** | Wikilinks, Markdown links, backlinks and hub discovery connect related notes. |
 | **Guardrails for writes** | Path validation, domain naming rules, explicit confirmation for destructive actions and a rotating SkillKey. |
-| **Scoped access** | Built-in OAuth with PKCE, read-only and read/write scopes, and per-token rate limiting. |
+| **Scoped access** | Built-in OAuth with PKCE, read-only and read/write scopes, and rate limits per access token and per client address. |
 
 > [!NOTE]
 > vigil is an early-stage, single-user project. It is not a multi-tenant service,

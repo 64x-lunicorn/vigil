@@ -10,20 +10,50 @@ defmodule Vigil.OAuth.Endpoint do
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow}
+  alias Vigil.RateLimit
+
+  @default_rpm 30
+  @default_register_rpm 5
 
   plug(:match)
   plug(:dispatch)
 
-  # Resolves what the deployment says about its proxy once, when the router is
-  # initialized, rather than re-parsing a CIDR list on every request.
+  # Resolves what the deployment says about its proxy and its budgets once,
+  # when the router is initialized, rather than re-parsing a CIDR list and
+  # re-reading application config on every request.
   @impl true
-  def init(opts), do: Keyword.put_new_lazy(opts, :client_addr, &ClientAddr.config/0)
+  def init(opts) do
+    opts
+    |> Keyword.put_new_lazy(:client_addr, &ClientAddr.config/0)
+    |> Keyword.put_new_lazy(:limits, &configured_limits/0)
+  end
 
   @impl true
   def call(conn, opts) do
     conn
     |> put_private(:vigil_client_addr, opts[:client_addr] || ClientAddr.config())
+    |> put_private(:vigil_limits, opts[:limits] || configured_limits())
     |> super(opts)
+  end
+
+  defp configured_limits do
+    rpm = budget(:oauth_rate_limit_rpm, @default_rpm)
+
+    %{
+      authorize: rpm,
+      token: rpm,
+      register: budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
+    }
+  end
+
+  # A budget that is not a positive number is not a budget. Falling back to the
+  # default keeps a mistyped environment variable from producing a limit that
+  # either refuses everything or crashes on the comparison.
+  defp budget(key, default) do
+    case Application.get_env(:vigil, key, default) do
+      rpm when is_integer(rpm) and rpm > 0 -> rpm
+      _ -> default
+    end
   end
 
   ## Discovery
@@ -43,27 +73,68 @@ defmodule Vigil.OAuth.Endpoint do
   ## Flow
 
   post "/oauth/register" do
-    handle_register(conn)
+    under_limit(conn, :register, &handle_register/1)
   end
 
   get "/oauth/authorize" do
-    conn = fetch_query_params(conn)
-    with_authorize_request(conn, conn.query_params, &render_consent(&1, &2, nil))
+    under_limit(conn, :authorize, fn conn ->
+      conn = fetch_query_params(conn)
+      with_authorize_request(conn, conn.query_params, &render_consent(&1, &2, nil))
+    end)
   end
 
   post "/oauth/authorize" do
-    {:ok, body, conn} = Plug.Conn.read_body(conn)
-    params = URI.decode_query(body)
+    under_limit(conn, :authorize, fn conn ->
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      params = URI.decode_query(body)
 
-    with_authorize_request(conn, params, &process_consent_decision(&1, &2, params))
+      with_authorize_request(conn, params, &process_consent_decision(&1, &2, params))
+    end)
   end
 
   post "/oauth/token" do
-    handle_token(conn)
+    under_limit(conn, :token, &handle_token/1)
   end
 
   match _ do
     send_resp(conn, 404, "")
+  end
+
+  ## Rate limits
+
+  @doc false
+  # Every endpoint here is reachable without a token, so this is the only thing
+  # bounding what an unauthenticated caller can make vigil do: fetch a CIMD
+  # document from an address it chose, write a `:dets` row and fsync it, or ask
+  # the token endpoint to answer a guess. Cloudflare Access is what keeps that
+  # from being reachable on the deployment `docs/guide.md` describes; this is
+  # the defence behind it.
+  #
+  # It runs before the handler rather than inside it, so the refusal costs
+  # nothing that the request was trying to buy — in particular `/authorize`
+  # refuses before `Vigil.OAuth.Client.resolve/2` can go out to the network.
+  #
+  # A refusal takes the shape of the surface it refuses: the consent page is
+  # HTML a browser renders, and the other two are read by a program.
+  defp under_limit(conn, endpoint, handler) do
+    budget = Map.fetch!(conn.private.vigil_limits, endpoint)
+    key = {:oauth, endpoint, ClientAddr.of(conn, conn.private.vigil_client_addr)}
+
+    if RateLimit.limited?(key, budget, System.system_time(:second)) do
+      refuse(conn, endpoint)
+    else
+      handler.(conn)
+    end
+  end
+
+  defp refuse(conn, :authorize) do
+    send_html(conn, 429, error_html("Too many requests. Try again in a minute."))
+  end
+
+  defp refuse(conn, _endpoint) do
+    conn
+    |> put_resp_header("cache-control", "no-store")
+    |> send_json(429, %{error: "temporarily_unavailable"})
   end
 
   ## Registration

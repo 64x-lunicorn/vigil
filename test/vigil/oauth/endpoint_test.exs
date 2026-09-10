@@ -21,7 +21,7 @@ defmodule Vigil.OAuth.EndpointTest do
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
     start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
     start_supervised!(Vigil.MCP.Envelope)
-    start_supervised!(Vigil.MCP.RateLimit)
+    start_supervised!(Vigil.RateLimit)
 
     oauth = Vigil.OAuthCase.setup!()
     %{vault: vault, state_dir: oauth.state_dir}
@@ -435,6 +435,124 @@ defmodule Vigil.OAuth.EndpointTest do
     assert List.last(results) == 429
   end
 
+  ## Rate limits on the endpoints themselves
+
+  test "the shipped budgets are per minute and per address, register the tightest" do
+    limits = Vigil.OAuth.Endpoint.init([])[:limits]
+
+    assert limits == %{authorize: 30, token: 30, register: 5}
+  end
+
+  test "registration past its budget is refused with an RFC 6749 error body" do
+    budgets!(register: 2)
+
+    body = %{client_name: "Test Client", redirect_uris: ["https://claude.ai/cb"]}
+
+    assert post_json("/oauth/register", body).status == 201
+    assert post_json("/oauth/register", body).status == 201
+
+    conn = post_json("/oauth/register", body)
+    assert conn.status == 429
+    assert Jason.decode!(conn.resp_body)["error"] == "temporarily_unavailable"
+  end
+
+  test "the token endpoint past its budget is refused with an RFC 6749 error body" do
+    budgets!(token: 1)
+
+    # Under budget the answer is the flow's own: an unknown code is a bad
+    # grant. Over it, the endpoint answers before the flow is consulted.
+    assert post_form("/oauth/token", %{"grant_type" => "authorization_code"}).status == 400
+
+    conn = post_form("/oauth/token", %{"grant_type" => "authorization_code"})
+    assert conn.status == 429
+    assert Jason.decode!(conn.resp_body)["error"] == "temporarily_unavailable"
+  end
+
+  test "the consent page past its budget is refused as HTML, not as JSON" do
+    budgets!(authorize: 1)
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+
+    query =
+      authorize_query(client["client_id"], "https://claude.ai/api/mcp/auth_callback", challenge)
+
+    assert get_query("/oauth/authorize", query).status == 200
+
+    conn = get_query("/oauth/authorize", query)
+    assert conn.status == 429
+    assert get_resp_header(conn, "content-type") == ["text/html; charset=utf-8"]
+    # The same headers the rest of the HTML surface carries — a refusal is
+    # still a page a browser renders.
+    assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+  end
+
+  test "a refused /authorize never reaches the CIMD fetch" do
+    budgets!(authorize: 1)
+    {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+
+    # Spend the budget on a client that needs no fetch...
+    spend =
+      authorize_query(client["client_id"], "https://claude.ai/api/mcp/auth_callback", challenge)
+
+    assert get_query("/oauth/authorize", spend).status == 200
+
+    # ...then ask with an https client_id, which is the only input that sends
+    # `Vigil.OAuth.Client.resolve/2` out to the network. 429 is the endpoint
+    # refusing before it resolves anything; a fetch that had been attempted
+    # would have failed and come back as 400 untrusted instead.
+    conn =
+      get_query(
+        "/oauth/authorize",
+        authorize_query(
+          "https://cimd.invalid/metadata.json",
+          "https://cimd.invalid/cb",
+          challenge
+        )
+      )
+
+    assert conn.status == 429
+  end
+
+  test "behind a trusted proxy the endpoint budgets are per forwarded client" do
+    budgets!(register: 1)
+    trust_proxy!("cf-connecting-ip", ["203.0.113.0/24"])
+
+    body = %{client_name: "Test Client", redirect_uris: ["https://claude.ai/cb"]}
+
+    assert register_as(body, {203, 0, 113, 7}, "198.51.100.9").status == 201
+    assert register_as(body, {203, 0, 113, 7}, "198.51.100.9").status == 429
+
+    # A different client through the same proxy still has its own budget.
+    assert register_as(body, {203, 0, 113, 7}, "198.51.100.20").status == 201
+  end
+
+  defp register_as(body, peer, forwarded) do
+    conn(:post, "/oauth/register", Jason.encode!(body))
+    |> put_req_header("content-type", "application/json")
+    |> put_req_header("cf-connecting-ip", forwarded)
+    |> Map.put(:remote_ip, peer)
+    |> call()
+  end
+
+  # The budgets are arguments; these tests would otherwise have to spend the
+  # production ones, thirty requests at a time.
+  defp budgets!(overrides) do
+    previous = [
+      oauth_rate_limit_rpm: Application.get_env(:vigil, :oauth_rate_limit_rpm),
+      oauth_register_rate_limit_rpm: Application.get_env(:vigil, :oauth_register_rate_limit_rpm)
+    ]
+
+    for {endpoint, budget} <- overrides do
+      case endpoint do
+        :register -> Application.put_env(:vigil, :oauth_register_rate_limit_rpm, budget)
+        _ -> Application.put_env(:vigil, :oauth_rate_limit_rpm, budget)
+      end
+    end
+
+    on_exit(fn -> restore_env(previous) end)
+  end
+
   defp wrong_password_params do
     {201, client} = register(["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
@@ -463,9 +581,15 @@ defmodule Vigil.OAuth.EndpointTest do
     Application.put_env(:vigil, :trusted_proxy_header, header)
     Application.put_env(:vigil, :trusted_proxies, cidrs)
 
-    on_exit(fn ->
-      for {k, v} <- previous, do: Application.put_env(:vigil, k, v)
-    end)
+    on_exit(fn -> restore_env(previous) end)
+  end
+
+  # A key that was unset has to be deleted again, not set to nil: an explicit
+  # nil is a value, and `Application.get_env/3`'s default only covers absence.
+  defp restore_env(previous) do
+    for {k, v} <- previous do
+      if is_nil(v), do: Application.delete_env(:vigil, k), else: Application.put_env(:vigil, k, v)
+    end
   end
 
   ## Response headers on the HTML

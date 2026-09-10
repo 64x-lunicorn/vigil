@@ -90,12 +90,29 @@ the consent page is about a different thing — that any local process can *ask*
 for consent while looking like the client. (§2.5, and RFC 8252 §8.3)
 
 **Is the rate limit per client, per address, or global — and what does an
-attacker gain by exhausting it for someone else?** Neither of the two limits
-covers the authorization server. `Vigil.MCP.RateLimit` is per access token and
-guards `/mcp` only. `Vigil.OAuth.Store.rate_limited?/2` has one caller,
-`Flow.consent/4`, so it counts wrong consent passwords and nothing else:
-`/oauth/register`, `/oauth/authorize` and `/oauth/token` are unlimited.
-**Finding → #79.**
+attacker gain by exhausting it for someone else?** There are three limits and
+they cover different things:
+
+| Limit | Keyed on | Budget | Covers |
+|---|---|---|---|
+| `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM`/min | every `/mcp` request, and only once the token has validated |
+| `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
+| `Vigil.OAuth.Store.rate_limited?/2` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+
+The middle row is the one that bounds an unauthenticated caller, and it is
+checked *before* the handler runs rather than inside it, so a refusal costs
+nothing the request was trying to buy: `/authorize` refuses before
+`Vigil.OAuth.Client.resolve/2` can send a CIMD fetch to an address the caller
+chose, `/register` before it writes a `:dets` row and fsyncs it, `/token`
+before it looks a guess up. Refusals take the shape of the surface they
+refuse — an HTML page for the consent form, an RFC 6749 `temporarily_unavailable`
+body for the two endpoints a program reads.
+
+What an attacker gains by exhausting someone else's budget is bounded by the
+key: with the proxy settings configured it is one address's budget, and
+without them it is the single global bucket described in the next answer. The
+consent limit is the one worth spending, and it locks out consenting for
+fifteen minutes rather than anything longer-lived.
 
 **Which address is a limit keyed on, behind a proxy?** Whatever
 `Vigil.OAuth.ClientAddr` says, which is `conn.remote_ip` until the deployment
@@ -124,7 +141,7 @@ framing since the headers below (§4.16).
 |---|---|---|---|
 | [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 | open |
 | [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 | open |
-| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — | open |
+| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — | `Vigil.RateLimit`, per address per endpoint |
 | [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 | `Vigil.OAuth.ClientAddr` |
 
 None of them was an incident on the current deployment, where Cloudflare Access
@@ -409,9 +426,12 @@ counters older than 15 minutes, and CIMD cache entries whose hour is up. No
 cron, no job library — just `Process.send_after/3`.
 
 The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
-client supplies, and it is filled from `GET /oauth/authorize`, which is not
-rate-limited — so nothing bounds the rate at which it grows either. The sweep is
-what keeps it finite. See [#79](https://github.com/64x-lunicorn/vigil/issues/79).
+client supplies and filled from `GET /oauth/authorize`, so it grows on input
+from outside. Two separate things bound it: the per-address limit on
+`/oauth/authorize` bounds the rate at which a caller can add to it, and this
+sweep bounds the total by dropping what has expired. Neither substitutes for
+the other — a rate limit alone leaves a table that only grows, and a sweep
+alone leaves the rate unbounded.
 
 The interval and the instant are both arguments with production defaults, so a
 test can drive one sweep rather than wait five minutes for it. The instant is a

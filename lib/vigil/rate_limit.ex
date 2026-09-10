@@ -1,11 +1,18 @@
-defmodule Vigil.MCP.RateLimit do
+defmodule Vigil.RateLimit do
   @moduledoc """
-  Fixed-window rate limit for `/mcp`, keyed by access token (AP-6.3).
-  Defense in depth, independent of Cloudflare — not a replacement for it.
+  One fixed-window rate limit, for every surface that needs one.
+
+  The key is whatever the caller counts by and the budget is the caller's to
+  choose, so the same window serves `/mcp` keyed by access token (AP-6.3) and
+  the authorization server keyed by client address. Both are defence in depth,
+  independent of Cloudflare — not a replacement for it.
+
+  `now` is an argument because a test that cannot name the instant can only
+  observe the window by waiting a minute for it.
   """
   use GenServer
 
-  @table :vigil_mcp_rate_limits
+  @table :vigil_rate_limits
   @window_seconds 60
 
   def start_link(_opts \\ []), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)

@@ -186,9 +186,10 @@ defmodule Vigil.OAuth.Store do
   Drops CIMD cache entries whose hour is up.
 
   This table is keyed on the `client_id` URL a client supplies, and it is
-  filled from `GET /oauth/authorize`, which is not rate-limited — so it grows
-  on input from outside and nothing bounds either the rate or the total. This
-  sweep is the only thing that keeps it finite. See issue #79.
+  filled from `GET /oauth/authorize`, so it grows on input from outside. Two
+  separate things bound it: `Vigil.OAuth.Endpoint`'s per-address limit bounds
+  the rate at which a caller can add to it, and this sweep bounds the total by
+  dropping what has expired. Neither substitutes for the other.
   """
   def sweep_cimd_cache(now) do
     sweep_table(@cimd_cache, fn {_url, _doc, expires_at} -> expires_at <= now end)
