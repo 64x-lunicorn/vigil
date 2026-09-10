@@ -2,7 +2,7 @@ defmodule Vigil.Vault.Rules do
   @moduledoc """
   Vault hygiene rules that more than one caller asks about.
 
-  `Vigil.Store.lint/1` and `Vigil.VaultCheck` answer different questions in
+  The `lint` tool and `Vigil.VaultCheck` answer different questions in
   different shapes and stay separate, but the facts underneath — what counts
   as a sentence-shaped heading, which headings collide, which heading slugs
   would change — were restated in both, and drifted. They live here now.

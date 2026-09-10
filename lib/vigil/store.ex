@@ -19,38 +19,66 @@ defmodule Vigil.Store do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  # `limit` is required, and matched in the head so a caller that omits it
-  # fails in its own process rather than in the single writer's. Vigil.MCP.Tools
-  # declares the bound (1..25, default 10) and supplies a value on every call.
-  def search(%{limit: _} = params), do: GenServer.call(__MODULE__, {:search, params})
-  def read(id, backlinks?), do: GenServer.call(__MODULE__, {:read, id, backlinks?})
-  # Depth is bounded where it is declared (Vigil.MCP.Tools, 1..2). Matched here
-  # too, so a caller outside that contract fails in its own process rather than
-  # reaching the single writer with a depth nothing downstream checks.
-  def links(id, direction, depth) when depth in [1, 2],
-    do: GenServer.call(__MODULE__, {:links, id, direction, depth})
+  # Every tool-facing call has one shape: the operation, and a map of that
+  # operation's parameters. What differs between two tools is the map, not the
+  # function, so a parameter added to a tool is a change to Vigil.MCP.Tools'
+  # table and to the handler that reads it — not to a client function, a
+  # message shape and a `handle_call` clause as well.
+  #
+  # There is a head per operation and no catch-all, because the head is where
+  # a broken contract belongs (docs/design.md, "The write path"): it matches
+  # what its operation cannot do without, so a `search` without a `limit`, a
+  # `links` with a depth the tool table does not allow, a `read` without an id
+  # fail in the caller's own process rather than reaching the single writer.
+  # A head matching a bare map has nothing of its own to state: `lint`,
+  # `current`, `reload` and `skill_list` declare no parameter, and the six
+  # writes state their contracts in Vigil.Vault.Policy, the one gate every
+  # write goes through. Vigil.MCP.Tools declares every bound and default (`limit` 1..25
+  # default 10, `depth` 1..2 default 1, `backlinks` default false) and
+  # supplies a value on every call, so nothing here restates one.
+  def call(:search, %{limit: _} = params), do: request(:search, params)
+  def call(:read, %{id: _, backlinks: _} = params), do: request(:read, params)
 
-  def create(params), do: GenServer.call(__MODULE__, {:create, params})
-  def append(params), do: GenServer.call(__MODULE__, {:append, params})
+  def call(:links, %{id: _, direction: _, depth: depth} = params) when depth in [1, 2],
+    do: request(:links, params)
 
-  def replace_section(id, content),
-    do: GenServer.call(__MODULE__, {:replace_section, id, content})
+  def call(:create, %{} = params), do: request(:create, params)
+  def call(:append, %{} = params), do: request(:append, params)
+  def call(:replace_section, %{id: _, content: _} = params), do: request(:replace_section, params)
+  def call(:rewrite_note, %{} = params), do: request(:rewrite_note, params)
+  def call(:delete_section, %{id: _} = params), do: request(:delete_section, params)
+  def call(:update_frontmatter, %{} = params), do: request(:update_frontmatter, params)
+  def call(:delete_note, %{} = params), do: request(:delete_note, params)
+  def call(:move_note, %{} = params), do: request(:move_note, params)
+  def call(:lint, %{} = params), do: request(:lint, params)
+  def call(:current, %{} = params), do: request(:current, params)
+  def call(:reload, %{} = params), do: request(:reload, params)
+  def call(:skill_list, %{} = params), do: request(:skill_list, params)
+  def call(:skill_read, %{name: _} = params), do: request(:skill_read, params)
+  def call(:skill_write, %{name: _, content: _} = params), do: request(:skill_write, params)
 
-  def rewrite_note(params), do: GenServer.call(__MODULE__, {:rewrite_note, params})
-  def delete_section(id), do: GenServer.call(__MODULE__, {:delete_section, id})
-  def update_frontmatter(params), do: GenServer.call(__MODULE__, {:update_frontmatter, params})
-  def delete_note(params), do: GenServer.call(__MODULE__, {:delete_note, params})
-  def move_note(params), do: GenServer.call(__MODULE__, {:move_note, params})
-  def lint(now \\ nil), do: GenServer.call(__MODULE__, {:lint, now})
+  defp request(op, params), do: GenServer.call(__MODULE__, {op, params})
 
-  def current(now \\ nil), do: GenServer.call(__MODULE__, {:current, now})
+  # The eight that go through the write path (docs/design.md, "The write
+  # path"): Vigil.Vault.Policy and Vigil.Vault.Plan already take the operation
+  # as an argument, so one `handle_call` clause covers all of them.
+  @write_ops [
+    :create,
+    :append,
+    :replace_section,
+    :rewrite_note,
+    :delete_section,
+    :update_frontmatter,
+    :delete_note,
+    :move_note
+  ]
+
+  # Not tool-facing: the time envelope Vigil.MCP.Server attaches to every tool
+  # result, and the two answers about the vault's domains that the same server
+  # puts into its `initialize` response.
   def snapshot(now), do: GenServer.call(__MODULE__, {:snapshot, now})
-  def reload(), do: GenServer.call(__MODULE__, :reload)
   def domain_names(), do: GenServer.call(__MODULE__, :domain_names)
   def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
-  def skill_list(), do: GenServer.call(__MODULE__, :skill_list)
-  def skill_read(name), do: GenServer.call(__MODULE__, {:skill_read, name})
-  def skill_write(name, content), do: GenServer.call(__MODULE__, {:skill_write, name, content})
 
   ## GenServer
 
@@ -82,74 +110,58 @@ defmodule Vigil.Store do
     {:ok, state}
   end
 
+  # One message shape for all of them: {operation, params}. Every handler
+  # below takes what its operation declared out of the map, and the eight
+  # writes share a single clause — which operation is being written is the
+  # difference, and Vigil.Vault.Policy and Vigil.Vault.Plan already take it as
+  # an argument.
   @impl true
   def handle_call({:search, params}, _from, state) do
     {:reply, Index.search(state.index, params), state}
   end
 
-  def handle_call({:read, id, backlinks?}, _from, state) do
-    {:reply, Index.read(state.index, id, backlinks?), state}
+  def handle_call({:read, params}, _from, state) do
+    {:reply, Index.read(state.index, params.id, params.backlinks), state}
   end
 
-  def handle_call({:links, id, direction, depth}, _from, state) do
-    {:reply, Index.links(state.index, id, direction, depth), state}
+  def handle_call({:links, params}, _from, state) do
+    {:reply, Index.links(state.index, params.id, params.direction, params.depth), state}
   end
 
-  def handle_call({:create, params}, _from, state) do
-    {result, new_state} = write(:create, params, state)
+  def handle_call({op, params}, _from, state) when op in @write_ops do
+    {result, new_state} = write(op, params, state)
     {:reply, result, new_state}
   end
 
-  def handle_call({:append, params}, _from, state) do
-    {result, new_state} = write(:append, params, state)
-    {:reply, result, new_state}
+  # `now` is the seam Vigil.Clock fills in; no tool declares it, and the tests
+  # that pin a moment pass it.
+  def handle_call({:lint, params}, _from, state) do
+    {:reply, Index.lint(state.index, Map.get(params, :now) || Clock.now()), state}
   end
 
-  def handle_call({:replace_section, id, content}, _from, state) do
-    {result, new_state} = write(:replace_section, %{id: id, content: content}, state)
-    {:reply, result, new_state}
+  def handle_call({:current, params}, _from, state) do
+    {:reply, Index.current(state.index, Map.get(params, :now) || Clock.now()), state}
   end
 
-  def handle_call({:rewrite_note, params}, _from, state) do
-    {result, new_state} = write(:rewrite_note, params, state)
-    {:reply, result, new_state}
+  def handle_call({:reload, _params}, _from, state) do
+    {state, pull_result} = do_full_load(state)
+    {:reply, reload_result(pull_result), state}
   end
 
-  def handle_call({:delete_section, id}, _from, state) do
-    {result, new_state} = write(:delete_section, %{id: id}, state)
-    {:reply, result, new_state}
+  def handle_call({:skill_list, _params}, _from, state) do
+    {:reply, do_skill_list(state), state}
   end
 
-  def handle_call({:update_frontmatter, params}, _from, state) do
-    {result, new_state} = write(:update_frontmatter, params, state)
-    {:reply, result, new_state}
+  def handle_call({:skill_read, params}, _from, state) do
+    {:reply, do_skill_read(params.name, state), state}
   end
 
-  def handle_call({:delete_note, params}, _from, state) do
-    {result, new_state} = write(:delete_note, params, state)
-    {:reply, result, new_state}
-  end
-
-  def handle_call({:move_note, params}, _from, state) do
-    {result, new_state} = write(:move_note, params, state)
-    {:reply, result, new_state}
-  end
-
-  def handle_call({:lint, now}, _from, state) do
-    {:reply, Index.lint(state.index, now || Clock.now()), state}
-  end
-
-  def handle_call({:current, now}, _from, state) do
-    {:reply, Index.current(state.index, now || Clock.now()), state}
+  def handle_call({:skill_write, params}, _from, state) do
+    {:reply, do_skill_write(params.name, params.content, state), state}
   end
 
   def handle_call({:snapshot, now}, _from, state) do
     {:reply, Index.snapshot(state.index, now), state}
-  end
-
-  def handle_call(:reload, _from, state) do
-    {state, pull_result} = do_full_load(state)
-    {:reply, reload_result(pull_result), state}
   end
 
   def handle_call(:domain_names, _from, state) do
@@ -158,18 +170,6 @@ defmodule Vigil.Store do
 
   def handle_call(:instructions_domains_text, _from, state) do
     {:reply, domains_yaml_raw(state.vault_path), state}
-  end
-
-  def handle_call(:skill_list, _from, state) do
-    {:reply, do_skill_list(state), state}
-  end
-
-  def handle_call({:skill_read, name}, _from, state) do
-    {:reply, do_skill_read(name, state), state}
-  end
-
-  def handle_call({:skill_write, name, content}, _from, state) do
-    {:reply, do_skill_write(name, content, state), state}
   end
 
   defp reload_result(:ok), do: %{reloaded: true}
@@ -511,8 +511,8 @@ defmodule Vigil.Store do
   #
   # skills/ is a separate concern from notes (docs/design.md, "skills/ — one
   # repository, two systems"); the subsystem itself lives in Vigil.Skills, a
-  # standalone module. Store.skill_list/0, skill_read/1, skill_write/2 stay
-  # public GenServer calls, not delegated directly — skill writes must
+  # standalone module. The :skill_list, :skill_read and :skill_write
+  # operations stay GenServer calls, not delegated directly — skill writes must
   # still commit and push through the same single-writer mailbox as note
   # writes (docs/design.md, "One writer").
 

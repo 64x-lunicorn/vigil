@@ -4,8 +4,8 @@ defmodule Vigil.StoreTest do
   alias Vigil.Store
 
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
-  # every real call, so Store.search/1 requires one rather than defaulting.
-  defp search(params), do: Store.search(Map.put_new(params, :limit, 10))
+  # every real call, so `Store.call(:search, ...)` requires one rather than defaulting.
+  defp search(params), do: Store.call(:search, Map.put_new(params, :limit, 10))
 
   setup do
     {vault, remote} = Vigil.FixtureVault.build(remote: true)
@@ -16,7 +16,7 @@ defmodule Vigil.StoreTest do
 
   # Ranking, filtering, journal-hiding and hub-attachment are Vigil.Index's
   # job now and are covered there (index_test.exs) without git. This is the
-  # wiring smoke test: Store.search/1 reaches the index and shapes the result.
+  # wiring smoke test: a :search call reaches the index and shapes the result.
   describe "search" do
     test "a term in domain bike returns ranked hits with previews, no bodies" do
       results = search(%{query: "tires", domain: "bike"})
@@ -26,12 +26,43 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # docs/design.md, "The write path": a caller that breaks a declared contract
+  # outright fails in its own process rather than in the writer's. The tool
+  # table is what declares the contract — `limit` 1..25, `depth` 1..2, an id
+  # for every operation that names one — and `Store.call/2`'s heads match it,
+  # so the mistake raises where it was made and the single writer keeps
+  # answering everyone else. An operation the Store does not have is refused
+  # in the same frame: there is no catch-all head to absorb it.
+  #
+  # The calls go through a variable on purpose. Written as literals the
+  # compiler's type checker warns about every one of them — it can see they
+  # match no head, which is the point of the test.
+  describe "a broken contract fails in the caller's process" do
+    test "a missing limit, an undeclared depth, a missing id, an operation that does not exist" do
+      writer = Process.whereis(Store)
+
+      broken = [
+        {:search, %{query: "tires"}},
+        {:links, %{id: "bike/via-carolina.md", direction: :out, depth: 3}},
+        {:read, %{backlinks: false}},
+        {:nonsense, %{}}
+      ]
+
+      for {op, params} <- broken do
+        assert_raise FunctionClauseError, fn -> Store.call(op, params) end
+      end
+
+      assert Process.whereis(Store) == writer
+      assert search(%{query: "tires", domain: "bike"}) != []
+    end
+  end
+
   # The chunk/note shapes, backlinks opt-in, lenient path resolution, and
   # invalid/not-found handling are Vigil.Index's job now and are covered
   # there (index_test.exs) without git. This is the wiring smoke test.
   describe "read" do
     test "reading a fragment returns exactly that chunk" do
-      {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/via-carolina.md#fueling", backlinks: false})
       assert result.heading == "Fueling"
       assert result.body =~ "baseline"
       refute Map.has_key?(result, :backlinks)
@@ -41,14 +72,14 @@ defmodule Vigil.StoreTest do
   describe "create" do
     test "creates file, commits as vigil, pushes, and updates the index", %{vault: vault} do
       assert {:ok, %{path: "bike/new.md", pushed: true}} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/new.md",
                  type: "reference",
                  content: "# New\n\nSome test content.\n"
                })
 
       assert File.exists?(Path.join(vault, "bike/new.md"))
-      {:ok, result} = Store.read("bike/new.md", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/new.md", backlinks: false})
       assert result.title == "New"
 
       {out, 0} = System.cmd("git", ["log", "-1", "--format=%an"], cd: vault)
@@ -57,7 +88,7 @@ defmodule Vigil.StoreTest do
 
     test "fails if file already exists" do
       assert {:error, msg} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/terra-speed.md",
                  type: "reference",
                  content: "# X\ntext"
@@ -68,12 +99,16 @@ defmodule Vigil.StoreTest do
 
     test "content without H1 is rejected" do
       assert {:error, _} =
-               Store.create(%{path: "bike/no-h1.md", type: "reference", content: "no h1 here"})
+               Store.call(:create, %{
+                 path: "bike/no-h1.md",
+                 type: "reference",
+                 content: "no h1 here"
+               })
     end
 
     test "content with its own frontmatter is rejected" do
       assert {:error, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/own-frontmatter.md",
                  type: "reference",
                  content: "---\ntype: reference\n---\n# X\ntext"
@@ -81,10 +116,11 @@ defmodule Vigil.StoreTest do
     end
 
     test "event requires starts/ends; other types forbid them" do
-      assert {:error, _} = Store.create(%{path: "bike/ev.md", type: "event", content: "# E\nx"})
+      assert {:error, _} =
+               Store.call(:create, %{path: "bike/ev.md", type: "event", content: "# E\nx"})
 
       assert {:error, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/ref.md",
                  type: "reference",
                  content: "# R\nx",
@@ -94,7 +130,7 @@ defmodule Vigil.StoreTest do
 
     test "duplicate detection blocks similarly-titled note in same domain, force bypasses it" do
       assert {:error, msg} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/terra-speed-tubeless.md",
                  type: "reference",
                  content: "# Terra Speed Tubeless\ntext"
@@ -104,7 +140,7 @@ defmodule Vigil.StoreTest do
       assert msg =~ "append"
 
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/terra-speed-tubeless.md",
                  type: "reference",
                  content: "# Terra Speed Tubeless\ntext",
@@ -118,18 +154,26 @@ defmodule Vigil.StoreTest do
     # "Via Carolina" is the shape that got through.
     test "a short name is checked too: a real duplicate is refused, a new note passes" do
       assert {:error, msg} =
-               Store.create(%{path: "bike/via.md", type: "reference", content: "# Via\ntext"})
+               Store.call(:create, %{
+                 path: "bike/via.md",
+                 type: "reference",
+                 content: "# Via\ntext"
+               })
 
       assert msg =~ "duplicates"
       assert msg =~ "bike/via-carolina.md"
 
       assert {:ok, _} =
-               Store.create(%{path: "bike/kvv.md", type: "reference", content: "# KVV\ntext"})
+               Store.call(:create, %{
+                 path: "bike/kvv.md",
+                 type: "reference",
+                 content: "# KVV\ntext"
+               })
     end
 
     test "duplicate detection does not fire within the same project folder" do
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "projects/vigil/vigil-notes.md",
                  type: "reference",
                  content: "# vigil Notes\nMore notes about vigil."
@@ -138,7 +182,7 @@ defmodule Vigil.StoreTest do
 
     test "duplicate detection still fires across different project folders" do
       assert {:error, msg} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "projects/other/vigil-copy.md",
                  type: "reference",
                  content: "# vigil Copy\nA different project note.",
@@ -150,24 +194,28 @@ defmodule Vigil.StoreTest do
 
     test "create_dirs creates a missing project folder, absent flag rejects it" do
       assert {:error, msg} =
-               Store.create(%{path: "projects/new/x.md", type: "reference", content: "# X\nx"})
+               Store.call(:create, %{
+                 path: "projects/new/x.md",
+                 type: "reference",
+                 content: "# X\nx"
+               })
 
       assert msg =~ "Project directory does not exist"
 
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "projects/new/x.md",
                  type: "reference",
                  content: "# X\nx",
                  create_dirs: true
                })
 
-      assert {:ok, _} = Store.read("projects/new/x.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "projects/new/x.md", backlinks: false})
     end
 
     test "create_dirs never creates directories outside projects/", %{vault: vault} do
       assert {:error, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "gear/sub/x.md",
                  type: "reference",
                  content: "# X\nx",
@@ -177,7 +225,7 @@ defmodule Vigil.StoreTest do
       refute File.dir?(Path.join(vault, "gear/sub"))
 
       assert {:error, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "unknown-domain/x.md",
                  type: "reference",
                  content: "# X\nx",
@@ -189,34 +237,47 @@ defmodule Vigil.StoreTest do
 
     test "unknown domain is rejected with a domain list" do
       assert {:error, msg} =
-               Store.create(%{path: "unknown-domain/x.md", type: "reference", content: "# X\nx"})
+               Store.call(:create, %{
+                 path: "unknown-domain/x.md",
+                 type: "reference",
+                 content: "# X\nx"
+               })
 
       assert msg =~ "bike"
     end
 
     test "projects allows exactly one extra level, other domains do not" do
       assert {:ok, _} =
-               Store.create(%{path: "projects/vigil/x.md", type: "reference", content: "# X\nx"})
+               Store.call(:create, %{
+                 path: "projects/vigil/x.md",
+                 type: "reference",
+                 content: "# X\nx"
+               })
 
       assert {:error, _} =
-               Store.create(%{path: "projects/new/x.md", type: "reference", content: "# X\nx"})
+               Store.call(:create, %{
+                 path: "projects/new/x.md",
+                 type: "reference",
+                 content: "# X\nx"
+               })
 
       assert {:error, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "projects/vigil/docs/x.md",
                  type: "reference",
                  content: "# X\nx"
                })
 
       assert {:error, _} =
-               Store.create(%{path: "gear/sub/x.md", type: "reference", content: "# X\nx"})
+               Store.call(:create, %{path: "gear/sub/x.md", type: "reference", content: "# X\nx"})
     end
 
     test "[[vigil-ranking]] in vigil.md resolves to projects/vigil/vigil-ranking.md" do
-      {:ok, result} = Store.read("projects/vigil/vigil.md", true)
+      {:ok, result} = Store.call(:read, %{id: "projects/vigil/vigil.md", backlinks: true})
       assert result.title == "vigil"
 
-      {:ok, links} = Store.links("projects/vigil/vigil.md", :out, 1)
+      {:ok, links} =
+        Store.call(:links, %{id: "projects/vigil/vigil.md", direction: :out, depth: 1})
 
       assert [%{target: "projects/vigil/vigil-ranking.md", status: "ok"}] =
                Enum.map(links.outgoing, &Map.take(&1, [:target, :status]))
@@ -231,31 +292,35 @@ defmodule Vigil.StoreTest do
   describe "append" do
     test "appends under an existing heading, at the end of that section" do
       assert {:ok, _} =
-               Store.append(%{
+               Store.call(:append, %{
                  path: "bike/via-carolina.md",
                  heading: "Gear",
                  content: "Extra: repair kit."
                })
 
-      {:ok, result} = Store.read("bike/via-carolina.md#gear", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/via-carolina.md#gear", backlinks: false})
       assert result.body =~ "Extra: repair kit."
     end
 
     test "appends a new section when the heading does not exist yet" do
       assert {:ok, _} =
-               Store.append(%{
+               Store.call(:append, %{
                  path: "bike/via-carolina.md",
                  heading: "Weather",
                  content: "Dry conditions expected."
                })
 
-      {:ok, result} = Store.read("bike/via-carolina.md#weather", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/via-carolina.md#weather", backlinks: false})
       assert result.body =~ "Dry conditions expected."
     end
 
     test "appends to EOF without a heading" do
-      assert {:ok, _} = Store.append(%{path: "bike/terra-speed.md", content: "Final sentence."})
-      {:ok, result} = Store.read("bike/terra-speed.md#gravel-experience", false)
+      assert {:ok, _} =
+               Store.call(:append, %{path: "bike/terra-speed.md", content: "Final sentence."})
+
+      {:ok, result} =
+        Store.call(:read, %{id: "bike/terra-speed.md#gravel-experience", backlinks: false})
+
       assert result.body =~ "Final sentence."
     end
 
@@ -263,7 +328,7 @@ defmodule Vigil.StoreTest do
     # parse, into two chunks one of which nobody asked for.
     test "a heading in content appended to an existing section is rejected", %{vault: vault} do
       assert {:error, msg} =
-               Store.append(%{
+               Store.call(:append, %{
                  path: "bike/via-carolina.md",
                  heading: "Gear",
                  content: "## Sneaky\nSplit."
@@ -276,10 +341,10 @@ defmodule Vigil.StoreTest do
     test "the same content is accepted at the end of the file and as a new section" do
       content = "## Sneaky\nNot sneaky here."
 
-      assert {:ok, _} = Store.append(%{path: "bike/terra-speed.md", content: content})
+      assert {:ok, _} = Store.call(:append, %{path: "bike/terra-speed.md", content: content})
 
       assert {:ok, _} =
-               Store.append(%{
+               Store.call(:append, %{
                  path: "bike/via-carolina.md",
                  heading: "Weather",
                  content: content
@@ -293,9 +358,12 @@ defmodule Vigil.StoreTest do
   describe "replace_section" do
     test "replaces the target chunk's body and the index picks it up" do
       assert {:ok, _} =
-               Store.replace_section("bike/via-carolina.md#fueling", "New fueling strategy.")
+               Store.call(:replace_section, %{
+                 id: "bike/via-carolina.md#fueling",
+                 content: "New fueling strategy."
+               })
 
-      {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/via-carolina.md#fueling", backlinks: false})
       assert result.body =~ "New fueling strategy."
     end
 
@@ -305,10 +373,12 @@ defmodule Vigil.StoreTest do
     test "an id that read accepts is accepted here too, and writes the resolved path" do
       messy = "bike/Via Carolina!!.md#fueling"
 
-      assert {:ok, _} = Store.read(messy, false)
-      assert {:ok, %{path: "bike/via-carolina.md"}} = Store.replace_section(messy, "Resolved.")
+      assert {:ok, _} = Store.call(:read, %{id: messy, backlinks: false})
 
-      {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
+      assert {:ok, %{path: "bike/via-carolina.md"}} =
+               Store.call(:replace_section, %{id: messy, content: "Resolved."})
+
+      {:ok, result} = Store.call(:read, %{id: "bike/via-carolina.md#fueling", backlinks: false})
       assert result.body =~ "Resolved."
     end
 
@@ -317,24 +387,29 @@ defmodule Vigil.StoreTest do
     # to resolve here too.
     test "leniency covers the whole path part, not just the basename" do
       for messy <- ["Bike/via-carolina.md#fueling", "bike/via-carolina.MD#fueling"] do
-        assert {:ok, _} = Store.read(messy, false)
+        assert {:ok, _} = Store.call(:read, %{id: messy, backlinks: false})
 
         assert {:ok, %{path: "bike/via-carolina.md"}} =
-                 Store.replace_section(messy, "Resolved via #{messy}.")
+                 Store.call(:replace_section, %{id: messy, content: "Resolved via #{messy}."})
       end
     end
 
     test "a section id that normalizes into skills/ is still Invalid path" do
-      assert {:error, "Invalid path"} = Store.replace_section("Skills/tdd.md#x", "text")
+      assert {:error, "Invalid path"} =
+               Store.call(:replace_section, %{id: "Skills/tdd.md#x", content: "text"})
     end
 
     test "an id naming skills/ is Invalid path, not Not found" do
-      assert {:error, "Invalid path"} = Store.replace_section("skills/tdd.md#x", "text")
-      assert {:error, "Invalid path"} = Store.delete_section("skills/tdd.md#x")
+      assert {:error, "Invalid path"} =
+               Store.call(:replace_section, %{id: "skills/tdd.md#x", content: "text"})
+
+      assert {:error, "Invalid path"} = Store.call(:delete_section, %{id: "skills/tdd.md#x"})
     end
 
     test "a missing section in a writable note is Not found" do
-      assert {:error, msg} = Store.replace_section("bike/via-carolina.md#nope", "text")
+      assert {:error, msg} =
+               Store.call(:replace_section, %{id: "bike/via-carolina.md#nope", content: "text"})
+
       assert msg =~ "Not found"
     end
   end
@@ -343,14 +418,14 @@ defmodule Vigil.StoreTest do
     test "returns the window Vigil.Events computes from the indexed event files" do
       during_event = ~U[2026-07-11 00:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
-      result = Store.current(during_event)
+      result = Store.call(:current, %{now: during_event})
 
       assert Enum.any?(result.active, &(&1.id == "bike/via-carolina.md"))
     end
 
     test "invalid event (ends < starts) never appears in current" do
       {:ok, _} =
-        Store.create(%{
+        Store.call(:create, %{
           path: "bike/kaputt.md",
           type: "event",
           content: "# Kaputt\nx",
@@ -359,7 +434,7 @@ defmodule Vigil.StoreTest do
         })
 
       now = ~U[2026-07-10 08:00:00Z] |> DateTime.shift_zone!("Europe/Berlin")
-      result = Store.current(now)
+      result = Store.call(:current, %{now: now})
 
       refute Enum.any?(
                result.active ++ result.upcoming ++ result.recently_past,
@@ -404,7 +479,7 @@ defmodule Vigil.StoreTest do
     test "path traversal and absolute paths are rejected without touching disk" do
       for bad_path <- ["../../etc/passwd", "/etc/passwd", "bike/../../x.md"] do
         assert {:error, msg} =
-                 Store.create(%{path: bad_path, type: "reference", content: "# X\nx"})
+                 Store.call(:create, %{path: bad_path, type: "reference", content: "# X\nx"})
 
         assert msg == "Invalid path"
       end
@@ -412,12 +487,12 @@ defmodule Vigil.StoreTest do
 
     test "writing into skills/ via create is rejected" do
       assert {:error, "Invalid path"} =
-               Store.create(%{path: "skills/x.md", type: "reference", content: "# X\nx"})
+               Store.call(:create, %{path: "skills/x.md", type: "reference", content: "# X\nx"})
     end
 
     test "dot-prefixed path segments are rejected everywhere, not just the first" do
       assert {:error, "Invalid path"} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "projects/.evil/x.md",
                  type: "reference",
                  content: "# X\nx",
@@ -427,7 +502,7 @@ defmodule Vigil.StoreTest do
 
     test "underscore-prefixed path segments are rejected the same way as dot-prefixed ones" do
       assert {:error, "Invalid path"} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "projects/_evil/x.md",
                  type: "reference",
                  content: "# X\nx",
@@ -440,7 +515,7 @@ defmodule Vigil.StoreTest do
     test "an unclean path is slugified; success carries path_normalized_from", %{vault: vault} do
       assert {:ok,
               %{path: "bike/cafe-overview.md", path_normalized_from: "bike/Café Overview!!.md"}} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/Café Overview!!.md",
                  type: "reference",
                  content: "# Café Overview\ntext"
@@ -452,7 +527,7 @@ defmodule Vigil.StoreTest do
 
     test "an already-canonical path has no path_normalized_from key" do
       assert {:ok, result} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/already-clean.md",
                  type: "reference",
                  content: "# X\nx"
@@ -463,7 +538,7 @@ defmodule Vigil.StoreTest do
 
     test "journal's naming.pattern rejects a non-date filename and suggests today's date" do
       assert {:error, msg} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "journal/some-note.md",
                  type: "reference",
                  content: "# X\nx"
@@ -477,7 +552,7 @@ defmodule Vigil.StoreTest do
 
     test "journal's naming.pattern accepts a conforming date filename" do
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "journal/2026-02-02.md",
                  type: "reference",
                  content: "# Journal Entry Test Day\ntext",
@@ -487,7 +562,7 @@ defmodule Vigil.StoreTest do
 
     test "a domain without a naming block is unaffected" do
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/any-name.md",
                  type: "reference",
                  content: "# X\nx"
@@ -496,7 +571,7 @@ defmodule Vigil.StoreTest do
 
     test "move_note normalizes and naming-checks the destination too" do
       assert {:error, msg} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "journal/not-a-date.md",
                  confirm: true
@@ -505,7 +580,7 @@ defmodule Vigil.StoreTest do
       assert msg =~ "does not match the schema"
 
       assert {:ok, %{to: "journal/2026-03-03.md"}} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "journal/2026-03-03.md",
                  confirm: true
@@ -516,7 +591,7 @@ defmodule Vigil.StoreTest do
   describe "rewrite_note" do
     test "replaces the body but keeps the frontmatter; requires confirm", %{vault: vault} do
       assert {:error, msg} =
-               Store.rewrite_note(%{
+               Store.call(:rewrite_note, %{
                  path: "bike/terra-speed.md",
                  content: "# New\nCompletely new."
                })
@@ -524,7 +599,7 @@ defmodule Vigil.StoreTest do
       assert msg =~ "confirm: true"
 
       assert {:ok, _} =
-               Store.rewrite_note(%{
+               Store.call(:rewrite_note, %{
                  path: "bike/terra-speed.md",
                  content: "# New\nCompletely new.",
                  confirm: true
@@ -535,7 +610,7 @@ defmodule Vigil.StoreTest do
       assert raw =~ "Completely new."
       refute raw =~ "Dimensions"
 
-      {:ok, result} = Store.read("bike/terra-speed.md", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
       assert result.type == :reference
     end
 
@@ -547,7 +622,7 @@ defmodule Vigil.StoreTest do
       one_left = "# Via Carolina\n\n## Fueling\nbaseline."
 
       assert {:error, msg} =
-               Store.rewrite_note(%{path: "bike/via-carolina.md", content: one_left})
+               Store.call(:rewrite_note, %{path: "bike/via-carolina.md", content: one_left})
 
       assert msg =~ "removes 2 of 3 headings"
     end
@@ -557,9 +632,10 @@ defmodule Vigil.StoreTest do
       # removes only 1 — under both half-of-3 and the 20-heading floor.
       new_content = "# Via Carolina\n\n## Fueling\nbaseline.\n\n## Gear\nFrame bag."
 
-      assert {:ok, _} = Store.rewrite_note(%{path: "bike/via-carolina.md", content: new_content})
+      assert {:ok, _} =
+               Store.call(:rewrite_note, %{path: "bike/via-carolina.md", content: new_content})
 
-      {:ok, result} = Store.read("bike/via-carolina.md", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/via-carolina.md", backlinks: false})
       assert Enum.map(result.toc, & &1.heading) == ["Fueling", "Gear"]
     end
 
@@ -570,7 +646,7 @@ defmodule Vigil.StoreTest do
         for n <- 1..30, do: "## Section #{n}\nContent #{n}."
 
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/many.md",
                  type: "reference",
                  content: "# Many Sections\n\n" <> Enum.join(many, "\n\n"),
@@ -580,11 +656,17 @@ defmodule Vigil.StoreTest do
       few = for n <- 1..5, do: "## Section #{n}\nContent #{n}."
       few_content = "# Many Sections\n\n" <> Enum.join(few, "\n\n")
 
-      assert {:error, msg} = Store.rewrite_note(%{path: "bike/many.md", content: few_content})
+      assert {:error, msg} =
+               Store.call(:rewrite_note, %{path: "bike/many.md", content: few_content})
+
       assert msg =~ "removes 25 of 30 headings"
 
       assert {:ok, _} =
-               Store.rewrite_note(%{path: "bike/many.md", content: few_content, confirm: true})
+               Store.call(:rewrite_note, %{
+                 path: "bike/many.md",
+                 content: few_content,
+                 confirm: true
+               })
 
       raw = File.read!(Path.join(vault, "bike/many.md"))
       refute raw =~ "Section 6"
@@ -595,8 +677,8 @@ defmodule Vigil.StoreTest do
   # there (edit_test.exs) without git. This is the wiring smoke test.
   describe "delete_section" do
     test "removes the section; the index no longer resolves it" do
-      assert {:ok, _} = Store.delete_section("bike/via-carolina.md#gear")
-      assert {:error, _} = Store.read("bike/via-carolina.md#gear", false)
+      assert {:ok, _} = Store.call(:delete_section, %{id: "bike/via-carolina.md#gear"})
+      assert {:error, _} = Store.call(:read, %{id: "bike/via-carolina.md#gear", backlinks: false})
     end
   end
 
@@ -610,7 +692,7 @@ defmodule Vigil.StoreTest do
       abs_path = Path.join(vault, path)
 
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: path,
                  type: "reference",
                  content: "# Shape\n\n## First\nFirst body.\n\n## Second\nSecond body.\n\n\n"
@@ -618,20 +700,22 @@ defmodule Vigil.StoreTest do
 
       assert one_trailing_newline?(abs_path)
 
-      assert {:ok, _} = Store.append(%{path: path, heading: "First", content: "More.\n\n"})
-      assert one_trailing_newline?(abs_path)
-
-      assert {:ok, _} = Store.replace_section("#{path}#second", "Replaced.\n\n")
-      assert one_trailing_newline?(abs_path)
-
-      assert {:ok, _} = Store.delete_section("#{path}#second")
-      assert one_trailing_newline?(abs_path)
-
-      assert {:ok, _} = Store.update_frontmatter(%{path: path, type: "decision"})
+      assert {:ok, _} = Store.call(:append, %{path: path, heading: "First", content: "More.\n\n"})
       assert one_trailing_newline?(abs_path)
 
       assert {:ok, _} =
-               Store.rewrite_note(%{path: path, content: "# Shape\n\n## Only\nBody.\n\n\n"})
+               Store.call(:replace_section, %{id: "#{path}#second", content: "Replaced.\n\n"})
+
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} = Store.call(:delete_section, %{id: "#{path}#second"})
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} = Store.call(:update_frontmatter, %{path: path, type: "decision"})
+      assert one_trailing_newline?(abs_path)
+
+      assert {:ok, _} =
+               Store.call(:rewrite_note, %{path: path, content: "# Shape\n\n## Only\nBody.\n\n\n"})
 
       assert one_trailing_newline?(abs_path)
     end
@@ -645,35 +729,35 @@ defmodule Vigil.StoreTest do
   describe "update_frontmatter" do
     test "changes type without touching the body, no confirm needed" do
       assert {:ok, _} =
-               Store.update_frontmatter(%{path: "bike/terra-speed.md", type: "decision"})
+               Store.call(:update_frontmatter, %{path: "bike/terra-speed.md", type: "decision"})
 
-      {:ok, result} = Store.read("bike/terra-speed.md", false)
+      {:ok, result} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
       assert result.type == :decision
       assert search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
 
     test "enforces the same starts/ends rules as create" do
       assert {:error, _} =
-               Store.update_frontmatter(%{path: "bike/terra-speed.md", type: "event"})
+               Store.call(:update_frontmatter, %{path: "bike/terra-speed.md", type: "event"})
     end
   end
 
   describe "delete" do
     test "removes the note from disk and the index; requires confirm", %{vault: vault} do
-      assert {:error, msg} = Store.delete_note(%{path: "bike/terra-speed.md"})
+      assert {:error, msg} = Store.call(:delete_note, %{path: "bike/terra-speed.md"})
       assert msg =~ "confirm: true"
 
       assert {:ok, %{pushed: true}} =
-               Store.delete_note(%{path: "bike/terra-speed.md", confirm: true})
+               Store.call(:delete_note, %{path: "bike/terra-speed.md", confirm: true})
 
       refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
-      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      assert {:error, _} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
       refute search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
 
     test "reports broken backlinks in the same call when confirm is passed up front" do
       assert {:ok, %{broken_backlinks: broken_backlinks}} =
-               Store.delete_note(%{path: "bike/terra-speed.md", confirm: true})
+               Store.call(:delete_note, %{path: "bike/terra-speed.md", confirm: true})
 
       assert "bike/via-carolina.md" in broken_backlinks
     end
@@ -682,12 +766,12 @@ defmodule Vigil.StoreTest do
   describe "move" do
     test "renames the note, updates the index; requires confirm", %{vault: vault} do
       assert {:error, msg} =
-               Store.move_note(%{from: "bike/terra-speed.md", to: "bike/terra-40c.md"})
+               Store.call(:move_note, %{from: "bike/terra-speed.md", to: "bike/terra-40c.md"})
 
       assert msg =~ "confirm: true"
 
       assert {:ok, %{pushed: true}} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "bike/terra-40c.md",
                  confirm: true
@@ -695,14 +779,14 @@ defmodule Vigil.StoreTest do
 
       refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
       assert File.exists?(Path.join(vault, "bike/terra-40c.md"))
-      assert {:error, _} = Store.read("bike/terra-speed.md", false)
-      {:ok, result} = Store.read("bike/terra-40c.md", false)
+      assert {:error, _} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
+      {:ok, result} = Store.call(:read, %{id: "bike/terra-40c.md", backlinks: false})
       assert result.title == "WTB Terra Speed 40C"
     end
 
     test "rejects a destination that already exists" do
       assert {:error, msg} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "bike/via-carolina.md",
                  confirm: true
@@ -713,7 +797,7 @@ defmodule Vigil.StoreTest do
 
     test "destination still runs through domain validation" do
       assert {:error, _} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "unbekannt/x.md",
                  confirm: true
@@ -724,11 +808,11 @@ defmodule Vigil.StoreTest do
   # Each finding's rule (duplicate headings, sentence-like headings, orphaned
   # links, overlong notes, stale decisions) is Vigil.Index's job now and is
   # covered there (index_test.exs) without git. This is the wiring smoke
-  # test: a write lands in the report Store.lint/1 returns.
+  # test: a write lands in the report a :lint call returns.
   describe "lint" do
     test "reports duplicate headings, sentence-like headings, and orphaned links" do
       {:ok, _} =
-        Store.create(%{
+        Store.call(:create, %{
           path: "bike/messy.md",
           type: "reference",
           content:
@@ -737,7 +821,7 @@ defmodule Vigil.StoreTest do
               "## Reference\nSee [[does-not-exist]].\n"
         })
 
-      report = Store.lint()
+      report = Store.call(:lint, %{})
 
       assert Enum.any?(report.duplicate_headings, &(&1.path == "bike/messy.md"))
       assert Enum.any?(report.sentence_headings, &String.starts_with?(&1.id, "bike/messy.md"))
@@ -757,24 +841,24 @@ defmodule Vigil.StoreTest do
     # validation, frontmatter validation, SkillKey token) lives in
     # test/vigil/skills_test.exs.
     test "skill_list, skill_read, and skill_write work end-to-end through the GenServer" do
-      [skill] = Store.skill_list()
+      [skill] = Store.call(:skill_list, %{})
       assert skill.name == "tdd"
 
-      {:ok, %{content: c1}} = Store.skill_read("tdd")
-      {:ok, %{content: c2}} = Store.skill_read("tdd.md")
+      {:ok, %{content: c1}} = Store.call(:skill_read, %{name: "tdd"})
+      {:ok, %{content: c2}} = Store.call(:skill_read, %{name: "tdd.md"})
       assert c1 == c2
       assert c1 =~ "SkillKey:"
 
-      assert {:error, msg} = Store.skill_read("does-not-exist")
+      assert {:error, msg} = Store.call(:skill_read, %{name: "does-not-exist"})
       assert msg =~ "tdd"
 
       assert {:ok, %{name: "new", pushed: true}} =
-               Store.skill_write(
-                 "new",
-                 "---\nname: new\ndescription: test skill\n---\n# New\n1. one"
-               )
+               Store.call(:skill_write, %{
+                 name: "new",
+                 content: "---\nname: new\ndescription: test skill\n---\n# New\n1. one"
+               })
 
-      {:ok, %{content: content}} = Store.skill_read("new")
+      {:ok, %{content: content}} = Store.call(:skill_read, %{name: "new"})
       assert content =~ "1. one"
       assert search(%{query: "one"}) == []
     end
@@ -786,7 +870,7 @@ defmodule Vigil.StoreTest do
   # commit time, on every write path at once.
   describe "created_at survives a write" do
     defp created_at(path) do
-      {:ok, note} = Store.read(path, false)
+      {:ok, note} = Store.call(:read, %{id: path, backlinks: false})
       note.created_at
     end
 
@@ -794,11 +878,13 @@ defmodule Vigil.StoreTest do
       before = created_at("bike/via-carolina.md")
       assert is_binary(before)
 
-      assert {:ok, _} = Store.append(%{path: "bike/via-carolina.md", content: "One more line."})
+      assert {:ok, _} =
+               Store.call(:append, %{path: "bike/via-carolina.md", content: "One more line."})
+
       assert created_at("bike/via-carolina.md") == before
 
       assert {:ok, _} =
-               Store.rewrite_note(%{
+               Store.call(:rewrite_note, %{
                  path: "bike/via-carolina.md",
                  content: "# Via Carolina\n\n## Fueling\nbaseline.\n\n## Gear\nFrame bag.",
                  confirm: true
@@ -807,7 +893,7 @@ defmodule Vigil.StoreTest do
       assert created_at("bike/via-carolina.md") == before
 
       assert {:ok, _} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/via-carolina.md",
                  to: "training/via-carolina.md",
                  confirm: true
@@ -818,7 +904,7 @@ defmodule Vigil.StoreTest do
 
     test "a note created now takes the creation date of its own commit" do
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/brand-new.md",
                  type: "reference",
                  content: "# New\n\nx"
@@ -830,8 +916,10 @@ defmodule Vigil.StoreTest do
     test "a full reload still reports the git creation date" do
       before = created_at("bike/via-carolina.md")
 
-      assert {:ok, _} = Store.append(%{path: "bike/via-carolina.md", content: "Another line."})
-      assert %{reloaded: true} = Store.reload()
+      assert {:ok, _} =
+               Store.call(:append, %{path: "bike/via-carolina.md", content: "Another line."})
+
+      assert %{reloaded: true} = Store.call(:reload, %{})
 
       assert created_at("bike/via-carolina.md") == before
     end
@@ -839,7 +927,7 @@ defmodule Vigil.StoreTest do
 
   describe "reload" do
     test "reload re-reads the vault and reports success" do
-      assert %{reloaded: true} = Store.reload()
+      assert %{reloaded: true} = Store.call(:reload, %{})
       assert search(%{query: "tires"}) != []
     end
 
@@ -849,7 +937,7 @@ defmodule Vigil.StoreTest do
       :ok = stop_supervised(Store)
       start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
 
-      assert %{reloaded: true, pull_failed: reason} = Store.reload()
+      assert %{reloaded: true, pull_failed: reason} = Store.call(:reload, %{})
       assert is_binary(reason)
       assert search(%{query: "tires"}) != []
     end
@@ -861,13 +949,17 @@ defmodule Vigil.StoreTest do
       start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
 
       assert {:error, msg} =
-               Store.create(%{path: "bike/new.md", type: "reference", content: "# New\ntext"})
+               Store.call(:create, %{
+                 path: "bike/new.md",
+                 type: "reference",
+                 content: "# New\ntext"
+               })
 
       assert msg =~ "push failed"
       assert File.exists?(Path.join(vault, "bike/new.md"))
 
       assert search(%{query: "tires"}) != []
-      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "bike/via-carolina.md", backlinks: false})
     end
 
     # The index is updated between commit and push for every write action
@@ -879,11 +971,11 @@ defmodule Vigil.StoreTest do
       start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
 
       assert {:error, msg} =
-               Store.delete_note(%{path: "bike/terra-speed.md", confirm: true})
+               Store.call(:delete_note, %{path: "bike/terra-speed.md", confirm: true})
 
       assert msg =~ "Deletion committed locally, but push failed"
       refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
-      assert {:error, _} = Store.read("bike/terra-speed.md", false)
+      assert {:error, _} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
       refute search(%{query: "tubeless"}) |> Enum.any?(&(&1.id =~ "terra-speed"))
     end
 
@@ -892,15 +984,15 @@ defmodule Vigil.StoreTest do
       start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "nonexistent-remote"})
 
       assert {:error, msg} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "bike/terra-40c.md",
                  confirm: true
                })
 
       assert msg =~ "Move committed locally, but push failed"
-      assert {:error, _} = Store.read("bike/terra-speed.md", false)
-      assert {:ok, _} = Store.read("bike/terra-40c.md", false)
+      assert {:error, _} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
+      assert {:ok, _} = Store.call(:read, %{id: "bike/terra-40c.md", backlinks: false})
     end
 
     test "writing into a read-only domain directory returns a precise error, store stays alive",
@@ -910,13 +1002,14 @@ defmodule Vigil.StoreTest do
       dir = Path.join(vault, "home")
       File.chmod!(dir, 0o555)
 
-      result = Store.create(%{path: "home/new.md", type: "reference", content: "# New\ntext"})
+      result =
+        Store.call(:create, %{path: "home/new.md", type: "reference", content: "# New\ntext"})
 
       File.chmod!(dir, 0o755)
 
       assert {:error, msg} = result
       assert msg =~ "Could not write file"
-      assert {:ok, _} = Store.read("home/diacritics-äöü-café.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "home/diacritics-äöü-café.md", backlinks: false})
     end
 
     test "append against an unreadable file returns a clean error, store stays alive", %{
@@ -925,14 +1018,14 @@ defmodule Vigil.StoreTest do
       path = Path.join(vault, "bike/via-carolina.md")
       File.chmod!(path, 0o000)
 
-      result = Store.append(%{path: "bike/via-carolina.md", content: "Extra."})
+      result = Store.call(:append, %{path: "bike/via-carolina.md", content: "Extra."})
 
       File.chmod!(path, 0o644)
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
       assert search(%{query: "tires"}) != []
-      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "bike/via-carolina.md", backlinks: false})
     end
 
     test "replace_section against an unreadable file returns a clean error, store stays alive", %{
@@ -941,14 +1034,18 @@ defmodule Vigil.StoreTest do
       path = Path.join(vault, "bike/via-carolina.md")
       File.chmod!(path, 0o000)
 
-      result = Store.replace_section("bike/via-carolina.md#fueling", "New strategy.")
+      result =
+        Store.call(:replace_section, %{
+          id: "bike/via-carolina.md#fueling",
+          content: "New strategy."
+        })
 
       File.chmod!(path, 0o644)
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
       assert search(%{query: "tires"}) != []
-      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "bike/via-carolina.md", backlinks: false})
     end
 
     test "delete_section against an unreadable file returns a clean error, store stays alive", %{
@@ -957,14 +1054,14 @@ defmodule Vigil.StoreTest do
       path = Path.join(vault, "bike/via-carolina.md")
       File.chmod!(path, 0o000)
 
-      result = Store.delete_section("bike/via-carolina.md#gear")
+      result = Store.call(:delete_section, %{id: "bike/via-carolina.md#gear"})
 
       File.chmod!(path, 0o644)
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
       assert search(%{query: "tires"}) != []
-      assert {:ok, _} = Store.read("bike/via-carolina.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "bike/via-carolina.md", backlinks: false})
     end
 
     test "rewrite_note against an unreadable file returns a clean error, store stays alive", %{
@@ -974,7 +1071,7 @@ defmodule Vigil.StoreTest do
       File.chmod!(path, 0o000)
 
       result =
-        Store.rewrite_note(%{
+        Store.call(:rewrite_note, %{
           path: "bike/terra-speed.md",
           content: "# New\nCompletely new.",
           confirm: true
@@ -985,7 +1082,7 @@ defmodule Vigil.StoreTest do
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
       assert search(%{query: "tires"}) != []
-      assert {:ok, _} = Store.read("bike/terra-speed.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
     end
 
     test "update_frontmatter against an unreadable file returns a clean error, store stays alive",
@@ -993,14 +1090,14 @@ defmodule Vigil.StoreTest do
       path = Path.join(vault, "bike/terra-speed.md")
       File.chmod!(path, 0o000)
 
-      result = Store.update_frontmatter(%{path: "bike/terra-speed.md", type: "decision"})
+      result = Store.call(:update_frontmatter, %{path: "bike/terra-speed.md", type: "decision"})
 
       File.chmod!(path, 0o644)
 
       assert {:error, msg} = result
       assert msg =~ "Could not read file"
       assert search(%{query: "tires"}) != []
-      assert {:ok, _} = Store.read("bike/terra-speed.md", false)
+      assert {:ok, _} = Store.call(:read, %{id: "bike/terra-speed.md", backlinks: false})
     end
   end
 
@@ -1012,20 +1109,22 @@ defmodule Vigil.StoreTest do
   # link resolution itself.
   describe "links" do
     test "links tool works via a lenient (non-canonical) path" do
-      {:ok, result} = Store.links("bike/Via Carolina!!.md", :out, 1)
+      {:ok, result} =
+        Store.call(:links, %{id: "bike/Via Carolina!!.md", direction: :out, depth: 1})
+
       assert result.id == "bike/via-carolina.md"
     end
 
     test "move_note reports broken_backlinks for a link that no longer resolves, keeps a still-resolving one out" do
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/references-explicitly.md",
                  type: "reference",
                  content: "# References Terra Speed\nSee [Terra Speed](bike/terra-speed.md)."
                })
 
       assert {:ok, result} =
-               Store.move_note(%{
+               Store.call(:move_note, %{
                  from: "bike/terra-speed.md",
                  to: "training/terra-speed.md",
                  confirm: true
@@ -1036,30 +1135,30 @@ defmodule Vigil.StoreTest do
     end
 
     test "delete_note's confirm-required message lists current backlinks" do
-      assert {:error, msg} = Store.delete_note(%{path: "bike/terra-speed.md"})
+      assert {:error, msg} = Store.call(:delete_note, %{path: "bike/terra-speed.md"})
       assert msg =~ "incoming references"
       assert msg =~ "bike/via-carolina.md"
     end
 
     test "removing a link from a note's content clears it from the target's incoming links (no ghost entry)" do
       assert {:ok, _} =
-               Store.create(%{
+               Store.call(:create, %{
                  path: "bike/references-first.md",
                  type: "reference",
                  content: "# References First\nSee [[terra-speed]]."
                })
 
-      {:ok, before} = Store.links("bike/terra-speed.md", :in, 1)
+      {:ok, before} = Store.call(:links, %{id: "bike/terra-speed.md", direction: :in, depth: 1})
       assert Enum.any?(before.incoming, &(&1.source == "bike/references-first.md"))
 
       assert {:ok, _} =
-               Store.rewrite_note(%{
+               Store.call(:rewrite_note, %{
                  path: "bike/references-first.md",
                  content: "# References First\nNo reference any more.",
                  confirm: true
                })
 
-      {:ok, after_} = Store.links("bike/terra-speed.md", :in, 1)
+      {:ok, after_} = Store.call(:links, %{id: "bike/terra-speed.md", direction: :in, depth: 1})
       refute Enum.any?(after_.incoming, &(&1.source == "bike/references-first.md"))
     end
   end
@@ -1072,24 +1171,24 @@ defmodule Vigil.StoreTest do
   describe "skills/ is not reachable through the note write tools" do
     test "append cannot write into skills/", %{vault: vault} do
       assert {:error, "Invalid path"} =
-               Store.append(%{path: "skills/tdd.md", content: "INJECTED"})
+               Store.call(:append, %{path: "skills/tdd.md", content: "INJECTED"})
 
       refute File.read!(Path.join(vault, "skills/tdd.md")) =~ "INJECTED"
     end
 
     test "rewrite_note cannot overwrite a skill" do
       assert {:error, "Invalid path"} =
-               Store.rewrite_note(%{path: "skills/tdd.md", content: "# Pwned\n\nbody\n"})
+               Store.call(:rewrite_note, %{path: "skills/tdd.md", content: "# Pwned\n\nbody\n"})
     end
 
     test "update_frontmatter cannot retype a skill" do
       assert {:error, "Invalid path"} =
-               Store.update_frontmatter(%{path: "skills/tdd.md", type: "decision"})
+               Store.call(:update_frontmatter, %{path: "skills/tdd.md", type: "decision"})
     end
 
     test "delete_note cannot delete a skill", %{vault: vault} do
       assert {:error, "Invalid path"} =
-               Store.delete_note(%{path: "skills/tdd.md", confirm: true})
+               Store.call(:delete_note, %{path: "skills/tdd.md", confirm: true})
 
       assert File.exists?(Path.join(vault, "skills/tdd.md"))
     end
@@ -1097,19 +1196,19 @@ defmodule Vigil.StoreTest do
     # Without confirm the answer used to be a confirmation prompt quoting the
     # path back — for a write the policy refuses on the next turn either way.
     test "delete_note without confirm answers Invalid path, not a prompt" do
-      assert {:error, "Invalid path"} = Store.delete_note(%{path: "skills/tdd.md"})
+      assert {:error, "Invalid path"} = Store.call(:delete_note, %{path: "skills/tdd.md"})
     end
 
     test "move_note without confirm answers Invalid path, not a prompt" do
       assert {:error, "Invalid path"} =
-               Store.move_note(%{from: "bike/terra-speed.md", to: "skills/pwned.md"})
+               Store.call(:move_note, %{from: "bike/terra-speed.md", to: "skills/pwned.md"})
 
       assert {:error, "Invalid path"} =
-               Store.move_note(%{from: "skills/tdd.md", to: "bike/pwned.md"})
+               Store.call(:move_note, %{from: "skills/tdd.md", to: "bike/pwned.md"})
     end
 
     test "a skill never becomes searchable through a write" do
-      Store.append(%{path: "skills/tdd.md", content: "INJECTEDWORD"})
+      Store.call(:append, %{path: "skills/tdd.md", content: "INJECTEDWORD"})
       assert search(%{query: "INJECTEDWORD"}) == []
     end
   end

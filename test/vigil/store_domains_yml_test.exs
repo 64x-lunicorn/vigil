@@ -5,8 +5,8 @@ defmodule Vigil.StoreDomainsYmlTest do
   alias Vigil.Store
 
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
-  # every real call, so Store.search/1 requires one rather than defaulting.
-  defp search(params), do: Store.search(Map.put_new(params, :limit, 10))
+  # every real call, so `Store.call(:search, ...)` requires one rather than defaulting.
+  defp search(params), do: Store.call(:search, Map.put_new(params, :limit, 10))
 
   defp git_init_empty(tmp) do
     File.mkdir_p!(tmp)
