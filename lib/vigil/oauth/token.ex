@@ -26,7 +26,7 @@ defmodule Vigil.OAuth.Token do
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.Store
+  alias Vigil.OAuth.{Code, Store}
 
   @access_ttl 3600
   @refresh_ttl 30 * 86_400
@@ -53,23 +53,17 @@ defmodule Vigil.OAuth.Token do
 
   `record` is what the pair descends from: the authorization code being
   redeemed, or the refresh token being rotated. The pair inherits that
-  record's client, scope and grant — through `scope_of/1` and
-  `grant_for_issue/1`, so no caller can inherit them one way here and another
-  way there.
-
-  The audience is the one thing passed separately. An authorization code
-  stores it as `:resource` and a refresh token as `:aud`, and reading both
-  names here would put the shape of a record this module does not own into
-  this module.
+  record's client, audience, scope and grant from the record itself, so no
+  caller can inherit them one way here and another way there.
 
   Both tokens carry the same `grant_id`: the family is what a replay revokes.
   They expire on different schedules — an hour against thirty days — because
   rotation is what bounds a refresh token, not its lifetime.
   """
-  def issue_pair(record, aud, now) do
+  def issue_pair(record, now) do
     access_token = random()
     refresh_token = random()
-    scope = scope_of(record)
+    {aud, scope} = inherited(record)
     grant_id = grant_for_issue(record)
 
     Store.put_token(access_token, %{
@@ -120,6 +114,17 @@ defmodule Vigil.OAuth.Token do
     token
   end
 
+  # Where the pair's audience and its scope come from. A refresh token is this
+  # module's record and carries both; an authorization code is
+  # `Vigil.OAuth.Code`'s record and answers for itself.
+  #
+  # The audience used to arrive as a parameter, because the two records name it
+  # differently — `:aud` here, `:resource` there — and reading both names in
+  # this module would have put the shape of a record it does not own into it.
+  # With the code record owned, it can be asked instead.
+  defp inherited(%{aud: aud} = record), do: {aud, scope_of(record)}
+  defp inherited(code), do: {Code.audience_of(code), Code.scope_of(code)}
+
   ## Classification
 
   @doc """
@@ -144,13 +149,18 @@ defmodule Vigil.OAuth.Token do
   def expired?(record, now), do: record.expires_at <= now
 
   @doc """
-  The scope a record grants when it does not name one.
+  The scope a **token** record grants when it does not name one.
 
   Records written before scopes existed are full-access: they were minted when
   `vault` was the only thing a token could be, and reading them as
   `vault:read` would silently take write access away from a client that has
   it. New records always carry a scope, so this default only ever applies
   backwards.
+
+  Only to token records, and that is deliberate: an authorization code answers
+  `Vigil.OAuth.Code.scope_of/1`, which has no default. A code lives sixty
+  seconds, so there is no such thing as a code from before scopes existed, and
+  a default here would have quietly covered a code minted without one.
   """
   def scope_of(record), do: Map.get(record, :scope, OAuth.scope())
 
