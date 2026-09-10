@@ -83,6 +83,13 @@ defmodule Vigil.Vault.PolicyTest do
     test "an existing project directory needs no creation" do
       assert {:ok, %{create_project_dir: nil}} = create("projects/vigil/x.md")
     end
+
+    test "the create decision carries no domain: nothing writes one" do
+      assert {:ok, resolved} = create("projects/vigil/x.md")
+
+      assert Enum.sort(Map.keys(resolved)) ==
+               [:create_project_dir, :ends, :normalized_from, :path, :starts, :type]
+    end
   end
 
   describe "normalization on :create" do
@@ -621,15 +628,20 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:move_note, %{from: "bike/a.md", to: "work/a.md", confirm: true}, f)
     end
 
-    test "an ordinary move is allowed" do
+    # The decision says where the note comes from and where it goes, and
+    # nothing else: a move creates no project directory, and no writer ever
+    # read the domain it resolved.
+    test "an ordinary move is allowed, and resolves to nothing but from and to" do
       f = facts(path_exists?: fn p -> p == "bike/a.md" end)
 
-      assert {:ok, %{from: "bike/a.md", to: "training/b.md"}} =
+      assert {:ok, %{from: "bike/a.md", to: "training/b.md"} = resolved} =
                Policy.check(
                  :move_note,
                  %{from: "bike/a.md", to: "training/b.md", confirm: true},
                  f
                )
+
+      assert Enum.sort(Map.keys(resolved)) == [:from, :to]
     end
   end
 end

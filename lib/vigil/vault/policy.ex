@@ -37,10 +37,10 @@ defmodule Vigil.Vault.Policy do
   @doc """
   Decides `op` for `request` against `facts`.
 
-  Returns `{:ok, resolved}` — a map of everything the caller needs that the
-  policy derived (the normalized path, the domain, parsed timestamps, a
-  project directory to create) — or `{:error, message}` with the message the
-  caller is expected to hand back verbatim.
+  Returns `{:ok, resolved}` — a map of what the caller needs and the policy
+  derived (the normalized path, parsed timestamps, a project directory to
+  create) — or `{:error, message}` with the message the caller is expected to
+  hand back verbatim.
   """
   @spec check(op, map, Facts.t()) :: {:ok, map} | {:error, String.t()}
 
@@ -61,7 +61,6 @@ defmodule Vigil.Vault.Policy do
        %{
          path: normalized,
          normalized_from: if(changed?, do: path),
-         domain: domain,
          create_project_dir: create_dir,
          type: type,
          starts: starts,
@@ -153,17 +152,14 @@ defmodule Vigil.Vault.Policy do
          :ok <- path_sanity(to),
          {:ok, normalized_to, _changed?} <- normalize(to),
          :ok <- path_sanity(normalized_to),
-         {:ok, domain, create_dir} <- writable_path(normalized_to, facts, false),
+         {:ok, domain, _create_dir} <- writable_path(normalized_to, facts, false),
          :ok <- naming_convention(normalized_to, domain, content, facts),
          :ok <- refute_exists(normalized_to, facts),
          :ok <- require_confirm(confirm?(request), "moves #{from} to #{to}") do
-      {:ok,
-       %{
-         from: normalized_from,
-         to: normalized_to,
-         domain: domain,
-         create_project_dir: create_dir
-       }}
+      # No project directory to create: the move asks `writable_path/3` with
+      # directory creation switched off, and `Vigil.Store` creates one for
+      # `:create` alone.
+      {:ok, %{from: normalized_from, to: normalized_to}}
     end
   end
 
