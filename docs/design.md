@@ -349,6 +349,16 @@ private helpers in `Vigil.Store` that only `create` and `move_note` called, so
 traversal and nothing else — each of them could write into `skills/` and into
 an excluded domain, and the write was then indexed as a note.
 
+**A section id is resolved once.** `replace_section` and `delete_section` take
+an id, and the policy resolves it through the same lenient lookup `read` uses —
+one retry through path normalization — so an id that reads is an id that
+writes. The write then goes to the resolved record's canonical path, never to
+one re-derived by splitting the id on its fragment. That is what makes the
+leniency safe: a normalized id writes where the lookup landed, not where the id
+pointed. The path check on the id's own path part still runs first, so an id
+naming `skills/` or an excluded domain answers "Invalid path" rather than
+"Not found".
+
 Order matters: write the file, commit, reparse into the index, then push. If
 the push fails the local commit stays and the tool returns an error saying the
 change is committed locally but not pushed. Nothing is rolled back.

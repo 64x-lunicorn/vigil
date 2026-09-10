@@ -344,10 +344,21 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "chunk/2" do
+  describe "lookups/1 find_chunk" do
     test "returns the Chunk struct at an id, or nil", %{index: index} do
-      assert %Index.Chunk{heading: "Fueling"} = Index.chunk(index, "bike/via-carolina.md#fueling")
-      assert Index.chunk(index, "bike/via-carolina.md#nope") == nil
+      find = Index.lookups(index).find_chunk
+
+      assert %Index.Chunk{heading: "Fueling"} = find.("bike/via-carolina.md#fueling")
+      assert find.("bike/via-carolina.md#nope") == nil
+    end
+
+    test "resolves leniently, as read/3 does, and carries the canonical path", %{index: index} do
+      assert %Index.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
+               Index.lookups(index).find_chunk.("bike/Via Carolina!!.md#fueling")
+    end
+
+    test "nil for an id without a fragment", %{index: index} do
+      assert Index.lookups(index).find_chunk.("bike/via-carolina.md") == nil
     end
   end
 

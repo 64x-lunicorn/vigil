@@ -24,17 +24,18 @@ defmodule Vigil.Vault.Facts do
             naming: %{},
             # Vault-local today, for the :date naming suggestion.
             today: ~D[1970-01-01],
-            # The indexed chunk a section id resolves to, or nil
-            # (replace_section, delete_section). The index, not the
-            # filesystem, is what says whether a section exists.
-            chunk: nil,
             path_exists?: &__MODULE__.no_such_path/1,
             read_note: &__MODULE__.no_such_note/1,
             find_similar: &__MODULE__.no_similar/2,
             # H2–H4 headings a note currently has (rewrite_note's shrink gate).
             count_headings: &__MODULE__.no_headings/1,
             # Incoming references to a note (delete_note's confirmation).
-            find_backlinks: &__MODULE__.no_backlinks/1
+            find_backlinks: &__MODULE__.no_backlinks/1,
+            # The indexed chunk a section id resolves to, or nil
+            # (replace_section, delete_section). The index, not the filesystem,
+            # is what says whether a section exists — and the record it hands
+            # back carries the path the write uses.
+            find_chunk: &__MODULE__.no_chunk/1
 
   @type t :: %__MODULE__{}
 
@@ -52,4 +53,7 @@ defmodule Vigil.Vault.Facts do
 
   @doc false
   def no_backlinks(_path), do: []
+
+  @doc false
+  def no_chunk(_id), do: nil
 end

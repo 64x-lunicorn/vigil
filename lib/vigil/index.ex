@@ -109,9 +109,6 @@ defmodule Vigil.Index do
   @doc "`%{notes:, chunks:}` counts, for the load log line."
   def size(index), do: %{notes: map_size(index.notes), chunks: map_size(index.chunks)}
 
-  @doc "The `Chunk` at `id`, or `nil` — the write path's section lookup (`replace_section`, `delete_section`)."
-  def chunk(index, id), do: Map.get(index.chunks, id)
-
   @doc "Incoming references to `key` (a note path or a full chunk id) — the write path's backlinks question."
   def backlinks(index, key), do: backlinks_for(index, key)
 
@@ -124,8 +121,26 @@ defmodule Vigil.Index do
   """
   def lookups(index) do
     %{
-      count_headings: fn path -> heading_count(index, path) end
+      count_headings: fn path -> heading_count(index, path) end,
+      find_chunk: fn id -> find_chunk(index, id) end
     }
+  end
+
+  # The chunk a section id resolves to, or nil — through the same lenient
+  # resolution `read/3` uses, so an id that reads is an id that writes. The
+  # record carries the canonical path, which is what makes leniency safe: the
+  # write goes where the lookup landed, not where the id pointed.
+  defp find_chunk(index, id) do
+    case String.split(id, "#", parts: 2) do
+      [path_part, _fragment] ->
+        case lookup_chunk(index, id, path_part) do
+          {:ok, chunk} -> chunk
+          :not_found -> nil
+        end
+
+      [_without_fragment] ->
+        nil
+    end
   end
 
   # How many of `path`'s chunks carry a heading — the `rewrite_note` shrink

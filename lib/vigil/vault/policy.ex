@@ -104,25 +104,31 @@ defmodule Vigil.Vault.Policy do
   end
 
   # The section ops resolve through the index, not the filesystem: the chunk
-  # record in `facts` is what says the section exists. The order below is
-  # load-bearing — the chunk must be found before the replacement content is
-  # judged, so a bad id is reported as a bad id rather than as bad content.
+  # record the index hands back is what says the section exists, and its
+  # canonical path is the one the caller writes to. A section id is resolved
+  # once, here.
+  #
+  # The order is load-bearing twice over. The path check on the id's own path
+  # part comes first, so an id naming `skills/` or an excluded domain answers
+  # "Invalid path" rather than "Not found". The chunk is then resolved before
+  # the replacement content is judged, so a bad id is reported as a bad id
+  # rather than as bad content.
   def check(:replace_section, request, facts) do
     id = Map.fetch!(request, :id)
 
-    with {:ok, path} <- section_path(id, facts),
-         :ok <- section_present(id, facts, "replaced"),
+    with :ok <- section_id_writable(id, facts),
+         {:ok, chunk} <- section_chunk(id, facts, "replaced"),
          :ok <- replacement_content(Map.fetch!(request, :content)) do
-      {:ok, %{path: path}}
+      {:ok, %{path: chunk.path, chunk: chunk}}
     end
   end
 
   def check(:delete_section, request, facts) do
     id = Map.fetch!(request, :id)
 
-    with {:ok, path} <- section_path(id, facts),
-         :ok <- section_present(id, facts, "deleted") do
-      {:ok, %{path: path}}
+    with :ok <- section_id_writable(id, facts),
+         {:ok, chunk} <- section_chunk(id, facts, "deleted") do
+      {:ok, %{path: chunk.path, chunk: chunk}}
     end
   end
 
@@ -251,18 +257,24 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
-  defp section_path(id, facts) do
+  # The path the caller named must be a writable note before the id is looked
+  # up at all. Only the verdict is kept — the path the write uses comes from
+  # the resolved record, never from here.
+  defp section_id_writable(id, facts) do
     case String.split(id, "#", parts: 2) do
-      [path, _fragment] -> writable_note(path, facts)
-      [_path] -> {:error, "id must contain a fragment: path#heading-slug"}
+      [path, _fragment] ->
+        with {:ok, _path} <- writable_note(path, facts), do: :ok
+
+      [_path] ->
+        {:error, "id must contain a fragment: path#heading-slug"}
     end
   end
 
-  defp section_present(id, facts, verb) do
-    case facts.chunk do
+  defp section_chunk(id, facts, verb) do
+    case facts.find_chunk.(id) do
       nil -> {:error, "Not found: #{id}"}
       %{heading: nil} -> {:error, "A section without a heading cannot be #{verb}: #{id}"}
-      _ -> :ok
+      chunk -> {:ok, chunk}
     end
   end
 

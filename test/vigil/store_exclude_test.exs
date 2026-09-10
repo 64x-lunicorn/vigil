@@ -58,6 +58,16 @@ defmodule Vigil.StoreExcludeTest do
       assert File.exists?(Path.join(vault, "work/secret.md"))
     end
 
+    # The section ops answer on the id's own path part, before the id is
+    # looked up at all: an excluded domain is "Invalid path", never the
+    # "Not found" a missing section gets.
+    test "the section ops reject an excluded domain as a path, not as a missing section" do
+      assert {:error, "Invalid path"} =
+               Store.replace_section("work/secret.md#secret", "INJECTED")
+
+      assert {:error, "Invalid path"} = Store.delete_section("work/secret.md#secret")
+    end
+
     test "an excluded note never becomes searchable through a write" do
       Store.append(%{path: "work/secret.md", content: "INJECTEDWORD"})
       assert Store.search(%{query: "INJECTEDWORD"}) == []

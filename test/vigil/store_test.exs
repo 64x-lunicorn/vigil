@@ -252,6 +252,29 @@ defmodule Vigil.StoreTest do
       {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
       assert result.body =~ "New fueling strategy."
     end
+
+    # The id is resolved once, by the policy, through the same lenient lookup
+    # `read` uses — so the two accept the same ids, and the write lands on the
+    # path the lookup resolved rather than on one re-derived from the id.
+    test "an id that read accepts is accepted here too, and writes the resolved path" do
+      messy = "bike/Via Carolina!!.md#fueling"
+
+      assert {:ok, _} = Store.read(messy, false)
+      assert {:ok, %{path: "bike/via-carolina.md"}} = Store.replace_section(messy, "Resolved.")
+
+      {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
+      assert result.body =~ "Resolved."
+    end
+
+    test "an id naming skills/ is Invalid path, not Not found" do
+      assert {:error, "Invalid path"} = Store.replace_section("skills/tdd.md#x", "text")
+      assert {:error, "Invalid path"} = Store.delete_section("skills/tdd.md#x")
+    end
+
+    test "a missing section in a writable note is Not found" do
+      assert {:error, msg} = Store.replace_section("bike/via-carolina.md#nope", "text")
+      assert msg =~ "Not found"
+    end
   end
 
   describe "current" do

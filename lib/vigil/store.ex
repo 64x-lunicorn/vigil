@@ -278,7 +278,7 @@ defmodule Vigil.Store do
   # Vigil.Vault.PolicyTest they are literals. The index answers some of them
   # itself (Vigil.Index.lookups/1); struct!/2 is what merges them, so a lookup
   # the struct has no field for raises here rather than being carried silently.
-  defp facts(state, opts \\ []) do
+  defp facts(state) do
     base = %Facts{
       vault_path: state.vault_path,
       domains: list_domain_names(state),
@@ -286,7 +286,6 @@ defmodule Vigil.Store do
       project_dirs: project_dirs(state),
       naming: naming_rules(state),
       today: Clock.today(),
-      chunk: Keyword.get(opts, :chunk),
       path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
       read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
       find_backlinks: fn path -> Index.backlinks(state.index, path) end,
@@ -407,11 +406,14 @@ defmodule Vigil.Store do
   ## replace_section
 
   defp do_replace_section(id, content, state) do
-    rec = Index.chunk(state.index, id)
-
-    with {:ok, %{path: path}} <-
-           Policy.check(:replace_section, %{id: id, content: content}, facts(state, chunk: rec)) do
-      edit_and_commit(state, path, "replace_section: #{id}", &Edit.replace_body(&1, rec, content))
+    with {:ok, %{path: path, chunk: chunk}} <-
+           Policy.check(:replace_section, %{id: id, content: content}, facts(state)) do
+      edit_and_commit(
+        state,
+        path,
+        "replace_section: #{chunk.id}",
+        &Edit.replace_body(&1, chunk, content)
+      )
     else
       {:error, msg} -> {{:error, msg}, state}
     end
@@ -441,11 +443,9 @@ defmodule Vigil.Store do
   ## delete_section
 
   defp do_delete_section(id, state) do
-    rec = Index.chunk(state.index, id)
-
-    with {:ok, %{path: path}} <-
-           Policy.check(:delete_section, %{id: id}, facts(state, chunk: rec)) do
-      edit_and_commit(state, path, "delete_section: #{id}", &Edit.delete_section(&1, rec))
+    with {:ok, %{path: path, chunk: chunk}} <-
+           Policy.check(:delete_section, %{id: id}, facts(state)) do
+      edit_and_commit(state, path, "delete_section: #{chunk.id}", &Edit.delete_section(&1, chunk))
     else
       {:error, msg} -> {{:error, msg}, state}
     end

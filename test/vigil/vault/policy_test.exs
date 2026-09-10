@@ -266,7 +266,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "replacement content may not introduce headings" do
-      f = facts(chunk: %{heading: "S"})
+      f = facts(find_chunk: fn _ -> %{heading: "S", path: "bike/x.md"} end)
 
       assert {:error, msg} =
                Policy.check(:replace_section, %{id: "bike/x.md#s", content: "## Nope"}, f)
@@ -431,7 +431,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "a section without a heading cannot be replaced or deleted" do
-      f = facts(chunk: %{heading: nil})
+      f = facts(find_chunk: fn _ -> %{heading: nil, path: "bike/x.md"} end)
 
       assert {:error, msg} =
                Policy.check(:replace_section, %{id: "bike/x.md#pre", content: "text"}, f)
@@ -443,7 +443,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "content rules apply once the section is known" do
-      f = facts(chunk: %{heading: "Fueling"})
+      f = facts(find_chunk: fn _ -> %{heading: "Fueling", path: "bike/x.md"} end)
 
       assert {:error, msg} =
                Policy.check(:replace_section, %{id: "bike/x.md#fueling", content: "## Nope"}, f)
@@ -455,7 +455,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "the writable-path rules still apply to a section id" do
-      f = facts(chunk: %{heading: "H"})
+      f = facts(find_chunk: fn _ -> %{heading: "H", path: "bike/x.md"} end)
       assert {:error, "Invalid path"} = Policy.check(:delete_section, %{id: "skills/tdd.md#h"}, f)
       assert {:error, "Invalid path"} = Policy.check(:delete_section, %{id: "work/x.md#h"}, f)
     end
