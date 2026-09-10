@@ -15,16 +15,21 @@ defmodule Vigil.MCP.Tools do
   run, each clause only has to say what it uniquely knows — the shape of its
   `Store` call — never how to parse or default an argument.
 
-  Four types cover every tool: `:string`, `:boolean`, `:integer`,
+  Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
-  non-empty; the generated schema says so with `minLength: 1`.
+  non-empty; the generated schema says so with `minLength: 1`. An integer is
+  always bounded — there is no unbounded integer type, because a bound stated
+  anywhere but here is a bound the published schema does not carry and the
+  validator does not enforce. The range is published as `minimum`/`maximum`
+  and an out-of-range value is refused in the same shape as an off-enum
+  string, before the Store's mailbox is reached.
   """
 
   alias Vigil.Store
 
   @type_enum ["reference", "decision", "event"]
 
-  @type param_type :: :string | :boolean | :integer | {:enum, [String.t()]}
+  @type param_type :: :string | :boolean | {:integer, Range.t()} | {:enum, [String.t()]}
 
   @type param_spec :: %{
           required(:name) => String.t(),
@@ -57,9 +62,9 @@ defmodule Vigil.MCP.Tools do
         },
         %{
           name: "limit",
-          type: :integer,
+          type: {:integer, 1..25},
           default: 10,
-          description: "Maximum number of hits (default 10, max 25)."
+          description: "Maximum number of hits (default 10)."
         }
       ]
     },
@@ -98,9 +103,9 @@ defmodule Vigil.MCP.Tools do
         },
         %{
           name: "depth",
-          type: :integer,
+          type: {:integer, 1..2},
           default: 1,
-          description: "1 (default) or 2; 2 adds neighbors. Higher values are an error."
+          description: "Defaults to 1; 2 adds each directly connected note's own depth-1 view."
         }
       ]
     },
@@ -392,8 +397,8 @@ defmodule Vigil.MCP.Tools do
   defp property_schema(%{type: :boolean, description: description}),
     do: %{type: "boolean", description: description}
 
-  defp property_schema(%{type: :integer, description: description}),
-    do: %{type: "integer", description: description}
+  defp property_schema(%{type: {:integer, min..max//_}, description: description}),
+    do: %{type: "integer", minimum: min, maximum: max, description: description}
 
   defp property_schema(%{type: {:enum, values}, description: description}),
     do: %{type: "string", enum: values, description: description}
@@ -511,8 +516,12 @@ defmodule Vigil.MCP.Tools do
     if is_boolean(value), do: {:ok, value}, else: type_error(spec, "a boolean")
   end
 
-  defp check_type(%{type: :integer} = spec, value) do
-    if is_integer(value), do: {:ok, value}, else: type_error(spec, "an integer")
+  defp check_type(%{type: {:integer, min..max//_ = range}} = spec, value) do
+    if is_integer(value) and value in range do
+      {:ok, value}
+    else
+      type_error(spec, "an integer between #{min} and #{max}")
+    end
   end
 
   defp check_type(%{type: {:enum, values}} = spec, value) do

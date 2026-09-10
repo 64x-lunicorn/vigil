@@ -3,6 +3,10 @@ defmodule Vigil.StoreExcludeTest do
 
   alias Vigil.Store
 
+  # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
+  # every real call, so Store.search/1 requires one rather than defaulting.
+  defp search(params), do: Store.search(Map.put_new(params, :limit, 10))
+
   setup do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
@@ -16,8 +20,8 @@ defmodule Vigil.StoreExcludeTest do
        } do
     assert File.exists?(Path.join(vault, "work/secret.md"))
 
-    assert Store.search(%{query: "excludedsearchword"}) == []
-    assert Store.search(%{query: "excludedsearchword", domain: "work"}) == []
+    assert search(%{query: "excludedsearchword"}) == []
+    assert search(%{query: "excludedsearchword", domain: "work"}) == []
 
     assert {:error, _} = Store.read("work/secret.md", false)
     assert {:error, _} = Store.create(%{path: "work/y.md", type: "reference", content: "# Y\nx"})
@@ -70,8 +74,8 @@ defmodule Vigil.StoreExcludeTest do
 
     test "an excluded note never becomes searchable through a write" do
       Store.append(%{path: "work/secret.md", content: "INJECTEDWORD"})
-      assert Store.search(%{query: "INJECTEDWORD"}) == []
-      assert Store.search(%{query: "INJECTEDWORD", domain: "work"}) == []
+      assert search(%{query: "INJECTEDWORD"}) == []
+      assert search(%{query: "INJECTEDWORD", domain: "work"}) == []
     end
   end
 end

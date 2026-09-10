@@ -320,13 +320,21 @@ The JSON schema published on `tools/list` and the argument validation
 cannot drift out of agreement the way hand-written twins do.
 
 Every declared parameter is validated against the schema the server itself
-publishes. A violation — a wrong type, an off-enum value, a missing or empty
-required parameter — is a tool error naming what was expected, not a
-substituted default. A caller who claims `type: "bogus"` gets told so, rather
-than receiving unfiltered results it believes were filtered. Undeclared
+publishes. A violation — a wrong type, an off-enum value, an out-of-range
+integer, a missing or empty required parameter — is a tool error naming what
+was expected, not a substituted default. A caller who claims `type: "bogus"`
+gets told so, rather than receiving unfiltered results it believes were
+filtered. Undeclared
 parameters are ignored: the schemas do not set `additionalProperties: false`,
 and rejecting extras a client legitimately sent would fail callers over
 something the server never declared.
+
+A bound is part of that declaration, not a correction applied afterwards.
+Integer parameters carry a range in the table (`limit` is `1..25`, `depth` is
+`1..2`), the range is published as `minimum`/`maximum`, and a value outside it
+is refused there. Nothing downstream clamps: `limit: 100` is an error, not a
+quiet 25, because a caller told it received the 25 best hits of 100 asked for
+cannot tell that from having asked for 25.
 
 ---
 

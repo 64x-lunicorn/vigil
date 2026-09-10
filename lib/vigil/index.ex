@@ -247,7 +247,7 @@ defmodule Vigil.Index do
     domain = Map.get(params, :domain)
     type_filter = Map.get(params, :type)
     prefer = Map.get(params, :prefer)
-    limit = Map.get(params, :limit, 10)
+    limit = Map.fetch!(params, :limit)
 
     index.chunks
     |> Map.values()
@@ -435,14 +435,16 @@ defmodule Vigil.Index do
   link to an existing note with a missing fragment names the fragment),
   incoming references, direction `:out`/`:in`/`:both`, depth 1, depth 2
   adding each directly connected note's own depth-1 view with no further
-  recursion, any other depth an error, and the same lenient id resolution
-  `read/3` uses.
+  recursion, and the same lenient id resolution `read/3` uses.
+
+  `depth` is bounded where it is declared — `Vigil.MCP.Tools`' table publishes
+  `1..2` and refuses anything else before the call reaches the Store — so this
+  function is not the place a deeper value is caught.
   """
   def links(index, id, direction, depth) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- Slug.safe_path(path_part),
-         :ok <- validate_depth(depth) do
+    with :ok <- Slug.safe_path(path_part) do
       if String.contains?(id, "#") do
         case lookup_chunk(index, id, path_part) do
           {:ok, chunk} -> {:ok, build_links_result(index, chunk.id, [chunk.id], direction, depth)}
@@ -457,13 +459,8 @@ defmodule Vigil.Index do
             {:error, "Not found: #{id}"}
         end
       end
-    else
-      {:error, msg} -> {:error, msg}
     end
   end
-
-  defp validate_depth(d) when d in [1, 2], do: :ok
-  defp validate_depth(_), do: {:error, "depth must be 1 or 2 (no deeper value allowed)"}
 
   defp build_links_result(index, id, chunk_ids, direction, depth) do
     base = %{id: id}

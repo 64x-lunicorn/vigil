@@ -1,19 +1,20 @@
 defmodule Vigil.Search do
   @moduledoc false
 
-  @max_limit 25
-  @default_limit 10
   @preview_len 120
 
   @doc """
   `items` is a list of maps:
   `%{id:, file_title:, heading_path:, type:, body:, body_downcased:, updated_at:}`.
 
-  `opts`: `:type`, `:prefer`, `:limit`.
+  `opts`: `:prefer`, and `:limit`, which is required. The bound on `limit` is
+  declared in `Vigil.MCP.Tools`' table and refused there; a limit that arrives
+  here has already been validated against it, so this function takes the
+  caller at its word rather than silently returning fewer hits than asked for.
   """
-  def run(items, query, opts \\ %{}) do
+  def run(items, query, opts) do
     q = String.downcase(query)
-    limit = opts |> Map.get(:limit, @default_limit) |> min(@max_limit) |> max(0)
+    limit = Map.fetch!(opts, :limit)
     prefer = Map.get(opts, :prefer)
 
     items
