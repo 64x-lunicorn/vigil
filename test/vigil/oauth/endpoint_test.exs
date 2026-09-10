@@ -1,8 +1,11 @@
 defmodule Vigil.OAuth.EndpointTest do
   @moduledoc """
-  The authorization server over HTTP, driven through `Vigil.MCP.Server` so the
-  forwarding is exercised too. The decisions these paths make are tested
-  without a conn in `Vigil.OAuth.FlowTest`.
+  The authorization server over HTTP, driven directly against
+  `Vigil.OAuth.Endpoint`. That `Vigil.MCP.Server` forwards everything it does
+  not own to the authorization server is asserted once, below; the two `/mcp`
+  behaviors — the audience check and a token surviving an `OAuth.Store`
+  restart — go through `Server` because `/mcp` is its own. The decisions
+  these paths make are tested without a conn in `Vigil.OAuth.FlowTest`.
   """
 
   use ExUnit.Case, async: false
@@ -10,24 +13,19 @@ defmodule Vigil.OAuth.EndpointTest do
 
   alias Vigil.MCP.Server
   alias Vigil.OAuth
-  alias Vigil.Store
 
   @issuer "https://vault.factory-lab.org"
   @resource "https://vault.factory-lab.org/mcp"
   @password "correct-horse-battery-staple"
 
   setup do
-    vault = Vigil.FixtureVault.build()
-    on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
-    start_supervised!({Store, vault_path: vault, exclude: [], git_remote: "origin"})
-    start_supervised!(Vigil.MCP.Envelope)
     start_supervised!(Vigil.RateLimit)
-
     oauth = Vigil.OAuthCase.setup!()
-    %{vault: vault, state_dir: oauth.state_dir}
+    %{state_dir: oauth.state_dir}
   end
 
-  defp call(conn), do: Server.call(conn, Server.init([]))
+  defp call(conn), do: OAuth.Endpoint.call(conn, OAuth.Endpoint.init([]))
+  defp server_call(conn), do: Server.call(conn, Server.init([]))
 
   defp get_json(path) do
     conn(:get, path) |> call()
@@ -76,6 +74,17 @@ defmodule Vigil.OAuth.EndpointTest do
 
   defp extract_query_param(url, key) do
     URI.parse(url).query |> URI.decode_query() |> Map.get(key)
+  end
+
+  ## Forwarding
+
+  test "Vigil.MCP.Server forwards a path it does not own to the authorization server" do
+    conn = conn(:get, "/.well-known/oauth-protected-resource") |> server_call()
+
+    assert conn.status == 200
+    body = Jason.decode!(conn.resp_body)
+    assert body["resource"] == @resource
+    assert body["authorization_servers"] == [@issuer]
   end
 
   ## Discovery
@@ -279,7 +288,7 @@ defmodule Vigil.OAuth.EndpointTest do
       conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{bad_token}")
-      |> call()
+      |> server_call()
 
     assert conn.status == 401
   end
@@ -807,7 +816,7 @@ defmodule Vigil.OAuth.EndpointTest do
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{token}")
       |> put_req_header("mcp-session-id", "persist-session")
-      |> call()
+      |> server_call()
 
     assert conn.status == 200
   end

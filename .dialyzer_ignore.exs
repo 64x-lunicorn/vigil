@@ -13,5 +13,5 @@
   # never returns `:nomatch`. The branch is dead defensive code, not a
   # behavioural bug: the live branch returns `length([]) == 0` for "no match",
   # which is the same answer. Harmless to keep, worth removing in a cleanup PR.
-  {"lib/vigil/search.ex", :pattern_match}
+  {"lib/vigil/index.ex", :pattern_match}
 ]

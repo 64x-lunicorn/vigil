@@ -174,7 +174,7 @@ The first two rows are one table, `Vigil.RateLimit`'s, and the third is
 The middle row is the one that bounds an unauthenticated caller, and it is
 checked *before* the handler runs rather than inside it, so a refusal costs
 nothing the request was trying to buy: `/authorize` refuses before
-`Vigil.OAuth.Client.resolve/2` can send a CIMD fetch to an address the caller
+`Vigil.OAuth.Client.resolve/3` can send a CIMD fetch to an address the caller
 chose, `/register` before it writes a `:dets` row and fsyncs it, `/token`
 before it looks a guess up. Refusals take the shape of the surface they
 refuse — an HTML page for the consent form, an RFC 6749 `temporarily_unavailable`

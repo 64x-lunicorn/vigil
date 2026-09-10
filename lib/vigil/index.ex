@@ -12,12 +12,27 @@ defmodule Vigil.Index do
   returns an index. `put/2` and `remove/2` return a new index — the link
   index (`Vigil.LinkIndex`) is rebuilt in full on every call, as it was in
   `Vigil.Store`'s ETS tables (`docs/design.md`, "The link index").
+
+  `search/2` decides filtering, matching, scoring, previews and `hub` in one
+  place — a search result's shape is decided once, here, rather than split
+  with the ranking half of the decision behind a seam of its own. `strength/1`
+  publishes the scoring scale for the one caller outside this module that
+  reads it: `Vigil.Vault.Policy`'s duplicate gate.
   """
 
-  alias Vigil.{Events, LinkIndex, Parser, Search, Slug}
+  alias Vigil.{Events, LinkIndex, Parser, Slug}
   alias Vigil.Vault.Rules
 
   @stale_decision_days 180
+
+  # The scoring scale `search/2` ranks with, defined once and read by both
+  # `score/3` and `strength/1`.
+  @title 10
+  @heading 5
+  @body_occurrence 1
+  @body_occurrence_cap 5
+  @preferred_type 5
+  @preview_len 120
 
   defmodule Note do
     @moduledoc "One vault note, as the index carries it."
@@ -236,10 +251,48 @@ defmodule Vigil.Index do
   end
 
   @doc """
+  What `kind` is worth on the scoring scale `search/2` ranks with.
+
+    * `:title` — the query appears in the note's title.
+    * `:heading` — it appears in a heading on the way to the chunk.
+    * `:body_occurrence` — it appears once in the body.
+    * `:body_occurrences_max` — the most the body can contribute, however
+      often the query occurs in it.
+    * `:preferred_type` — the chunk has the type the caller preferred.
+
+  The whole scale is published, not only the one number a caller compares
+  against: what a threshold means is a claim about how the parts add up, and
+  neither a caller nor a test can check that claim unless the parts are named.
+
+  `strength(:title)` is the lowest score meaning *the query names this note*
+  rather than merely appearing in it — for a search with no preferred type. A
+  title hit reaches it alone; the only other way to it is a heading hit with
+  the body at its maximum. A `prefer` hint adds a second axis and the reading
+  no longer holds: `:preferred_type` lifts a heading hit or a body at its
+  maximum to the same score, and a chunk of the preferred type scores above
+  zero without matching the query anywhere. `Vigil.Vault.Policy`'s duplicate
+  gate is asked without a preference, which is what makes the reading it
+  relies on true.
+  """
+  @spec strength(atom) :: pos_integer
+  def strength(:title), do: @title
+  def strength(:heading), do: @heading
+  def strength(:body_occurrence), do: @body_occurrence
+  def strength(:body_occurrences_max), do: @body_occurrence * @body_occurrence_cap
+  def strength(:preferred_type), do: @preferred_type
+
+  @doc """
   Answers the `search` tool: the domain and type filters apply before
-  matching, `journal/` is hidden unless asked for by name, ranking and
-  previews come from `Vigil.Search`, and `hub` is attached when exactly one
-  other note links to the hit's note.
+  matching, `journal/` is hidden unless asked for by name, matching is a
+  literal phrase against a chunk's title/headings/body, scoring is the
+  additive scale `strength/1` publishes, and `hub` is attached when exactly
+  one other note links to the hit's note.
+
+  `opts` inside `params`: `:prefer`, and `:limit`, which is required. The
+  bound on `limit` is declared in `Vigil.MCP.Tools`' table and refused there;
+  a limit that arrives here has already been validated against it, so this
+  function takes the caller at its word rather than silently returning fewer
+  hits than asked for.
   """
   def search(index, params) do
     query = Map.fetch!(params, :query)
@@ -251,8 +304,7 @@ defmodule Vigil.Index do
     index.chunks
     |> Map.values()
     |> Enum.filter(&search_filter?(&1, domain, type_filter))
-    |> Enum.map(&search_item/1)
-    |> Search.run(query, %{limit: limit, prefer: prefer})
+    |> rank(query, %{limit: limit, prefer: prefer})
     |> Enum.map(&attach_hub(index, &1))
   end
 
@@ -267,16 +319,89 @@ defmodule Vigil.Index do
     domain_ok and type_ok
   end
 
-  defp search_item(chunk) do
+  defp rank(chunks, query, opts) do
+    q = String.downcase(query)
+    limit = Map.fetch!(opts, :limit)
+    prefer = Map.get(opts, :prefer)
+
+    chunks
+    |> Enum.map(&{score(&1, q, prefer), &1})
+    |> Enum.filter(fn {score, _} -> score > 0 end)
+    |> Enum.sort_by(fn {score, chunk} -> {-score, negated_time(chunk.updated_at)} end)
+    |> Enum.take(limit)
+    |> Enum.map(fn {score, chunk} -> to_search_result(chunk, score) end)
+  end
+
+  defp negated_time(nil), do: 0
+  defp negated_time(%DateTime{} = dt), do: -DateTime.to_unix(dt)
+
+  defp score(chunk, q, prefer) when q != "" do
+    title_hit? = String.contains?(String.downcase(chunk.file_title), q)
+
+    heading_hit? =
+      Enum.any?(chunk.heading_path, fn h -> String.contains?(String.downcase(h), q) end)
+
+    body_hits = count_occurrences(chunk.body_downcased, q)
+
+    score = 0
+    score = if title_hit?, do: score + @title, else: score
+    score = if heading_hit?, do: score + @heading, else: score
+    score = score + @body_occurrence * min(body_hits, @body_occurrence_cap)
+    score = if prefer && chunk.type == prefer, do: score + @preferred_type, else: score
+    score
+  end
+
+  defp score(_chunk, "", _prefer), do: 0
+
+  defp count_occurrences(_haystack, ""), do: 0
+
+  defp count_occurrences(haystack, needle) do
+    case :binary.matches(haystack, needle) do
+      :nomatch -> 0
+      matches -> length(matches)
+    end
+  end
+
+  defp to_search_result(chunk, score) do
     %{
       id: chunk.id,
-      file_title: chunk.file_title,
-      heading_path: chunk.heading_path,
+      title: search_display_title(chunk),
       type: chunk.type,
-      body: chunk.body,
-      body_downcased: chunk.body_downcased,
-      updated_at: chunk.updated_at
+      score: score,
+      preview: search_preview(chunk.body)
     }
+  end
+
+  defp search_display_title(%{file_title: title, heading_path: path}) do
+    Enum.join([title | path], " › ")
+  end
+
+  defp search_preview(body, limit \\ @preview_len) do
+    text =
+      body
+      |> String.replace(~r/\r?\n/, " ")
+      |> String.replace(~r/[#*_\[\]]/, "")
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    if String.length(text) <= limit do
+      text
+    else
+      truncate_at_word(text, limit) <> "…"
+    end
+  end
+
+  defp truncate_at_word(text, limit) do
+    truncated = String.slice(text, 0, limit)
+
+    case :binary.matches(truncated, " ") do
+      [] ->
+        truncated
+
+      matches ->
+        {pos, _len} = List.last(matches)
+        String.slice(truncated, 0, pos)
+    end
   end
 
   # The hub of a note, when exactly one other note links to it. Linked from
