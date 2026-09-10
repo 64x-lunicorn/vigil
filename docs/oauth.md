@@ -124,14 +124,39 @@ Redirect URIs are validated at registration: each must be `https://`, or
 
 If `client_id` is an `https://` URL, the document is fetched and validated:
 
-1. Fetch over HTTPS, 5 s timeout, 64 KB maximum.
+1. Fetch over HTTPS, 5 s timeout, 64 KB maximum. The cap is applied **during**
+   the read — a declared `Content-Length` over it ends the request before any
+   body is read, and an undeclared body is counted as it arrives and cancelled
+   on the chunk that crosses the cap — so an oversized response is never
+   buffered in full.
 2. `client_id` inside the document must equal the URL exactly.
 3. Required fields present: `client_id`, `client_name`, `redirect_uris`.
 4. Result cached for one hour.
 
-**SSRF protection:** HTTPS only, redirects are not followed, and the resolved
-IP must not fall into `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`,
-`192.168.0.0/16`, `169.254.0.0/16`, `::1` or `fc00::/7`.
+**SSRF protection.** HTTPS only, and redirects are not followed, so a 302 into
+the private range cannot be followed either.
+
+The host is resolved **once**. That address is checked, and the socket is then
+opened against *that address* rather than against the URL. This is what closes
+DNS rebinding: a guard that resolves, approves, and then hands the URL to an
+HTTP client which resolves again is bypassed by an attacker who controls the
+host's DNS and answers the two lookups differently — a public address for the
+guard, `127.0.0.1` for the connection. With one lookup there is no second
+answer to give.
+
+Pinning the address costs nothing in certificate verification. The host travels
+as the `Host` header and as `server_name_indication`, which in OTP's `:ssl` is
+both the SNI extension and the reference identity the hostname check runs
+against — so TLS is still verified against the system trust store, for the name
+in the `client_id`, not for the address.
+
+The address must not fall into any of:
+
+| Family | Refused |
+|---|---|
+| IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.18.0.0/15` (benchmarking) |
+| IPv6 | `::`, `::1`, `fc00::/7` (unique local), `fe80::/10` (link-local) |
+| IPv4-mapped IPv6 | `::ffff:a.b.c.d` is unfolded to `a.b.c.d` first, so every IPv4 row above covers its mapped form |
 
 ---
 
