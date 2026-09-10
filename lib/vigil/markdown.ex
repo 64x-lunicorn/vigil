@@ -1,7 +1,8 @@
 defmodule Vigil.Markdown do
   @moduledoc """
   The one reading of a Markdown note: what counts as a heading, where the
-  frontmatter block ends, how content splits into lines.
+  frontmatter block ends, how content splits into lines, and which of those
+  lines are fenced code.
 
   Before this module the same three facts were restated in `Vigil.Parser`,
   `Vigil.Store`, `Vigil.VaultCheck` and `mix vigil.slug_diff`, so the running
@@ -16,6 +17,26 @@ defmodule Vigil.Markdown do
   @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
 
   @frontmatter_marker "---"
+
+  # A fence delimiter: leading space, then three or more backticks or three or
+  # more tildes. An opening delimiter may carry an info string (```markdown);
+  # a closing one carries nothing but whitespace. Group 1 is the run itself,
+  # group 2 whatever follows it on the line.
+  @fence_re ~r/^\s*(`{3,}|~{3,})(.*)$/
+
+  @typedoc """
+  What one line of a note is. `:fence` is a delimiter line, `:code` a line
+  inside a fenced block — for everyone but a syntax highlighter the two are
+  the same thing: body content that says nothing about the note's structure.
+  """
+  @type line_kind ::
+          :fence
+          | :code
+          | {:h1, String.t()}
+          | {:heading, 2..4, String.t()}
+          | :content
+
+  @type read_line :: %{line: String.t(), kind: line_kind()}
 
   @doc """
   `content` ending in exactly one `\\n` — the shape of every file vigil writes.
@@ -33,6 +54,76 @@ defmodule Vigil.Markdown do
     case List.last(lines) do
       "" -> Enum.slice(lines, 0..-2//1)
       _ -> lines
+    end
+  end
+
+  @doc """
+  Reads a note into its lines, each classified: a fence delimiter, a line
+  inside a fenced block, the H1 title, an H2–H4 heading, or ordinary content.
+
+  Takes the note's `content`, or the lines a caller has already split off —
+  `Vigil.Parser` hands over the body lines it kept past the frontmatter block.
+  Line numbers stay with the caller, which is the only one that knows what the
+  first line it handed over is numbered.
+
+  Fence state is a fact about a whole file in line order, which is why it is
+  decided here and not by a regex over a body: a pair-matching regex cannot
+  tell an opening delimiter from a closing one when a note holds an odd number
+  of them, and a fence left open at the end of a note is a real case. A block
+  opened with backticks is closed by backticks only, by at least as many as
+  opened it, and by a delimiter carrying no info string.
+  """
+  @spec read(String.t() | [String.t()]) :: [read_line()]
+  def read(content) when is_binary(content), do: content |> split_lines() |> read()
+
+  def read(lines) when is_list(lines) do
+    {read, _open} =
+      Enum.map_reduce(lines, nil, fn line, open ->
+        {kind, open} = classify(line, open)
+        {%{line: line, kind: kind}, open}
+      end)
+
+    read
+  end
+
+  # Inside a block: only its own closing delimiter ends it; everything else,
+  # heading-shaped lines included, is code.
+  defp classify(line, {char, length} = open) do
+    case fence_delimiter(line) do
+      {^char, closing_length, ""} when closing_length >= length -> {:fence, nil}
+      _ -> {:code, open}
+    end
+  end
+
+  defp classify(line, nil) do
+    case fence_delimiter(line) do
+      {char, length, _info} ->
+        {:fence, {char, length}}
+
+      nil ->
+        {heading_kind(line), nil}
+    end
+  end
+
+  defp heading_kind(line) do
+    case h1(line) do
+      nil ->
+        case heading(line) do
+          {rank, text} -> {:heading, rank, text}
+          nil -> :content
+        end
+
+      title ->
+        {:h1, title}
+    end
+  end
+
+  # `{delimiter character, its length, the rest of the line trimmed}`, or `nil`
+  # for a line that is no delimiter at all.
+  defp fence_delimiter(line) do
+    case Regex.run(@fence_re, line) do
+      [_, run, info] -> {String.first(run), String.length(run), String.trim(info)}
+      nil -> nil
     end
   end
 
