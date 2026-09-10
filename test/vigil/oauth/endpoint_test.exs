@@ -824,17 +824,22 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Janitor sweep (time injected, no sleeping)
 
   test "an expired code is gone after a sweep" do
-    OAuth.Store.put_code("stale-code", %{
-      client_id: "x",
-      redirect_uri: "https://x/y",
-      code_challenge: "y",
-      resource: @resource,
-      expires_at: System.system_time(:second) - 1
-    })
+    {201, client} = register(["https://client.example/cb"])
+    {_verifier, challenge} = pkce_pair()
+
+    {:ok, ctx} =
+      OAuth.Flow.authorize_request(
+        authorize_query(client["client_id"], "https://client.example/cb", challenge)
+      )
+
+    # A code lives a minute, so one minted an hour ago has expired. Minted by
+    # the module that owns the record, so what the sweep walks is the shape
+    # production writes.
+    code = OAuth.Code.issue(ctx, System.system_time(:second) - 3600)
 
     OAuth.Store.sweep_expired(System.system_time(:second))
 
-    assert OAuth.Store.take_code("stale-code") == :error
+    assert OAuth.Store.take_code(code) == :error
   end
 
   ## CIMD SSRF guard (deterministic — a literal loopback IP needs no network access)

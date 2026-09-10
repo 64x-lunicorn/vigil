@@ -149,6 +149,17 @@ The reason is a category difference: a note is a statement about the world and
 ages. A skill is an instruction to the assistant and does not. They share a Git
 repository and nothing else.
 
+**A skill write goes through the single writer; a skill read does not.**
+Principle 2 is a rule about writes, and a skill write earns the mailbox: it
+commits and pushes, in order with note writes. The two reads inherited that
+routing without the argument and paid for it — the push runs inside the
+writer's handler, so a skill read queued behind a network round trip, and a
+skill read is the mandatory bootstrap in front of every write (Security model,
+layer 4). They are answered in the caller's own process now, against the vault
+path `Vigil.Store` publishes at startup rather than answers questions about.
+`Vigil.Skills` takes that path as a plain argument and holds no state of its
+own, which is what makes the two reads free to leave.
+
 ### Frontmatter — exactly one required field
 
 ```yaml
@@ -169,10 +180,11 @@ either derivable or was deliberately rejected.
 
 **`Vigil.Vault.Frontmatter` owns that rule.** It takes a type and the raw
 `starts`/`ends` beside it and answers with the parsed values or with a typed
-problem. A caller renders that verdict in its own register rather than
-restating the rule: `Vigil.Vault.Policy` renders it as the refusal the write
-gate hands back. `Vigil.Parser` and the doctor still state the rule themselves
-and are to be moved onto the owner.
+problem. Each caller renders that verdict in its own register rather than
+restating the rule: `Vigil.Vault.Policy` as the refusal the write gate hands
+back, `Vigil.Parser` as the downgrade to `reference` plus a warning,
+`Vigil.VaultCheck` as a finding. No module states any part of the rule except
+the owner.
 
 The owner exists because the three statements had drifted. The write gate had
 no ordering rule at all, so it accepted an event whose `ends` preceded its
@@ -183,10 +195,27 @@ itself had just written. Vigil is the vault's only writer (principle 2), which
 is what makes a write path that can produce a note its own reader refuses
 indefensible: there is no second writer to blame it on.
 
-**Parsing is defensive.** Missing frontmatter, unparsable YAML, a missing or
-invalid `type` — all produce a warning with path and reason, and the note is
-parsed anyway and treated as `reference`. The server always starts, nothing is
-lost, nothing crashes.
+The doctor had drifted the other way. It checked that an event carried a
+`starts` and never that it carried an `ends`, so a note the write gate refuses
+passed the doctor; and its ordering check quietly returned nothing for a
+timestamp it could not parse, which is the exact input the write gate refuses.
+Both halves are gone with the rule they restated.
+
+**Parsing is defensive.** Missing frontmatter, unparsable YAML, and every
+verdict the owner refuses — a missing or invalid `type`, an event without both
+timestamps or with unparsable ones or with its `ends` first, and `starts`/`ends`
+on a note that is not an event — all produce a warning with path and reason,
+and the note is parsed anyway and treated as `reference`. The server always
+starts, nothing is lost, nothing crashes.
+
+The last of those is wider than it was: a `decision` carrying a stray
+timestamp used to index as a `decision` with the timestamps dropped, and now
+downgrades like any other frontmatter the vault does not allow. That follows
+from the rule having one owner — the reader applies the verdict it is given
+rather than a subset of it — and it costs the note its place in `lint`'s stale
+report until a human fixes the file. Vigil never writes such a note: the write
+gate refuses it on the same verdict, so it can only arrive hand-written, and
+the doctor names it.
 
 ### Derived metadata
 
@@ -353,7 +382,10 @@ drift out of agreement the way hand-written twins do, and adding a tool is
 adding a row.
 
 **The call is the table's third product.** A row's `call:` names the
-operation; its parameters travel under the names the table gives them. The one
+operation; its parameters travel under the names the table gives them.
+`Vigil.Store` answers all but two of them — the two skill reads are answered
+against `Vigil.Skills` in the caller's process, for the reason under
+"`skills/` — one repository, two systems". The one
 exception is `skill_key`, which is a parameter of no operation — it carries the
 SkillKey of the Security model's layer 4, the gate reads it, and it does not
 travel. An enum's internal form is the atom of the same name, derived once from
@@ -380,15 +412,21 @@ parameters are ignored: the schemas do not set `additionalProperties: false`,
 and rejecting extras a client legitimately sent would fail callers over
 something the server never declared.
 
-**One shape for every tool-facing call.** `Vigil.Store.call/2` takes an
-operation and a params map — not a positional pair for `read`, a positional
-triple for `links` and a map for `search`. The difference
-between two tools is the map, so a parameter added to a tool changes the table
-and the handler that reads it, rather than a client function, a message shape
-and a `handle_call` clause as well. The eight writes share a single clause:
-which operation is being written is data `Vigil.Vault.Policy` and
-`Vigil.Vault.Plan` already take as an argument. What stays per operation is
-the contract — the head that matches what a call cannot do without.
+**One shape for every tool-facing call, all the way down.**
+`Vigil.Store.call/2` takes an operation and a params map — not a positional
+pair for `read`, a positional triple for `links` and a map for `search` — and
+so does the `Vigil.Index` function that answers it. The difference between two
+tools is the map, so a parameter added to a read tool changes the table and
+the index function that reads it, and nothing in between: not a client
+function, not a message shape, not a `handle_call` clause, and not an argument
+list that unpacks the map back into the positional triple it replaced.
+
+The five reads share a single `handle_call` clause and so do the eight writes,
+because in both groups the operation is the only difference: it names the
+`Vigil.Index` function that answers a read, and `Vigil.Vault.Policy` and
+`Vigil.Vault.Plan` already take a write as an argument. What stays per
+operation is the contract — the head that matches what a call cannot do
+without.
 
 A bound is part of that declaration, not a correction applied afterwards.
 Integer parameters carry a range in the table (`limit` is `1..25`, `depth` is
@@ -513,10 +551,13 @@ write.
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
 write must not cost read access to everything else. A caller that breaks a
-declared contract outright — a `search` without a `limit`, a `links` with a
-depth the tool table does not allow, a `read` without an id — is matched in
-`Vigil.Store.call/2`'s heads, so it fails in its own process rather than in
-the writer's.
+declared contract outright — a `search` without a `limit`, a `links` without a
+depth, a `read` without an id — is matched in `Vigil.Store.call/2`'s heads, so
+it fails in its own process rather than in the writer's. A head states what
+its operation cannot do without and never a *bound*: `depth` is `1..2` in the
+tool table, which refuses `3` before the Store is reached, and a second
+statement of the range here would be free to disagree with the schema the
+server publishes.
 
 The write effect itself belongs to `Vigil.Commit`: writing a file, deleting
 one, moving one, pushing, and the wording for a POSIX error — everything it
@@ -528,6 +569,64 @@ above, which `Vigil.Store` states where it executes a plan; the reparse
 between commit and push, which would index a skill as a note; and each write
 action's push-failure message, which names its own object: a change, a
 deletion, a move, a skill.
+
+## Git is reached through a value
+
+`Vigil.Commit` is the write effect, and it does two things at once: it touches
+the filesystem and it commits. The filesystem half stays where it is. The git
+half is a value its callers hold rather than a module they name.
+
+**The value is the whole of `Vigil.Git`, not the write half.** Six questions:
+`add_commit`, `remove_commit`, `move_commit`, `push` — and `pull` and
+`log_metadata`, which no write ever asks. Those two belong to the load, and
+`Vigil.Store` asks them directly. A seam drawn around the write effect alone
+would leave every load reaching for a repository, and `log_metadata` answering
+`%{}` for a directory that is not one — which is a `created_at` of `nil` on
+every note, arriving as an ordinary answer. The seam is drawn where git is,
+not where the writes are.
+
+**It is a struct of functions with no defaults**, built by `struct!/2`, the
+same shape and the same rule as `Vigil.Vault.Facts`: a question added and left
+unwired fails at construction rather than answering. The production adapter is
+a function on `Vigil.Git` beside the contract it implements, not a set of
+closures assembled by a caller — there are two callers, `Vigil.Store` and
+`Vigil.Skills`, and an adapter assembled at the call site would exist twice.
+`Store` builds it when it is not handed one; `Skills` has no default, because
+it holds no configuration it could build one from. One default, in one place.
+
+**The second adapter is a commit log, and it keeps the metadata.** It records
+what it was asked to commit, under the instant it was handed, authored as
+`vigil` — and answers `log_metadata` from that record. It does not read a clock
+of its own. The alternative, an adapter answering "no metadata", was rejected:
+it would put a `created_at` of `nil` under every test in the suite, which is a
+shape production never has.
+
+This is not a second metadata database, and principle 3 is untouched by it.
+"Creation date = first commit" is a claim about where a fact lives and what
+therefore must not be written into frontmatter. What the seam states is
+narrower: a commit reports the instant and the author it was made under. Git
+satisfies that claim by being a metadata database. The second adapter
+satisfies it by remembering. Neither invents a fact the other derives — and
+the one thing that could go wrong here, the two drifting apart, is the reason
+the contract is tested rather than assumed.
+
+**One suite runs against both adapters, and it is the only thing that touches
+a repository.** Everything git actually owns is asserted there: that a commit
+is authored `vigil <vigil@local>` whatever the ambient configuration says,
+that a failed push leaves the local commit standing, that `move` and `delete`
+are `git mv` and `git rm` rather than filesystem calls, that a first commit is
+what `log_metadata` reports as a creation date. Every other test asserts
+something about vigil and merely used to travel through git to do it — that a
+write path leaves one trailing newline, that the index carries a `created_at`
+across an append, that a push failure is reported in the words the operation
+deserves. Those are claims about `Vigil.Markdown`, `Vigil.Index` and
+`Vigil.Store`, and each of them now fails for one reason instead of two.
+
+The speed is a consequence and not the argument. The argument is that
+`Vigil.Store`'s order — perform, commit, reparse, push — was the one part of
+the write path with no test that could fail on it, because exercising it meant
+building a repository. An adapter that records its calls can be asked what
+order they came in.
 
 ---
 

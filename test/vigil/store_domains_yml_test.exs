@@ -44,7 +44,6 @@ defmodule Vigil.StoreDomainsYmlTest do
 
     start_supervised!({Store, vault_path: tmp, exclude: [], git_remote: "origin"})
     assert search(%{query: "irgendwas"}) == []
-    assert Store.domain_names() == []
   end
 
   test "unreadable _domains.yml logs a warning and instructions_domains_text falls back to empty" do

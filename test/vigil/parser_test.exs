@@ -130,6 +130,45 @@ defmodule Vigil.ParserTest do
     assert file.type == :reference
   end
 
+  # The rule is Vigil.Vault.Frontmatter's; what the parser keeps is the
+  # downgrade and the warning. So a `decision` carrying timestamps — which the
+  # write gate refuses, and which the parser used to index as a decision with
+  # the timestamps silently dropped — is a reference here too.
+  test "a non-event carrying starts/ends is downgraded and says why" do
+    content = """
+    ---
+    type: decision
+    starts: 2026-07-10T17:00:00+02:00
+    ends: 2026-07-12T20:00:00+02:00
+    ---
+    # D
+    text
+    """
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, %{type: :reference, starts: nil, ends: nil}} =
+                 Parser.parse("x/d.md", content, %{})
+      end)
+
+    assert log =~ "starts/ends on a note that is not an event"
+    assert log =~ "treating as reference"
+  end
+
+  test "event with a starts and no ends is treated as reference" do
+    content = """
+    ---
+    type: event
+    starts: 2026-07-10T17:00:00+02:00
+    ---
+    # E
+    text
+    """
+
+    {:ok, file} = Parser.parse("x/e.md", content, %{})
+    assert file.type == :reference
+  end
+
   test "event whose ends precedes its starts is treated as reference" do
     content = """
     ---

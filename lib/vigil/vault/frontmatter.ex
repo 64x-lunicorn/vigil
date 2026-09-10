@@ -8,17 +8,21 @@ defmodule Vigil.Vault.Frontmatter do
   or neither, ISO 8601 with an offset, and `ends` not before `starts`.
 
   Pure, and it renders nothing. `check/3` answers with the parsed values or
-  with a typed problem, and a caller renders that verdict in its own register
-  rather than stating the rule again: `Vigil.Vault.Policy` renders it as the
-  refusal the write gate hands back. `Vigil.Parser` still states the rule
-  itself, as a downgrade to `reference` plus a warning, and so does the
-  doctor, as a finding; both are to be moved onto this module.
+  with a typed problem, and each of the three callers renders that verdict in
+  its own register rather than stating the rule again: `Vigil.Vault.Policy` as
+  the refusal the write gate hands back, `Vigil.Parser` as a downgrade to
+  `reference` plus a warning, `Vigil.VaultCheck` as a finding. No other module
+  states any part of the rule, which is what makes the write gate and the
+  reader unable to disagree.
 
   Stating it three times is how the write gate came to accept an event whose
   `ends` preceded its `starts` — a note the parser then downgraded to
   `reference` when it indexed it, so the file on disk said one thing and the
   index another. Vigil is the vault's only writer; a write path that can
-  produce a note its own reader refuses has no second writer to blame.
+  produce a note its own reader refuses has no second writer to blame. The
+  doctor had drifted the other way and reported neither that event nor an
+  event with a `starts` and no `ends`, and said nothing at all about a
+  timestamp that would not parse — the exact input the write gate refuses.
   """
 
   @enforce_keys [:type, :starts, :ends]

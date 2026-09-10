@@ -46,6 +46,21 @@ making them agree — and the `grant_id` default has to fall one way for issuing
 and the other way for revoking, which is a thing that can only be stated once
 if the two statements live next to each other.
 
+**The authorization-code record has one owner**, on the same argument.
+`Vigil.OAuth.Code` mints every code that exists, answers whether the request
+presenting one may redeem it, and answers whether one has expired. It had been
+the counter-example to the paragraph above: the record was a map literal in
+`Vigil.OAuth.Flow`, destructured field by field through the grant path and
+reached into a sixth time by `Vigil.OAuth.Store`'s sweep — which asked
+`Vigil.OAuth.Token` the very same question about a token, so the store knew
+the shape of one record and not the other. Two tests hand-wrote their own
+variants, one of them without the `grant_id` production always sets.
+
+What stays with `Vigil.OAuth.Flow` is the rendering: five distinct problems,
+one `invalid_grant`, said once. The audience check stays there too, because it
+is the one check the two grants share and RFC 8707 answers it differently
+(`invalid_target`).
+
 **Persistence via `:dets`.** Tokens and registered clients must survive a
 restart, otherwise every deploy forces re-authorization. `:dets` ships with
 OTP; no dependency.
@@ -546,8 +561,8 @@ and a client stays until it is deleted.
 
 | Swept | Owner | Reclaimed when |
 |---|---|---|
-| authorization codes | `Vigil.OAuth.Store` | the code has expired |
-| access and refresh tokens | `Vigil.OAuth.Store` | the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
+| authorization codes | `Vigil.OAuth.Store` | `Vigil.OAuth.Code` says the code has expired |
+| access and refresh tokens | `Vigil.OAuth.Store` | `Vigil.OAuth.Token` says the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
 | consent-failure counters | `Vigil.OAuth.Store` | the 15-minute lockout window has elapsed |
 | CIMD cache entries | `Vigil.OAuth.Store` | the cached hour is up |
 | request-limit windows | `Vigil.RateLimit` | the one-minute window has elapsed |

@@ -107,7 +107,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   # against is read out of a public table too, so a response costs one call
   # into the writer — the tool's own — and not a second one behind it.
   test "the events the snapshot is built from are published, not asked for" do
-    assert :ets.info(:vigil_events, :protection) == :public
-    assert :ets.info(:vigil_events, :owner) == Process.whereis(Store)
+    assert :ets.info(:vigil_store, :protection) == :public
+    assert :ets.info(:vigil_store, :owner) == Process.whereis(Store)
   end
 end

@@ -50,6 +50,25 @@ defmodule Vigil.VaultCheckTest do
     text
     """)
 
+    write.("domaina/event-without-ends.md", """
+    ---
+    type: event
+    starts: 2026-01-01T00:00:00+01:00
+    ---
+    # Event Without Ends
+    text
+    """)
+
+    write.("domaina/event-unparsable-times.md", """
+    ---
+    type: event
+    starts: 2026-07-10T17:00:00
+    ends: 2026-07-12T20:00:00
+    ---
+    # Event Without An Offset
+    text
+    """)
+
     write.("domaina/ends-before-starts.md", """
     ---
     type: event
@@ -228,7 +247,7 @@ defmodule Vigil.VaultCheckTest do
     assert report.overview.domains == 2
     assert "domaina" in report.overview.domain_names
     assert "domainb" in report.overview.domain_names
-    assert report.overview.notes == 20
+    assert report.overview.notes == 22
   end
 
   test "B1: missing frontmatter, missing/unknown type, event rules, oversized frontmatter", %{
@@ -248,8 +267,18 @@ defmodule Vigil.VaultCheckTest do
     assert ["unknown type 'foo' (allowed: reference, decision, event)"] =
              messages_for.("domaina/type-unknown.md")
 
-    assert ["event without starts — will never be picked up by current"] =
+    assert ["event needs both starts and ends — will never be picked up by current"] =
              messages_for.("domaina/event-without-starts.md")
+
+    # The half the doctor used to miss: it checked for a `starts` and never
+    # for an `ends`, so a note the write gate refuses passed the doctor.
+    assert ["event needs both starts and ends — will never be picked up by current"] =
+             messages_for.("domaina/event-without-ends.md")
+
+    # The other half: an ordering check that quietly returned nothing for a
+    # timestamp it could not parse — the exact input the write gate refuses.
+    assert ["starts/ends is not an ISO 8601 timestamp with an offset"] =
+             messages_for.("domaina/event-unparsable-times.md")
 
     assert ["starts/ends have no effect on type 'reference'"] =
              messages_for.("domaina/non-event-with-starts.md")
@@ -285,7 +314,7 @@ defmodule Vigil.VaultCheckTest do
     vault: vault
   } do
     diff = VaultCheck.run(vault).b3_chunk_diff
-    assert diff.checked == 20
+    assert diff.checked == 22
 
     assert [
              %{

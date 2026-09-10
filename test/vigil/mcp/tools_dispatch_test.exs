@@ -1,6 +1,8 @@
 defmodule Vigil.MCP.ToolsDispatchTest do
   # The stub registers itself under `Vigil.Store`'s name, so this file cannot
-  # run beside anything that starts the real one.
+  # run beside anything that starts the real one — including the one describe
+  # below that starts the real Store itself, which is why nothing here is
+  # async.
   use ExUnit.Case, async: false
 
   alias Vigil.MCP.Tools
@@ -205,6 +207,43 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
       assert_receive {:store_call, {:skill_write, params}}
       assert Map.keys(params) |> Enum.sort() == [:content, :name]
+    end
+  end
+
+  # docs/design.md, "skills/ — one repository, two systems": the two skill
+  # reads are answered in the caller's process, against the vault path the
+  # writer publishes. Suspending the writer is the whole claim in one line —
+  # a GenServer.call would block until it timed out, and a skill read is the
+  # mandatory bootstrap (AP-4) in front of every write, so it would otherwise
+  # be queued behind the push at the end of the write before it.
+  describe "a skill read does not enter the writer's mailbox" do
+    setup do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+      start_supervised!({Vigil.Store, vault_path: vault, exclude: [], git_remote: "origin"})
+
+      writer = Process.whereis(Vigil.Store)
+      :sys.suspend(writer)
+      on_exit(fn -> if Process.alive?(writer), do: :sys.resume(writer) end)
+
+      %{vault: vault}
+    end
+
+    test "skill_list answers while the writer is suspended" do
+      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch("skill_list", %{}, @now)
+    end
+
+    test "skill_read answers while the writer is suspended, key and all" do
+      assert {:ok, %{name: "tdd", content: content}} =
+               Tools.dispatch("skill_read", %{"name" => "tdd"}, @now)
+
+      assert content =~ "SkillKey:"
+    end
+
+    test "a missing skill still hands back the bootstrap key" do
+      assert {:error, message} = Tools.dispatch("skill_read", %{"name" => "does-not-exist"}, @now)
+      assert message =~ "tdd"
+      assert message =~ "SkillKey:"
     end
   end
 

@@ -28,6 +28,14 @@ defmodule Vigil.VaultDiscoveryTest do
       assert VaultDiscovery.domain_dirs(root, ["work"]) == ["bike", "projects"]
     end
 
+    test "a root with no directories has no domains" do
+      root = Path.join(System.tmp_dir!(), "vigil_vd_#{System.unique_integer([:positive])}")
+      File.mkdir_p!(root)
+      on_exit(fn -> File.rm_rf(root) end)
+
+      assert VaultDiscovery.domain_dirs(root, []) == []
+    end
+
     test "the result is sorted" do
       assert VaultDiscovery.domain_dirs(System.tmp_dir!() <> "/nope_does_not_exist") == []
     end

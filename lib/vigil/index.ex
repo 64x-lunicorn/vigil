@@ -193,25 +193,15 @@ defmodule Vigil.Index do
   def backlinks(index, key), do: backlinks_for(index, key)
 
   @doc """
-  The adapters `Vigil.Vault.Facts` carries for the questions only the index can
-  answer, as a map ready to be merged into a `Facts` struct.
+  The chunk a section id resolves to, or `nil` — through the same lenient
+  resolution `read/2` uses, so an id that reads is an id that writes. The
+  record carries the canonical path, which is what makes leniency safe: the
+  write goes where the lookup landed, not where the id pointed.
 
-  The policy asks them about the path it derived itself, which is why they are
-  closures over the index rather than values looked up ahead of the decision.
+  One of the three questions only the index can answer for the write gate;
+  `replace_section` and `delete_section` resolve their id with it.
   """
-  def lookups(index) do
-    %{
-      count_headings: fn path -> heading_count(index, path) end,
-      find_chunk: fn id -> find_chunk(index, id) end,
-      find_section: fn path, heading -> chunk_by_heading(index, path, Parser.slug(heading)) end
-    }
-  end
-
-  # The chunk a section id resolves to, or nil — through the same lenient
-  # resolution `read/3` uses, so an id that reads is an id that writes. The
-  # record carries the canonical path, which is what makes leniency safe: the
-  # write goes where the lookup landed, not where the id pointed.
-  defp find_chunk(index, id) do
+  def find_chunk(index, id) do
     case String.split(id, "#", parts: 2) do
       [path_part, _fragment] ->
         case lookup_chunk(index, id, path_part) do
@@ -224,9 +214,12 @@ defmodule Vigil.Index do
     end
   end
 
-  # How many of `path`'s chunks carry a heading — the `rewrite_note` shrink
-  # gate's baseline, reached through `lookups/1`.
-  defp heading_count(index, path) do
+  @doc """
+  How many of `path`'s chunks carry a heading — the `rewrite_note` shrink
+  gate's baseline. `0` for a path the index does not know, which is the
+  permissive answer that switches the gate off.
+  """
+  def count_headings(index, path) do
     case Map.get(index.notes, path) do
       nil -> 0
       note -> Enum.count(note.chunk_ids, &heading_chunk?(index, &1))
@@ -240,11 +233,14 @@ defmodule Vigil.Index do
     end
   end
 
-  # The chunk in `path` whose heading slug matches `target_slug`, or `nil` —
-  # `append`'s existing-section lookup, reached through `lookups/1`. Both sides
-  # are slugged here so the caller never has to know how a heading becomes an
-  # id.
-  defp chunk_by_heading(index, path, target_slug) do
+  @doc """
+  The chunk in `path` whose heading slugifies the same as `heading`, or `nil` —
+  `append`'s existing-section lookup. Both sides are slugged here so the caller
+  never has to know how a heading becomes an id.
+  """
+  def find_section(index, path, heading) do
+    target_slug = Parser.slug(heading)
+
     case Map.get(index.notes, path) do
       nil ->
         nil
@@ -439,8 +435,11 @@ defmodule Vigil.Index do
   and, when asked, its backlinks. An id that misses exactly is retried once
   through path normalization (the lenient lookup). A path that fails the
   safety check answers "Invalid path"; anything else "Not found".
+
+  `params` is the `read` tool's own parameter map: `:id` and `:backlinks`,
+  under the names `Vigil.MCP.Tools`' table gives them.
   """
-  def read(index, id, backlinks?) do
+  def read(index, %{id: id, backlinks: backlinks?}) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
     with :ok <- Slug.safe_path(path_part) do
@@ -567,13 +566,15 @@ defmodule Vigil.Index do
   link to an existing note with a missing fragment names the fragment),
   incoming references, direction `:out`/`:in`/`:both`, depth 1, depth 2
   adding each directly connected note's own depth-1 view with no further
-  recursion, and the same lenient id resolution `read/3` uses.
+  recursion, and the same lenient id resolution `read/2` uses.
 
-  `depth` is bounded where it is declared — `Vigil.MCP.Tools`' table publishes
-  `1..2` and refuses anything else before the call reaches the Store — so this
-  function is not the place a deeper value is caught.
+  `params` is the `links` tool's own parameter map: `:id`, `:direction` and
+  `:depth`, under the names `Vigil.MCP.Tools`' table gives them. `depth` is
+  bounded where it is declared — the table publishes `1..2` and refuses
+  anything else before the call reaches the Store — so this function is not
+  the place a deeper value is caught.
   """
-  def links(index, id, direction, depth) do
+  def links(index, %{id: id, direction: direction, depth: depth}) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
     with :ok <- Slug.safe_path(path_part) do
@@ -692,8 +693,12 @@ defmodule Vigil.Index do
   fragment where present), overlong notes and decision notes stale relative to
   `now`. All four vault-hygiene definitions come from `Vigil.Vault.Rules`, so
   `mix vigil.vault_check` reports the same notes for the same reasons.
+
+  `params` carries `:now` — the instant the response's envelope was decided
+  at. This module is a pure value and reads no clock of its own; a caller with
+  no envelope to share one resolves it before calling.
   """
-  def lint(index, now) do
+  def lint(index, %{now: now}) do
     notes = Map.values(index.notes)
     chunks = Map.values(index.chunks)
 
@@ -775,8 +780,12 @@ defmodule Vigil.Index do
     |> Enum.map(fn n -> %{path: n.path, updated_at: iso(n.updated_at)} end)
   end
 
-  @doc "%{now:, active:, upcoming:, recently_past:} from `Vigil.Events`, over the index's event-typed notes."
-  def current(index, now), do: Events.current(event_notes(index), now)
+  @doc """
+  `%{now:, active:, upcoming:, recently_past:}` from `Vigil.Events`, over the
+  index's event-typed notes. `params` carries `:now`, on the same terms as
+  `lint/2`.
+  """
+  def current(index, %{now: now}), do: Events.current(event_notes(index), now)
 
   @doc """
   The index's event-typed notes — the only part of the index the time envelope
@@ -837,7 +846,7 @@ defmodule Vigil.Index do
   # Rebuilt in full rather than maintained incrementally — see
   # `Vigil.Store`'s former `rebuild_links_index/0` for why (docs/design.md,
   # "The link index"). `Vigil.LinkIndex` returns bag-shaped lists of pairs;
-  # grouped here into maps keyed by chunk id / target key so `read/3` can
+  # grouped here into maps keyed by chunk id / target key so `read/2` can
   # look them up directly instead of scanning.
   defp rebuild_links(index) do
     files = Map.values(index.notes)

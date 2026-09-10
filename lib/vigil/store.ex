@@ -16,7 +16,11 @@ defmodule Vigil.Store do
 
   alias Vigil.Vault.{Decision, Domains, Facts, Plan, Policy}
 
-  @events_table :vigil_events
+  # What this process publishes for readers that must not queue behind it. It
+  # is written from inside the writer — at init for the vault path, on every
+  # index change for the event notes — which is what makes a public table safe
+  # to read anywhere else.
+  @published_table :vigil_store
 
   ## Public API
 
@@ -31,10 +35,10 @@ defmodule Vigil.Store do
   # There is a head per operation and no catch-all, because the head is where
   # a broken contract belongs (docs/design.md, "The write path"): it matches
   # what its operation cannot do without, so a `search` without a `limit`, a
-  # `links` with a depth the tool table does not allow, a `read` without an id
-  # fail in the caller's own process rather than reaching the single writer.
+  # `links` without a depth, a `read` without an id fail in the caller's own
+  # process rather than reaching the single writer.
   # A head matching a bare map has nothing of its own to state: `lint`,
-  # `current`, `reload` and `skill_list` declare no parameter, and the six
+  # `current` and `reload` declare no parameter, and the six
   # writes state their contracts in Vigil.Vault.Policy, the one gate every
   # write goes through. Vigil.MCP.Tools declares every bound and default (`limit` 1..25
   # default 10, `depth` 1..2 default 1, `backlinks` default false) and
@@ -42,8 +46,7 @@ defmodule Vigil.Store do
   def call(:search, %{limit: _} = params), do: request(:search, params)
   def call(:read, %{id: _, backlinks: _} = params), do: request(:read, params)
 
-  def call(:links, %{id: _, direction: _, depth: depth} = params) when depth in [1, 2],
-    do: request(:links, params)
+  def call(:links, %{id: _, direction: _, depth: _} = params), do: request(:links, params)
 
   def call(:create, %{} = params), do: request(:create, params)
   def call(:append, %{} = params), do: request(:append, params)
@@ -53,14 +56,25 @@ defmodule Vigil.Store do
   def call(:update_frontmatter, %{} = params), do: request(:update_frontmatter, params)
   def call(:delete_note, %{} = params), do: request(:delete_note, params)
   def call(:move_note, %{} = params), do: request(:move_note, params)
-  def call(:lint, %{} = params), do: request(:lint, params)
-  def call(:current, %{} = params), do: request(:current, params)
+  # The two rows that resolve an instant. Vigil.MCP.Tools puts the response's
+  # envelope instant into the params of every row declaring `now:`, so in
+  # production nothing is resolved here; the fallback covers a caller with no
+  # envelope to share one, which is a test pinning a moment. It is resolved in
+  # the caller's process rather than behind the writer's mailbox for the
+  # reason bd7e842 removed the other one: a clock read on the far side of the
+  # writer can land in a different minute than the response it belongs to.
+  def call(:lint, %{} = params), do: request(:lint, with_now(params))
+  def call(:current, %{} = params), do: request(:current, with_now(params))
   def call(:reload, %{} = params), do: request(:reload, params)
-  def call(:skill_list, %{} = params), do: request(:skill_list, params)
-  def call(:skill_read, %{name: _} = params), do: request(:skill_read, params)
   def call(:skill_write, %{name: _, content: _} = params), do: request(:skill_write, params)
 
   defp request(op, params), do: GenServer.call(__MODULE__, {op, params})
+
+  defp with_now(params), do: Map.put_new_lazy(params, :now, &Clock.now/0)
+
+  # The five the index answers. Each names the Vigil.Index function that
+  # answers it, which is what lets one `handle_call` clause cover all of them.
+  @read_ops [:search, :read, :links, :lint, :current]
 
   # The eight that go through the write path (docs/design.md, "The write
   # path"): Vigil.Vault.Policy and Vigil.Vault.Plan already take the operation
@@ -77,8 +91,8 @@ defmodule Vigil.Store do
   ]
 
   # Not tool-facing: the time envelope Vigil.MCP.Envelope attaches to every
-  # tool result, and the two answers about the vault's domains that the same
-  # server puts into its `initialize` response.
+  # tool result, and the raw _domains.yml text the same server puts into its
+  # `initialize` response.
   #
   # The snapshot is computed in the caller, out of the event notes this module
   # publishes on every index change — the same reason Vigil.MCP.Envelope's own
@@ -87,7 +101,14 @@ defmodule Vigil.Store do
   # which for a write tool would land after the write.
   def snapshot(now), do: Events.snapshot(published_events(), now)
 
-  def domain_names(), do: GenServer.call(__MODULE__, :domain_names)
+  # Where the vault is, for the two callers that need it without the mailbox:
+  # `skill_list` and `skill_read` are answered in the caller's process
+  # (Vigil.MCP.Tools), because a skill read is the mandatory bootstrap before
+  # every write and must not queue behind the push of the write before it.
+  # Written once at init and never again — this process is bound to one vault
+  # for its whole life.
+  def vault_path(), do: :ets.lookup_element(@published_table, :vault_path, 2)
+
   def instructions_domains_text(), do: GenServer.call(__MODULE__, :instructions_domains_text)
 
   # No fallback for a missing table. It lives with this process, so its absence
@@ -98,7 +119,7 @@ defmodule Vigil.Store do
   # session's state, so an empty snapshot would be read as every active event
   # having finished, and the next response would report a phase change that
   # never happened.
-  defp published_events, do: :ets.lookup_element(@events_table, :events, 2)
+  defp published_events, do: :ets.lookup_element(@published_table, :events, 2)
 
   ## GenServer
 
@@ -112,9 +133,11 @@ defmodule Vigil.Store do
       raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
     end
 
-    if :ets.whereis(@events_table) == :undefined do
-      :ets.new(@events_table, [:set, :named_table, :public, read_concurrency: true])
+    if :ets.whereis(@published_table) == :undefined do
+      :ets.new(@published_table, [:set, :named_table, :public, read_concurrency: true])
     end
+
+    :ets.insert(@published_table, {:vault_path, vault_path})
 
     state = %{
       vault_path: vault_path,
@@ -134,22 +157,23 @@ defmodule Vigil.Store do
     {:ok, state}
   end
 
-  # One message shape for all of them: {operation, params}. Every handler
-  # below takes what its operation declared out of the map, and the eight
-  # writes share a single clause — which operation is being written is the
-  # difference, and Vigil.Vault.Policy and Vigil.Vault.Plan already take it as
-  # an argument.
+  # One message shape for all of them: {operation, params}. The five reads and
+  # the eight writes share one clause each, because in both groups the
+  # operation is the only difference: Vigil.Index names each read's answer,
+  # and Vigil.Vault.Policy and Vigil.Vault.Plan already take the write as an
+  # argument.
+  #
+  # A read makes no decision here: the params map is handed on exactly as the
+  # tool table describes it, so a parameter added to a read tool is a change
+  # to the table and to the index function that reads it, and to nothing in
+  # between. The operation *is* the name of that function, which is what
+  # collapses the five clauses into one — and what the compiler cannot check.
+  # The dispatch coverage in Vigil.MCP.ServerTest drives every declared tool
+  # end to end, which is where a row whose `call:` no longer names an index
+  # function fails (docs/design.md, "MCP tool schemas are authoritative").
   @impl true
-  def handle_call({:search, params}, _from, state) do
-    {:reply, Index.search(state.index, params), state}
-  end
-
-  def handle_call({:read, params}, _from, state) do
-    {:reply, Index.read(state.index, params.id, params.backlinks), state}
-  end
-
-  def handle_call({:links, params}, _from, state) do
-    {:reply, Index.links(state.index, params.id, params.direction, params.depth), state}
+  def handle_call({op, params}, _from, state) when op in @read_ops do
+    {:reply, apply(Index, op, [state.index, params]), state}
   end
 
   def handle_call({op, params}, _from, state) when op in @write_ops do
@@ -157,38 +181,13 @@ defmodule Vigil.Store do
     {:reply, result, new_state}
   end
 
-  # `now` is the response's instant, put here by Vigil.MCP.Tools for the two
-  # rows that declare `now:` — the same instant their envelope was decided at,
-  # so `current` cannot report a time its own envelope contradicts. The
-  # fallback covers a caller with no envelope to share it — a test pinning a
-  # moment.
-  def handle_call({:lint, params}, _from, state) do
-    {:reply, Index.lint(state.index, Map.get(params, :now) || Clock.now()), state}
-  end
-
-  def handle_call({:current, params}, _from, state) do
-    {:reply, Index.current(state.index, Map.get(params, :now) || Clock.now()), state}
-  end
-
   def handle_call({:reload, _params}, _from, state) do
     {state, pull_result} = do_full_load(state)
     {:reply, reload_result(pull_result), state}
   end
 
-  def handle_call({:skill_list, _params}, _from, state) do
-    {:reply, do_skill_list(state), state}
-  end
-
-  def handle_call({:skill_read, params}, _from, state) do
-    {:reply, do_skill_read(params.name, state), state}
-  end
-
   def handle_call({:skill_write, params}, _from, state) do
     {:reply, do_skill_write(params.name, params.content, state), state}
-  end
-
-  def handle_call(:domain_names, _from, state) do
-    {:reply, list_domain_names(state), state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
@@ -306,10 +305,8 @@ defmodule Vigil.Store do
 
   # Built fresh per write. The function fields are the adapters at the policy's
   # seam: here they read the filesystem and the index, in Vigil.Vault.PolicyTest
-  # they are literals. The index answers three of them itself
-  # (Vigil.Index.lookups/1), destructured rather than merged so that a lookup
-  # the struct has no field for fails here, and Facts.new/1 requires the rest —
-  # an unanswered question raises instead of opening the gate it guards.
+  # they are literals. Facts.new/1 requires every one of them — an unanswered
+  # question raises instead of opening the gate it guards.
   #
   # `now` is the instant the write's own response's envelope was decided at
   # (Vigil.MCP.Envelope.for_tool/2), passed in rather than read here — a
@@ -317,12 +314,6 @@ defmodule Vigil.Store do
   # resolve `today` to a different day than the envelope heading the same
   # response.
   defp facts(state, now) do
-    %{
-      count_headings: count_headings,
-      find_chunk: find_chunk,
-      find_section: find_section
-    } = Index.lookups(state.index)
-
     Facts.new(
       domains: list_domain_names(state),
       exclude: state.exclude,
@@ -339,9 +330,9 @@ defmodule Vigil.Store do
       find_similar: fn query, domain, depth ->
         Index.search(state.index, %{query: query, domain: domain, limit: depth})
       end,
-      count_headings: count_headings,
-      find_chunk: find_chunk,
-      find_section: find_section
+      count_headings: fn path -> Index.count_headings(state.index, path) end,
+      find_chunk: fn id -> Index.find_chunk(state.index, id) end,
+      find_section: fn path, heading -> Index.find_section(state.index, path, heading) end
     )
   end
 
@@ -484,7 +475,7 @@ defmodule Vigil.Store do
   # of the three write outcomes — goes through here. Publishing inside the
   # writer is what makes the table safe to read anywhere else.
   defp put_index(state, index) do
-    :ets.insert(@events_table, {:events, Index.event_notes(index)})
+    :ets.insert(@published_table, {:events, Index.event_notes(index)})
     %{state | index: index}
   end
 
@@ -558,14 +549,12 @@ defmodule Vigil.Store do
   #
   # skills/ is a separate concern from notes (docs/design.md, "skills/ — one
   # repository, two systems"); the subsystem itself lives in Vigil.Skills, a
-  # standalone module. The :skill_list, :skill_read and :skill_write
-  # operations stay GenServer calls, not delegated directly — skill writes must
-  # still commit and push through the same single-writer mailbox as note
-  # writes (docs/design.md, "One writer").
-
-  defp do_skill_list(state), do: Skills.list(state.vault_path)
-
-  defp do_skill_read(name, state), do: Skills.read(name, state.vault_path)
+  # standalone module. Only :skill_write is a GenServer call, because
+  # principle 2 — one writer — is about writes: a skill write commits and
+  # pushes through the same mailbox as a note write, in order with it. The two
+  # skill *reads* never enter it (Vigil.MCP.Tools answers them against
+  # vault_path/0), so the bootstrap read every write begins with does not
+  # queue behind the push of the write before it.
 
   defp do_skill_write(name, content, state) do
     Skills.write(name, content, %{vault_path: state.vault_path, git_remote: state.git_remote})
