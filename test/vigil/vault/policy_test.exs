@@ -155,7 +155,9 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test ":append requires the file to exist" do
-      assert {:error, msg} = Policy.check(:append, %{path: "bike/ghost.md"}, facts())
+      assert {:error, msg} =
+               Policy.check(:append, %{path: "bike/ghost.md", content: "x"}, facts())
+
       assert msg =~ "File not found"
     end
   end
@@ -169,8 +171,13 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "append cannot reach into skills/ or an excluded domain", %{f: f} do
-      assert {:error, "Invalid path"} = Policy.check(:append, %{path: "skills/tdd.md"}, f)
-      assert {:error, "Invalid path"} = Policy.check(:append, %{path: "work/secret.md"}, f)
+      req = %{content: "x"}
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:append, Map.put(req, :path, "skills/tdd.md"), f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:append, Map.put(req, :path, "work/secret.md"), f)
     end
 
     test "rewrite_note cannot reach into skills/ or an excluded domain", %{f: f} do
@@ -206,7 +213,11 @@ defmodule Vigil.Vault.PolicyTest do
 
   describe "confirm gates" do
     test "delete_note without confirm names the backlinks" do
-      f = facts(path_exists?: fn _ -> true end, backlinks: ["bike/a.md#x", "bike/b.md#y"])
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_backlinks: fn _ -> ["bike/a.md#x", "bike/b.md#y"] end
+        )
 
       assert {:error, msg} = Policy.check(:delete_note, %{path: "bike/x.md", confirm: false}, f)
       assert msg =~ "Destructive operation"
@@ -233,7 +244,7 @@ defmodule Vigil.Vault.PolicyTest do
 
   describe "rewrite_note shrink threshold" do
     test "removing more than half the headings requires confirm" do
-      f = facts(path_exists?: fn _ -> true end, heading_count: 10)
+      f = facts(path_exists?: fn _ -> true end, count_headings: fn _ -> 10 end)
       req = %{path: "bike/x.md", content: "# T\n\n## One\n## Two\n", confirm: false}
 
       assert {:error, msg} = Policy.check(:rewrite_note, req, f)
@@ -241,7 +252,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "a modest shrink goes through without confirm" do
-      f = facts(path_exists?: fn _ -> true end, heading_count: 10)
+      f = facts(path_exists?: fn _ -> true end, count_headings: fn _ -> 10 end)
 
       req = %{
         path: "bike/x.md",
@@ -250,6 +261,60 @@ defmodule Vigil.Vault.PolicyTest do
       }
 
       assert {:ok, _} = Policy.check(:rewrite_note, req, f)
+    end
+  end
+
+  describe "append resolves its target" do
+    setup do
+      %{f: facts(path_exists?: fn _ -> true end)}
+    end
+
+    test "no heading appends at the end of the file", %{f: f} do
+      assert {:ok, %{path: "bike/x.md", target: :end}} =
+               Policy.check(:append, %{path: "bike/x.md", content: "text"}, f)
+    end
+
+    test "a heading the note does not have opens a new section", %{f: f} do
+      assert {:ok, %{target: {:new_section, "Weather"}}} =
+               Policy.check(:append, %{path: "bike/x.md", heading: "Weather", content: "text"}, f)
+    end
+
+    test "a heading the note has resolves to that section's chunk" do
+      chunk = %{heading: "Gear", path: "bike/x.md"}
+      f = facts(path_exists?: fn _ -> true end, find_section: fn _p, _h -> chunk end)
+
+      assert {:ok, %{target: {:section, ^chunk}}} =
+               Policy.check(:append, %{path: "bike/x.md", heading: "Gear", content: "text"}, f)
+    end
+
+    test "a heading in content that lands inside an existing section is rejected" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      assert {:error, msg} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Gear", content: "## Nope\ntext"},
+                 f
+               )
+
+      assert msg =~ "split the section in two"
+    end
+
+    test "the same content is fine at the end of the file and in a new section", %{f: f} do
+      content = "## Fine here\ntext"
+
+      assert {:ok, _} = Policy.check(:append, %{path: "bike/x.md", content: content}, f)
+
+      assert {:ok, _} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Weather", content: content},
+                 f
+               )
     end
   end
 
@@ -262,7 +327,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "replacement content may not introduce headings" do
-      f = facts(chunk: %{heading: "S"})
+      f = facts(find_chunk: fn _ -> %{heading: "S", path: "bike/x.md"} end)
 
       assert {:error, msg} =
                Policy.check(:replace_section, %{id: "bike/x.md#s", content: "## Nope"}, f)
@@ -427,7 +492,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "a section without a heading cannot be replaced or deleted" do
-      f = facts(chunk: %{heading: nil})
+      f = facts(find_chunk: fn _ -> %{heading: nil, path: "bike/x.md"} end)
 
       assert {:error, msg} =
                Policy.check(:replace_section, %{id: "bike/x.md#pre", content: "text"}, f)
@@ -439,7 +504,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "content rules apply once the section is known" do
-      f = facts(chunk: %{heading: "Fueling"})
+      f = facts(find_chunk: fn _ -> %{heading: "Fueling", path: "bike/x.md"} end)
 
       assert {:error, msg} =
                Policy.check(:replace_section, %{id: "bike/x.md#fueling", content: "## Nope"}, f)
@@ -451,7 +516,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "the writable-path rules still apply to a section id" do
-      f = facts(chunk: %{heading: "H"})
+      f = facts(find_chunk: fn _ -> %{heading: "H", path: "bike/x.md"} end)
       assert {:error, "Invalid path"} = Policy.check(:delete_section, %{id: "skills/tdd.md#h"}, f)
       assert {:error, "Invalid path"} = Policy.check(:delete_section, %{id: "work/x.md#h"}, f)
     end

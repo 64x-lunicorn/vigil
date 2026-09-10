@@ -12,18 +12,20 @@ defmodule Vigil.MCP.Envelope.Decision do
   @weekdays {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 
   @doc """
-  Envelope for the `current` tool: always `_t`, but counts as the session's
-  first call. Returns `{envelope, new_session_state}`.
+  The envelope for a response to `tool`, given the session's previous state
+  (`nil` for a session with none yet). Returns `{envelope, new_session_state}`.
+
+  `current` always gets `_t`: its own response is the full time picture, so the
+  long first line under it would say the same thing twice. It still counts as
+  the session's first call, and that rule lives here rather than in the
+  transport layer — which form a tool gets is a decision about the envelope,
+  not about routing.
   """
-  def for_current(now, snapshot) do
-    {%{"_t" => format_time(now)}, %{active_ids: snapshot.active_ids, last_active: now}}
+  def for_tool("current", _prev_state, now, snapshot) do
+    {%{"_t" => format_time(now)}, session_state(now, snapshot)}
   end
 
-  @doc """
-  Envelope for any other tool call, given the session's previous state (`nil`
-  for a session with none yet). Returns `{envelope, new_session_state}`.
-  """
-  def for_call(prev_state, now, snapshot) do
+  def for_tool(_tool, prev_state, now, snapshot) do
     result =
       case prev_state do
         nil ->
@@ -42,8 +44,10 @@ defmodule Vigil.MCP.Envelope.Decision do
           end
       end
 
-    {result, %{active_ids: snapshot.active_ids, last_active: now}}
+    {result, session_state(now, snapshot)}
   end
+
+  defp session_state(now, snapshot), do: %{active_ids: snapshot.active_ids, last_active: now}
 
   defp format_time(now), do: Calendar.strftime(now, "%H:%M")
 

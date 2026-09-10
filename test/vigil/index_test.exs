@@ -344,10 +344,21 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "chunk/2" do
+  describe "lookups/1 find_chunk" do
     test "returns the Chunk struct at an id, or nil", %{index: index} do
-      assert %Index.Chunk{heading: "Fueling"} = Index.chunk(index, "bike/via-carolina.md#fueling")
-      assert Index.chunk(index, "bike/via-carolina.md#nope") == nil
+      find = Index.lookups(index).find_chunk
+
+      assert %Index.Chunk{heading: "Fueling"} = find.("bike/via-carolina.md#fueling")
+      assert find.("bike/via-carolina.md#nope") == nil
+    end
+
+    test "resolves leniently, as read/3 does, and carries the canonical path", %{index: index} do
+      assert %Index.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
+               Index.lookups(index).find_chunk.("bike/Via Carolina!!.md#fueling")
+    end
+
+    test "nil for an id without a fragment", %{index: index} do
+      assert Index.lookups(index).find_chunk.("bike/via-carolina.md") == nil
     end
   end
 
@@ -363,28 +374,85 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "heading_count/2" do
-    test "counts chunks with a heading, ignoring the pre-heading chunk", %{index: index} do
-      assert Index.heading_count(index, "bike/via-carolina.md") == 3
+  describe "put/2 and move/3 own created_at" do
+    @later %{
+      created_at: ~U[2026-06-01 09:00:00Z],
+      updated_at: ~U[2026-06-01 09:00:00Z],
+      last_author: "vigil"
+    }
+
+    defp reparsed(rel_path, meta) do
+      content = File.read!(Path.join(@fixtures, rel_path))
+      {:ok, file} = Parser.parse(rel_path, content, meta)
+      file
     end
 
-    test "zero for an unknown path", %{index: index} do
-      assert Index.heading_count(index, "bike/nope.md") == 0
+    test "replacing a note the index holds keeps its creation date", %{index: index} do
+      rewritten = Index.put(index, reparsed("bike/via-carolina.md", @later))
+
+      note = Index.note(rewritten, "bike/via-carolina.md")
+      assert note.created_at == @git_meta.created_at
+      assert note.updated_at == @later.updated_at
+    end
+
+    test "the note's chunks keep it too", %{index: index} do
+      rewritten = Index.put(index, reparsed("bike/via-carolina.md", @later))
+
+      {:ok, chunk} = Index.read(rewritten, "bike/via-carolina.md#fueling", false)
+      assert chunk.created_at == DateTime.to_iso8601(@git_meta.created_at)
+    end
+
+    test "a note the index has not seen takes the commit metadata's value", %{index: index} do
+      {:ok, fresh} = Parser.parse("bike/fresh.md", "# Fresh\n\nbody\n", @later)
+
+      assert Index.note(Index.put(index, fresh), "bike/fresh.md").created_at ==
+               @later.created_at
+    end
+
+    test "a move onto the note's own path keeps the note", %{index: index} do
+      same_path =
+        Index.move(index, "bike/via-carolina.md", reparsed("bike/via-carolina.md", @later))
+
+      note = Index.note(same_path, "bike/via-carolina.md")
+      assert note.created_at == @git_meta.created_at
+      assert {:ok, _} = Index.read(same_path, "bike/via-carolina.md#fueling", false)
+    end
+
+    test "a move carries the creation date from the source path", %{index: index} do
+      content = File.read!(Path.join(@fixtures, "bike/via-carolina.md"))
+      {:ok, moved} = Parser.parse("training/via-carolina.md", content, @later)
+
+      after_move = Index.move(index, "bike/via-carolina.md", moved)
+
+      assert Index.note(after_move, "bike/via-carolina.md") == nil
+      assert Index.note(after_move, "training/via-carolina.md").created_at == @git_meta.created_at
     end
   end
 
-  describe "chunk_by_heading/3" do
-    test "finds the chunk whose heading slugifies to the target slug", %{index: index} do
-      assert %Index.Chunk{heading: "Gear"} =
-               Index.chunk_by_heading(index, "bike/via-carolina.md", "gear")
+  describe "lookups/1 count_headings" do
+    test "counts chunks with a heading, ignoring the pre-heading chunk", %{index: index} do
+      assert Index.lookups(index).count_headings.("bike/via-carolina.md") == 3
+    end
+
+    test "zero for an unknown path", %{index: index} do
+      assert Index.lookups(index).count_headings.("bike/nope.md") == 0
+    end
+  end
+
+  describe "lookups/1 find_section" do
+    test "finds the chunk whose heading slugifies to the same slug", %{index: index} do
+      find = Index.lookups(index).find_section
+
+      assert %Index.Chunk{heading: "Gear"} = find.("bike/via-carolina.md", "Gear")
+      assert %Index.Chunk{heading: "Gear"} = find.("bike/via-carolina.md", "gear!")
     end
 
     test "nil when no heading in the note matches", %{index: index} do
-      assert Index.chunk_by_heading(index, "bike/via-carolina.md", "weather") == nil
+      assert Index.lookups(index).find_section.("bike/via-carolina.md", "Weather") == nil
     end
 
     test "nil for an unknown path", %{index: index} do
-      assert Index.chunk_by_heading(index, "bike/nope.md", "gear") == nil
+      assert Index.lookups(index).find_section.("bike/nope.md", "Gear") == nil
     end
   end
 

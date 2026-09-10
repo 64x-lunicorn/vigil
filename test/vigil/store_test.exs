@@ -239,6 +239,33 @@ defmodule Vigil.StoreTest do
       {:ok, result} = Store.read("bike/terra-speed.md#gravel-experience", false)
       assert result.body =~ "Final sentence."
     end
+
+    # A heading spliced into the middle of a section splits it on the next
+    # parse, into two chunks one of which nobody asked for.
+    test "a heading in content appended to an existing section is rejected", %{vault: vault} do
+      assert {:error, msg} =
+               Store.append(%{
+                 path: "bike/via-carolina.md",
+                 heading: "Gear",
+                 content: "## Sneaky\nSplit."
+               })
+
+      assert msg =~ "split the section in two"
+      refute File.read!(Path.join(vault, "bike/via-carolina.md")) =~ "Sneaky"
+    end
+
+    test "the same content is accepted at the end of the file and as a new section" do
+      content = "## Sneaky\nNot sneaky here."
+
+      assert {:ok, _} = Store.append(%{path: "bike/terra-speed.md", content: content})
+
+      assert {:ok, _} =
+               Store.append(%{
+                 path: "bike/via-carolina.md",
+                 heading: "Weather",
+                 content: content
+               })
+    end
   end
 
   # Which lines move, and content-shape validation, are Vigil.Vault.Edit's
@@ -251,6 +278,45 @@ defmodule Vigil.StoreTest do
 
       {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
       assert result.body =~ "New fueling strategy."
+    end
+
+    # The id is resolved once, by the policy, through the same lenient lookup
+    # `read` uses — so the two accept the same ids, and the write lands on the
+    # path the lookup resolved rather than on one re-derived from the id.
+    test "an id that read accepts is accepted here too, and writes the resolved path" do
+      messy = "bike/Via Carolina!!.md#fueling"
+
+      assert {:ok, _} = Store.read(messy, false)
+      assert {:ok, %{path: "bike/via-carolina.md"}} = Store.replace_section(messy, "Resolved.")
+
+      {:ok, result} = Store.read("bike/via-carolina.md#fueling", false)
+      assert result.body =~ "Resolved."
+    end
+
+    # The writable-path check runs on the normalized path part, not the raw
+    # one: a messy domain segment or extension resolves for `read`, so it has
+    # to resolve here too.
+    test "leniency covers the whole path part, not just the basename" do
+      for messy <- ["Bike/via-carolina.md#fueling", "bike/via-carolina.MD#fueling"] do
+        assert {:ok, _} = Store.read(messy, false)
+
+        assert {:ok, %{path: "bike/via-carolina.md"}} =
+                 Store.replace_section(messy, "Resolved via #{messy}.")
+      end
+    end
+
+    test "a section id that normalizes into skills/ is still Invalid path" do
+      assert {:error, "Invalid path"} = Store.replace_section("Skills/tdd.md#x", "text")
+    end
+
+    test "an id naming skills/ is Invalid path, not Not found" do
+      assert {:error, "Invalid path"} = Store.replace_section("skills/tdd.md#x", "text")
+      assert {:error, "Invalid path"} = Store.delete_section("skills/tdd.md#x")
+    end
+
+    test "a missing section in a writable note is Not found" do
+      assert {:error, msg} = Store.replace_section("bike/via-carolina.md#nope", "text")
+      assert msg =~ "Not found"
     end
   end
 
@@ -452,6 +518,19 @@ defmodule Vigil.StoreTest do
 
       {:ok, result} = Store.read("bike/terra-speed.md", false)
       assert result.type == :reference
+    end
+
+    # The shrink gate's baseline is the note's own indexed heading count, asked
+    # for by the policy rather than handed in. If that question never reaches
+    # the policy the baseline reads as 0, nothing looks removed, and the gate
+    # opens without a word.
+    test "the shrink gate names the note's own heading count" do
+      one_left = "# Via Carolina\n\n## Fueling\nbaseline."
+
+      assert {:error, msg} =
+               Store.rewrite_note(%{path: "bike/via-carolina.md", content: one_left})
+
+      assert msg =~ "removes 2 of 3 headings"
     end
 
     test "confirm not required when the shrink stays under the threshold" do
@@ -679,6 +758,63 @@ defmodule Vigil.StoreTest do
       {:ok, %{content: content}} = Store.skill_read("new")
       assert content =~ "1. one"
       assert Store.search(%{query: "one"}) == []
+    end
+  end
+
+  # Creation date = first commit (docs/design.md, principle 3). A write is
+  # never a note's first commit, and the index is what keeps that true —
+  # Vigil.Index.put/2 would otherwise reset created_at to the write's own
+  # commit time, on every write path at once.
+  describe "created_at survives a write" do
+    defp created_at(path) do
+      {:ok, note} = Store.read(path, false)
+      note.created_at
+    end
+
+    test "append, rewrite_note and move_note all leave it alone" do
+      before = created_at("bike/via-carolina.md")
+      assert is_binary(before)
+
+      assert {:ok, _} = Store.append(%{path: "bike/via-carolina.md", content: "One more line."})
+      assert created_at("bike/via-carolina.md") == before
+
+      assert {:ok, _} =
+               Store.rewrite_note(%{
+                 path: "bike/via-carolina.md",
+                 content: "# Via Carolina\n\n## Fueling\nbaseline.\n\n## Gear\nFrame bag.",
+                 confirm: true
+               })
+
+      assert created_at("bike/via-carolina.md") == before
+
+      assert {:ok, _} =
+               Store.move_note(%{
+                 from: "bike/via-carolina.md",
+                 to: "training/via-carolina.md",
+                 confirm: true
+               })
+
+      assert created_at("training/via-carolina.md") == before
+    end
+
+    test "a note created now takes the creation date of its own commit" do
+      assert {:ok, _} =
+               Store.create(%{
+                 path: "bike/brand-new.md",
+                 type: "reference",
+                 content: "# New\n\nx"
+               })
+
+      assert is_binary(created_at("bike/brand-new.md"))
+    end
+
+    test "a full reload still reports the git creation date" do
+      before = created_at("bike/via-carolina.md")
+
+      assert {:ok, _} = Store.append(%{path: "bike/via-carolina.md", content: "Another line."})
+      assert %{reloaded: true} = Store.reload()
+
+      assert created_at("bike/via-carolina.md") == before
     end
   end
 

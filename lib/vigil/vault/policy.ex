@@ -7,11 +7,11 @@ defmodule Vigil.Vault.Policy do
   conventions from `_domains.yml`, frontmatter and type rules, duplicate
   detection, and the confirm gates on destructive operations.
 
-  The module is pure. It reads no file, touches no ETS table and consults no
-  application configuration; `Vigil.Vault.Facts` carries everything it needs.
-  Where a decision authorises an effect — creating a project directory — it
-  says so in its result rather than performing it, so asking the question
-  never changes the vault.
+  Policy performs no effect and changes nothing. It asks the vault questions
+  through `Vigil.Vault.Facts` — whether a path exists, what a note contains,
+  which chunk an id resolves to — and where a decision authorises an effect it
+  says so in its result rather than performing it. Asking never changes the
+  vault.
 
   Every write path goes through here. That is the point: the rules used to be
   private to `Vigil.Store` and only two of the eight write paths applied them,
@@ -71,8 +71,12 @@ defmodule Vigil.Vault.Policy do
   end
 
   def check(:append, request, facts) do
-    with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts) do
-      {:ok, %{path: path}}
+    content = Map.fetch!(request, :content)
+
+    with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
+         {:ok, target} <- append_target(path, Map.get(request, :heading), facts),
+         :ok <- appended_content(target, content) do
+      {:ok, %{path: path, target: target}}
     end
   end
 
@@ -95,33 +99,40 @@ defmodule Vigil.Vault.Policy do
 
   def check(:delete_note, request, facts) do
     path = Map.fetch!(request, :path)
+    backlinks = facts.find_backlinks.(path)
 
-    with :ok <- require_confirm(confirm?(request), delete_description(path, facts)),
+    with :ok <- require_confirm(confirm?(request), delete_description(path, backlinks)),
          {:ok, path} <- existing_note(path, facts) do
-      {:ok, %{path: path}}
+      {:ok, %{path: path, backlinks: backlinks}}
     end
   end
 
   # The section ops resolve through the index, not the filesystem: the chunk
-  # record in `facts` is what says the section exists. The order below is
-  # load-bearing — the chunk must be found before the replacement content is
-  # judged, so a bad id is reported as a bad id rather than as bad content.
+  # record the index hands back is what says the section exists, and its
+  # canonical path is the one the caller writes to. A section id is resolved
+  # once, here.
+  #
+  # The order is load-bearing twice over. The path check on the id's own path
+  # part comes first, so an id naming `skills/` or an excluded domain answers
+  # "Invalid path" rather than "Not found". The chunk is then resolved before
+  # the replacement content is judged, so a bad id is reported as a bad id
+  # rather than as bad content.
   def check(:replace_section, request, facts) do
     id = Map.fetch!(request, :id)
 
-    with {:ok, path} <- section_path(id, facts),
-         :ok <- section_present(id, facts, "replaced"),
+    with :ok <- section_id_writable(id, facts),
+         {:ok, chunk} <- section_chunk(id, facts, "replaced"),
          :ok <- replacement_content(Map.fetch!(request, :content)) do
-      {:ok, %{path: path}}
+      {:ok, %{path: chunk.path, chunk: chunk}}
     end
   end
 
   def check(:delete_section, request, facts) do
     id = Map.fetch!(request, :id)
 
-    with {:ok, path} <- section_path(id, facts),
-         :ok <- section_present(id, facts, "deleted") do
-      {:ok, %{path: path}}
+    with :ok <- section_id_writable(id, facts),
+         {:ok, chunk} <- section_chunk(id, facts, "deleted") do
+      {:ok, %{path: chunk.path, chunk: chunk}}
     end
   end
 
@@ -250,18 +261,55 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
-  defp section_path(id, facts) do
+  # The path the caller named must be a writable note before the id is looked
+  # up at all — and it is judged on the normalized path, because that is the
+  # path `find_chunk` resolves to. Judging the raw one would answer "Invalid
+  # path" for an id `read` accepts, which is the asymmetry this seam exists to
+  # close. Sanity is still checked before normalization as well as after
+  # (`writable_note/2` re-checks it), so normalization cannot turn a rejected
+  # path into an accepted one. Only the verdict is kept: the path the write
+  # uses comes from the resolved record, never from here.
+  defp section_id_writable(id, facts) do
     case String.split(id, "#", parts: 2) do
-      [path, _fragment] -> writable_note(path, facts)
-      [_path] -> {:error, "id must contain a fragment: path#heading-slug"}
+      [path, _fragment] ->
+        with :ok <- path_sanity(path),
+             {:ok, _path} <- writable_note(canonical_or_raw(path), facts) do
+          :ok
+        end
+
+      [_path] ->
+        {:error, "id must contain a fragment: path#heading-slug"}
     end
   end
 
-  defp section_present(id, facts, verb) do
-    case facts.chunk do
+  # A path no filename can be derived from stays as it is: the lookup will not
+  # find it either, and "Not found" is what `read` answers for an id naming no
+  # section.
+  defp canonical_or_raw(path) do
+    case Slug.normalize_path(path) do
+      {:ok, normalized, _changed?} -> normalized
+      {:error, _reason} -> path
+    end
+  end
+
+  # Where an append lands: at the end of a section the note already has, in a
+  # new section at the end of the file, or at the end of the file itself. Which
+  # one it is decides what the file becomes, which makes it a policy question
+  # and not the caller's.
+  defp append_target(_path, nil, _facts), do: {:ok, :end}
+
+  defp append_target(path, heading, facts) do
+    case facts.find_section.(path, heading) do
+      nil -> {:ok, {:new_section, heading}}
+      chunk -> {:ok, {:section, chunk}}
+    end
+  end
+
+  defp section_chunk(id, facts, verb) do
+    case facts.find_chunk.(id) do
       nil -> {:error, "Not found: #{id}"}
       %{heading: nil} -> {:error, "A section without a heading cannot be #{verb}: #{id}"}
-      _ -> :ok
+      chunk -> {:ok, chunk}
     end
   end
 
@@ -356,8 +404,25 @@ defmodule Vigil.Vault.Policy do
   end
 
   defp replacement_content(content) do
+    refute_headings(content, "content must not contain headings (## through ####)")
+  end
+
+  # A heading spliced into the middle of an existing section splits that
+  # section on the next parse, into two chunks one of which nobody asked for.
+  # The other two targets append at the end of the file, where a heading opens
+  # a section rather than cutting one in half, and are left alone.
+  defp appended_content({:section, _chunk}, content) do
+    refute_headings(
+      content,
+      "content appended to an existing section must not contain headings (## through ####): it would split the section in two"
+    )
+  end
+
+  defp appended_content(_target, _content), do: :ok
+
+  defp refute_headings(content, message) do
     if Enum.any?(Markdown.split_lines(content), &Markdown.heading?/1) do
-      {:error, "content must not contain headings (## through ####)"}
+      {:error, message}
     else
       :ok
     end
@@ -413,8 +478,8 @@ defmodule Vigil.Vault.Policy do
      "Destructive operation: #{description}. Call again with confirm: true to execute it."}
   end
 
-  defp delete_description(path, facts) do
-    case facts.backlinks do
+  defp delete_description(path, backlinks) do
+    case backlinks do
       [] ->
         "permanently deletes #{path} from the vault"
 
@@ -425,10 +490,10 @@ defmodule Vigil.Vault.Policy do
 
   # confirm is only required when the new version removes more than half of
   # the existing sections OR more than 20 headings; below that rewrite_note
-  # goes through without it. The baseline is facts.heading_count — what vigil
-  # has indexed for the note (see Vigil.Index.heading_count/2).
+  # goes through without it. The baseline is what vigil has indexed for the
+  # note the policy resolved, asked for here rather than handed in.
   defp shrink_threshold(path, content, confirm, facts) do
-    old_count = facts.heading_count
+    old_count = facts.count_headings.(path)
     removed = old_count - Markdown.count_headings(content)
 
     if removed > 0 and (removed > div(old_count, 2) or removed > 20) do

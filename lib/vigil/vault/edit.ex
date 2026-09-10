@@ -13,7 +13,7 @@ defmodule Vigil.Vault.Edit do
   already holds from the index. `Edit` depends on `Vigil.Index` for the
   struct; `Index` does not depend back.
 
-  `Vigil.Vault.Policy.section_present/3` already guarantees a non-nil chunk
+  `Vigil.Vault.Policy` already guarantees a non-nil chunk
   with a non-nil heading before a splice is reached, but that guarantee lives
   in a different module. A failed write must never take the `Store` GenServer
   down, so the precondition is checked here too — an error tuple, not a raise.

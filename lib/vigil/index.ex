@@ -72,28 +72,86 @@ defmodule Vigil.Index do
     rebuild_links(%__MODULE__{notes: notes, chunks: chunks})
   end
 
-  @doc "Replaces one note's chunks with a freshly parsed file, then rebuilds the link index in full."
+  @doc """
+  Replaces one note's chunks with a freshly parsed file, then rebuilds the link
+  index in full.
+
+  Creation date = first commit (`docs/design.md`, principle 3), and a write is
+  never a note's first commit — so a note the index already holds at that path
+  keeps the `created_at` it has, and only a note the index has not seen takes
+  the value the parsed file carries.
+  """
   def put(index, parsed_file) do
-    {note, file_chunks} = index_file(parsed_file)
-    old_chunk_ids = old_chunk_ids(index, note.path)
+    index
+    |> replace(parsed_file.path, parsed_file)
+    |> rebuild_links()
+  end
 
-    notes = Map.put(index.notes, note.path, note)
-    chunks = index.chunks |> Map.drop(old_chunk_ids) |> Map.merge(file_chunks)
+  @doc """
+  Moves a note: the file parsed at its destination replaces the note at `from`,
+  which is removed.
 
-    rebuild_links(%{index | notes: notes, chunks: chunks})
+  A move needs its own entry point because the carry-over crosses paths — the
+  old note is at the source and the new one at the destination — so `put/2`'s
+  same-path rule cannot see it. Removal and carry-over belong to one function
+  for that reason.
+  """
+  def move(index, from, parsed_file) do
+    index
+    |> replace(from, parsed_file)
+    |> drop_source(from, parsed_file.path)
+    |> rebuild_links()
   end
 
   @doc "Removes a note and its chunks, then rebuilds the link index in full."
   def remove(index, path) do
-    case old_chunk_ids(index, path) do
-      [] ->
-        rebuild_links(%{index | notes: Map.delete(index.notes, path)})
+    index
+    |> drop(path)
+    |> rebuild_links()
+  end
 
-      chunk_ids ->
-        notes = Map.delete(index.notes, path)
-        chunks = Map.drop(index.chunks, chunk_ids)
-        rebuild_links(%{index | notes: notes, chunks: chunks})
+  # Puts `parsed_file` at its own path, carrying `created_at` over from
+  # whatever the index holds at `previous_path` — the same path for a write,
+  # the source path for a move.
+  defp replace(index, previous_path, parsed_file) do
+    {note, file_chunks} =
+      parsed_file
+      |> index_file()
+      |> carry_created_at(index, previous_path)
+
+    notes = Map.put(index.notes, note.path, note)
+    chunks = index.chunks |> Map.drop(old_chunk_ids(index, note.path)) |> Map.merge(file_chunks)
+
+    %{index | notes: notes, chunks: chunks}
+  end
+
+  # The date a note was created is a fact about the vault's history, not about
+  # the write in front of us: the commit metadata a write carries describes
+  # that write. So a `created_at` the index already holds always wins.
+  defp carry_created_at({note, chunks}, index, previous_path) do
+    case Map.get(index.notes, previous_path) do
+      %Note{created_at: %DateTime{} = created_at} ->
+        {%{note | created_at: created_at},
+         Map.new(chunks, fn {id, chunk} -> {id, %{chunk | created_at: created_at}} end)}
+
+      _ ->
+        {note, chunks}
     end
+  end
+
+  # A move onto the note's own path is a no-op move, not a delete: dropping the
+  # source after the replace would take the note just put there. The write
+  # policy refuses such a move before it gets here, and this function does not
+  # rely on that.
+  defp drop_source(index, path, path), do: index
+  defp drop_source(index, from, _to), do: drop(index, from)
+
+  defp drop(index, path) do
+    %{
+      index
+      | notes: Map.delete(index.notes, path),
+        chunks: Map.drop(index.chunks, old_chunk_ids(index, path))
+    }
   end
 
   defp old_chunk_ids(index, path) do
@@ -109,14 +167,44 @@ defmodule Vigil.Index do
   @doc "`%{notes:, chunks:}` counts, for the load log line."
   def size(index), do: %{notes: map_size(index.notes), chunks: map_size(index.chunks)}
 
-  @doc "The `Chunk` at `id`, or `nil` — the write path's section lookup (`replace_section`, `delete_section`)."
-  def chunk(index, id), do: Map.get(index.chunks, id)
-
   @doc "Incoming references to `key` (a note path or a full chunk id) — the write path's backlinks question."
   def backlinks(index, key), do: backlinks_for(index, key)
 
-  @doc "How many of `path`'s chunks carry a heading — the `rewrite_note` shrink gate's baseline."
-  def heading_count(index, path) do
+  @doc """
+  The adapters `Vigil.Vault.Facts` carries for the questions only the index can
+  answer, as a map ready to be merged into a `Facts` struct.
+
+  The policy asks them about the path it derived itself, which is why they are
+  closures over the index rather than values looked up ahead of the decision.
+  """
+  def lookups(index) do
+    %{
+      count_headings: fn path -> heading_count(index, path) end,
+      find_chunk: fn id -> find_chunk(index, id) end,
+      find_section: fn path, heading -> chunk_by_heading(index, path, Parser.slug(heading)) end
+    }
+  end
+
+  # The chunk a section id resolves to, or nil — through the same lenient
+  # resolution `read/3` uses, so an id that reads is an id that writes. The
+  # record carries the canonical path, which is what makes leniency safe: the
+  # write goes where the lookup landed, not where the id pointed.
+  defp find_chunk(index, id) do
+    case String.split(id, "#", parts: 2) do
+      [path_part, _fragment] ->
+        case lookup_chunk(index, id, path_part) do
+          {:ok, chunk} -> chunk
+          :not_found -> nil
+        end
+
+      [_without_fragment] ->
+        nil
+    end
+  end
+
+  # How many of `path`'s chunks carry a heading — the `rewrite_note` shrink
+  # gate's baseline, reached through `lookups/1`.
+  defp heading_count(index, path) do
     case Map.get(index.notes, path) do
       nil -> 0
       note -> Enum.count(note.chunk_ids, &heading_chunk?(index, &1))
@@ -130,8 +218,11 @@ defmodule Vigil.Index do
     end
   end
 
-  @doc "The chunk in `path` whose heading slug matches `target_slug`, or `nil` — `append`'s existing-section lookup."
-  def chunk_by_heading(index, path, target_slug) do
+  # The chunk in `path` whose heading slug matches `target_slug`, or `nil` —
+  # `append`'s existing-section lookup, reached through `lookups/1`. Both sides
+  # are slugged here so the caller never has to know how a heading becomes an
+  # id.
+  defp chunk_by_heading(index, path, target_slug) do
     case Map.get(index.notes, path) do
       nil ->
         nil

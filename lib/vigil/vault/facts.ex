@@ -3,12 +3,14 @@ defmodule Vigil.Vault.Facts do
   Everything `Vigil.Vault.Policy` needs to know about the vault to decide one
   request. A plain struct, built fresh per call.
 
-  Three fields are adapters rather than data, because the policy has to ask
-  questions whose answers depend on the path it derives itself: `path_exists?`,
-  `read_note` and `find_similar`. In production `Vigil.Store` supplies closures
-  over the filesystem and the ETS index; in tests they are literals. All three
-  default to answering "nothing there", so a `Facts` built without them makes
-  no accidental claims.
+  Most fields are adapters rather than data, because the policy has to ask
+  questions whose answers depend on the path it derives itself: a value curated
+  before the policy ran is a value looked up for a path the policy had not
+  decided on yet. In production `Vigil.Store` supplies closures over the
+  filesystem and the index (`Vigil.Index.lookups/1` hands out the ones the
+  index answers); in tests they are literals. Every adapter defaults to
+  answering "nothing there", so a `Facts` built without one makes no accidental
+  claims.
   """
 
   defstruct vault_path: "/",
@@ -22,17 +24,21 @@ defmodule Vigil.Vault.Facts do
             naming: %{},
             # Vault-local today, for the :date naming suggestion.
             today: ~D[1970-01-01],
-            # H2–H4 headings the target note currently has (rewrite_note).
-            heading_count: 0,
-            # Incoming references to the target note (delete_note).
-            backlinks: [],
-            # The indexed chunk a section id resolves to, or nil
-            # (replace_section, delete_section). The index, not the
-            # filesystem, is what says whether a section exists.
-            chunk: nil,
             path_exists?: &__MODULE__.no_such_path/1,
             read_note: &__MODULE__.no_such_note/1,
-            find_similar: &__MODULE__.no_similar/2
+            find_similar: &__MODULE__.no_similar/2,
+            # H2–H4 headings a note currently has (rewrite_note's shrink gate).
+            count_headings: &__MODULE__.no_headings/1,
+            # Incoming references to a note (delete_note's confirmation).
+            find_backlinks: &__MODULE__.no_backlinks/1,
+            # The indexed chunk a section id resolves to, or nil
+            # (replace_section, delete_section). The index, not the filesystem,
+            # is what says whether a section exists — and the record it hands
+            # back carries the path the write uses.
+            find_chunk: &__MODULE__.no_chunk/1,
+            # The section in a note whose heading matches, or nil (append's
+            # target decision).
+            find_section: &__MODULE__.no_section/2
 
   @type t :: %__MODULE__{}
 
@@ -44,4 +50,16 @@ defmodule Vigil.Vault.Facts do
 
   @doc false
   def no_similar(_query, _domain), do: []
+
+  @doc false
+  def no_headings(_path), do: 0
+
+  @doc false
+  def no_backlinks(_path), do: []
+
+  @doc false
+  def no_chunk(_id), do: nil
+
+  @doc false
+  def no_section(_path, _heading), do: nil
 end

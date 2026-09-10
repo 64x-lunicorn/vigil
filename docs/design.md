@@ -337,15 +337,37 @@ Every write — `create`, `append`, `replace_section`, `rewrite_note`,
 `Vigil.Vault.Policy` first. One function, `check/3`, holds every rule about a
 write: path safety, path normalization, which domains are writable, the naming
 conventions from `_domains.yml`, frontmatter and type rules, duplicate
-detection, and the confirm gates. It is pure — it reads no file and touches no
-index; `Vigil.Vault.Facts` carries what it needs, and where a decision
-authorises an effect it says so in its result rather than performing it.
+detection, and the confirm gates. Policy performs no effect and changes
+nothing. It asks the vault questions through `Vigil.Vault.Facts` — whether a
+path exists, what a note contains, which chunk an id resolves to — and where a
+decision authorises an effect it says so in its result rather than performing
+it. Asking never changes the vault.
 
 The point of one gate is that there is no second way in. The rules used to be
 private helpers in `Vigil.Store` that only `create` and `move_note` called, so
 `append`, `rewrite_note`, `update_frontmatter` and `delete_note` checked
 traversal and nothing else — each of them could write into `skills/` and into
 an excluded domain, and the write was then indexed as a note.
+
+**`append` resolves its target through the gate too.** Whether an append
+becomes a new section, an addition to an existing one, or text at the end of
+the file decides what the file becomes, so the policy decides it and returns
+the target alongside the path. Content is judged against that target: a heading
+in content appended *into* an existing section is rejected, because the next
+parse would split that section into two chunks one of which nobody asked for.
+Appending at the end of a file, or opening a new section via the heading
+argument, is unaffected — there a heading opens a section rather than cutting
+one in half.
+
+**A section id is resolved once.** `replace_section` and `delete_section` take
+an id, and the policy resolves it through the same lenient lookup `read` uses —
+one retry through path normalization — so an id that reads is an id that
+writes. The write then goes to the resolved record's canonical path, never to
+one re-derived by splitting the id on its fragment. That is what makes the
+leniency safe: a normalized id writes where the lookup landed, not where the id
+pointed. The path check on the id's own path part still runs first, so an id
+naming `skills/` or an excluded domain answers "Invalid path" rather than
+"Not found".
 
 Order matters: write the file, commit, reparse into the index, then push. If
 the push fails the local commit stays and the tool returns an error saying the
@@ -363,6 +385,15 @@ write.
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
 write must not cost read access to everything else.
+
+The write effect itself — create the directory, write the file, commit it, and
+the wording for a POSIX error — belongs to `Vigil.Commit`, and notes and skills
+both go through it. It sits at the top level rather than under
+`Vigil.Vault.*` for the same reason `Vigil.Markdown` does: skills are never
+notes and must not depend on a note-shaped module. What stays with each caller
+is what differs — `Vigil.Store` reparses the written file into the index
+between commit and push, which would index a skill as a note, and the two
+push-failure messages describe different objects.
 
 ---
 
@@ -423,6 +454,13 @@ Every tool response carries exactly one of these fields:
 
 It sits at the top level of the JSON the assistant reads — not in `_meta`, not
 as a separate content block. The target is under 10 tokens per response.
+
+**Every** response, including an error. An error response carries its message
+as JSON next to the envelope field and keeps its error marker, and it advances
+the session's state like any other response: a session whose first call failed
+has still made a first call. The field is attached around both outcomes of a
+tool call rather than inside the success branch, so the rule is structurally
+true rather than true in one of two branches.
 
 This is the reason the assistant never has to guess what time it is.
 

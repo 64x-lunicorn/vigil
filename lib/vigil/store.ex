@@ -5,6 +5,7 @@ defmodule Vigil.Store do
 
   alias Vigil.{
     Clock,
+    Commit,
     Index,
     Markdown,
     Parser,
@@ -238,7 +239,7 @@ defmodule Vigil.Store do
         %{}
 
       {:error, reason} ->
-        Logger.warning("cannot read _domains.yml: #{fs_error(reason)}")
+        Logger.warning("cannot read _domains.yml: #{Commit.fs_error(reason)}")
         %{}
     end
   end
@@ -262,7 +263,7 @@ defmodule Vigil.Store do
 
       {:error, reason} ->
         if File.exists?(path) do
-          Logger.warning("cannot read _domains.yml: #{fs_error(reason)}")
+          Logger.warning("cannot read _domains.yml: #{Commit.fs_error(reason)}")
         end
 
         ""
@@ -273,26 +274,28 @@ defmodule Vigil.Store do
 
   ## Vault facts for Vigil.Vault.Policy
 
-  # Built fresh per write. The three function fields are the adapters at the
-  # policy's seam: in production they read the filesystem and the index, in
-  # Vigil.Vault.PolicyTest they are literals.
-  defp facts(state, opts \\ []) do
-    %Facts{
+  # Built fresh per write. The function fields are the adapters at the policy's
+  # seam: in production they read the filesystem and the index, in
+  # Vigil.Vault.PolicyTest they are literals. The index answers some of them
+  # itself (Vigil.Index.lookups/1); struct!/2 is what merges them, so a lookup
+  # the struct has no field for raises here rather than being carried silently.
+  defp facts(state) do
+    base = %Facts{
       vault_path: state.vault_path,
       domains: list_domain_names(state),
       exclude: state.exclude,
       project_dirs: project_dirs(state),
       naming: naming_rules(state),
       today: Clock.today(),
-      heading_count: Keyword.get(opts, :heading_count, 0),
-      backlinks: Keyword.get(opts, :backlinks, []),
-      chunk: Keyword.get(opts, :chunk),
       path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
       read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
+      find_backlinks: fn path -> Index.backlinks(state.index, path) end,
       find_similar: fn query, domain ->
         Index.search(state.index, %{query: query, domain: domain, limit: 25})
       end
     }
+
+    struct!(base, Index.lookups(state.index))
   end
 
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
@@ -314,7 +317,7 @@ defmodule Vigil.Store do
   defp create_project_dir(_state, nil), do: :ok
 
   defp create_project_dir(state, project) do
-    safe_mkdir_p(Path.join([state.vault_path, "projects", project]))
+    Commit.mkdir_p(Path.join([state.vault_path, "projects", project]))
   end
 
   ## create
@@ -331,7 +334,6 @@ defmodule Vigil.Store do
         write_and_commit(
           state,
           resolved.path,
-          abs(state, resolved.path),
           full_content,
           "create: #{resolved.path} — #{first_line(content)}"
         )
@@ -373,12 +375,9 @@ defmodule Vigil.Store do
   ## append
 
   defp do_append(params, state) do
-    heading = Map.get(params, :heading)
     content = Map.fetch!(params, :content)
 
-    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)) do
-      target = append_target(state.index, path, heading)
-
+    with {:ok, %{path: path, target: target}} <- Policy.check(:append, params, facts(state)) do
       edit_and_commit(
         state,
         path,
@@ -390,25 +389,17 @@ defmodule Vigil.Store do
     end
   end
 
-  defp append_target(_index, _path, nil), do: :end
-
-  defp append_target(index, path, heading) do
-    target_slug = Parser.slug(heading)
-
-    case Index.chunk_by_heading(index, path, target_slug) do
-      nil -> {:new_section, heading}
-      chunk -> {:section, chunk}
-    end
-  end
-
   ## replace_section
 
   defp do_replace_section(id, content, state) do
-    rec = Index.chunk(state.index, id)
-
-    with {:ok, %{path: path}} <-
-           Policy.check(:replace_section, %{id: id, content: content}, facts(state, chunk: rec)) do
-      edit_and_commit(state, path, "replace_section: #{id}", &Edit.replace_body(&1, rec, content))
+    with {:ok, %{path: path, chunk: chunk}} <-
+           Policy.check(:replace_section, %{id: id, content: content}, facts(state)) do
+      edit_and_commit(
+        state,
+        path,
+        "replace_section: #{chunk.id}",
+        &Edit.replace_body(&1, chunk, content)
+      )
     else
       {:error, msg} -> {{:error, msg}, state}
     end
@@ -418,16 +409,14 @@ defmodule Vigil.Store do
 
   defp do_rewrite_note(params, state) do
     content = Map.fetch!(params, :content)
-    heading_count = Index.heading_count(state.index, Map.fetch!(params, :path))
 
-    with {:ok, %{path: path}} <-
-           Policy.check(:rewrite_note, params, facts(state, heading_count: heading_count)),
+    with {:ok, %{path: path}} <- Policy.check(:rewrite_note, params, facts(state)),
          abs_path = abs(state, path),
          {:ok, original} <- read_existing_file(abs_path) do
       case Markdown.split_frontmatter(original) do
         {:ok, frontmatter, _old_body} ->
           new_content = Markdown.normalize_trailing_newline(frontmatter <> content)
-          write_and_commit(state, path, abs_path, new_content, "rewrite_note: #{path}")
+          write_and_commit(state, path, new_content, "rewrite_note: #{path}")
 
         {:error, msg} ->
           {{:error, msg}, state}
@@ -440,11 +429,9 @@ defmodule Vigil.Store do
   ## delete_section
 
   defp do_delete_section(id, state) do
-    rec = Index.chunk(state.index, id)
-
-    with {:ok, %{path: path}} <-
-           Policy.check(:delete_section, %{id: id}, facts(state, chunk: rec)) do
-      edit_and_commit(state, path, "delete_section: #{id}", &Edit.delete_section(&1, rec))
+    with {:ok, %{path: path, chunk: chunk}} <-
+           Policy.check(:delete_section, %{id: id}, facts(state)) do
+      edit_and_commit(state, path, "delete_section: #{chunk.id}", &Edit.delete_section(&1, chunk))
     else
       {:error, msg} -> {{:error, msg}, state}
     end
@@ -459,7 +446,7 @@ defmodule Vigil.Store do
 
     with {:ok, original} <- read_existing_file(abs_path),
          {:ok, new_content} <- edit_fun.(original) do
-      write_and_commit(state, path, abs_path, new_content, message)
+      write_and_commit(state, path, new_content, message)
     else
       {:error, msg} -> {{:error, msg}, state}
     end
@@ -476,7 +463,7 @@ defmodule Vigil.Store do
         {:ok, _old_frontmatter, body} ->
           new_frontmatter = build_frontmatter(resolved.type, resolved.starts, resolved.ends)
           new_content = Markdown.normalize_trailing_newline(new_frontmatter <> body)
-          write_and_commit(state, path, abs_path, new_content, "update_frontmatter: #{path}")
+          write_and_commit(state, path, new_content, "update_frontmatter: #{path}")
 
         {:error, msg} ->
           {{:error, msg}, state}
@@ -489,10 +476,8 @@ defmodule Vigil.Store do
   ## delete
 
   defp do_delete_note(params, state) do
-    backlinks = Index.backlinks(state.index, Map.fetch!(params, :path))
-
-    with {:ok, %{path: path}} <-
-           Policy.check(:delete_note, params, facts(state, backlinks: backlinks)) do
+    with {:ok, %{path: path, backlinks: backlinks}} <-
+           Policy.check(:delete_note, params, facts(state)) do
       case Git.remove_commit(state.vault_path, path, "delete: #{path}") do
         :ok ->
           case Git.push(state.vault_path, state.git_remote) do
@@ -535,7 +520,12 @@ defmodule Vigil.Store do
       {:ok, commit_meta} ->
         case Git.push(state.vault_path, state.git_remote) do
           :ok ->
-            new_index = reparse_moved_file(state, normalized_from, normalized_to, commit_meta)
+            new_index =
+              case reparse(state, normalized_to, commit_meta, "move") do
+                {:ok, file} -> Index.move(state.index, normalized_from, file)
+                :error -> state.index
+              end
+
             new_state = %{state | index: new_index}
             # Backlink report — a diff of incoming references before and
             # after the move rather than an ad-hoc scan. A source chunk that
@@ -565,83 +555,34 @@ defmodule Vigil.Store do
     end
   end
 
-  defp reparse_moved_file(state, from, to, commit_meta) do
-    existing_created_at =
-      case Index.note(state.index, from) do
-        %Index.Note{created_at: created_at} -> created_at
-        nil -> nil
-      end
-
-    created_at = existing_created_at || commit_meta.updated_at
-
-    case read_for_reparse(state.vault_path, to, "move") do
-      {:ok, content} ->
-        meta = %{
-          created_at: created_at,
-          updated_at: commit_meta.updated_at,
-          last_author: commit_meta.last_author
-        }
-
-        {:ok, file} = Parser.parse(to, content, meta)
-
-        state.index |> Index.remove(from) |> Index.put(file)
-
-      :error ->
-        state.index
-    end
-  end
-
   ## shared write path
 
-  defp write_and_commit(state, rel_path, abs_path, full_content, message) do
-    with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
-         :ok <- safe_write(abs_path, full_content) do
-      case Git.add_commit(state.vault_path, rel_path, message) do
-        {:ok, commit_meta} ->
-          new_state = %{state | index: reparse_file(state, rel_path, commit_meta)}
-
-          case Git.push(new_state.vault_path, new_state.git_remote) do
-            :ok ->
-              {{:ok, %{path: rel_path, pushed: true}}, new_state}
-
-            {:error, out} ->
-              {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
+  # The write effect belongs to Vigil.Commit; what this adds is the note-shaped
+  # part around it — the reparse between commit and push (docs/design.md, "The
+  # write path"), which would be wrong for a skill.
+  defp write_and_commit(state, rel_path, full_content, message) do
+    case Commit.write(state.vault_path, rel_path, full_content, message) do
+      {:ok, commit_meta} ->
+        index =
+          case reparse(state, rel_path, commit_meta, "write") do
+            {:ok, file} -> Index.put(state.index, file)
+            :error -> state.index
           end
 
-        {:error, out} ->
-          {{:error, "git commit failed: #{out}"}, state}
-      end
-    else
-      {:error, msg} -> {{:error, msg}, state}
+        new_state = %{state | index: index}
+
+        case Git.push(new_state.vault_path, new_state.git_remote) do
+          :ok ->
+            {{:ok, %{path: rel_path, pushed: true}}, new_state}
+
+          {:error, out} ->
+            {{:error, "Change saved and committed locally, but push failed: #{out}"}, new_state}
+        end
+
+      {:error, msg} ->
+        {{:error, msg}, state}
     end
   end
-
-  defp safe_mkdir_p(path) do
-    case File.mkdir_p(path) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Could not create directory #{path}: #{fs_error(reason)}"}
-    end
-  end
-
-  defp safe_write(path, content) do
-    case File.write(path, content) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Could not write file #{path}: #{fs_error(reason)}"}
-    end
-  end
-
-  defp fs_error(:eacces), do: "no write permission"
-  defp fs_error(:enospc), do: "out of disk space"
-  defp fs_error(:eisdir), do: "target path is a directory"
-  defp fs_error(:enotdir), do: "a path component is not a directory"
-  defp fs_error(:erofs), do: "filesystem is read-only"
-  defp fs_error(reason), do: inspect(reason)
 
   # Used by the write paths that read a note's current content before
   # transforming it (append, rewrite_note, edit_and_commit, update_frontmatter).
@@ -651,49 +592,47 @@ defmodule Vigil.Store do
   defp read_existing_file(path) do
     case File.read(path) do
       {:ok, content} -> {:ok, content}
-      {:error, reason} -> {:error, "Could not read file #{path}: #{fs_error(reason)}"}
+      {:error, reason} -> {:error, "Could not read file #{path}: #{Commit.fs_error(reason)}"}
     end
   end
 
-  # Used by reparse_file/reparse_moved_file: the write or move itself has
-  # already succeeded (and been committed/pushed) by the time these run. A
-  # read failure here must not crash the GenServer and take down unrelated
-  # calls — it only means the index stays stale for `rel_path` until the
-  # next reload, so the failure is logged rather than propagated.
+  # Used by reparse/4: the write or move itself has already succeeded (and been
+  # committed/pushed) by the time it runs. A read failure here must not crash
+  # the GenServer and take down unrelated calls — it only means the index
+  # stays stale for `rel_path` until the next reload, so the failure is logged
+  # rather than propagated.
   defp read_for_reparse(vault_path, rel_path, verb) do
     case File.read(Path.join(vault_path, rel_path)) do
       {:ok, content} ->
         {:ok, content}
 
       {:error, reason} ->
-        Logger.warning("vigil: could not reparse #{rel_path} after #{verb}: #{fs_error(reason)}")
+        Logger.warning(
+          "vigil: could not reparse #{rel_path} after #{verb}: #{Commit.fs_error(reason)}"
+        )
+
         :error
     end
   end
 
-  defp reparse_file(state, rel_path, commit_meta) do
-    existing_created_at =
-      case Index.note(state.index, rel_path) do
-        %Index.Note{created_at: created_at} -> created_at
-        nil -> nil
-      end
-
-    created_at = existing_created_at || commit_meta.updated_at
-
-    case read_for_reparse(state.vault_path, rel_path, "write") do
+  # The file as it now stands on disk, reparsed. `created_at` is deliberately
+  # not computed here: "creation date = first commit" (docs/design.md,
+  # principle 3) is the index's invariant, and it preserves the value it
+  # already holds for the note (Vigil.Index.put/2, Vigil.Index.move/3). What
+  # this hands over is the write's own commit metadata.
+  defp reparse(state, rel_path, commit_meta, verb) do
+    case read_for_reparse(state.vault_path, rel_path, verb) do
       {:ok, content} ->
         meta = %{
-          created_at: created_at,
+          created_at: commit_meta.updated_at,
           updated_at: commit_meta.updated_at,
           last_author: commit_meta.last_author
         }
 
-        {:ok, file} = Parser.parse(rel_path, content, meta)
-
-        Index.put(state.index, file)
+        Parser.parse(rel_path, content, meta)
 
       :error ->
-        state.index
+        :error
     end
   end
 

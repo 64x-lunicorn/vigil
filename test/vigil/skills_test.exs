@@ -94,6 +94,32 @@ defmodule Vigil.SkillsTest do
       assert File.read!(Path.join(vault, "skills/trailing.md")) |> String.ends_with?("1. one\n")
     end
 
+    # The write effect and its POSIX-error wording live in Vigil.Commit, for
+    # notes and skills alike. A failed skill write says the same sentence a
+    # failed note write says, and is still an error tuple, not a raise.
+    test "a failed write returns the shared filesystem error" do
+      {vault, _remote} = Vigil.FixtureVault.build(remote: true)
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+
+      dir = Path.join(vault, "skills")
+      File.chmod!(dir, 0o555)
+
+      result =
+        Skills.write(
+          "blocked",
+          "---\nname: blocked\ndescription: test skill\n---\n# Blocked\n1. one",
+          %{vault_path: vault, git_remote: "origin"}
+        )
+
+      File.chmod!(dir, 0o755)
+
+      assert {:error, msg} = result
+      assert msg =~ "Could not write file"
+      assert msg =~ "no write permission"
+
+      assert {:ok, _} = Skills.read("tdd", vault)
+    end
+
     test "rejects content missing required frontmatter fields, without touching git" do
       {vault, _remote} = Vigil.FixtureVault.build(remote: true)
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)

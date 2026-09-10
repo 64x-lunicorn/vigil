@@ -4,16 +4,15 @@ defmodule Vigil.Skills do
 
   Skills are a genuinely separate concern from notes: `skills/` is excluded
   from domain discovery, skill files are never parsed or indexed as notes,
-  and skill writes carry no `Vigil.Vault.Policy` check. `write/3` therefore
-  does not reuse `Vigil.Store.write_and_commit/5` — that helper always
-  reparses and indexes the written file afterward, which would be wrong
-  here — and this module keeps its own small copy of the mkdir/write/
-  error-mapping helpers rather than sharing them with `Store`.
+  and skill writes carry no `Vigil.Vault.Policy` check. The write effect is
+  still the same effect, and `Vigil.Commit` owns it for both — what `write/3`
+  does not do is `Vigil.Store`'s reparse between commit and push, which would
+  index a skill as a note.
 
   Takes `vault_path`/`git_remote` as plain arguments — no GenServer, no ETS.
   """
 
-  alias Vigil.{Git, Markdown, SkillKey}
+  alias Vigil.{Commit, Git, Markdown, SkillKey}
 
   @doc "Lists skills (name + description) found under `vault_path`/skills/."
   def list(vault_path) do
@@ -93,30 +92,31 @@ defmodule Vigil.Skills do
   def write(name, content, %{vault_path: vault_path, git_remote: git_remote}) do
     normalized = normalize_skill_name(name)
 
+    rel_path = "skills/#{normalized}.md"
+
     with true <- valid_skill_name?(normalized),
-         :ok <- validate_skill_frontmatter(content) do
-      abs_path = Path.join([vault_path, "skills", "#{normalized}.md"])
-      rel_path = "skills/#{normalized}.md"
-
-      with :ok <- safe_mkdir_p(Path.dirname(abs_path)),
-           :ok <- safe_write(abs_path, Markdown.normalize_trailing_newline(content)) do
-        case Git.add_commit(vault_path, rel_path, "skill_write: #{rel_path}") do
-          {:ok, _commit_meta} ->
-            case Git.push(vault_path, git_remote) do
-              :ok ->
-                {:ok, %{name: normalized, pushed: true}}
-
-              {:error, out} ->
-                {:error, "Skill saved locally, but push failed: #{out}"}
-            end
-
-          {:error, out} ->
-            {:error, "git commit failed: #{out}"}
-        end
-      end
+         :ok <- validate_skill_frontmatter(content),
+         {:ok, _commit_meta} <-
+           Commit.write(
+             vault_path,
+             rel_path,
+             Markdown.normalize_trailing_newline(content),
+             "skill_write: #{rel_path}"
+           ) do
+      push(normalized, vault_path, git_remote)
     else
       false -> {:error, "Invalid path"}
       {:error, msg} -> {:error, msg}
+    end
+  end
+
+  # Push stays here rather than in Vigil.Commit: the two push-failure messages
+  # in the project describe different objects — a skill, and a change to the
+  # vault — and saying so is the point of having two.
+  defp push(name, vault_path, git_remote) do
+    case Git.push(vault_path, git_remote) do
+      :ok -> {:ok, %{name: name, pushed: true}}
+      {:error, out} -> {:error, "Skill saved locally, but push failed: #{out}"}
     end
   end
 
@@ -135,31 +135,4 @@ defmodule Vigil.Skills do
         {:error, "content must start with frontmatter"}
     end
   end
-
-  defp safe_mkdir_p(path) do
-    case File.mkdir_p(path) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Could not create directory #{path}: #{fs_error(reason)}"}
-    end
-  end
-
-  defp safe_write(path, content) do
-    case File.write(path, content) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        {:error, "Could not write file #{path}: #{fs_error(reason)}"}
-    end
-  end
-
-  defp fs_error(:eacces), do: "no write permission"
-  defp fs_error(:enospc), do: "out of disk space"
-  defp fs_error(:eisdir), do: "target path is a directory"
-  defp fs_error(:enotdir), do: "a path component is not a directory"
-  defp fs_error(:erofs), do: "filesystem is read-only"
-  defp fs_error(reason), do: inspect(reason)
 end

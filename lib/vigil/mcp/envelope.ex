@@ -1,5 +1,16 @@
 defmodule Vigil.MCP.Envelope do
-  @moduledoc false
+  @moduledoc """
+  The session table behind the time envelope.
+
+  A `GenServer` only because the table needs an owner that outlives a request —
+  exactly as `Vigil.MCP.RateLimit`'s does. The table is public and the lookup
+  and the insert happen in the caller, so a response costs no process hop to
+  do one read and one write.
+
+  What the envelope says is `Vigil.MCP.Envelope.Decision`'s to decide,
+  including which form a given tool gets. This module holds the state that
+  decision is made against, and nothing else.
+  """
   use GenServer
 
   alias Vigil.MCP.Envelope.Decision
@@ -8,41 +19,32 @@ defmodule Vigil.MCP.Envelope do
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, [], name: __MODULE__)
 
-  @doc "Envelope for the `current` tool: always \"_t\", but counts as the session's first call."
-  def for_current(session_id, now, snapshot) do
-    GenServer.call(__MODULE__, {:for_current, session_id, now, snapshot})
+  @doc """
+  The envelope for one response to `tool` in `session_id`, recording the
+  session state it leaves behind.
+
+  One entry point for every tool: the router hands over the tool's name and
+  asks nothing else.
+  """
+  def for_tool(session_id, tool, now, snapshot) do
+    {envelope, session_state} = Decision.for_tool(tool, previous(session_id), now, snapshot)
+    :ets.insert(@table, {session_id, session_state})
+    envelope
   end
 
-  @doc "Envelope for any other tool call."
-  def for_call(session_id, now, snapshot) do
-    GenServer.call(__MODULE__, {:for_call, session_id, now, snapshot})
+  defp previous(session_id) do
+    case :ets.lookup(@table, session_id) do
+      [{^session_id, session_state}] -> session_state
+      [] -> nil
+    end
   end
 
   @impl true
   def init(_) do
     if :ets.whereis(@table) == :undefined do
-      :ets.new(@table, [:set, :named_table, :private])
+      :ets.new(@table, [:set, :named_table, :public])
     end
 
     {:ok, %{}}
-  end
-
-  @impl true
-  def handle_call({:for_current, session_id, now, snapshot}, _from, state) do
-    {result, session_state} = Decision.for_current(now, snapshot)
-    :ets.insert(@table, {session_id, session_state})
-    {:reply, result, state}
-  end
-
-  def handle_call({:for_call, session_id, now, snapshot}, _from, state) do
-    prev_state =
-      case :ets.lookup(@table, session_id) do
-        [] -> nil
-        [{_, session_state}] -> session_state
-      end
-
-    {result, session_state} = Decision.for_call(prev_state, now, snapshot)
-    :ets.insert(@table, {session_id, session_state})
-    {:reply, result, state}
   end
 end

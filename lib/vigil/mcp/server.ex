@@ -215,23 +215,29 @@ defmodule Vigil.MCP.Server do
     end
   end
 
-  defp build_tool_call_result(name, {:ok, value}, session_id) do
+  # The envelope is attached around both outcomes rather than inside the
+  # success branch, so "every tool response carries exactly one of `_`, `_t` or
+  # `_!`" (docs/design.md, "The time envelope") is structurally true instead of
+  # true in one of two branches. An error advances the session's state for the
+  # same reason: a failed first call is still a call the session made, and
+  # repeating the long first form on the next one would be a lie about which
+  # response is first.
+  defp build_tool_call_result(name, result, session_id) do
     now = Vigil.Clock.now()
-    snapshot = Store.snapshot(now)
-    envelope = envelope_for(name, session_id, now, snapshot)
-    text = Jason.encode!(Map.merge(%{result: value}, envelope))
-    %{content: [%{type: "text", text: text}]}
+    envelope = Envelope.for_tool(session_id, name, now, Store.snapshot(now))
+
+    case result do
+      {:ok, value} ->
+        %{content: [text_content(%{result: value}, envelope)]}
+
+      {:error, message} ->
+        %{content: [text_content(%{error: message}, envelope)], isError: true}
+    end
   end
 
-  defp build_tool_call_result(_name, {:error, message}, _session_id) do
-    %{content: [%{type: "text", text: message}], isError: true}
+  defp text_content(payload, envelope) do
+    %{type: "text", text: Jason.encode!(Map.merge(payload, envelope))}
   end
-
-  defp envelope_for("current", session_id, now, snapshot),
-    do: Envelope.for_current(session_id, now, snapshot)
-
-  defp envelope_for(_name, session_id, now, snapshot),
-    do: Envelope.for_call(session_id, now, snapshot)
 
   # Sent to the client on `initialize`. These are writing rules for the vault,
   # not rules for this server, which is why the two things they depend on —
