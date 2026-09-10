@@ -15,7 +15,7 @@ defmodule Vigil.Index do
   """
 
   alias Vigil.{Events, LinkIndex, Parser, Search, Slug}
-  alias Vigil.Vault.{Policy, Rules}
+  alias Vigil.Vault.Rules
 
   @overlong_note_chunk_threshold 40
   @stale_decision_days 180
@@ -311,7 +311,7 @@ defmodule Vigil.Index do
   def read(index, id, backlinks?) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- Policy.safe_path(path_part) do
+    with :ok <- Slug.safe_path(path_part) do
       if String.contains?(id, "#") do
         case lookup_chunk(index, id, path_part) do
           {:ok, chunk} -> {:ok, chunk_result(index, chunk, backlinks?)}
@@ -441,7 +441,7 @@ defmodule Vigil.Index do
   def links(index, id, direction, depth) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- Policy.safe_path(path_part),
+    with :ok <- Slug.safe_path(path_part),
          :ok <- validate_depth(depth) do
       if String.contains?(id, "#") do
         case lookup_chunk(index, id, path_part) do

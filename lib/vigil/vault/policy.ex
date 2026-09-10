@@ -161,36 +161,13 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
-  @doc """
-  The path-safety rule on its own, for the read paths.
-
-  `read` and `links` take an id from the caller and must reject traversal the
-  same way a write does, but none of the other write rules apply to them: a
-  reader may reach a note in a domain that is no longer writable.
-  """
-  @spec safe_path(String.t()) :: :ok | {:error, String.t()}
-  def safe_path(path), do: path_sanity(path)
-
   ## Path safety
 
-  # Rejected before normalization and again after it: normalization must not
-  # be able to turn a rejected path into an accepted one.
-  defp path_sanity(path) do
-    cond do
-      String.contains?(path, "..") -> @invalid_path
-      String.starts_with?(path, "/") -> @invalid_path
-      String.contains?(path, "\\") -> @invalid_path
-      String.contains?(path, <<0>>) -> @invalid_path
-      Enum.any?(String.split(path, "/"), &reserved_segment?/1) -> @invalid_path
-      true -> :ok
-    end
-  end
-
-  # A leading "." (hidden) or "_" (reserved, e.g. _domains.yml) is allowed in
-  # no path segment.
-  defp reserved_segment?(segment) do
-    String.starts_with?(segment, ".") or String.starts_with?(segment, "_")
-  end
+  # Owned by `Vigil.Slug`, alongside the normalization it is applied under —
+  # the read paths ask the same function. Checked before normalization and
+  # again after it: normalization must not be able to turn a rejected path
+  # into an accepted one.
+  defp path_sanity(path), do: Slug.safe_path(path)
 
   defp normalize(path) do
     case Slug.normalize_path(path) do
@@ -215,7 +192,7 @@ defmodule Vigil.Vault.Policy do
       not String.ends_with?(last, ".md") -> @invalid_path
       first == "skills" -> @invalid_path
       first in facts.exclude -> @invalid_path
-      reserved_segment?(first) -> @invalid_path
+      Slug.reserved_segment?(first) -> @invalid_path
       length(parts) == 2 -> domain_rules(first, parts, facts, create_dirs)
       length(parts) == 3 and first == "projects" -> domain_rules(first, parts, facts, create_dirs)
       true -> @invalid_path

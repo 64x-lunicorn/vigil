@@ -1,13 +1,21 @@
 defmodule Vigil.Slug do
   @moduledoc """
-  Canonical slug form for path segments and headings.
+  Canonical slug form for path segments and headings, and the path-safety
+  rule that guards them.
 
   This is the single slug implementation in the project — `Vigil.Parser.slug/1`
   delegates here, so that chunk IDs and file/directory names can never drift
   apart. `legacy_slugify/1` is the one deliberate exception; see its docs.
+
+  `safe_path/1` sits here because it is the rule `normalize_path/1` is applied
+  under: a path is checked for sanity, normalized, and checked again. Both the
+  read path (`Vigil.Index`) and the write gate (`Vigil.Vault.Policy`) ask it;
+  neither owns it.
   """
 
   @max_length 80
+
+  @invalid_path {:error, "Invalid path"}
 
   # Applied *before* generic diacritic stripping: NFD decomposition would turn
   # "ü" into "u", losing the information that German expects "ue".
@@ -136,6 +144,45 @@ defmodule Vigil.Slug do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  @doc """
+  Whether a vault-relative path is safe to resolve at all.
+
+  The rule every path crosses, on the read side as well as the write side:
+  no traversal, no absolute path, no backslash, no null byte, and no segment
+  starting with `.` (hidden) or `_` (reserved, e.g. `_domains.yml`).
+
+  It is deliberately not a *permission* check — `skills/tdd.md` and a note in
+  an excluded domain both pass here. Which paths a caller may read or write is
+  the caller's own rule; `Vigil.Vault.Policy` adds the write ones on top,
+  `Vigil.Index` adds none. Callers apply it before and after `normalize_path/1`,
+  so normalization cannot turn a rejected path into an accepted one.
+
+  Returns `:ok` or `{:error, "Invalid path"}` — the message callers hand back
+  verbatim.
+  """
+  @spec safe_path(String.t()) :: :ok | {:error, String.t()}
+  def safe_path(path) do
+    cond do
+      String.contains?(path, "..") -> @invalid_path
+      String.starts_with?(path, "/") -> @invalid_path
+      String.contains?(path, "\\") -> @invalid_path
+      String.contains?(path, <<0>>) -> @invalid_path
+      Enum.any?(String.split(path, "/"), &reserved_segment?/1) -> @invalid_path
+      true -> :ok
+    end
+  end
+
+  @doc """
+  Whether a single path segment is hidden (`.`) or reserved (`_`).
+
+  The per-segment half of `safe_path/1`, for callers holding one segment
+  rather than a path.
+  """
+  @spec reserved_segment?(String.t()) :: boolean
+  def reserved_segment?(segment) do
+    String.starts_with?(segment, ".") or String.starts_with?(segment, "_")
   end
 
   @doc """

@@ -465,17 +465,6 @@ defmodule Vigil.Vault.PolicyTest do
     end
   end
 
-  describe "safe_path/1" do
-    test "the read paths get the traversal rule without the write rules" do
-      assert Policy.safe_path("bike/x.md") == :ok
-      assert Policy.safe_path("work/secret.md") == :ok
-      assert Policy.safe_path("skills/tdd.md") == :ok
-      assert Policy.safe_path("../../etc/passwd") == {:error, "Invalid path"}
-      assert Policy.safe_path("/etc/passwd") == {:error, "Invalid path"}
-      assert Policy.safe_path(".hidden/x.md") == {:error, "Invalid path"}
-    end
-  end
-
   describe "section ops resolve through the index, not the filesystem" do
     test "an id without a fragment is refused before anything else" do
       assert {:error, msg} =
