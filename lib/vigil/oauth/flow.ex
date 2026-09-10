@@ -8,13 +8,17 @@ defmodule Vigil.OAuth.Flow do
   what makes a PKCE or refresh-rotation question answerable without building
   a conn — and, before that, without starting a git-backed vault, because the
   whole flow used to live inside the MCP router.
+
+  What a *token record* is belongs next door, to `Vigil.OAuth.Token`: minting
+  the pair a grant produces, telling access from refresh from replay, and
+  answering whether a token is valid for a resource. Verification is an OAuth
+  2.1 decision like the ones here and just as free of a conn — it only used to
+  live in the router because the record had no owner.
   """
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{Client, RedirectUri, Store, Token}
 
-  @access_token_ttl 3600
-  @refresh_token_ttl 30 * 86_400
   @authorization_code_ttl 60
 
   @doc """
@@ -173,14 +177,7 @@ defmodule Vigil.OAuth.Flow do
             {:error, 400, "invalid_target"}
 
           true ->
-            {:ok,
-             issue_tokens(
-               data.client_id,
-               data.resource,
-               scope_of(data),
-               grant_for_issue(data),
-               now
-             )}
+            {:ok, Token.issue_pair(data, data.resource, now)}
         end
     end
   end
@@ -188,11 +185,11 @@ defmodule Vigil.OAuth.Flow do
   def grant(%{"grant_type" => "refresh_token"} = params, now) do
     refresh_token = params["refresh_token"] || ""
 
-    case Store.get_token(refresh_token) do
+    case Token.fetch_refresh(refresh_token) do
       # Order matters: a spent token is a replay before it is anything else.
-      {:ok, %{type: :refresh, spent_at: _} = data} -> replayed(data)
-      {:ok, %{type: :refresh} = data} -> refresh(refresh_token, data, params, now)
-      _ -> {:error, 400, "invalid_grant"}
+      {:spent, data} -> replayed(data)
+      {:ok, data} -> refresh(refresh_token, data, params, now)
+      :error -> {:error, 400, "invalid_grant"}
     end
   end
 
@@ -200,7 +197,7 @@ defmodule Vigil.OAuth.Flow do
 
   defp refresh(refresh_token, data, params, now) do
     cond do
-      data.expires_at <= now ->
+      Token.expired?(data, now) ->
         {:error, 400, "invalid_grant"}
 
       data.client_id != params["client_id"] ->
@@ -214,8 +211,8 @@ defmodule Vigil.OAuth.Flow do
         # so a replay is refused — and, because it is marked rather than
         # deleted, recognised as a replay rather than mistaken for a token that
         # never existed.
-        Store.spend_token(refresh_token, data, now)
-        {:ok, issue_tokens(data.client_id, data.aud, scope_of(data), grant_for_issue(data), now)}
+        Token.spend_refresh(refresh_token, data, now)
+        {:ok, Token.issue_pair(data, data.aud, now)}
     end
   end
 
@@ -235,7 +232,7 @@ defmodule Vigil.OAuth.Flow do
   # attacker who knows the token but not the `client_id` should not be able to
   # keep the family alive by getting the rest of the request wrong.
   defp replayed(data) do
-    Store.revoke_grant(Map.get(data, :grant_id))
+    Store.revoke_grant(Token.grant_of(data))
     {:error, 400, "invalid_grant"}
   end
 
@@ -245,44 +242,5 @@ defmodule Vigil.OAuth.Flow do
 
   defp target_ok?(params, expected) do
     is_nil(params["resource"]) or params["resource"] == expected
-  end
-
-  defp scope_of(data), do: Map.get(data, :scope, OAuth.scope())
-
-  # The grant a newly issued pair belongs to. A code or refresh token minted
-  # before grants existed carries none, and minting one here keeps the
-  # invariant unconditional: every token issued from now on belongs to a family
-  # that can be revoked. Note this is only right for *issuing* — revoking a
-  # grant that does not exist has to stay a no-op, so `replayed/1` reads the
-  # field directly rather than through this.
-  defp grant_for_issue(data), do: Map.get(data, :grant_id) || Vigil.Uuid.v4()
-
-  defp issue_tokens(client_id, aud, scope, grant_id, now) do
-    access_token = Token.random()
-    refresh_token = Token.random()
-
-    Store.put_token(access_token, %{
-      grant_id: grant_id,
-      aud: aud,
-      scope: scope,
-      expires_at: now + @access_token_ttl
-    })
-
-    Store.put_token(refresh_token, %{
-      type: :refresh,
-      grant_id: grant_id,
-      client_id: client_id,
-      aud: aud,
-      scope: scope,
-      expires_at: now + @refresh_token_ttl
-    })
-
-    %{
-      access_token: access_token,
-      token_type: "Bearer",
-      expires_in: @access_token_ttl,
-      refresh_token: refresh_token,
-      scope: scope
-    }
   end
 end

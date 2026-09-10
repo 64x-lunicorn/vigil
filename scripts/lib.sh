@@ -258,11 +258,15 @@ wait_until_healthy() {
 # same process, no concurrency. If the service is not running yet (first-time
 # setup before the first start), the standalone path via the code checkout is
 # fine and only needs fetched deps, no release binary.
+#
+# Both paths mint through `Vigil.OAuth.Token`, which owns the token record —
+# an rpc expression that writes the map itself is how this one came to be a
+# variant that carried no grant_id.
 vigil_seed_token() {
   local resource="$1" scope="$2"
   if systemctl is-active --quiet vigil; then
     local ausdruck
-    ausdruck="token = Vigil.OAuth.Token.random(); now = System.system_time(:second); Vigil.OAuth.Store.put_token(token, %{aud: \"${resource}\", scope: \"${scope}\", expires_at: now + 3650 * 86400}); IO.puts(token)"
+    ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(\"${resource}\", \"${scope}\", 3650 * 86400, System.system_time(:second)))"
     as_vigil /opt/vigil/current/bin/vigil rpc "$ausdruck" | tail -1
   else
     # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here

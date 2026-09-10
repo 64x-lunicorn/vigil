@@ -76,41 +76,16 @@ defmodule Vigil.MCP.Server do
     end
   end
 
+  # What makes a token acceptable here is `Vigil.OAuth.Token`'s to say — the
+  # record's kind, its audience and its hour are its own facts, not the
+  # router's. All this adds is the one thing that is HTTP: the header the
+  # token arrived in, and that every refusal answers the same challenge.
   defp validate_access_token(conn) do
-    case get_req_header(conn, "authorization") do
-      ["Bearer " <> token] ->
-        case check_access_token(token) do
-          {:ok, scope} -> {:ok, scope, token}
-          {:error, :challenge} -> {:error, :challenge}
-        end
-
-      _ ->
-        {:error, :challenge}
-    end
-  end
-
-  defp check_access_token(token) do
-    case OAuth.Store.get_token(token) do
-      :error ->
-        {:error, :challenge}
-
-      {:ok, %{type: :refresh}} ->
-        {:error, :challenge}
-
-      {:ok, record} ->
-        now = System.system_time(:second)
-
-        cond do
-          record.expires_at <= now ->
-            OAuth.Store.delete_token(token)
-            {:error, :challenge}
-
-          not Plug.Crypto.secure_compare(record.aud, OAuth.resource()) ->
-            {:error, :challenge}
-
-          true ->
-            {:ok, Map.get(record, :scope, OAuth.scope())}
-        end
+    with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
+         {:ok, scope} <- OAuth.Token.validate_access(token, OAuth.resource()) do
+      {:ok, scope, token}
+    else
+      _ -> {:error, :challenge}
     end
   end
 
