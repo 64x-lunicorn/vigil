@@ -70,11 +70,39 @@ provided by PKCE or the OpenID Connect nonce value". Since PKCE is mandatory
 here, a client that omits `state` is not thereby unprotected. (§4.7.1)
 
 **Are refresh tokens rotated, and what happens on a second presentation?**
-Rotated: the presented token is deleted before the new pair is minted, so a
-replay finds nothing and gets `invalid_grant`. That meets §2.2.2 — "Refresh
-tokens for public clients MUST be sender-constrained or use refresh token
-rotation" — and detects replay as §4.14.2 requires. It does not *act* on the
-detection: the signal is generated and dropped. **Finding → #78.**
+Rotated, and the second presentation revokes the whole authorization grant.
+That meets §2.2.2 — "Refresh tokens for public clients MUST be
+sender-constrained or use refresh token rotation" — and acts on the detection
+§4.14.2 asks for, rather than only generating it.
+
+The mechanism is a marker, not a deletion. The presented token is marked
+**spent** before the new pair is minted; presenting a spent token is the
+signal, because §4.14.2's case is precisely that "if a refresh token is
+compromised and subsequently used by both the attacker and the legitimate
+client, one of them will present an invalidated refresh token". vigil cannot
+tell which of the two did, so every access and refresh token descended from
+that authorization goes — which is the cost §4.14.2 names, "forcing the
+legitimate client to obtain a fresh authorization grant".
+
+Three things about the shape:
+
+- **The family is keyed on the grant, not the client.** A `grant_id` is minted
+  with the authorization code and carried onto every token redeemed or
+  refreshed from it. A client legitimately holds more than one grant over
+  time, so revoking by `client_id` would take down authorizations that had
+  nothing to do with the replay.
+- **The answer is `invalid_grant` either way**, identical to a refresh token
+  that never existed. The caller does not learn that a family was found.
+- **No other check runs first.** Presenting a spent token *is* the signal, so
+  an attacker who has the token but not the `client_id` cannot keep the family
+  alive by getting the rest of the request wrong.
+
+A spent marker is evidence with an expiry date: the record keeps its
+`expires_at` and the janitor reclaims it on the same schedule as a live token,
+so the table does not grow a permanent tombstone per rotation. Tokens that
+predate the field — a refresh token from an older deployment, or an access
+token from `mix vigil.seed_token` — carry no grant, and "every token whose
+grant is unknown" is deliberately not treated as a family. (§2.2.2, §4.14.2)
 
 **Does the authorization response carry `iss`?** Yes, on the success redirect
 and the error redirect alike — RFC 9207 §2 asks for both: "In authorization
@@ -152,7 +180,7 @@ framing since the headers below (§4.16).
 | # | Gap | RFC 9700 | Answered by |
 |---|---|---|---|
 | [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 | `iss` on both redirect shapes, advertised |
-| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 | open |
+| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 | a replay revokes the whole grant |
 | [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — | `Vigil.RateLimit`, per address per endpoint |
 | [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 | `Vigil.OAuth.ClientAddr` |
 
@@ -399,17 +427,29 @@ Checks run in this order:
    → else `invalid_grant`
 7. If `resource` was sent, it must match the stored one → else `invalid_target`
 
-Success returns an access token (1 hour) and a refresh token (30 days).
+Success returns an access token (1 hour) and a refresh token (30 days), both
+carrying the `grant_id` minted with the code.
 
 ### `grant_type=refresh_token`
 
-**Rotation is mandatory** for a public client: the old refresh token is deleted
-and a new one issued alongside the new access token.
+**Rotation is mandatory** for a public client: the old refresh token is marked
+spent and a new pair is issued.
 
-An invalid or expired refresh token **must** return `invalid_grant` —
+Checks run in this order:
+
+1. Token exists and is a refresh token → else `invalid_grant`
+2. **Already spent → revoke every token of that grant**, and answer
+   `invalid_grant`. This check is first on purpose; see the replay answer in
+   the RFC 9700 walk above
+3. Not expired → else `invalid_grant`
+4. `client_id` matches the stored one → else `invalid_grant`
+5. If `resource` was sent, it must match the stored one → else `invalid_target`
+
+An invalid, expired or replayed refresh token **must** return `invalid_grant` —
 specifically not `invalid_request` and not a custom code. Clients renew tokens
 reactively on a 401 and proactively shortly before expiry; a wrong error code
-breaks renewal.
+breaks renewal. A client whose grant was revoked has to run the authorization
+flow again, consent page included.
 
 ### Error format
 
@@ -438,9 +478,10 @@ Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
 not matter, and a token lost to a crash costs one re-authorization.
 
 `Vigil.OAuth.Janitor` runs every five minutes and sweeps all four tables:
-expired authorization codes, expired access and refresh tokens, rate-limit
-counters older than 15 minutes, and CIMD cache entries whose hour is up. No
-cron, no job library — just `Process.send_after/3`.
+expired authorization codes, expired access and refresh tokens — spent ones
+included, since a rotated refresh token is marked rather than deleted —
+rate-limit counters older than 15 minutes, and CIMD cache entries whose hour
+is up. No cron, no job library — just `Process.send_after/3`.
 
 The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
 client supplies and filled from `GET /oauth/authorize`, so it grows on input
@@ -486,6 +527,8 @@ cannot authenticate anyone is worse than no service.
 - No JWT, no signing keys, no JWKS
 - No `client_credentials` grant
 - No `client_secret` — every client is public and uses PKCE
-- No revocation endpoint (delete the `.dets` file)
+- No revocation *endpoint* — a replayed refresh token revokes its grant from
+  the inside, but there is nothing for a client to call (delete the `.dets`
+  file)
 - No OpenID Connect discovery
 - No session cookie after login

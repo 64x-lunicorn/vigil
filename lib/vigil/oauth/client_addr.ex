@@ -60,7 +60,10 @@ defmodule Vigil.OAuth.ClientAddr do
     header = Keyword.get_lazy(opts, :header, &configured_header/0)
     trusted = Keyword.get_lazy(opts, :trusted, &configured_trusted/0)
 
-    forwarded(conn, header, trusted) || format(conn.remote_ip)
+    case forwarded(conn, header, trusted) do
+      nil -> format(conn.remote_ip)
+      address -> address
+    end
   end
 
   defp forwarded(_conn, nil, _trusted), do: nil

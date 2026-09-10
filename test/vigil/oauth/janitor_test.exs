@@ -32,6 +32,11 @@ defmodule Vigil.OAuth.JanitorTest do
     Store.put_token("token-expired", token_attrs(@now))
     Store.put_token("token-live", token_attrs(@now + 3600))
 
+    # A rotated refresh token is marked spent rather than deleted, so it is a
+    # row the sweep has to reclaim on its own expiry like any other.
+    Store.spend_token("token-spent-expired", token_attrs(@now), @now - 60)
+    Store.spend_token("token-spent-live", token_attrs(@now + 3600), @now - 60)
+
     # sweep_rate_limits/1 drops a window older than 15 minutes.
     Store.record_failure("198.51.100.1", @now - 901)
     Store.record_failure("198.51.100.2", @now)
@@ -80,14 +85,21 @@ defmodule Vigil.OAuth.JanitorTest do
     seed()
 
     assert keys(Store.all_codes()) == ["code-expired", "code-live"]
-    assert keys(Store.all_tokens()) == ["token-expired", "token-live"]
+
+    assert keys(Store.all_tokens()) == [
+             "token-expired",
+             "token-live",
+             "token-spent-expired",
+             "token-spent-live"
+           ]
+
     assert :ets.info(@rate_limits, :size) == 2
     assert :ets.info(@cimd_cache, :size) == 2
 
     sweep_now()
 
     assert keys(Store.all_codes()) == ["code-live"]
-    assert keys(Store.all_tokens()) == ["token-live"]
+    assert keys(Store.all_tokens()) == ["token-live", "token-spent-live"]
 
     assert :ets.lookup(@rate_limits, "198.51.100.1") == []
     assert [{"198.51.100.2", _count, _window}] = :ets.lookup(@rate_limits, "198.51.100.2")
@@ -100,8 +112,9 @@ defmodule Vigil.OAuth.JanitorTest do
 
   test "the CIMD cache is swept at all" do
     # The table is keyed on the client_id URL a client supplies and is filled
-    # from GET /oauth/authorize, which is not rate-limited, so nothing used to
-    # act on its expiry and nothing bounds the rate either. See issue #79.
+    # from GET /oauth/authorize, so it grows on input from outside. The
+    # per-address limit on that endpoint bounds the rate; only this sweep
+    # bounds the total.
     start_janitor(interval: :timer.minutes(5), now: fn -> @now end)
 
     for i <- 1..50 do
@@ -124,7 +137,14 @@ defmodule Vigil.OAuth.JanitorTest do
     sweep_now()
 
     assert keys(Store.all_codes()) == ["code-expired", "code-live"]
-    assert keys(Store.all_tokens()) == ["token-expired", "token-live"]
+
+    assert keys(Store.all_tokens()) == [
+             "token-expired",
+             "token-live",
+             "token-spent-expired",
+             "token-spent-live"
+           ]
+
     assert :ets.info(@cimd_cache, :size) == 2
   end
 
