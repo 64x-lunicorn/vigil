@@ -448,7 +448,7 @@ defmodule Vigil.Vault.PolicyTest do
   describe "duplicate detection on :create" do
     test "a strong match in the same domain is reported unless forced" do
       f =
-        facts(find_similar: fn _q, _d -> [%{id: "bike/terra-speed.md", score: 15}] end)
+        facts(find_similar: fn _q, _d, _depth -> [%{id: "bike/terra-speed.md", score: 15}] end)
 
       assert {:error, msg} =
                Policy.check(
@@ -473,7 +473,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "a weak match is not a duplicate" do
-      f = facts(find_similar: fn _q, _d -> [%{id: "bike/other.md", score: 3}] end)
+      f = facts(find_similar: fn _q, _d, _depth -> [%{id: "bike/other.md", score: 3}] end)
 
       assert {:ok, _} =
                Policy.check(
@@ -486,7 +486,9 @@ defmodule Vigil.Vault.PolicyTest do
     test "notes inside the same project folder are not duplicates of each other" do
       f =
         facts(
-          find_similar: fn _q, _d -> [%{id: "projects/vigil/vigil-ranking.md", score: 20}] end
+          find_similar: fn _q, _d, _depth ->
+            [%{id: "projects/vigil/vigil-ranking.md", score: 20}]
+          end
         )
 
       assert {:ok, _} =
@@ -495,6 +497,93 @@ defmodule Vigil.Vault.PolicyTest do
                  %{path: "projects/vigil/vigil-scoring.md", type: "reference", content: "# T\nx"},
                  f
                )
+    end
+
+    # The gate used to derive its terms from the basename's `-` segments and
+    # keep only the ones longer than three characters, so a name made only of
+    # short segments produced no terms at all: `find_similar` was never asked,
+    # the empty result read as "nothing similar", and the gate answered :ok
+    # before `Facts` was reached. A German vault has short note names —
+    # training/ftp.md, gear/rad.md, home/weg.md are all live shapes — so this
+    # was the common case, not an edge one.
+    test "a name of only short segments is still checked, and a real duplicate is refused" do
+      f = facts(find_similar: fn _q, _d, _depth -> [%{id: "training/ftp-test.md", score: 15}] end)
+
+      assert {:error, msg} =
+               Policy.check(
+                 :create,
+                 %{path: "training/ftp.md", type: "reference", content: "# FTP\nx"},
+                 f
+               )
+
+      assert msg =~ "Possible duplicates found: training/ftp-test.md"
+      assert msg =~ "force: true"
+
+      assert {:ok, _} =
+               Policy.check(
+                 :create,
+                 %{path: "training/ftp.md", type: "reference", content: "# FTP\nx", force: true},
+                 f
+               )
+    end
+
+    test "a name of only short segments passes when the vault has nothing like it" do
+      f = facts(find_similar: fn _q, _d, _depth -> [] end)
+
+      assert {:ok, _} =
+               Policy.check(
+                 :create,
+                 %{path: "training/ftp.md", type: "reference", content: "# FTP\nx"},
+                 f
+               )
+    end
+
+    # What the gate keys on, pinned: the note's own name is always a term, and
+    # the search depth is the policy's to state rather than the adapter's.
+    test "the note's own name is a term, and the policy names the search depth" do
+      me = self()
+
+      f =
+        facts(
+          find_similar: fn query, domain, depth ->
+            send(me, {:asked, query, domain, depth})
+            []
+          end
+        )
+
+      assert {:ok, _} =
+               Policy.check(
+                 :create,
+                 %{path: "training/ftp.md", type: "reference", content: "# FTP\nx"},
+                 f
+               )
+
+      assert_received {:asked, "ftp", "training", depth}
+      assert is_integer(depth) and depth > 0
+      refute_received {:asked, _, _, _}
+    end
+
+    test "the terms are the name itself and every segment that stands alone" do
+      me = self()
+
+      f =
+        facts(
+          find_similar: fn query, _domain, _depth ->
+            send(me, {:asked, query})
+            []
+          end
+        )
+
+      assert {:ok, _} =
+               Policy.check(
+                 :create,
+                 %{path: "bike/gp-5000.md", type: "reference", content: "# GP\nx"},
+                 f
+               )
+
+      assert_received {:asked, "gp-5000"}
+      assert_received {:asked, "5000"}
+      refute_received {:asked, _}
     end
   end
 

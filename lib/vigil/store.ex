@@ -304,8 +304,12 @@ defmodule Vigil.Store do
       path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
       read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
       find_backlinks: fn path -> Index.backlinks(state.index, path) end,
-      find_similar: fn query, domain ->
-        Index.search(state.index, %{query: query, domain: domain, limit: 25})
+      # The depth comes from the policy, which is where the duplicate gate's
+      # sensitivity is stated — terms, depth and threshold together. An
+      # adapter that chose its own would be a third module deciding how
+      # sensitive the gate is.
+      find_similar: fn query, domain, depth ->
+        Index.search(state.index, %{query: query, domain: domain, limit: depth})
       end,
       count_headings: count_headings,
       find_chunk: find_chunk,
