@@ -573,13 +573,24 @@ defmodule Vigil.Index do
     }
   end
 
+  # Per note, because that is the scope a chunk id is unique in — and what
+  # collides is the heading text's slug, not the heading chain
+  # (Vigil.Vault.Rules). The ids locate every chunk in the collision.
   defp lint_duplicate_headings(chunks) do
     chunks
-    |> Enum.filter(& &1.heading)
-    |> Enum.group_by(&{&1.path, &1.heading_path})
-    |> Enum.filter(fn {_key, group} -> length(group) > 1 end)
-    |> Enum.map(fn {{path, heading_path}, group} ->
-      %{path: path, heading_path: heading_path, ids: Enum.map(group, & &1.id)}
+    |> Enum.group_by(& &1.path)
+    |> Enum.sort_by(fn {path, _group} -> path end)
+    |> Enum.flat_map(fn {path, note_chunks} ->
+      note_chunks
+      |> Rules.duplicate_headings()
+      |> Enum.map(fn %{slug: slug, chunks: group} ->
+        %{
+          path: path,
+          slug: slug,
+          headings: group |> Enum.map(& &1.heading) |> Enum.uniq(),
+          ids: Enum.map(group, & &1.id)
+        }
+      end)
     end)
   end
 

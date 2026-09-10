@@ -263,7 +263,27 @@ defmodule Vigil.IndexTest do
       updated = Index.put(index, file)
       report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
 
-      assert Enum.any?(report.duplicate_headings, &(&1.path == "bike/messy.md"))
+      assert [finding] = Enum.filter(report.duplicate_headings, &(&1.path == "bike/messy.md"))
+      assert finding.slug == "duplicate"
+      assert finding.headings == ["Duplicate"]
+      assert finding.ids == ["bike/messy.md#duplicate", "bike/messy.md#duplicate-2"]
+    end
+
+    # What collides is the heading text's slug, not the heading chain: these
+    # two really do become #b and #b-2. Grouping by the chain reported nothing.
+    test "same heading under two different H2s is a duplicate", %{index: index} do
+      {:ok, file} =
+        Parser.parse(
+          "bike/chains.md",
+          "# Chains\n\n## A\n\n### B\nOne.\n\n## C\n\n### B\nTwo.\n",
+          @git_meta
+        )
+
+      updated = Index.put(index, file)
+      report = Index.lint(updated, ~U[2026-01-01 10:00:00Z])
+
+      assert [finding] = Enum.filter(report.duplicate_headings, &(&1.path == "bike/chains.md"))
+      assert finding.ids == ["bike/chains.md#b", "bike/chains.md#b-2"]
     end
 
     test "sentence-like headings", %{index: index} do

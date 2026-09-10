@@ -318,10 +318,11 @@ defmodule Vigil.VaultCheck do
       |> length()
 
     duplicates =
-      heading_chunks
-      |> Enum.group_by(& &1.heading)
-      |> Enum.filter(fn {_h, group} -> length(group) > 1 end)
-      |> Enum.map(fn {heading, group} -> %{heading: heading, count: length(group)} end)
+      parsed_file.chunks
+      |> Rules.duplicate_headings()
+      |> Enum.map(fn %{chunks: [first | _] = group} ->
+        %{heading: first.heading, count: length(group)}
+      end)
 
     sentence_headings =
       heading_chunks
