@@ -375,12 +375,9 @@ defmodule Vigil.Store do
   ## append
 
   defp do_append(params, state) do
-    heading = Map.get(params, :heading)
     content = Map.fetch!(params, :content)
 
-    with {:ok, %{path: path}} <- Policy.check(:append, params, facts(state)) do
-      target = append_target(state.index, path, heading)
-
+    with {:ok, %{path: path, target: target}} <- Policy.check(:append, params, facts(state)) do
       edit_and_commit(
         state,
         path,
@@ -389,17 +386,6 @@ defmodule Vigil.Store do
       )
     else
       {:error, msg} -> {{:error, msg}, state}
-    end
-  end
-
-  defp append_target(_index, _path, nil), do: :end
-
-  defp append_target(index, path, heading) do
-    target_slug = Parser.slug(heading)
-
-    case Index.chunk_by_heading(index, path, target_slug) do
-      nil -> {:new_section, heading}
-      chunk -> {:section, chunk}
     end
   end
 

@@ -122,7 +122,8 @@ defmodule Vigil.Index do
   def lookups(index) do
     %{
       count_headings: fn path -> heading_count(index, path) end,
-      find_chunk: fn id -> find_chunk(index, id) end
+      find_chunk: fn id -> find_chunk(index, id) end,
+      find_section: fn path, heading -> chunk_by_heading(index, path, Parser.slug(heading)) end
     }
   end
 
@@ -159,8 +160,11 @@ defmodule Vigil.Index do
     end
   end
 
-  @doc "The chunk in `path` whose heading slug matches `target_slug`, or `nil` — `append`'s existing-section lookup."
-  def chunk_by_heading(index, path, target_slug) do
+  # The chunk in `path` whose heading slug matches `target_slug`, or `nil` —
+  # `append`'s existing-section lookup, reached through `lookups/1`. Both sides
+  # are slugged here so the caller never has to know how a heading becomes an
+  # id.
+  defp chunk_by_heading(index, path, target_slug) do
     case Map.get(index.notes, path) do
       nil ->
         nil

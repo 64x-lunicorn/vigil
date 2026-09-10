@@ -349,6 +349,16 @@ private helpers in `Vigil.Store` that only `create` and `move_note` called, so
 traversal and nothing else — each of them could write into `skills/` and into
 an excluded domain, and the write was then indexed as a note.
 
+**`append` resolves its target through the gate too.** Whether an append
+becomes a new section, an addition to an existing one, or text at the end of
+the file decides what the file becomes, so the policy decides it and returns
+the target alongside the path. Content is judged against that target: a heading
+in content appended *into* an existing section is rejected, because the next
+parse would split that section into two chunks one of which nobody asked for.
+Appending at the end of a file, or opening a new section via the heading
+argument, is unaffected — there a heading opens a section rather than cutting
+one in half.
+
 **A section id is resolved once.** `replace_section` and `delete_section` take
 an id, and the policy resolves it through the same lenient lookup `read` uses —
 one retry through path normalization — so an id that reads is an id that

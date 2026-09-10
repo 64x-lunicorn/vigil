@@ -239,6 +239,33 @@ defmodule Vigil.StoreTest do
       {:ok, result} = Store.read("bike/terra-speed.md#gravel-experience", false)
       assert result.body =~ "Final sentence."
     end
+
+    # A heading spliced into the middle of a section splits it on the next
+    # parse, into two chunks one of which nobody asked for.
+    test "a heading in content appended to an existing section is rejected", %{vault: vault} do
+      assert {:error, msg} =
+               Store.append(%{
+                 path: "bike/via-carolina.md",
+                 heading: "Gear",
+                 content: "## Sneaky\nSplit."
+               })
+
+      assert msg =~ "split the section in two"
+      refute File.read!(Path.join(vault, "bike/via-carolina.md")) =~ "Sneaky"
+    end
+
+    test "the same content is accepted at the end of the file and as a new section" do
+      content = "## Sneaky\nNot sneaky here."
+
+      assert {:ok, _} = Store.append(%{path: "bike/terra-speed.md", content: content})
+
+      assert {:ok, _} =
+               Store.append(%{
+                 path: "bike/via-carolina.md",
+                 heading: "Weather",
+                 content: content
+               })
+    end
   end
 
   # Which lines move, and content-shape validation, are Vigil.Vault.Edit's

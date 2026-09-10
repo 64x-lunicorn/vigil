@@ -155,7 +155,9 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test ":append requires the file to exist" do
-      assert {:error, msg} = Policy.check(:append, %{path: "bike/ghost.md"}, facts())
+      assert {:error, msg} =
+               Policy.check(:append, %{path: "bike/ghost.md", content: "x"}, facts())
+
       assert msg =~ "File not found"
     end
   end
@@ -169,8 +171,13 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "append cannot reach into skills/ or an excluded domain", %{f: f} do
-      assert {:error, "Invalid path"} = Policy.check(:append, %{path: "skills/tdd.md"}, f)
-      assert {:error, "Invalid path"} = Policy.check(:append, %{path: "work/secret.md"}, f)
+      req = %{content: "x"}
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:append, Map.put(req, :path, "skills/tdd.md"), f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:append, Map.put(req, :path, "work/secret.md"), f)
     end
 
     test "rewrite_note cannot reach into skills/ or an excluded domain", %{f: f} do
@@ -254,6 +261,60 @@ defmodule Vigil.Vault.PolicyTest do
       }
 
       assert {:ok, _} = Policy.check(:rewrite_note, req, f)
+    end
+  end
+
+  describe "append resolves its target" do
+    setup do
+      %{f: facts(path_exists?: fn _ -> true end)}
+    end
+
+    test "no heading appends at the end of the file", %{f: f} do
+      assert {:ok, %{path: "bike/x.md", target: :end}} =
+               Policy.check(:append, %{path: "bike/x.md", content: "text"}, f)
+    end
+
+    test "a heading the note does not have opens a new section", %{f: f} do
+      assert {:ok, %{target: {:new_section, "Weather"}}} =
+               Policy.check(:append, %{path: "bike/x.md", heading: "Weather", content: "text"}, f)
+    end
+
+    test "a heading the note has resolves to that section's chunk" do
+      chunk = %{heading: "Gear", path: "bike/x.md"}
+      f = facts(path_exists?: fn _ -> true end, find_section: fn _p, _h -> chunk end)
+
+      assert {:ok, %{target: {:section, ^chunk}}} =
+               Policy.check(:append, %{path: "bike/x.md", heading: "Gear", content: "text"}, f)
+    end
+
+    test "a heading in content that lands inside an existing section is rejected" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      assert {:error, msg} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Gear", content: "## Nope\ntext"},
+                 f
+               )
+
+      assert msg =~ "split the section in two"
+    end
+
+    test "the same content is fine at the end of the file and in a new section", %{f: f} do
+      content = "## Fine here\ntext"
+
+      assert {:ok, _} = Policy.check(:append, %{path: "bike/x.md", content: content}, f)
+
+      assert {:ok, _} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Weather", content: content},
+                 f
+               )
     end
   end
 

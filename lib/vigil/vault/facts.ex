@@ -35,7 +35,10 @@ defmodule Vigil.Vault.Facts do
             # (replace_section, delete_section). The index, not the filesystem,
             # is what says whether a section exists — and the record it hands
             # back carries the path the write uses.
-            find_chunk: &__MODULE__.no_chunk/1
+            find_chunk: &__MODULE__.no_chunk/1,
+            # The section in a note whose heading matches, or nil (append's
+            # target decision).
+            find_section: &__MODULE__.no_section/2
 
   @type t :: %__MODULE__{}
 
@@ -56,4 +59,7 @@ defmodule Vigil.Vault.Facts do
 
   @doc false
   def no_chunk(_id), do: nil
+
+  @doc false
+  def no_section(_path, _heading), do: nil
 end

@@ -71,8 +71,12 @@ defmodule Vigil.Vault.Policy do
   end
 
   def check(:append, request, facts) do
-    with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts) do
-      {:ok, %{path: path}}
+    content = Map.fetch!(request, :content)
+
+    with {:ok, path} <- existing_note(Map.fetch!(request, :path), facts),
+         {:ok, target} <- append_target(path, Map.get(request, :heading), facts),
+         :ok <- appended_content(target, content) do
+      {:ok, %{path: path, target: target}}
     end
   end
 
@@ -270,6 +274,19 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # Where an append lands: at the end of a section the note already has, in a
+  # new section at the end of the file, or at the end of the file itself. Which
+  # one it is decides what the file becomes, which makes it a policy question
+  # and not the caller's.
+  defp append_target(_path, nil, _facts), do: {:ok, :end}
+
+  defp append_target(path, heading, facts) do
+    case facts.find_section.(path, heading) do
+      nil -> {:ok, {:new_section, heading}}
+      chunk -> {:ok, {:section, chunk}}
+    end
+  end
+
   defp section_chunk(id, facts, verb) do
     case facts.find_chunk.(id) do
       nil -> {:error, "Not found: #{id}"}
@@ -369,8 +386,25 @@ defmodule Vigil.Vault.Policy do
   end
 
   defp replacement_content(content) do
+    refute_headings(content, "content must not contain headings (## through ####)")
+  end
+
+  # A heading spliced into the middle of an existing section splits that
+  # section on the next parse, into two chunks one of which nobody asked for.
+  # The other two targets append at the end of the file, where a heading opens
+  # a section rather than cutting one in half, and are left alone.
+  defp appended_content({:section, _chunk}, content) do
+    refute_headings(
+      content,
+      "content appended to an existing section must not contain headings (## through ####): it would split the section in two"
+    )
+  end
+
+  defp appended_content(_target, _content), do: :ok
+
+  defp refute_headings(content, message) do
     if Enum.any?(Markdown.split_lines(content), &Markdown.heading?/1) do
-      {:error, "content must not contain headings (## through ####)"}
+      {:error, message}
     else
       :ok
     end

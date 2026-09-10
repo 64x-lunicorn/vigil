@@ -384,18 +384,20 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "chunk_by_heading/3" do
-    test "finds the chunk whose heading slugifies to the target slug", %{index: index} do
-      assert %Index.Chunk{heading: "Gear"} =
-               Index.chunk_by_heading(index, "bike/via-carolina.md", "gear")
+  describe "lookups/1 find_section" do
+    test "finds the chunk whose heading slugifies to the same slug", %{index: index} do
+      find = Index.lookups(index).find_section
+
+      assert %Index.Chunk{heading: "Gear"} = find.("bike/via-carolina.md", "Gear")
+      assert %Index.Chunk{heading: "Gear"} = find.("bike/via-carolina.md", "gear!")
     end
 
     test "nil when no heading in the note matches", %{index: index} do
-      assert Index.chunk_by_heading(index, "bike/via-carolina.md", "weather") == nil
+      assert Index.lookups(index).find_section.("bike/via-carolina.md", "Weather") == nil
     end
 
     test "nil for an unknown path", %{index: index} do
-      assert Index.chunk_by_heading(index, "bike/nope.md", "gear") == nil
+      assert Index.lookups(index).find_section.("bike/nope.md", "Gear") == nil
     end
   end
 
