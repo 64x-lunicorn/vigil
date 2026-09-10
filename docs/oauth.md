@@ -31,6 +31,94 @@ Code.
 
 ---
 
+## Walked against RFC 9700
+
+vigil is a hand-written OAuth 2.1 authorization server, so at some point
+somebody has to walk it against
+[RFC 9700](https://www.rfc-editor.org/rfc/rfc9700.html), *Best Current Practice
+for OAuth 2.0 Security*. This section is the result, so the next reviewer does
+not re-derive it. Each answer is the behaviour of the code, not an intention.
+
+**Is `code_challenge` required, and is `plain` refused?** Yes and yes.
+`Vigil.OAuth.Flow.authorize_details/1` rejects a missing or empty
+`code_challenge` with `invalid_request`, and requires
+`code_challenge_method` to be exactly `S256` — so `plain` is refused, and so is
+an *absent* method, which RFC 7636 would otherwise default to `plain`. The
+verifier is checked at the token endpoint with
+`Plug.Crypto.secure_compare/2`. This is stricter than §2.1.1 asks: "Authorization
+servers MUST support PKCE", and "MUST mitigate PKCE downgrade attacks by
+ensuring that a token request containing a `code_verifier` parameter is accepted
+only if a `code_challenge` parameter was present in the authorization request"
+— here there is no request without one. (§2.1.1, §4.8)
+
+**Can a code be redeemed by another client, and is `redirect_uri` re-checked
+at the token endpoint?** No, and yes. `grant/2` compares both the stored
+`client_id` and the stored `redirect_uri` against the token request and answers
+`invalid_grant` on either mismatch. The code is deleted on lookup — `take_code/1`
+— so it is one-time even on the failing paths. What that binding does *not* do
+is authenticate: every client here is public (see below), so `client_id` is
+asserted rather than proven, and PKCE is the actual defence against code
+injection. (§4.5.3.1)
+
+**What binds the authorization response to the request that started it, and
+what if `state` is absent?** `state` is echoed when the client sends one and
+omitted when it does not; vigil never invents one. The binding to the browser
+session is the client's to hold, and §4.7.1 says PKCE is enough for it: "PKCE
+provides robust protection against CSRF attacks even in the presence of an
+attacker that can read the authorization response", and "the same protection is
+provided by PKCE or the OpenID Connect nonce value". Since PKCE is mandatory
+here, a client that omits `state` is not thereby unprotected. (§4.7.1)
+
+**Are refresh tokens rotated, and what happens on a second presentation?**
+Rotated: the presented token is deleted before the new pair is minted, so a
+replay finds nothing and gets `invalid_grant`. That meets §2.2.2 — "Refresh
+tokens for public clients MUST be sender-constrained or use refresh token
+rotation" — and detects replay as §4.14.2 requires. It does not *act* on the
+detection: the signal is generated and dropped. **Finding → #78.**
+
+**Does the authorization response carry `iss`?** No, and nothing depends on it.
+§4.4.2.1 wants the issuer identifier in the authorization response, via the
+`iss` parameter of RFC 9207. **Finding → #77.**
+
+**What authenticates a client at the token endpoint?** Nothing —
+`token_endpoint_auth_methods_supported` is `["none"]` and there are no client
+secrets, by design for a single-user deployment. The consequence for the
+loopback clients the consent page warns about is bounded by PKCE: a local
+process that races the redirect and grabs the code still cannot redeem it
+without the `code_verifier`, which never leaves the real client. The warning on
+the consent page is about a different thing — that any local process can *ask*
+for consent while looking like the client. (§2.5, and RFC 8252 §8.3)
+
+**Is the rate limit per client, per address, or global — and what does an
+attacker gain by exhausting it for someone else?** Neither of the two limits
+covers the authorization server. `Vigil.MCP.RateLimit` is per access token and
+guards `/mcp` only. `Vigil.OAuth.Store.rate_limited?/2` has one caller,
+`Flow.consent/4`, so it counts wrong consent passwords and nothing else:
+`/oauth/register`, `/oauth/authorize` and `/oauth/token` are unlimited.
+**Finding → #79.** And the one limit that exists is keyed on `conn.remote_ip`,
+which behind the deployment's proxy is the proxy — one global bucket, so
+exhausting it locks out the owner rather than the attacker.
+**Finding → #81.** (§4.13)
+
+Two things the walk confirmed in passing: the authorization server never
+redirects to an unregistered `redirect_uri` — an untrusted client or URI gets a
+400 HTML page and no `Location` at all (§4.11.2) — and the consent page refuses
+framing since the headers below (§4.16).
+
+### What the walk found
+
+| # | Gap | RFC 9700 |
+|---|---|---|
+| [#77](https://github.com/64x-lunicorn/vigil/issues/77) | No `iss` in the authorization response | §4.4.2.1 |
+| [#78](https://github.com/64x-lunicorn/vigil/issues/78) | Refresh replay is detected but nothing is revoked | §4.14.2 |
+| [#79](https://github.com/64x-lunicorn/vigil/issues/79) | The OAuth endpoints have no rate limit | — |
+| [#81](https://github.com/64x-lunicorn/vigil/issues/81) | The consent limit counts the proxy, not the client | §4.13 |
+
+None of them is an incident on the current deployment, where Cloudflare Access
+is in front of the endpoint. They are the defences that are absent behind it.
+
+---
+
 ## Endpoints
 
 All served by `Vigil.OAuth.Endpoint`, which `Vigil.MCP.Server` forwards to for
@@ -296,8 +384,9 @@ counters older than 15 minutes, and CIMD cache entries whose hour is up. No
 cron, no job library — just `Process.send_after/3`.
 
 The CIMD cache matters most of the four. It is keyed on the `client_id` URL a
-client supplies, so it grows on input from outside; registration is
-rate-limited, which bounds the rate of growth but not the total.
+client supplies, and it is filled from `GET /oauth/authorize`, which is not
+rate-limited — so nothing bounds the rate at which it grows either. The sweep is
+what keeps it finite. See [#79](https://github.com/64x-lunicorn/vigil/issues/79).
 
 The interval and the instant are both arguments with production defaults, so a
 test can drive one sweep rather than wait five minutes for it. The instant is a
