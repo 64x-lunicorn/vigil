@@ -115,8 +115,22 @@ defmodule Vigil.Index do
   @doc "Incoming references to `key` (a note path or a full chunk id) — the write path's backlinks question."
   def backlinks(index, key), do: backlinks_for(index, key)
 
-  @doc "How many of `path`'s chunks carry a heading — the `rewrite_note` shrink gate's baseline."
-  def heading_count(index, path) do
+  @doc """
+  The adapters `Vigil.Vault.Facts` carries for the questions only the index can
+  answer, as a map ready to be merged into a `Facts` struct.
+
+  The policy asks them about the path it derived itself, which is why they are
+  closures over the index rather than values looked up ahead of the decision.
+  """
+  def lookups(index) do
+    %{
+      count_headings: fn path -> heading_count(index, path) end
+    }
+  end
+
+  # How many of `path`'s chunks carry a heading — the `rewrite_note` shrink
+  # gate's baseline, reached through `lookups/1`.
+  defp heading_count(index, path) do
     case Map.get(index.notes, path) do
       nil -> 0
       note -> Enum.count(note.chunk_ids, &heading_chunk?(index, &1))

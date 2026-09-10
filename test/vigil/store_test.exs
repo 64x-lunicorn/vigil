@@ -454,6 +454,19 @@ defmodule Vigil.StoreTest do
       assert result.type == :reference
     end
 
+    # The shrink gate's baseline is the note's own indexed heading count, asked
+    # for by the policy rather than handed in. If that question never reaches
+    # the policy the baseline reads as 0, nothing looks removed, and the gate
+    # opens without a word.
+    test "the shrink gate names the note's own heading count" do
+      one_left = "# Via Carolina\n\n## Fueling\nbaseline."
+
+      assert {:error, msg} =
+               Store.rewrite_note(%{path: "bike/via-carolina.md", content: one_left})
+
+      assert msg =~ "removes 2 of 3 headings"
+    end
+
     test "confirm not required when the shrink stays under the threshold" do
       # via-carolina.md has 3 headings (Fueling, Second Half, Gear); this
       # removes only 1 — under both half-of-3 and the 20-heading floor.

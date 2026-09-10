@@ -337,9 +337,11 @@ Every write — `create`, `append`, `replace_section`, `rewrite_note`,
 `Vigil.Vault.Policy` first. One function, `check/3`, holds every rule about a
 write: path safety, path normalization, which domains are writable, the naming
 conventions from `_domains.yml`, frontmatter and type rules, duplicate
-detection, and the confirm gates. It is pure — it reads no file and touches no
-index; `Vigil.Vault.Facts` carries what it needs, and where a decision
-authorises an effect it says so in its result rather than performing it.
+detection, and the confirm gates. Policy performs no effect and changes
+nothing. It asks the vault questions through `Vigil.Vault.Facts` — whether a
+path exists, what a note contains, which chunk an id resolves to — and where a
+decision authorises an effect it says so in its result rather than performing
+it. Asking never changes the vault.
 
 The point of one gate is that there is no second way in. The rules used to be
 private helpers in `Vigil.Store` that only `create` and `move_note` called, so

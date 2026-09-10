@@ -7,11 +7,11 @@ defmodule Vigil.Vault.Policy do
   conventions from `_domains.yml`, frontmatter and type rules, duplicate
   detection, and the confirm gates on destructive operations.
 
-  The module is pure. It reads no file, touches no ETS table and consults no
-  application configuration; `Vigil.Vault.Facts` carries everything it needs.
-  Where a decision authorises an effect — creating a project directory — it
-  says so in its result rather than performing it, so asking the question
-  never changes the vault.
+  Policy performs no effect and changes nothing. It asks the vault questions
+  through `Vigil.Vault.Facts` — whether a path exists, what a note contains,
+  which chunk an id resolves to — and where a decision authorises an effect it
+  says so in its result rather than performing it. Asking never changes the
+  vault.
 
   Every write path goes through here. That is the point: the rules used to be
   private to `Vigil.Store` and only two of the eight write paths applied them,
@@ -95,10 +95,11 @@ defmodule Vigil.Vault.Policy do
 
   def check(:delete_note, request, facts) do
     path = Map.fetch!(request, :path)
+    backlinks = facts.find_backlinks.(path)
 
-    with :ok <- require_confirm(confirm?(request), delete_description(path, facts)),
+    with :ok <- require_confirm(confirm?(request), delete_description(path, backlinks)),
          {:ok, path} <- existing_note(path, facts) do
-      {:ok, %{path: path}}
+      {:ok, %{path: path, backlinks: backlinks}}
     end
   end
 
@@ -413,8 +414,8 @@ defmodule Vigil.Vault.Policy do
      "Destructive operation: #{description}. Call again with confirm: true to execute it."}
   end
 
-  defp delete_description(path, facts) do
-    case facts.backlinks do
+  defp delete_description(path, backlinks) do
+    case backlinks do
       [] ->
         "permanently deletes #{path} from the vault"
 
@@ -425,10 +426,10 @@ defmodule Vigil.Vault.Policy do
 
   # confirm is only required when the new version removes more than half of
   # the existing sections OR more than 20 headings; below that rewrite_note
-  # goes through without it. The baseline is facts.heading_count — what vigil
-  # has indexed for the note (see Vigil.Index.heading_count/2).
+  # goes through without it. The baseline is what vigil has indexed for the
+  # note the policy resolved, asked for here rather than handed in.
   defp shrink_threshold(path, content, confirm, facts) do
-    old_count = facts.heading_count
+    old_count = facts.count_headings.(path)
     removed = old_count - Markdown.count_headings(content)
 
     if removed > 0 and (removed > div(old_count, 2) or removed > 20) do

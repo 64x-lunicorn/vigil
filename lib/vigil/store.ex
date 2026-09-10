@@ -273,26 +273,29 @@ defmodule Vigil.Store do
 
   ## Vault facts for Vigil.Vault.Policy
 
-  # Built fresh per write. The three function fields are the adapters at the
-  # policy's seam: in production they read the filesystem and the index, in
-  # Vigil.Vault.PolicyTest they are literals.
+  # Built fresh per write. The function fields are the adapters at the policy's
+  # seam: in production they read the filesystem and the index, in
+  # Vigil.Vault.PolicyTest they are literals. The index answers some of them
+  # itself (Vigil.Index.lookups/1); struct!/2 is what merges them, so a lookup
+  # the struct has no field for raises here rather than being carried silently.
   defp facts(state, opts \\ []) do
-    %Facts{
+    base = %Facts{
       vault_path: state.vault_path,
       domains: list_domain_names(state),
       exclude: state.exclude,
       project_dirs: project_dirs(state),
       naming: naming_rules(state),
       today: Clock.today(),
-      heading_count: Keyword.get(opts, :heading_count, 0),
-      backlinks: Keyword.get(opts, :backlinks, []),
       chunk: Keyword.get(opts, :chunk),
       path_exists?: fn path -> File.exists?(Path.join(state.vault_path, path)) end,
       read_note: fn path -> File.read(Path.join(state.vault_path, path)) end,
+      find_backlinks: fn path -> Index.backlinks(state.index, path) end,
       find_similar: fn query, domain ->
         Index.search(state.index, %{query: query, domain: domain, limit: 25})
       end
     }
+
+    struct!(base, Index.lookups(state.index))
   end
 
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
@@ -418,10 +421,8 @@ defmodule Vigil.Store do
 
   defp do_rewrite_note(params, state) do
     content = Map.fetch!(params, :content)
-    heading_count = Index.heading_count(state.index, Map.fetch!(params, :path))
 
-    with {:ok, %{path: path}} <-
-           Policy.check(:rewrite_note, params, facts(state, heading_count: heading_count)),
+    with {:ok, %{path: path}} <- Policy.check(:rewrite_note, params, facts(state)),
          abs_path = abs(state, path),
          {:ok, original} <- read_existing_file(abs_path) do
       case Markdown.split_frontmatter(original) do
@@ -489,10 +490,8 @@ defmodule Vigil.Store do
   ## delete
 
   defp do_delete_note(params, state) do
-    backlinks = Index.backlinks(state.index, Map.fetch!(params, :path))
-
-    with {:ok, %{path: path}} <-
-           Policy.check(:delete_note, params, facts(state, backlinks: backlinks)) do
+    with {:ok, %{path: path, backlinks: backlinks}} <-
+           Policy.check(:delete_note, params, facts(state)) do
       case Git.remove_commit(state.vault_path, path, "delete: #{path}") do
         :ok ->
           case Git.push(state.vault_path, state.git_remote) do

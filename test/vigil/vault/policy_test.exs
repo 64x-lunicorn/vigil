@@ -206,7 +206,11 @@ defmodule Vigil.Vault.PolicyTest do
 
   describe "confirm gates" do
     test "delete_note without confirm names the backlinks" do
-      f = facts(path_exists?: fn _ -> true end, backlinks: ["bike/a.md#x", "bike/b.md#y"])
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_backlinks: fn _ -> ["bike/a.md#x", "bike/b.md#y"] end
+        )
 
       assert {:error, msg} = Policy.check(:delete_note, %{path: "bike/x.md", confirm: false}, f)
       assert msg =~ "Destructive operation"
@@ -233,7 +237,7 @@ defmodule Vigil.Vault.PolicyTest do
 
   describe "rewrite_note shrink threshold" do
     test "removing more than half the headings requires confirm" do
-      f = facts(path_exists?: fn _ -> true end, heading_count: 10)
+      f = facts(path_exists?: fn _ -> true end, count_headings: fn _ -> 10 end)
       req = %{path: "bike/x.md", content: "# T\n\n## One\n## Two\n", confirm: false}
 
       assert {:error, msg} = Policy.check(:rewrite_note, req, f)
@@ -241,7 +245,7 @@ defmodule Vigil.Vault.PolicyTest do
     end
 
     test "a modest shrink goes through without confirm" do
-      f = facts(path_exists?: fn _ -> true end, heading_count: 10)
+      f = facts(path_exists?: fn _ -> true end, count_headings: fn _ -> 10 end)
 
       req = %{
         path: "bike/x.md",

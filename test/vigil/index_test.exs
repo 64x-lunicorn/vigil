@@ -363,13 +363,13 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  describe "heading_count/2" do
+  describe "lookups/1 count_headings" do
     test "counts chunks with a heading, ignoring the pre-heading chunk", %{index: index} do
-      assert Index.heading_count(index, "bike/via-carolina.md") == 3
+      assert Index.lookups(index).count_headings.("bike/via-carolina.md") == 3
     end
 
     test "zero for an unknown path", %{index: index} do
-      assert Index.heading_count(index, "bike/nope.md") == 0
+      assert Index.lookups(index).count_headings.("bike/nope.md") == 0
     end
   end
 
