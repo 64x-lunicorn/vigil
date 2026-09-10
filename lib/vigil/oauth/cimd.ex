@@ -8,16 +8,28 @@ defmodule Vigil.OAuth.Cimd do
   @timeout 5_000
   @max_bytes 65_536
 
+  @doc """
+  The two facts the fetch reaches for outside itself: the outbound request and
+  the name resolution the SSRF guard decides on.
+
+  They travel bundled, the way `Vigil.SkillKey`'s secret and window do, because
+  neither is useful alone: a test that fakes the request but not the resolution
+  still asks a real resolver about a host, and one that fakes the resolution but
+  not the request still opens a socket. Only both together take this module off
+  the network.
+  """
+  def net, do: %{request: &http_get/1, resolve: &:inet.getaddr/2}
+
   @doc "Fetches and validates a CIMD document, cached for 1h. Returns {:ok, client_meta} | :error."
-  def fetch(url, now \\ System.system_time(:second)) do
+  def fetch(url, now \\ System.system_time(:second), net \\ net()) do
     case Store.cimd_cache_get(url, now) do
       {:ok, doc} ->
         {:ok, doc}
 
       :error ->
         with :ok <- validate_url(url),
-             :ok <- ssrf_guard(url),
-             {:ok, body} <- http_get(url),
+             :ok <- ssrf_guard(url, net.resolve),
+             {:ok, body} <- net.request.(url),
              true <- byte_size(body) <= @max_bytes,
              {:ok, json} <- Jason.decode(body),
              :ok <- validate_document(json, url) do
@@ -42,15 +54,15 @@ defmodule Vigil.OAuth.Cimd do
     end
   end
 
-  defp ssrf_guard(url) do
+  defp ssrf_guard(url, resolve) do
     %URI{host: host} = URI.parse(url)
 
-    case :inet.getaddr(String.to_charlist(host), :inet) do
+    case resolve.(String.to_charlist(host), :inet) do
       {:ok, ip} ->
         if private_ip?(ip), do: :error, else: :ok
 
       {:error, _} ->
-        case :inet.getaddr(String.to_charlist(host), :inet6) do
+        case resolve.(String.to_charlist(host), :inet6) do
           {:ok, ip} -> if private_ip?(ip), do: :error, else: :ok
           {:error, _} -> :error
         end
