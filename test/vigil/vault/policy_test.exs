@@ -1,18 +1,21 @@
 defmodule Vigil.Vault.PolicyTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.Vault.{Facts, Policy}
+  alias Vigil.Vault.{AbsentFacts, Policy}
 
+  # Every fact the policy could look up answers "nothing there" unless a test
+  # names it — see Vigil.Vault.AbsentFacts. The vault this stands in for has
+  # four domains, one excluded domain and one project directory, and nothing
+  # in it.
   defp facts(overrides \\ []) do
-    struct!(
-      %Facts{
+    AbsentFacts.answering_nothing(
+      [
         vault_path: "/vault",
         domains: ["bike", "journal", "projects", "training"],
         exclude: ["work"],
         project_dirs: ["vigil"],
         today: ~D[2026-09-09]
-      },
-      overrides
+      ] ++ overrides
     )
   end
 

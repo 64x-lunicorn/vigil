@@ -275,12 +275,19 @@ defmodule Vigil.Store do
   ## Vault facts for Vigil.Vault.Policy
 
   # Built fresh per write. The function fields are the adapters at the policy's
-  # seam: in production they read the filesystem and the index, in
-  # Vigil.Vault.PolicyTest they are literals. The index answers some of them
-  # itself (Vigil.Index.lookups/1); struct!/2 is what merges them, so a lookup
-  # the struct has no field for raises here rather than being carried silently.
+  # seam: here they read the filesystem and the index, in Vigil.Vault.PolicyTest
+  # they are literals. The index answers three of them itself
+  # (Vigil.Index.lookups/1), destructured rather than merged so that a lookup
+  # the struct has no field for fails here, and Facts.new/1 requires the rest —
+  # an unanswered question raises instead of opening the gate it guards.
   defp facts(state) do
-    base = %Facts{
+    %{
+      count_headings: count_headings,
+      find_chunk: find_chunk,
+      find_section: find_section
+    } = Index.lookups(state.index)
+
+    Facts.new(
       vault_path: state.vault_path,
       domains: list_domain_names(state),
       exclude: state.exclude,
@@ -292,10 +299,11 @@ defmodule Vigil.Store do
       find_backlinks: fn path -> Index.backlinks(state.index, path) end,
       find_similar: fn query, domain ->
         Index.search(state.index, %{query: query, domain: domain, limit: 25})
-      end
-    }
-
-    struct!(base, Index.lookups(state.index))
+      end,
+      count_headings: count_headings,
+      find_chunk: find_chunk,
+      find_section: find_section
+    )
   end
 
   defp abs(state, rel_path), do: Path.join(state.vault_path, rel_path)
