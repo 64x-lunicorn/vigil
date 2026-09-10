@@ -392,6 +392,27 @@ defmodule Vigil.Vault.PolicyTest do
                )
     end
 
+    # The other half of what fence-awareness opened. An unclosed fence splits
+    # nothing where it stands, but every line below it in the note becomes
+    # part of the sample — a strictly larger blast than the split this gate
+    # exists to prevent.
+    test "content that leaves a fenced block open is refused" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      assert {:error, msg} =
+               Policy.check(
+                 :append,
+                 %{path: "bike/x.md", heading: "Gear", content: "Sample:\n\n```markdown\n## X\n"},
+                 f
+               )
+
+      assert msg =~ "must not leave a fenced block open"
+    end
+
     test "the same content is fine at the end of the file and in a new section", %{f: f} do
       content = "## Fine here\ntext"
 

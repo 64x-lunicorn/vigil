@@ -86,6 +86,21 @@ defmodule Vigil.Markdown do
     read
   end
 
+  @doc """
+  True when `content` ends inside a fenced block it never closed.
+
+  Which matters to whoever splices `content` into a note: a fence is a fact
+  about the lines that follow it, so content that leaves one open turns the
+  rest of the note into somebody's code sample.
+  """
+  @spec unclosed_fence?(String.t()) :: boolean()
+  def unclosed_fence?(content) do
+    content
+    |> split_lines()
+    |> Enum.reduce(nil, fn line, open -> elem(classify(line, open), 1) end)
+    |> Kernel.!=(nil)
+  end
+
   # Inside a block: only its own closing delimiter ends it; everything else,
   # heading-shaped lines included, is code.
   defp classify(line, {char, length} = open) do

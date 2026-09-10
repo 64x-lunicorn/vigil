@@ -395,14 +395,33 @@ defmodule Vigil.Vault.Policy do
   # "Heading" means what the parser means by it: a `##` line inside a fenced
   # block splits nothing, and appending a code sample to an existing section
   # is an ordinary thing to want.
+  #
+  # Which is why the fence has to be closed. A block left open swallows every
+  # line below the splice point — the whole rest of the note becomes part of
+  # the sample, and every section under it loses its chunk id. That is a
+  # larger blast than the split this gate exists to prevent, and only the
+  # mid-note targets can suffer it: the other two append at the end of the
+  # file, where there is nothing below to swallow.
   defp appended_content({:section, _chunk}, content) do
-    refute_headings(
-      content,
-      "content appended to an existing section must not contain headings (## through ####): it would split the section in two"
-    )
+    with :ok <-
+           refute_headings(
+             content,
+             "content appended to an existing section must not contain headings (## through ####): it would split the section in two"
+           ) do
+      refute_open_fence(content)
+    end
   end
 
   defp appended_content(_target, _content), do: :ok
+
+  defp refute_open_fence(content) do
+    if Markdown.unclosed_fence?(content) do
+      {:error,
+       "content appended to an existing section must not leave a fenced block open: every line below it in the note would become part of the code sample"}
+    else
+      :ok
+    end
+  end
 
   defp refute_headings(content, message) do
     if Markdown.headings(content) == [] do

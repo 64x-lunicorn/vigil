@@ -74,6 +74,19 @@ defmodule Vigil.MarkdownTest do
     end
   end
 
+  describe "unclosed_fence?/1" do
+    test "true when the walk ends inside a block that never closed" do
+      assert Markdown.unclosed_fence?("text\n```markdown\n## X\n")
+      assert Markdown.unclosed_fence?("~~~\n")
+      refute Markdown.unclosed_fence?("text\n```\n## X\n```\n")
+      refute Markdown.unclosed_fence?("plain text\n")
+    end
+
+    test "a closing delimiter of the other flavour does not close the block" do
+      assert Markdown.unclosed_fence?("```\ncode\n~~~\n")
+    end
+  end
+
   describe "frontmatter/1" do
     test "returns the yaml text, the body lines and the number of lines consumed" do
       content = "---\ntype: reference\n---\n# Title\nbody\n"
