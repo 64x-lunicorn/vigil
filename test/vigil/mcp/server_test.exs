@@ -4,6 +4,7 @@ defmodule Vigil.MCP.ServerTest do
 
   alias Vigil.Store
   alias Vigil.MCP.Server
+  alias Vigil.MCP.Tools
   alias Vigil.OAuth
 
   setup do
@@ -663,5 +664,142 @@ defmodule Vigil.MCP.ServerTest do
     conn = post(expired, %{jsonrpc: "2.0", id: 1, method: "ping"})
     assert conn.status == 401
     assert OAuth.Store.get_token(expired) == :error
+  end
+
+  # `dispatch_tool/2` is the one frame nothing else looks at: validation runs
+  # before it, and the write path's own defenses (Facts, Decision, Plan) all
+  # sit after it. Driving every declared tool once through the MCP surface is
+  # the only way its clauses execute at all.
+  #
+  # The list is checked against `Tools.definitions/0` first, so a tool added to
+  # `@tools` without an entry here fails the suite instead of quietly going
+  # unexercised.
+  describe "dispatch coverage" do
+    test "every declared tool is dispatched end to end", %{token: token, vault: vault} do
+      key = Vigil.SkillKey.current(Vigil.SkillKey.config())
+      calls = dispatch_calls()
+
+      assert MapSet.new(calls, fn {name, _args, _verify} -> name end) ==
+               MapSet.new(Tools.definitions(), & &1.name)
+
+      for {{name, args, verify}, index} <- Enum.with_index(calls) do
+        args = if Tools.write_tool?(name), do: Map.put(args, :skill_key, key), else: args
+
+        conn =
+          post(
+            token,
+            %{
+              jsonrpc: "2.0",
+              id: 100 + index,
+              method: "tools/call",
+              params: %{name: name, arguments: args}
+            },
+            [{"mcp-session-id", "session-dispatch"}]
+          )
+
+        result = Jason.decode!(conn.resp_body)["result"]
+        payload = Jason.decode!(hd(result["content"])["text"])
+
+        refute Map.get(result, "isError"), "#{name} returned an error: #{payload["error"]}"
+        verify.(%{payload: payload, vault: vault})
+      end
+    end
+  end
+
+  # One `{tool, arguments, verification}` per declared tool, read-only tools
+  # first. No verification depends on another entry having run: the two
+  # `bike/terra-speed.md` cases name different sections of it, and nothing
+  # asserts on a note a later entry rewrites.
+  #
+  # Three tools carry a pair of same-typed parameters that can be swapped
+  # without anything raising, so each is verified where the swap would show:
+  # `search` (query/domain) has to find the note the query names inside the
+  # domain, `append` (heading/content) has to land its text inside the section
+  # the heading names, and `replace_section` (id/content) has to replace the
+  # chunk the id names.
+  defp dispatch_calls do
+    [
+      {"search", %{query: "tires", domain: "bike"},
+       fn %{payload: payload} ->
+         assert Enum.any?(
+                  payload["result"],
+                  &String.starts_with?(&1["id"], "bike/via-carolina.md")
+                )
+       end},
+      {"read", %{id: "projects/vigil/vigil.md"},
+       fn %{payload: payload} -> assert payload["result"]["title"] == "vigil" end},
+      {"links", %{id: "bike/via-carolina.md", direction: "out"},
+       fn %{payload: payload} -> assert is_list(payload["result"]["outgoing"]) end},
+      {"lint", %{},
+       fn %{payload: payload} -> assert is_list(payload["result"]["orphaned_links"]) end},
+      {"current", %{}, fn %{payload: payload} -> assert is_list(payload["result"]["active"]) end},
+      {"reload", %{}, fn %{payload: payload} -> assert payload["result"]["reloaded"] == true end},
+      {"skill_list", %{},
+       fn %{payload: payload} -> assert Enum.any?(payload["result"], &(&1["name"] == "tdd")) end},
+      {"skill_read", %{name: "tdd"},
+       fn %{payload: payload} -> assert payload["result"]["content"] =~ "# TDD" end},
+      {"create",
+       %{
+         path: "bike/dispatch-created.md",
+         type: "reference",
+         content: "# Dispatch Created\n\nA note the dispatch table made.\n"
+       },
+       fn %{vault: vault} ->
+         assert File.exists?(Path.join(vault, "bike/dispatch-created.md"))
+       end},
+      {"append", %{path: "bike/via-carolina.md", heading: "Gear", content: "Extra: repair kit."},
+       fn %{vault: vault} ->
+         file = File.read!(Path.join(vault, "bike/via-carolina.md"))
+         assert section_body(file, "Gear") =~ "Extra: repair kit."
+         refute file =~ "## Extra: repair kit."
+       end},
+      {"replace_section",
+       %{id: "bike/terra-speed.md#dimensions", content: "Replaced: 42mm wide."},
+       fn %{vault: vault} ->
+         file = File.read!(Path.join(vault, "bike/terra-speed.md"))
+         assert section_body(file, "Dimensions") =~ "Replaced: 42mm wide."
+         refute file =~ "40mm wide"
+       end},
+      {"rewrite_note",
+       %{
+         path: "garden/raised-bed.md",
+         content: "# Raised Bed\n\n## Levels\nThree levels, south-facing.\n"
+       },
+       fn %{vault: vault} ->
+         assert File.read!(Path.join(vault, "garden/raised-bed.md")) =~ "## Levels"
+       end},
+      {"delete_section", %{id: "bike/terra-speed.md#gravel-experience"},
+       fn %{vault: vault} ->
+         refute File.read!(Path.join(vault, "bike/terra-speed.md")) =~ "Gravel Experience"
+       end},
+      {"update_frontmatter", %{path: "projects/vigil/vigil-mcp-config.md", type: "decision"},
+       fn %{vault: vault} ->
+         assert File.read!(Path.join(vault, "projects/vigil/vigil-mcp-config.md")) =~
+                  "type: decision"
+       end},
+      {"delete_note", %{path: "journal/2026-07-09.md", confirm: true},
+       fn %{vault: vault} -> refute File.exists?(Path.join(vault, "journal/2026-07-09.md")) end},
+      {"move_note",
+       %{from: "training/note-without-anything.md", to: "training/renamed.md", confirm: true},
+       fn %{vault: vault} ->
+         assert File.exists?(Path.join(vault, "training/renamed.md"))
+         refute File.exists?(Path.join(vault, "training/note-without-anything.md"))
+       end},
+      {"skill_write",
+       %{
+         name: "dispatch-skill",
+         content:
+           "---\nname: dispatch-skill\ndescription: Written by the dispatch table.\n---\n# Dispatch Skill\n"
+       },
+       fn %{vault: vault} ->
+         assert File.exists?(Path.join(vault, "skills/dispatch-skill.md"))
+       end}
+    ]
+  end
+
+  # The body of one `## Heading` section: everything up to the next heading.
+  defp section_body(file, heading) do
+    [_, rest] = String.split(file, "## " <> heading, parts: 2)
+    rest |> String.split(~r/^#/m, parts: 2) |> hd()
   end
 end
