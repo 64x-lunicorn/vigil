@@ -1,0 +1,379 @@
+#!/usr/bin/env bash
+# scripts/test/update_test.sh — acceptance test for the delivery mechanism.
+#
+# update.sh is the script that actually ships a change to the vault host, and
+# until this file existed it was the one part of the pipeline nothing checked.
+# Its rollback path in particular was code whose first execution would have
+# been during a production incident: verify() goes red, the symlink has to move
+# back, the service has to come up on the old release, and the operator has to
+# be told which of the two situations they are in.
+#
+# What this covers that scripts/test/release_smoke.sh cannot: the smoke test
+# proves a release boots and serves. It says nothing about switching between
+# two of them — the order of stop/symlink/start, what `.previous_release`
+# records, whether a red verify() actually rolls back, which exit code the
+# operator sees, and which old releases the cleanup deletes.
+#
+# It drives the real scripts/update.sh against a throwaway prefix.
+# VIGIL_UPDATE_TEST_STUBS=1 (see update.sh) replaces root, the service account,
+# systemd and the booted release with file-backed stand-ins; the step sequence,
+# the exit codes, the rollback decision and the retention rule under test are
+# production code, not a copy of it. `mix` is a stub on PATH — building a real
+# release per case would make this a ten-minute test that proves nothing extra,
+# since the smoke test already proves a release builds and boots.
+#
+# Everything happens in a temp directory and is removed afterwards. No root, no
+# systemd, no production paths, no network.
+#
+# Usage: bash scripts/test/update_test.sh [--keep]
+
+set -euo pipefail
+IFS=$'\n\t'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+UPDATE_SH="${REPO_ROOT}/scripts/update.sh"
+
+KEEP=0
+[ "${1:-}" = "--keep" ] && KEEP=1
+
+PASS=0
+FAIL=0
+WORK=""
+
+pass() {
+  echo "  ok   - $1"
+  PASS=$((PASS + 1))
+}
+
+fail() {
+  echo "  FAIL - $1" >&2
+  [ -n "${2:-}" ] && echo "         $2" >&2
+  FAIL=$((FAIL + 1))
+}
+
+assert_eq() {
+  if [ "$2" = "$3" ]; then
+    pass "$1"
+  else
+    fail "$1" "expected '$2', got '$3'"
+  fi
+}
+
+step() {
+  echo
+  echo "── $1 ──"
+}
+
+# shellcheck disable=SC2329 # invoked by the EXIT trap below
+cleanup() {
+  if [ -n "$WORK" ] && [ "$KEEP" = "0" ] && [ -d "$WORK" ]; then
+    rm -rf "$WORK"
+  elif [ -n "$WORK" ] && [ "$KEEP" = "1" ]; then
+    echo "Work directory kept: ${WORK}"
+  fi
+}
+trap cleanup EXIT INT TERM
+
+WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/vigil-update-test.XXXXXX")" && pwd -P)"
+PREFIX="${WORK}/opt/vigil"
+VAULT="${WORK}/var/lib/vigil/vault"
+ENV_FILE="${WORK}/etc/vigil/env"
+BIN="${WORK}/bin"
+
+## ── The throwaway host ───────────────────────────────────────────────────
+
+# A `mix` that records what it was asked to do and answers according to files
+# the test writes, so a red `mix test` and a red audit are drivable without a
+# BEAM anywhere near this.
+build_fake_mix() {
+  mkdir -p "$BIN"
+  cat >"${BIN}/mix" <<'MIX'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >>"${FAKE_MIX_LOG}"
+case "${1:-}" in
+  test)
+    [ -f "${FAKE_MIX_TEST_FAILS:-/nonexistent}" ] && exit 1
+    echo "42 tests, 0 failures"
+    ;;
+  hex.audit)
+    if [ -f "${FAKE_MIX_AUDIT_CRITICAL:-/nonexistent}" ]; then
+      echo "Dependency foo 1.0.0 has a CRITICAL advisory"
+    else
+      echo "No retired packages found"
+    fi
+    ;;
+  release)
+    # A release here is a directory with a bin/vigil in it, which is all the
+    # switchover touches.
+    path=""
+    while [ $# -gt 0 ]; do
+      [ "$1" = "--path" ] && path="${2:-}"
+      shift
+    done
+    if [ -z "$path" ]; then
+      echo "fake mix: release without --path" >&2
+      exit 1
+    fi
+    mkdir -p "${path}/bin"
+    echo "#!/bin/sh" >"${path}/bin/vigil"
+    chmod +x "${path}/bin/vigil"
+    ;;
+esac
+exit 0
+MIX
+  chmod +x "${BIN}/mix"
+}
+
+# A code repo with two commits, so `--to` has something real to move between.
+build_repo() {
+  local repo="${PREFIX}/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q -b main
+  git -C "$repo" config user.email test@example.com
+  git -C "$repo" config user.name "Update Test"
+  mkdir -p "${repo}/deploy"
+  echo "[Unit]" >"${repo}/deploy/vigil.service"
+  echo "v1" >"${repo}/version"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "v1"
+  OLD_SHA="$(git -C "$repo" rev-parse --short HEAD)"
+  echo "v2" >"${repo}/version"
+  git -C "$repo" commit -qam "v2"
+  NEW_SHA="$(git -C "$repo" rev-parse --short HEAD)"
+  git -C "$repo" checkout -q "$OLD_SHA"
+}
+
+# A vault whose `github/main..main` count is 0, which is what preflight asks.
+build_vault() {
+  mkdir -p "$VAULT"
+  git -C "$VAULT" init -q -b main
+  git -C "$VAULT" config user.email test@example.com
+  git -C "$VAULT" config user.name "Update Test"
+  echo "# note" >"${VAULT}/note.md"
+  git -C "$VAULT" add -A
+  git -C "$VAULT" commit -q -m "note"
+  git -C "$VAULT" update-ref refs/remotes/github/main HEAD
+}
+
+# One release directory, optionally one that does not come up.
+make_release() {
+  local name="$1" healthy="${2:-healthy}"
+  mkdir -p "${PREFIX}/releases/${name}/bin"
+  echo "#!/bin/sh" >"${PREFIX}/releases/${name}/bin/vigil"
+  [ "$healthy" = "broken" ] && touch "${PREFIX}/releases/${name}/.verify-fails"
+  echo "${PREFIX}/releases/${name}"
+}
+
+build_host() {
+  rm -rf "${WORK:?}/opt" "${WORK:?}/var" "${WORK:?}/etc"
+  mkdir -p "$PREFIX/releases" "$(dirname "$ENV_FILE")"
+  build_repo
+  build_vault
+  cat >"$ENV_FILE" <<ENV
+VIGIL_RESOURCE=https://vault.example/mcp
+VIGIL_PORT=4000
+ENV
+  local first
+  first="$(make_release v0)"
+  ln -sfn "$first" "${PREFIX}/current"
+  : >"${PREFIX}/.service-active"
+  FAKE_MIX_LOG="${WORK}/mix.log"
+  : >"$FAKE_MIX_LOG"
+}
+
+# Runs the real update.sh against the throwaway host. Prints its exit code.
+run_update() {
+  set +e
+  env \
+    PATH="${BIN}:${PATH}" \
+    VIGIL_UPDATE_TEST_STUBS=1 \
+    VIGIL_PREFIX="${PREFIX_OVERRIDE:-$PREFIX}" \
+    VIGIL_VAULT_DIR="$VAULT" \
+    VIGIL_ENV_FILE="$ENV_FILE" \
+    VIGIL_UNIT_FILE="${WORK}/etc/vigil.service" \
+    VIGIL_SERVICE_USER="$(id -un)" \
+    VIGIL_SERVICE_GROUP="$(id -gn)" \
+    FAKE_MIX_LOG="$FAKE_MIX_LOG" \
+    FAKE_MIX_TEST_FAILS="${FAKE_MIX_TEST_FAILS:-/nonexistent}" \
+    FAKE_MIX_AUDIT_CRITICAL="${FAKE_MIX_AUDIT_CRITICAL:-/nonexistent}" \
+    bash "$UPDATE_SH" "$@" >"${WORK}/out.log" 2>&1
+  local rc=$?
+  set -e
+  echo "$rc"
+}
+
+current_release() { basename "$(readlink "${PREFIX}/current")"; }
+service_running() { [ -f "${PREFIX}/.service-active" ] && echo yes || echo no; }
+
+build_fake_mix
+
+## ── 1. The happy path ────────────────────────────────────────────────────
+
+step "1/7  A healthy release is switched to"
+
+build_host
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+assert_eq "the service is running" "yes" "$(service_running)"
+assert_eq "the previous release is recorded" "${PREFIX}/releases/v0" \
+  "$(cat "${PREFIX}/.previous_release")"
+
+if grep -q "^test$" "$FAKE_MIX_LOG"; then
+  pass "the suite was run before switching over"
+else
+  fail "the suite was run before switching over" "mix log: $(tr '\n' ',' <"$FAKE_MIX_LOG")"
+fi
+
+## ── 2. A release that does not come up is rolled back ────────────────────
+
+step "2/7  A red verify() rolls back automatically"
+
+build_host
+# The release update.sh is about to build is the one that will not come up.
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 3 — rolled back, service running" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the service is running again" "yes" "$(service_running)"
+
+## ── 3. When the rollback does not come up either ─────────────────────────
+
+step "3/7  A rollback that is also red is reported as such"
+
+build_host
+rm -rf "${PREFIX}/releases/v0"
+make_release v0 broken >/dev/null
+ln -sfn "${PREFIX}/releases/v0" "${PREFIX}/current"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 1 — manual intervention" "1" "$RC"
+if grep -q "Manual intervention needed" "${WORK}/out.log"; then
+  pass "says manual intervention is needed"
+else
+  fail "says manual intervention is needed" "$(tail -3 "${WORK}/out.log")"
+fi
+
+## ── 4. --rollback ────────────────────────────────────────────────────────
+
+step "4/7  --rollback returns to the recorded release"
+
+build_host
+make_release v1 >/dev/null
+ln -sfn "${PREFIX}/releases/v1" "${PREFIX}/current"
+echo "${PREFIX}/releases/v0" >"${PREFIX}/.previous_release"
+
+RC="$(run_update --rollback --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the recorded previous release" "v0" "$(current_release)"
+assert_eq "the service is running" "yes" "$(service_running)"
+
+## ── 5. Refusals leave the running service alone ──────────────────────────
+
+step "5/7  A red suite does not reach the switchover"
+
+build_host
+FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
+touch "$FAKE_MIX_TEST_FAILS"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+FAKE_MIX_TEST_FAILS=""
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+assert_eq "the code repo was put back on the running revision" "$OLD_SHA" \
+  "$(git -C "${PREFIX}/repo" rev-parse --short HEAD)"
+
+step "5b   Unpushed vault commits abort the preflight"
+
+build_host
+echo "# unpushed" >"${VAULT}/later.md"
+git -C "$VAULT" add -A
+git -C "$VAULT" commit -q -m "not pushed"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 2 — nothing was touched" "2" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+
+## ── 6. Cleanup keeps current, previous and one more ──────────────────────
+
+step "6/7  Cleanup keeps three releases and never the running one"
+
+build_host
+for old in old1 old2 old3; do
+  make_release "$old" >/dev/null
+  # Distinct mtimes, newest last: the retention rule is "newest first".
+  touch -t "2401010$((RANDOM % 9 + 1))00" "${PREFIX}/releases/${old}"
+done
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+KEPT="$(find "${PREFIX}/releases" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+assert_eq "three release directories remain" "3" "$KEPT"
+
+if [ -d "${PREFIX}/releases/${NEW_SHA}" ]; then
+  pass "the running release was kept"
+else
+  fail "the running release was kept"
+fi
+if [ -d "${PREFIX}/releases/v0" ]; then
+  pass "the previous release was kept"
+else
+  fail "the previous release was kept"
+fi
+
+## ── 7. A prefix reached through a symlink ────────────────────────────────
+
+step "7/7  Cleanup keeps the running release behind a symlinked prefix"
+
+# The regression this pins: the cleanup compared `readlink -f` output against
+# the unresolved directory listing, so with any symlink in the prefix nothing
+# matched and neither the running release nor the rollback target was
+# protected — leaving `update.sh --rollback` with nothing to roll back to.
+build_host
+make_release old1 >/dev/null
+make_release old2 >/dev/null
+ln -sfn "$PREFIX" "${WORK}/vigil-link"
+PREFIX_OVERRIDE="${WORK}/vigil-link"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+PREFIX_OVERRIDE=""
+
+assert_eq "exits 0" "0" "$RC"
+if [ -d "${PREFIX}/releases/${NEW_SHA}" ]; then
+  pass "the running release survived the cleanup"
+else
+  fail "the running release survived the cleanup" \
+    "left: $(find "${PREFIX}/releases" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | tr '\n' ' ')"
+fi
+if [ -d "${PREFIX}/releases/v0" ]; then
+  pass "the previous release survived the cleanup"
+else
+  fail "the previous release survived the cleanup"
+fi
+
+## ── Summary ──────────────────────────────────────────────────────────────
+
+echo
+echo "──────────────────────────────────────────"
+echo "  passed: ${PASS}    failed: ${FAIL}"
+echo "──────────────────────────────────────────"
+
+if [ "$FAIL" -gt 0 ]; then
+  echo
+  echo "Last update.sh output:"
+  tail -30 "${WORK}/out.log" || true
+  exit 1
+fi
+exit 0

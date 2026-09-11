@@ -73,7 +73,13 @@ shell tests:
 ```bash
 shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
+bash scripts/test/update_test.sh
 ```
+
+`update_test.sh` drives `update.sh` against a throwaway prefix: the
+switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
+refusals that must leave the running service alone, and the release retention
+rule. It needs no root, no systemd and no production paths.
 
 For changes to `mix.exs`, `config/`, the release or anything on the boot path,
 run the release smoke test. It builds a production release, boots it against a
