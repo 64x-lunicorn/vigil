@@ -413,8 +413,8 @@ one write including a complete index rebuild ~115 ms.
 `Vigil.MCP.Tools` declares each tool once — name, description, the `write`
 flag, the `Store` operation it calls, and its parameters' names, types and
 required-ness — in a single table. Three things are generated from it: the
-JSON schema published on `tools/list`, the argument validation `dispatch/2`
-runs on `tools/call`, and the `Vigil.Store.call/2` that follows. They cannot
+JSON schema published on `tools/list`, the argument validation `dispatch/4`
+runs on `tools/call`, and the `Vigil.Store.call/3` that follows. They cannot
 drift out of agreement the way hand-written twins do, and adding a tool is
 adding a row.
 
@@ -425,7 +425,16 @@ against `Vigil.Skills` in the caller's process, for the reason under
 "`skills/` — one repository, two systems". The one
 exception is `skill_key`, which is a parameter of no operation — it carries the
 SkillKey of the Security model's layer 4, the gate reads it, and it does not
-travel. An enum's internal form is the atom of the same name, derived once from
+travel.
+
+**`skill_key` is also the one parameter no row declares.** A tool takes one
+because it writes, and the row already says `write: true` — the same flag the
+gate reads the requirement off. So the parameter is derived from it too,
+stated once rather than written out identically in nine rows, each free to
+drift in its description or its required-ness while the gate went on requiring
+the same thing. `confirm` is not derivable the same way and stays declared per
+row: only three of the nine writes take one, and `write: true` does not say
+which. An enum's internal form is the atom of the same name, derived once from
 the values the table already declares rather than restated in each tool's
 dispatch; that restatement is what let `search` convert its `type` while
 `create` passed the same enum through as a string. Whether an answer is lifted
