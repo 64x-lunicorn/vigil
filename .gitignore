@@ -29,3 +29,6 @@ vigil-*.tar
 
 # Dialyzer PLTs (cached in CI, rebuilt locally on demand)
 /priv/plts/
+
+# What a failing contract snapshot wrote out for comparison (test/support/contract_snapshot.ex).
+/test/fixtures/contracts/*.actual

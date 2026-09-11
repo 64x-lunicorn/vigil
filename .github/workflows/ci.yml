@@ -206,6 +206,12 @@ jobs:
       - name: init.sh --check-only stays read-only
         run: bash scripts/test/check_only_test.sh
 
+      # update.sh is the script that actually ships a change, and its rollback
+      # path was code whose first execution would have been a production
+      # incident. This drives the real script against a throwaway prefix.
+      - name: update.sh switches over, rolls back and prunes correctly
+        run: bash scripts/test/update_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest

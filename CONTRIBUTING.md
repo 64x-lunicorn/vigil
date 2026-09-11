@@ -73,7 +73,13 @@ shell tests:
 ```bash
 shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
+bash scripts/test/update_test.sh
 ```
+
+`update_test.sh` drives `update.sh` against a throwaway prefix: the
+switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
+refusals that must leave the running service alone, and the release retention
+rule. It needs no root, no systemd and no production paths.
 
 For changes to `mix.exs`, `config/`, the release or anything on the boot path,
 run the release smoke test. It builds a production release, boots it against a
@@ -82,6 +88,17 @@ write-commit-push path and shutdown:
 
 ```bash
 bash scripts/test/release_smoke.sh
+```
+
+If your change touches the MCP tool table (`Vigil.MCP.Tools`) or the OAuth
+metadata (`Vigil.OAuth`), the recorded contracts under
+`test/fixtures/contracts/` will no longer match and the suite will say so.
+These files are what already-connected clients see, so a change to one is a
+change to a published interface. Read the diff the failure prints; if it is
+what you meant, record it and commit the updated file with the change:
+
+```bash
+UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs
 ```
 
 These checks use throwaway fixture vaults and do not require root or a

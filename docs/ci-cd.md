@@ -76,9 +76,9 @@ release.
 
 | Job | What it proves |
 | :--- | :--- |
-| **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes, no retired or vulnerable dependencies. |
+| **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes (including the recorded interface contracts), no retired or vulnerable dependencies. |
 | **Static analysis** | Credo finds no issues; Dialyzer finds no new type errors. |
-| **Deployment scripts** | ShellCheck is clean, and `init.sh --check-only` is still strictly read-only. |
+| **Deployment scripts** | ShellCheck is clean, `init.sh --check-only` is still strictly read-only, and `update.sh` switches over, rolls back and prunes releases correctly. |
 | **Release smoke test** | A real production release boots and serves. See below. |
 | **Workflow lint** | actionlint and zizmor: the pipeline's own configuration is checked like code. |
 | **Secret scan** | gitleaks over the full history, not just the diff. |
@@ -147,6 +147,18 @@ bypassed rather than respected.
 
 **Behaviour.** `mix test`, in `MIX_ENV=test` against the fixture vault.
 
+**Published interfaces.** The MCP tool list and the two OAuth metadata
+documents are recorded verbatim under
+[`test/fixtures/contracts/`](../test/fixtures/contracts/) and compared byte for
+byte by
+[`contracts_test.exs`](../test/vigil/contracts_test.exs). These documents are
+contracts with software that is already connected, and a renamed parameter, a
+reordered enum or a dropped field is a one-line change here and a broken client
+out there. A test that asserts field by field cannot see it: such a test only
+knows about the fields somebody thought to name in it. Recording a change is
+deliberate — `UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs` — and
+the diff in the pull request is the review of the interface change.
+
 **Boot and runtime.**
 [`scripts/test/release_smoke.sh`](../scripts/test/release_smoke.sh) is the
 layer that catches what the suite is blind to. `mix test` never boots an OTP
@@ -171,6 +183,30 @@ over HTTP:
 is an incident, not a lint warning. ShellCheck is blocking, and
 `check_only_test.sh` guards the specific regression where `--check-only`
 silently fell through to apply-mode.
+
+**Delivery.** [`scripts/test/update_test.sh`](../scripts/test/update_test.sh)
+covers the script that actually ships a change. The smoke test above proves a
+release boots and serves; it says nothing about switching between two of them,
+which is where the rollback lives — and a rollback path that has never been
+executed is code whose first run is a production incident. The test drives the
+real `update.sh` against a throwaway prefix
+(`VIGIL_UPDATE_TEST_STUBS=1` stands in for root, the service account, systemd
+and a booted release) and pins:
+
+- a healthy release is switched to, and `.previous_release` records what it
+  replaced
+- a red `verify()` rolls back automatically, the service comes up on the old
+  release, and the operator gets exit 3 rather than a silent failure
+- a rollback that is *also* red says manual intervention is needed (exit 1)
+- `--rollback` returns to the recorded release, and refuses — rather than
+  reporting success for a switch it did not make — when an automatic rollback
+  has already left `current` and `.previous_release` naming the same release
+- a red suite and unpushed vault commits never reach the switchover, and leave
+  the running service and the code checkout as they were
+- the retention rule keeps the running release, the rollback target and one
+  more — including when the prefix is reached through a symlink, which is the
+  case that had the protection comparing resolved paths against unresolved
+  ones and deleting the rollback target
 
 **Supply chain.** `mix hex.audit` (retired packages) and `mix deps.audit`
 (published CVEs) run in CI. Every third-party action is pinned to a **commit

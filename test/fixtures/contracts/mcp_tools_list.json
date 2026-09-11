@@ -1,0 +1,452 @@
+[
+  {
+    "description": "Searches chunk bodies and headings for a phrase.",
+    "inputSchema": {
+      "properties": {
+        "domain": {
+          "description": "Restrict results to this domain.",
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum number of hits (default 10).",
+          "maximum": 25,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prefer": {
+          "description": "Boost this type in the ranking.",
+          "enum": [
+            "reference",
+            "decision",
+            "event"
+          ],
+          "type": "string"
+        },
+        "query": {
+          "description": "Exact search phrase.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "type": {
+          "description": "Filter by chunk type.",
+          "enum": [
+            "reference",
+            "decision",
+            "event"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search"
+  },
+  {
+    "description": "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
+    "inputSchema": {
+      "properties": {
+        "backlinks": {
+          "description": "Append the chunk ids that link here.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "path#heading-slug, or just path.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "read"
+  },
+  {
+    "description": "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
+    "inputSchema": {
+      "properties": {
+        "depth": {
+          "description": "Defaults to 1; 2 adds each directly connected note's own depth-1 view.",
+          "maximum": 2,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "direction": {
+          "description": "Defaults to both.",
+          "enum": [
+            "out",
+            "in",
+            "both"
+          ],
+          "type": "string"
+        },
+        "id": {
+          "description": "path, or path#heading-slug.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "links"
+  },
+  {
+    "description": "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Markdown body, starting with an H1.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "create_dirs": {
+          "description": "Create a missing project directory under projects/.",
+          "type": "boolean"
+        },
+        "ends": {
+          "description": "ISO timestamp, only for type: event.",
+          "type": "string"
+        },
+        "force": {
+          "description": "Skip the duplicate check.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "starts": {
+          "description": "ISO timestamp, only for type: event.",
+          "type": "string"
+        },
+        "type": {
+          "description": "Frontmatter type of the note.",
+          "enum": [
+            "reference",
+            "decision",
+            "event"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "type",
+        "content",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "create"
+  },
+  {
+    "description": "Appends content to an existing note.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Markdown text to append.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "heading": {
+          "description": "Section name; without it, appends at end of file.",
+          "type": "string"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "append"
+  },
+  {
+    "description": "Replaces the body of exactly one chunk.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "New body, without headings of its own.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "description": "path#heading-slug.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "content",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "replace_section"
+  },
+  {
+    "description": "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "description": "Only required once the rewrite crosses Policy's shrink threshold (removes more than half of the note's headings, or more than 20); optional otherwise.",
+          "type": "boolean"
+        },
+        "content": {
+          "description": "New body, starting with an H1.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "rewrite_note"
+  },
+  {
+    "description": "Removes a chunk including its heading.",
+    "inputSchema": {
+      "properties": {
+        "id": {
+          "description": "path#heading-slug.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "delete_section"
+  },
+  {
+    "description": "Sets type/starts/ends in the frontmatter of an existing note; the body is untouched.",
+    "inputSchema": {
+      "properties": {
+        "ends": {
+          "description": "ISO timestamp, only for type: event.",
+          "type": "string"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "starts": {
+          "description": "ISO timestamp, only for type: event.",
+          "type": "string"
+        },
+        "type": {
+          "description": "New frontmatter type.",
+          "enum": [
+            "reference",
+            "decision",
+            "event"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "type",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "update_frontmatter"
+  },
+  {
+    "description": "Permanently deletes a note. Destructive — requires confirm: true.",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "description": "Must be true, otherwise the call is rejected.",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "delete_note"
+  },
+  {
+    "description": "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
+    "inputSchema": {
+      "properties": {
+        "confirm": {
+          "description": "Must be true, otherwise the call is rejected.",
+          "type": "boolean"
+        },
+        "from": {
+          "description": "Existing path.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "to": {
+          "description": "New path.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "move_note"
+  },
+  {
+    "description": "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "lint"
+  },
+  {
+    "description": "Returns the current time plus active and nearby events.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "current"
+  },
+  {
+    "description": "Runs git pull and reparses the vault.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "reload"
+  },
+  {
+    "description": "Lists available skills with their description, without bodies.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "skill_list"
+  },
+  {
+    "description": "Reads the full content of a skill.",
+    "inputSchema": {
+      "properties": {
+        "name": {
+          "description": "Skill name, with or without .md.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "skill_read"
+  },
+  {
+    "description": "Creates or replaces a skill; only on explicit instruction.",
+    "inputSchema": {
+      "properties": {
+        "content": {
+          "description": "Full file content including frontmatter.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "description": "Skill name, with or without .md.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "skill_key": {
+          "description": "Current key from skill_read.",
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "content",
+        "skill_key"
+      ],
+      "type": "object"
+    },
+    "name": "skill_write"
+  }
+]
