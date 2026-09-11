@@ -15,7 +15,8 @@ defmodule Vigil.OAuth.EndpointTest do
   """
 
   use ExUnit.Case, async: false
-  use Plug.Test
+  import Plug.Conn
+  import Plug.Test
 
   alias Vigil.MCP.Server
   alias Vigil.OAuth

@@ -12,6 +12,9 @@ on:
     - cron: "17 5 * * *"
   workflow_dispatch:
 
+# Two things that only a clock can ask. The dependency audit is one; the other
+# is whether the suite passes for reasons it means to.
+
 permissions: {}
 
 jobs:
@@ -80,6 +83,81 @@ jobs:
           } > body.md
           # Self-healing: a workflow that fails because a label is missing
           # reports nothing at all, which is the one outcome worse than a CVE.
+          gh label create needs-triage \
+            --color BFD4F2 --description "Not yet triaged" --force >/dev/null 2>&1 || true
+          gh issue create --title "${title}" --body-file body.md --label needs-triage
+
+  # ExUnit picks a random seed per run, so a pull request samples exactly one
+  # ordering. A test that passes only because another ran first, or only
+  # because it ran first itself, is invisible until the day the seed lands
+  # differently — which will be a day somebody is trying to ship something
+  # else. This asks the question on a schedule instead, when a red result costs
+  # nothing but attention.
+  flakes:
+    name: Test ordering
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      - name: Ten orderings
+        id: orderings
+        run: |
+          set -euo pipefail
+          : >seeds.txt
+          for _ in $(seq 1 10); do
+            seed="$RANDOM"
+            echo "── seed ${seed} ──"
+            if ! mix test --seed "$seed" --warnings-as-errors; then
+              echo "${seed}" >>seeds.txt
+            fi
+          done
+          if [ -s seeds.txt ]; then
+            echo "::error::The suite failed under $(wc -l <seeds.txt) of 10 orderings."
+            {
+              echo "### Failing seeds"
+              echo '```'
+              cat seeds.txt
+              echo '```'
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "All ten orderings passed." >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Open an issue when an ordering is red
+        if: failure() && steps.orderings.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Test suite depends on ordering"
+          existing="$(gh issue list --state open --search "\"${title}\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" --body "Still failing as of ${RUN_URL}"
+            exit 0
+          fi
+          {
+            echo "The scheduled ordering run found at least one seed the suite does not survive."
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "Reproduce with \`mix test --seed <seed>\` — the failing seeds are in the run summary."
+          } >body.md
           gh label create needs-triage \
             --color BFD4F2 --description "Not yet triaged" --force >/dev/null 2>&1 || true
           gh issue create --title "${title}" --body-file body.md --label needs-triage

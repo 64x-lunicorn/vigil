@@ -110,8 +110,11 @@ jobs:
       - name: Audit dependencies for known vulnerabilities
         run: mix deps.audit
 
+      # --warnings-as-errors: `mix compile` only sees lib/ and test/support
+      # (elixirc_paths), so without this the test files are the one place a
+      # warning may stand — including a deprecation that will be a removal.
       - name: Test
-        run: mix test
+        run: mix test --warnings-as-errors
 
   static:
     name: Static analysis

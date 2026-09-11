@@ -8,6 +8,7 @@ defmodule Vigil.MixProject do
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
+      test_ignore_filters: test_ignore_filters(),
       deps: deps(),
       aliases: aliases(),
       releases: releases(),
@@ -17,6 +18,14 @@ defmodule Vigil.MixProject do
 
   def cli do
     [preferred_envs: [ci: :test]]
+  end
+
+  # test/fixtures/** is data, not tests. The OAuth compatibility fixture keeps
+  # its generator beside the .dets files it wrote, and `mix test` otherwise
+  # warns that a .exs there matches no test pattern — a warning that would stop
+  # the suite under --warnings-as-errors.
+  defp test_ignore_filters do
+    [~r"^test/fixtures/"]
   end
 
   def application do
@@ -61,7 +70,11 @@ defmodule Vigil.MixProject do
         "credo --strict",
         "cmd mix hex.audit",
         "deps.audit",
-        "test",
+        # --warnings-as-errors here as well as on compile: elixirc_paths only
+        # carries test/support into the compile step, so the test files
+        # themselves were the one part of the project where a warning was
+        # allowed to stand.
+        "test --warnings-as-errors",
         "dialyzer"
       ]
     ]

@@ -11,7 +11,8 @@ defmodule Vigil.MCP.ServerTest do
   # `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs
   # after every async file has finished.
   use ExUnit.Case, async: true
-  use Plug.Test
+  import Plug.Conn
+  import Plug.Test
 
   alias Vigil.Store
   alias Vigil.MCP.Server

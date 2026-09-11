@@ -25,6 +25,25 @@ defmodule Vigil.ContractsTest do
     end
   end
 
+  describe "the documentation of the tool list" do
+    # docs/guide.md is what a person reads to learn what vigil can do, and the
+    # skills in the vault point at it. A tool added to the table and not to the
+    # guide is a tool only the machine knows about; one removed from the table
+    # and left in the guide is an instruction to call something that is not
+    # there. Neither is caught by the snapshot above, which only knows what the
+    # server serves.
+    @guide Path.expand("../../docs/guide.md", __DIR__)
+
+    test "every tool the server offers is named in docs/guide.md" do
+      guide = File.read!(@guide)
+
+      for %{name: name} <- Tools.definitions() do
+        assert String.contains?(guide, name),
+               "#{name} is in the tool table and not in docs/guide.md"
+      end
+    end
+  end
+
   describe "the OAuth metadata documents" do
     setup do
       Vigil.OAuthCase.setup!()
