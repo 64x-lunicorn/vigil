@@ -65,6 +65,16 @@ step() {
   echo "── $1 ──"
 }
 
+# sha256sum on Linux, shasum on macOS. Named rather than inlined because the
+# state fingerprint below is compared across three runs of update.sh.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  else
+    shasum -a 256 "$@"
+  fi
+}
+
 # Two codes for one false positive: ShellCheck renamed it in 0.10, and a
 # contributor may still be on a version that reports the old one. CI is pinned
 # to 0.11 and only needs SC2329; the second code is for the local run.
@@ -169,6 +179,31 @@ make_release() {
   echo "${PREFIX}/releases/${name}"
 }
 
+# Everything the authorization server has persisted lives beside the vault, in
+# the state dir. update.sh must never write there: the tokens in these files
+# are what an already-connected client authenticates with, and a delivery that
+# resets them is a delivery that silently logs Claude out.
+STATE_DIR=""
+
+seed_oauth_state() {
+  STATE_DIR="$(dirname "$VAULT")"
+  mkdir -p "$STATE_DIR"
+  for table in clients codes tokens; do
+    echo "pretend-dets-${table}-written-before-the-update" \
+      >"${STATE_DIR}/oauth_${table}.dets"
+  done
+  echo "17" >"${STATE_DIR}/.last_chunks"
+}
+
+# The state dir's contents, as one comparable string.
+state_fingerprint() {
+  find "$STATE_DIR" -maxdepth 1 -type f -print |
+    sort |
+    while IFS= read -r file; do
+      printf '%s %s\n' "$(basename "$file")" "$(sha256_of "$file" | cut -d' ' -f1)"
+    done
+}
+
 build_host() {
   rm -rf "${WORK:?}/opt" "${WORK:?}/var" "${WORK:?}/etc"
   mkdir -p "$PREFIX/releases" "$(dirname "$ENV_FILE")"
@@ -184,6 +219,7 @@ ENV
   : >"${PREFIX}/.service-active"
   FAKE_MIX_LOG="${WORK}/mix.log"
   : >"$FAKE_MIX_LOG"
+  seed_oauth_state
 }
 
 # Runs the real update.sh against the throwaway host. Prints its exit code.
@@ -349,6 +385,33 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "exits 2 — nothing was touched" "2" "$RC"
 assert_eq "current still points at the old release" "v0" "$(current_release)"
+
+## ── 5c. Persisted auth state survives the delivery ───────────────────────
+
+step "5c   The OAuth state dir is untouched by an update and by a rollback"
+
+# What this pins is the delivery mechanism, not the records: no BEAM runs here,
+# so the files are stand-ins. That an access token written by the *previous
+# version* still validates under the new one is a question about the records
+# and is pinned in test/vigil/oauth/store_compatibility_test.exs.
+
+build_host
+BEFORE="$(state_fingerprint)"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the update exits 0" "0" "$RC"
+assert_eq "the state dir is byte-identical after the update" "$BEFORE" "$(state_fingerprint)"
+
+# And again through the path that moves the symlink twice.
+build_host
+BEFORE="$(state_fingerprint)"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+assert_eq "the state dir is byte-identical after the rollback" "$BEFORE" "$(state_fingerprint)"
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 
