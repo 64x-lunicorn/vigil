@@ -406,12 +406,20 @@ else
   fail "twelve checks, in the order the later ones depend on" "$ACTUAL_ORDER"
 fi
 
+# One assertion, and it reflects the loop: a name that resolves to nothing is
+# collected rather than reported on the spot, so removing a verify_* function
+# turns this red instead of recording a failure and a pass together.
+UNDEFINED=""
 for check in "${VIGIL_VERIFY_CHECKS[@]}"; do
   if ! declare -F "$check" >/dev/null; then
-    fail "${check} is defined"
+    UNDEFINED="${UNDEFINED:+${UNDEFINED} }${check}"
   fi
 done
-pass "every name in the list is a function that exists"
+if [ -z "$UNDEFINED" ]; then
+  pass "every name in the list is a function that exists"
+else
+  fail "every name in the list is a function that exists" "not defined: ${UNDEFINED}"
+fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 

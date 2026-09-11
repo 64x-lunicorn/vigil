@@ -49,9 +49,7 @@ defmodule Vigil.Vault.Policy do
     path = Map.fetch!(request, :path)
     content = Map.fetch!(request, :content)
 
-    with :ok <- path_sanity(path),
-         {:ok, normalized, changed?} <- normalize(path),
-         :ok <- path_sanity(normalized),
+    with {:ok, normalized, changed?} <- canonical(path),
          {:ok, domain, create_dir} <- writable_path(normalized, facts, create_dirs?(request)),
          :ok <- naming_convention(normalized, domain, content, facts),
          :ok <- refute_exists(normalized, facts),
@@ -146,13 +144,10 @@ defmodule Vigil.Vault.Policy do
     from = Map.fetch!(request, :from)
     to = Map.fetch!(request, :to)
 
-    with :ok <- path_sanity(from),
-         {:ok, from_candidate, _changed?} <- normalize(from),
+    with {:ok, from_candidate, _changed?} <- canonical(from),
          {:ok, normalized_from} <- existing_note(from_candidate, facts),
          content = note_content(normalized_from, facts),
-         :ok <- path_sanity(to),
-         {:ok, normalized_to, _changed?} <- normalize(to),
-         :ok <- path_sanity(normalized_to),
+         {:ok, normalized_to, _changed?} <- canonical(to),
          {:ok, domain, _create_dir} <- writable_path(normalized_to, facts, false),
          :ok <- naming_convention(normalized_to, domain, content, facts),
          :ok <- refute_exists(normalized_to, facts),
@@ -166,23 +161,17 @@ defmodule Vigil.Vault.Policy do
 
   ## Path safety
 
-  # Owned by `Vigil.Slug`, alongside the normalization it is applied under —
-  # the read paths ask the same function. Checked before normalization and
-  # again after it: normalization must not be able to turn a rejected path
-  # into an accepted one. `:create` and `:move_note` spell that out because
-  # they want what `normalize/1` says about a path no filename can be derived
-  # from; a caller that only wants the canonical path asks
-  # `Slug.canonical_path/1`, which is the same two steps in the same order.
-  defp path_sanity(path), do: Slug.safe_path(path)
-
-  defp normalize(path) do
-    case Slug.normalize_path(path) do
-      {:ok, normalized, changed?} ->
-        {:ok, normalized, changed?}
-
-      {:error, _reason} ->
-        {:error,
-         "No valid filename can be derived from \"#{path}\". Use a name containing letters or digits."}
+  # The order a typed path is turned into a stored one — checked, normalized,
+  # checked again — is `Vigil.Slug`'s, and this gate holds no copy of it.
+  # `:create` and `:move_note` ask `canonical/1` rather than
+  # `canonical_path/1` because they want two things that function keeps: what
+  # normalization changed, which `:create` reports back, and what it says
+  # about a path no filename can be derived from, which is the one refusal
+  # this module has a sentence of its own for.
+  defp canonical(path) do
+    with {:error, :empty} <- Slug.canonical(path) do
+      {:error,
+       "No valid filename can be derived from \"#{path}\". Use a name containing letters or digits."}
     end
   end
 
@@ -217,7 +206,7 @@ defmodule Vigil.Vault.Policy do
 
   # The path must name a writable note. Says nothing about whether it is there.
   defp writable_note(path, facts) do
-    with :ok <- path_sanity(path),
+    with :ok <- Slug.safe_path(path),
          {:ok, _domain, _create_dir} <- writable_path(path, facts, false) do
       {:ok, path}
     end

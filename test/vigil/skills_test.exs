@@ -6,7 +6,13 @@ defmodule Vigil.SkillsTest do
   use ExUnit.Case, async: true
 
   alias Vigil.Git.CommitLog
-  alias Vigil.Skills
+  alias Vigil.{SkillKey, Skills}
+
+  # The deployment's SkillKey, stated here rather than resolved. `read/3` takes
+  # it the way it takes the vault path and the git adapter — this module holds
+  # no configuration to build one from — so the token asserted against below is
+  # the token this file handed in.
+  @key %{secret: "skills-test-secret", window: 3600}
 
   # Where a skill write goes and what it reaches git through. The commit log
   # is the adapter (docs/design.md, "Git is reached through a value"): what
@@ -42,7 +48,7 @@ defmodule Vigil.SkillsTest do
     end
   end
 
-  describe "read/2 (FixtureVault-backed)" do
+  describe "read/3 (FixtureVault-backed)" do
     setup do
       vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
@@ -50,25 +56,25 @@ defmodule Vigil.SkillsTest do
     end
 
     test "with and without .md returns the same content", %{vault: vault} do
-      {:ok, %{content: c1}} = Skills.read("tdd", vault)
-      {:ok, %{content: c2}} = Skills.read("tdd.md", vault)
+      {:ok, %{content: c1}} = Skills.read("tdd", vault, @key)
+      {:ok, %{content: c2}} = Skills.read("tdd.md", vault, @key)
       assert c1 == c2
       assert c1 =~ "Failing Test"
     end
 
     test "prefixes the response with the current SkillKey token", %{vault: vault} do
-      {:ok, %{content: content}} = Skills.read("tdd", vault)
-      assert content =~ "SkillKey: #{Vigil.SkillKey.current(Vigil.SkillKey.config())}"
+      {:ok, %{content: content}} = Skills.read("tdd", vault, @key)
+      assert content =~ "SkillKey: #{SkillKey.current(@key)}"
     end
 
     test "a not-found skill lists available names and still carries a SkillKey token", %{
       vault: vault
     } do
-      assert {:error, msg} = Skills.read("does-not-exist", vault)
+      assert {:error, msg} = Skills.read("does-not-exist", vault, @key)
       assert msg =~ "tdd"
 
       [_, token] = Regex.run(~r/SkillKey: ([0-9a-f]+)/, msg)
-      assert token == Vigil.SkillKey.current(Vigil.SkillKey.config())
+      assert token == SkillKey.current(@key)
     end
   end
 
@@ -86,7 +92,7 @@ defmodule Vigil.SkillsTest do
 
       assert File.exists?(Path.join(vault, "skills/new.md"))
 
-      {:ok, %{content: content}} = Skills.read("new", vault)
+      {:ok, %{content: content}} = Skills.read("new", vault, @key)
       assert content =~ "1. one"
     end
 
@@ -130,7 +136,7 @@ defmodule Vigil.SkillsTest do
       assert msg =~ "Could not write file"
       assert msg =~ "no write permission"
 
-      assert {:ok, _} = Skills.read("tdd", vault)
+      assert {:ok, _} = Skills.read("tdd", vault, @key)
     end
 
     test "rejects content missing required frontmatter fields, without touching git" do
@@ -148,8 +154,8 @@ defmodule Vigil.SkillsTest do
   describe "fixture-free unit tests: valid_skill_name?/1 (via read/2, write/3)" do
     test "read/2 rejects a name with path-hostile characters, without touching disk" do
       vault = tmp_dir()
-      assert {:error, "Invalid path"} = Skills.read("../evil", vault)
-      assert {:error, "Invalid path"} = Skills.read("Has Spaces", vault)
+      assert {:error, "Invalid path"} = Skills.read("../evil", vault, @key)
+      assert {:error, "Invalid path"} = Skills.read("Has Spaces", vault, @key)
       refute File.exists?(Path.join(vault, "skills"))
     end
 
@@ -187,8 +193,8 @@ defmodule Vigil.SkillsTest do
       File.mkdir_p!(skills_dir)
       File.write!(Path.join(skills_dir, "foo.md"), "---\nname: foo\ndescription: d\n---\n# Foo")
 
-      assert {:ok, %{name: "foo"}} = Skills.read("  foo  ", vault)
-      assert {:ok, %{name: "foo"}} = Skills.read("foo.md", vault)
+      assert {:ok, %{name: "foo"}} = Skills.read("  foo  ", vault, @key)
+      assert {:ok, %{name: "foo"}} = Skills.read("foo.md", vault, @key)
     end
   end
 

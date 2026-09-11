@@ -5,6 +5,7 @@ defmodule Vigil.MCP.Server do
 
   alias Vigil.MCP.{Tools, Envelope}
   alias Vigil.RateLimit
+  alias Vigil.SkillKey
   alias Vigil.Store
   alias Vigil.OAuth
 
@@ -230,7 +231,7 @@ defmodule Vigil.MCP.Server do
         if scope == OAuth.read_scope() and Tools.write_tool?(name) do
           {:error, "Read-only token: write access denied."}
         else
-          Tools.dispatch(store, name, arguments, now)
+          Tools.dispatch(store, name, arguments, now, SkillKey.key(settings(conn)))
         end
 
       body = build_tool_call_result(result, envelope)

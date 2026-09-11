@@ -51,7 +51,7 @@ defmodule Vigil.MCP.Tools do
   enum through as a string.
   """
 
-  alias Vigil.{Skills, Store}
+  alias Vigil.{Skills, SkillKey, Store}
 
   # The one parameter that is not a parameter of any Store operation: it
   # authorizes a write and is consumed by the gate below.
@@ -446,7 +446,7 @@ defmodule Vigil.MCP.Tools do
   AP-6's read-only (`vault:read`) scope. `skill_write` requires a SkillKey
   same as any other write tool; the bootstrap deadlock this could cause on a
   brand-new vault (no `vigil-vault-conventions` skill yet to read a key from)
-  is resolved in `Vigil.Skills.read/2`, which reveals the current key even
+  is resolved in `Vigil.Skills.read/3`, which reveals the current key even
   when the requested skill doesn't exist yet.
   """
   @spec write_tool?(String.t()) :: boolean()
@@ -480,19 +480,24 @@ defmodule Vigil.MCP.Tools do
   `store` is the writer the call is made against, the one thing here that a
   deployment and a test file legitimately disagree about. It defaults to the
   registration production runs under, so the MCP surface hands in no name.
+
+  `key` is the deployment's SkillKey (`Vigil.SkillKey.key/1`), built from the
+  settings the composition root resolved and handed in for the same reason
+  `now` is: it has no default here, because a gate that resolves its own
+  secret is a gate a test cannot hand another deployment.
   """
-  @spec dispatch(GenServer.server(), String.t(), map(), DateTime.t()) ::
+  @spec dispatch(GenServer.server(), String.t(), map(), DateTime.t(), SkillKey.t()) ::
           {:ok, term()} | {:error, String.t()}
-  def dispatch(store \\ Store.default_name(), name, args, now) do
+  def dispatch(store \\ Store.default_name(), name, args, now, key) do
     case find_tool(name) do
       nil ->
         {:error, "Unknown tool: #{name}"}
 
       tool ->
-        with :ok <- maybe_require_skill_key(tool, args),
+        with :ok <- maybe_require_skill_key(tool, args, key),
              {:ok, params} <- validate_params(param_specs(tool), args) do
           params = params |> Map.delete(@skill_key) |> maybe_put_now(tool, now)
-          tool.call |> answer(params, store) |> to_result()
+          tool.call |> answer(params, store, key) |> to_result()
         end
     end
   end
@@ -509,20 +514,23 @@ defmodule Vigil.MCP.Tools do
   # They still read the path off the writer that was handed in, not off the
   # default one: a vault is the writer's, and a read answered against another
   # writer's vault is a read of the wrong vault.
-  defp answer(:skill_list, %{}, store), do: Skills.list(Store.vault_path(store))
-  defp answer(:skill_read, %{name: name}, store), do: Skills.read(name, Store.vault_path(store))
-  defp answer(op, params, store), do: Store.call(store, op, params)
+  defp answer(:skill_list, %{}, store, _key), do: Skills.list(Store.vault_path(store))
+
+  defp answer(:skill_read, %{name: name}, store, key),
+    do: Skills.read(name, Store.vault_path(store), key)
+
+  defp answer(op, params, store, _key), do: Store.call(store, op, params)
 
   defp maybe_put_now(params, %{now: true}, now), do: Map.put(params, :now, now)
   defp maybe_put_now(params, _tool, _now), do: params
 
-  defp maybe_require_skill_key(%{write: true}, args), do: require_skill_key(args)
-  defp maybe_require_skill_key(%{write: false}, _args), do: :ok
+  defp maybe_require_skill_key(%{write: true}, args, key), do: require_skill_key(args, key)
+  defp maybe_require_skill_key(%{write: false}, _args, _key), do: :ok
 
-  defp require_skill_key(args) do
+  defp require_skill_key(args, key) do
     case Map.get(args, @skill_key_name) do
-      key when is_binary(key) and key != "" ->
-        if Vigil.SkillKey.valid?(key, Vigil.SkillKey.config()) do
+      token when is_binary(token) and token != "" ->
+        if SkillKey.valid?(token, key) do
           :ok
         else
           skill_key_error()

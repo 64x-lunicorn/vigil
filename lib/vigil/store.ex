@@ -375,7 +375,7 @@ defmodule Vigil.Store do
   # reload. The load builds one of its own, out of the same function.
   #
   # `now` is the instant the write's own response's envelope was decided at
-  # (Vigil.MCP.Envelope.for_tool/4), passed through rather than read here.
+  # (Vigil.MCP.Envelope.for_tool/5), passed through rather than read here.
   defp facts(state, now) do
     Facts.over_vault(
       state.index,

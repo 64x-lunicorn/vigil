@@ -51,8 +51,11 @@ defmodule Vigil.Skills do
   prefixed with the current SkillKey token — the read-side token, data
   attached to the response, not the write gate (that lives in
   `lib/vigil/mcp/tools.ex`).
+
+  `key` is the deployment's SkillKey, handed in the way the vault path is:
+  this module reads no configuration of its own.
   """
-  def read(name, vault_path) do
+  def read(name, vault_path, key) do
     normalized = normalize_skill_name(name)
 
     if valid_skill_name?(normalized) do
@@ -60,7 +63,7 @@ defmodule Vigil.Skills do
 
       case File.read(abs_path) do
         {:ok, content} ->
-          token = SkillKey.current(SkillKey.config())
+          token = SkillKey.current(key)
           prefixed = "SkillKey: #{token} (valid until the next full hour)\n\n" <> content
           {:ok, %{name: normalized, content: prefixed}}
 
@@ -71,7 +74,7 @@ defmodule Vigil.Skills do
           # requires a SkillKey, but a fresh vault has no conventions skill to
           # read one from.
           names = vault_path |> list() |> Enum.map(& &1.name) |> Enum.join(", ")
-          token = SkillKey.current(SkillKey.config())
+          token = SkillKey.current(key)
 
           {:error,
            "Skill not found: #{normalized}. Available: #{names}. SkillKey: #{token} (valid until the next full hour)."}

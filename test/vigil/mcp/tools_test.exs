@@ -7,6 +7,11 @@ defmodule Vigil.MCP.ToolsTest do
   # at; nothing in this file depends on which one it is.
   @now ~U[2026-07-09 11:20:00Z]
 
+  # The deployment's SkillKey, stated rather than resolved: the write gate
+  # takes it as an argument, so the key a test signs a token with is the key
+  # the gate checks it against.
+  @key %{secret: "tools-test-secret", window: 3600}
+
   @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete_note move_note skill_write)
 
   describe "definitions/0 is derived from the declaration table" do
@@ -108,31 +113,31 @@ defmodule Vigil.MCP.ToolsTest do
     end
   end
 
-  describe "dispatch/4 validates before the Store is reached" do
+  describe "dispatch/5 validates before the Store is reached" do
     test "an unknown tool is rejected without touching the Store" do
-      assert Tools.dispatch("does_not_exist", %{}, @now) ==
+      assert Tools.dispatch("does_not_exist", %{}, @now, @key) ==
                {:error, "Unknown tool: does_not_exist"}
     end
 
     test "a missing required string is a tool error, not a raise" do
-      assert {:error, message} = Tools.dispatch("search", %{}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{}, @now, @key)
       assert message =~ "Missing or invalid parameter: query"
     end
 
     test "an empty required string is treated the same as missing" do
-      assert {:error, message} = Tools.dispatch("search", %{"query" => ""}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{"query" => ""}, @now, @key)
       assert message =~ "Missing or invalid parameter: query"
     end
 
     test "a non-string value for a string parameter is a tool error" do
-      assert {:error, message} = Tools.dispatch("search", %{"query" => 123}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{"query" => 123}, @now, @key)
       assert message =~ "Invalid parameter query"
       assert message =~ "a string"
     end
 
     test "a non-boolean value for a boolean parameter is a tool error" do
       assert {:error, message} =
-               Tools.dispatch("read", %{"id" => "bike/x.md", "backlinks" => "yes"}, @now)
+               Tools.dispatch("read", %{"id" => "bike/x.md", "backlinks" => "yes"}, @now, @key)
 
       assert message =~ "Invalid parameter backlinks"
       assert message =~ "a boolean"
@@ -140,7 +145,7 @@ defmodule Vigil.MCP.ToolsTest do
 
     test "limit: \"abc\" is a tool error, not a 500" do
       assert {:error, message} =
-               Tools.dispatch("search", %{"query" => "tires", "limit" => "abc"}, @now)
+               Tools.dispatch("search", %{"query" => "tires", "limit" => "abc"}, @now, @key)
 
       assert message =~ "Invalid parameter limit"
       assert message =~ "an integer between 1 and 25"
@@ -152,7 +157,12 @@ defmodule Vigil.MCP.ToolsTest do
     test "a limit outside 1..25 is refused rather than clamped" do
       for out_of_range <- [100, 26, 0, -5] do
         assert {:error, message} =
-                 Tools.dispatch("search", %{"query" => "tires", "limit" => out_of_range}, @now)
+                 Tools.dispatch(
+                   "search",
+                   %{"query" => "tires", "limit" => out_of_range},
+                   @now,
+                   @key
+                 )
 
         assert message =~ "Invalid parameter limit: expected an integer between 1 and 25"
       end
@@ -160,19 +170,19 @@ defmodule Vigil.MCP.ToolsTest do
 
     test "a depth outside 1..2 is refused before the Store is reached" do
       assert {:error, message} =
-               Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 3}, @now)
+               Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 3}, @now, @key)
 
       assert message =~ "Invalid parameter depth: expected an integer between 1 and 2"
 
       assert {:error, message} =
-               Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 0}, @now)
+               Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 0}, @now, @key)
 
       assert message =~ "Invalid parameter depth"
     end
 
     test "an off-enum value is a tool error naming the allowed values" do
       assert {:error, message} =
-               Tools.dispatch("search", %{"query" => "tires", "type" => "bogus"}, @now)
+               Tools.dispatch("search", %{"query" => "tires", "type" => "bogus"}, @now, @key)
 
       assert message =~ "Invalid parameter type"
       assert message =~ "reference"
@@ -182,14 +192,19 @@ defmodule Vigil.MCP.ToolsTest do
 
     test "direction: \"sideways\" is rejected rather than silently becoming :both" do
       assert {:error, message} =
-               Tools.dispatch("links", %{"id" => "bike/x.md", "direction" => "sideways"}, @now)
+               Tools.dispatch(
+                 "links",
+                 %{"id" => "bike/x.md", "direction" => "sideways"},
+                 @now,
+                 @key
+               )
 
       assert message =~ "Invalid parameter direction"
     end
 
     test "every violation is reported in one message, not only the first" do
       assert {:error, message} =
-               Tools.dispatch("search", %{"type" => "bogus", "limit" => "abc"}, @now)
+               Tools.dispatch("search", %{"type" => "bogus", "limit" => "abc"}, @now, @key)
 
       assert message =~ "query"
       assert message =~ "type"
@@ -197,19 +212,19 @@ defmodule Vigil.MCP.ToolsTest do
     end
 
     test "undeclared parameters are ignored" do
-      assert {:error, message} = Tools.dispatch("search", %{"nonsense" => "x"}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{"nonsense" => "x"}, @now, @key)
       refute message =~ "nonsense"
       assert message =~ "query"
     end
 
     test "an explicit null for an optional parameter is treated as absent, not a type error" do
-      assert {:error, message} = Tools.dispatch("search", %{"domain" => nil}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{"domain" => nil}, @now, @key)
       refute message =~ "domain"
       assert message =~ "query"
     end
 
     test "an explicit null for a required parameter is the same as missing" do
-      assert {:error, message} = Tools.dispatch("search", %{"query" => nil}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{"query" => nil}, @now, @key)
       assert message =~ "Missing or invalid parameter: query"
     end
 
@@ -222,14 +237,15 @@ defmodule Vigil.MCP.ToolsTest do
                    "type" => "reference",
                    "content" => "# X"
                  },
-                 @now
+                 @now,
+                 @key
                )
 
       assert message =~ "SkillKey"
     end
 
     test "a write tool with an expired skill_key gets the SkillKey error" do
-      key = Vigil.SkillKey.current(Vigil.SkillKey.config(), System.system_time(:second) - 7200)
+      token = Vigil.SkillKey.current(@key, System.system_time(:second) - 7200)
 
       assert {:error, message} =
                Tools.dispatch(
@@ -238,16 +254,17 @@ defmodule Vigil.MCP.ToolsTest do
                    "path" => "bike/x.md",
                    "type" => "reference",
                    "content" => "# X",
-                   "skill_key" => key
+                   "skill_key" => token
                  },
-                 @now
+                 @now,
+                 @key
                )
 
       assert message =~ "SkillKey"
     end
 
     test "a read-only tool needs no skill_key" do
-      assert {:error, message} = Tools.dispatch("search", %{}, @now)
+      assert {:error, message} = Tools.dispatch("search", %{}, @now, @key)
       refute message =~ "SkillKey"
     end
   end

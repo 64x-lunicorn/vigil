@@ -95,6 +95,42 @@ defmodule Vigil.SlugTest do
     end
   end
 
+  describe "canonical/1 and canonical_path/1" do
+    test "safety is checked before normalization" do
+      # Normalization slugifies every segment, so `_domains.yml` becomes
+      # `domains.yml` and `/abs/x.md` becomes `abs/x.md`. A path checked only
+      # after that is a path whose check the normalization has laundered.
+      assert Slug.canonical_path("_domains.yml") == {:error, "Invalid path"}
+      assert Slug.canonical_path("/etc/passwd") == {:error, "Invalid path"}
+      assert Slug.canonical_path("bike/../../etc/passwd") == {:error, "Invalid path"}
+
+      assert Slug.canonical("_domains.yml") == {:error, "Invalid path"}
+    end
+
+    # And after it, which is the half no caller has to remember. Nothing
+    # `normalize_path/1` produces today can fail it — every segment it emits
+    # starts with a letter or a digit — and that is the reason the check
+    # belongs to the resolution rather than to each caller: what keeps it true
+    # is one function away from the rule, not eight.
+    test "a safe path is canonicalised to what the vault would store it under" do
+      assert Slug.canonical_path("Bike/Terra Speed.MD") == {:ok, "bike/terra-speed.md"}
+      assert Slug.canonical_path("bike/terra-speed.md") == {:ok, "bike/terra-speed.md"}
+    end
+
+    test "canonical/1 says whether normalization changed the path" do
+      assert Slug.canonical("Bike/Terra Speed.MD") == {:ok, "bike/terra-speed.md", true}
+      assert Slug.canonical("bike/terra-speed.md") == {:ok, "bike/terra-speed.md", false}
+    end
+
+    # The two callers differ on this one answer, which is why there are two
+    # functions: a read answers it the way it answers a miss, and the write
+    # gate has a sentence to say about it.
+    test "a path no filename can be derived from" do
+      assert Slug.canonical_path("bike/---.md") == {:ok, "bike/---.md"}
+      assert Slug.canonical("bike/---.md") == {:error, :empty}
+    end
+  end
+
   describe "legacy_slugify/1 (migration comparison only)" do
     test "deletes untransliterated diacritics instead of transliterating them" do
       assert Slug.legacy_slugify("café") == "caf"
