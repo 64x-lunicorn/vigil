@@ -210,6 +210,15 @@ is an incident, not a lint warning. ShellCheck is blocking, and
 `check_only_test.sh` guards the specific regression where `--check-only`
 silently fell through to apply-mode.
 
+`verify_test.sh`, `update_test.sh` and `release_smoke.sh` share one assertion
+harness, [`scripts/test/harness.sh`](../scripts/test/harness.sh). Each keeps
+its own subjects and its own stand-ins; what it sources is the counting, the
+headings and the summary — one statement of what a pass prints and what a
+green run exits with, rather than three kept in step by hand. Each of the
+three ends on `report`, which is what turns the counters into an exit code.
+`check_only_test.sh` is the exception: its `assert_eq` and `assert_contains`
+carry a message shape of their own.
+
 **Delivery.** [`scripts/test/update_test.sh`](../scripts/test/update_test.sh)
 covers the script that actually ships a change. The smoke test above proves a
 release boots and serves; it says nothing about switching between two of them,
