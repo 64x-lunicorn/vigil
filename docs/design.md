@@ -290,6 +290,15 @@ Collisions inside one file get a `-2`, `-3` suffix.
 (`File title › Fueling › Second Half`); the chunk id uses only the slug of the
 heading itself.
 
+**One chunk, one owner.** A chunk is a `Vigil.Parser.Chunk`, and there is no
+second struct restating its fields: the parser produces it, `Vigil.Index`
+holds it, `Vigil.Vault.Edit` splices a note's lines by it. A field added to a
+chunk is added in one place, and what the line numbers it carries mean is
+documented on that struct and nowhere else — this document included. What the index adds as it indexes a chunk is the note's `domain`
+and title, denormalised onto it: search filters by domain and titles every hit
+per chunk, and asking the note per chunk would put a lookup back onto the path
+this whole section exists to keep cheap.
+
 This is what keeps retrieval cheap: the assistant fetches one section, not a
 3000-word file.
 

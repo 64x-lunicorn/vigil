@@ -1,13 +1,13 @@
 defmodule Vigil.Vault.EditTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.Index
+  alias Vigil.Parser.Chunk
   alias Vigil.Vault.Edit
 
   # A chunk as Edit needs it: heading, heading_line, body_end_line. Every
-  # other field on Index.Chunk is irrelevant to the splice.
+  # other field on the chunk is irrelevant to the splice.
   defp chunk(heading, heading_line, body_end_line) do
-    %Index.Chunk{heading: heading, heading_line: heading_line, body_end_line: body_end_line}
+    %Chunk{heading: heading, heading_line: heading_line, body_end_line: body_end_line}
   end
 
   # Three ## sections, no nesting. "Second" is mid-file (a heading follows
@@ -243,7 +243,8 @@ defmodule Vigil.Vault.EditTest do
 
   # Every test above hands Edit a chunk with hand-written line numbers, which
   # cannot catch the two modules disagreeing about where a body ends. These
-  # drive the real parser instead.
+  # drive the real parser instead — and what it produces is what Edit splices,
+  # with nothing in between reshaping it.
   describe "against chunks the parser produced" do
     @note """
     ---
@@ -260,7 +261,7 @@ defmodule Vigil.Vault.EditTest do
 
     defp parsed_chunk(content, id) do
       {:ok, file} = Vigil.Parser.parse("x/notes.md", content, %{})
-      Index.find_chunk(Index.build([file]), id)
+      Enum.find(file.chunks, &(&1.id == id))
     end
 
     test "replacing a mid-file body leaves exactly one blank line before the next heading" do

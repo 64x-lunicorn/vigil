@@ -20,7 +20,8 @@ defmodule Vigil.Vault.Decision do
   the same one, and what differs is what the plan does with it.
   """
 
-  alias Vigil.{Index, Vault.Edit}
+  alias Vigil.Parser
+  alias Vigil.Vault.Edit
 
   defmodule Create do
     @moduledoc "A note to write where none is: where it lands, and as what."
@@ -50,7 +51,7 @@ defmodule Vigil.Vault.Decision do
     @enforce_keys [:path, :chunk]
     defstruct @enforce_keys
 
-    @type t :: %__MODULE__{path: String.t(), chunk: Index.Chunk.t()}
+    @type t :: %__MODULE__{path: String.t(), chunk: Parser.Chunk.t()}
   end
 
   defmodule RewriteNote do

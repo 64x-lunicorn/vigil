@@ -9,13 +9,11 @@ defmodule Vigil.Vault.Edit do
   into lines and the join. How a file ends is `Vigil.Markdown`'s rule, stated
   once for every write path (docs/design.md, "How a file is written").
 
-  The target of a splice is an `%Vigil.Index.Chunk{}` — the value `Store`
-  already holds from the index. `Edit` depends on `Vigil.Index` for the
-  struct and for the line-index helpers it splices by; `Index` does not
-  depend back. The parser's chunk carries the same field names and is not
-  the same value: the specs and the calls here name one struct, so a rename
-  on either side is a compile error rather than a silent splice by the other
-  side's numbers.
+  The target of a splice is a `%Vigil.Parser.Chunk{}` — the value `Store`
+  already holds from the index, produced by the parser and unchanged since.
+  `Edit` depends on `Vigil.Parser` for the struct and for the line-index
+  helpers it splices by; the line numbers are the parser's, so the module
+  that states what they mean is the module the splice asks.
 
   `Vigil.Vault.Policy` already guarantees a non-nil chunk
   with a non-nil heading before a splice is reached, but that guarantee lives
@@ -23,8 +21,8 @@ defmodule Vigil.Vault.Edit do
   down, so the precondition is checked here too — an error tuple, not a raise.
   """
 
-  alias Vigil.Index.Chunk
   alias Vigil.Markdown
+  alias Vigil.Parser.Chunk
 
   @type target :: {:section, Chunk.t()} | {:new_section, String.t()} | :end
 

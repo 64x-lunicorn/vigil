@@ -1,7 +1,7 @@
 defmodule Vigil.Vault.PlanTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.Index
+  alias Vigil.Parser
   alias Vigil.Vault.{AbsentFacts, Decision, Plan, Policy}
 
   # No vault, no git, no GenServer: a plan is a value derived from a decision
@@ -54,7 +54,7 @@ defmodule Vigil.Vault.PlanTest do
   # it. Line numbers are the parser's: the body ends at its last non-blank
   # line.
   defp fueling do
-    %Index.Chunk{
+    %Parser.Chunk{
       id: "#{@path}#fueling",
       path: @path,
       heading: "Fueling",

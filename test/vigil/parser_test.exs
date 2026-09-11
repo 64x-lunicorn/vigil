@@ -12,9 +12,10 @@ defmodule Vigil.ParserTest do
     file
   end
 
-  # A chunk of the shape the index holds. Built behind a function so the type
-  # checker does not read the deliberate mismatch below as unreachable code.
-  defp index_chunk, do: struct(Vigil.Index.Chunk, heading_line: 6, body_end_line: 7)
+  # A chunk-shaped map: the same field names, and not a chunk. Built behind a
+  # function so the type checker does not read the deliberate mismatch below
+  # as unreachable code.
+  defp chunk_shaped_map, do: Map.new(heading_line: 6, body_end_line: 7)
 
   # The note's pre-heading chunk: a body, and no heading line of its own.
   defp pre_chunk, do: struct(Chunk, body_end_line: 3)
@@ -421,12 +422,12 @@ defmodule Vigil.ParserTest do
       assert Chunk.body_end_index(chunk) == chunk.body_end_line
     end
 
-    test "a chunk of another shape is refused, however its fields are named" do
-      foreign = index_chunk()
+    test "a chunk-shaped map is refused, however its fields are named" do
+      shaped = chunk_shaped_map()
 
-      assert_raise FunctionClauseError, fn -> Chunk.heading_index(foreign) end
-      assert_raise FunctionClauseError, fn -> Chunk.body_start_index(foreign) end
-      assert_raise FunctionClauseError, fn -> Chunk.body_end_index(foreign) end
+      assert_raise FunctionClauseError, fn -> Chunk.heading_index(shaped) end
+      assert_raise FunctionClauseError, fn -> Chunk.body_start_index(shaped) end
+      assert_raise FunctionClauseError, fn -> Chunk.body_end_index(shaped) end
     end
 
     test "a chunk with no heading line of its own has no heading index" do

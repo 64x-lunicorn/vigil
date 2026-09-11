@@ -180,10 +180,10 @@ defmodule Vigil.Vault.FactsTest do
       assert facts.count_headings.("gear/terra-speed.md") == 2
       assert facts.count_headings.("gear/unknown.md") == 0
 
-      assert %Index.Chunk{heading: "Weight"} = facts.find_chunk.("gear/terra-speed.md#weight")
+      assert %Parser.Chunk{heading: "Weight"} = facts.find_chunk.("gear/terra-speed.md#weight")
       assert facts.find_chunk.("gear/terra-speed.md#nope") == nil
 
-      assert %Index.Chunk{id: "gear/terra-speed.md#weight"} =
+      assert %Parser.Chunk{id: "gear/terra-speed.md#weight"} =
                facts.find_section.("gear/terra-speed.md", "Weight")
 
       assert facts.find_section.("gear/terra-speed.md", "Nope") == nil

@@ -22,7 +22,7 @@ defmodule Vigil.IndexTest do
   # `Vigil.Search.run/3`.
   defp ranking_chunk(overrides) do
     Map.merge(
-      %Index.Chunk{
+      %Parser.Chunk{
         id: "x/a.md",
         path: "x/a.md",
         domain: "x",
@@ -38,10 +38,6 @@ defmodule Vigil.IndexTest do
   end
 
   defp ranking_index(chunks), do: %Index{chunks: Map.new(chunks, &{&1.id, &1})}
-
-  # A chunk of the shape the parser produces. Built behind a function so the
-  # type checker does not read the deliberate mismatch below as unreachable.
-  defp parsed_chunk, do: struct(Parser.Chunk, heading_line: 6, body_end_line: 7)
 
   defp parse(rel_path) do
     content = File.read!(Path.join(@fixtures, rel_path))
@@ -561,14 +557,14 @@ defmodule Vigil.IndexTest do
 
   describe "find_chunk/2" do
     test "returns the Chunk struct at an id, or nil", %{index: index} do
-      assert %Index.Chunk{heading: "Fueling"} =
+      assert %Parser.Chunk{heading: "Fueling"} =
                Index.find_chunk(index, "bike/via-carolina.md#fueling")
 
       assert Index.find_chunk(index, "bike/via-carolina.md#nope") == nil
     end
 
     test "resolves leniently, as read/2 does, and carries the canonical path", %{index: index} do
-      assert %Index.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
+      assert %Parser.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
                Index.find_chunk(index, "bike/Via Carolina!!.md#fueling")
     end
 
@@ -660,10 +656,10 @@ defmodule Vigil.IndexTest do
 
   describe "find_section/3" do
     test "finds the chunk whose heading slugifies to the same slug", %{index: index} do
-      assert %Index.Chunk{heading: "Gear"} =
+      assert %Parser.Chunk{heading: "Gear"} =
                Index.find_section(index, "bike/via-carolina.md", "Gear")
 
-      assert %Index.Chunk{heading: "Gear"} =
+      assert %Parser.Chunk{heading: "Gear"} =
                Index.find_section(index, "bike/via-carolina.md", "gear!")
     end
 
@@ -700,26 +696,19 @@ defmodule Vigil.IndexTest do
     end
   end
 
-  # The same 1-based, inclusive line numbers the parser produces, and the same
-  # 0-based translation `Vigil.Vault.Edit` splices with — on the struct the
-  # write path actually holds, so the spec and the call name one module.
-  describe "Chunk line indices" do
-    test "0-based indices for the heading, the body's first line and the line after it", %{
-      index: index
-    } do
-      chunk = Index.find_chunk(index, "bike/via-carolina.md#fueling")
+  # One chunk, one owner (docs/design.md, "Chunking"): what the index holds is
+  # the value the parser produced, with the two fields search needs on it.
+  # Nothing copies it field by field, which is what this asserts by comparing
+  # the whole struct — a field added to the parser's chunk arrives here with
+  # no second edit, and a copy that forgot one would fail.
+  describe "the chunk the index holds" do
+    test "is the parser's own chunk, plus the note's domain and title", %{index: index} do
+      parsed =
+        parse("bike/via-carolina.md").chunks
+        |> Enum.find(&(&1.heading == "Fueling"))
 
-      assert Index.Chunk.heading_index(chunk) == chunk.heading_line - 1
-      assert Index.Chunk.body_start_index(chunk) == chunk.heading_line
-      assert Index.Chunk.body_end_index(chunk) == chunk.body_end_line
-    end
-
-    test "a chunk of another shape is refused, however its fields are named" do
-      parsed = parsed_chunk()
-
-      assert_raise FunctionClauseError, fn -> Index.Chunk.heading_index(parsed) end
-      assert_raise FunctionClauseError, fn -> Index.Chunk.body_start_index(parsed) end
-      assert_raise FunctionClauseError, fn -> Index.Chunk.body_end_index(parsed) end
+      assert Index.find_chunk(index, parsed.id) ==
+               %{parsed | domain: "bike", file_title: "Via Carolina"}
     end
   end
 end
