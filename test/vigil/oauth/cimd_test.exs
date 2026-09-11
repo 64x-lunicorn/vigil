@@ -16,7 +16,6 @@ defmodule Vigil.OAuth.CimdTest do
 
   setup do
     Vigil.OAuthCase.setup!()
-    :ok
   end
 
   ## Fake net
@@ -58,14 +57,16 @@ defmodule Vigil.OAuth.CimdTest do
   end
 
   # Drives `fetch` against a host whose only resolved address is `ip`.
-  defp fetch_resolving_to(ip) do
-    Cimd.fetch(@url, @now, net(addresses: [{:ok, ip}]))
+  defp fetch_resolving_to(persistence, ip) do
+    Cimd.fetch(persistence, @url, @now, net(addresses: [{:ok, ip}]))
   end
 
   ## The happy path
 
-  test "a valid document becomes a client, and the fetch resolves before it requests" do
-    assert {:ok, doc} = Cimd.fetch(@url, @now, net([]))
+  test "a valid document becomes a client, and the fetch resolves before it requests", %{
+    persistence: persistence
+  } do
+    assert {:ok, doc} = Cimd.fetch(persistence, @url, @now, net([]))
 
     assert doc == %{
              client_id: @url,
@@ -77,40 +78,51 @@ defmodule Vigil.OAuth.CimdTest do
     assert_received {:request, @url, @public}
   end
 
-  test "a document without client_name is refused rather than defaulted to the URL" do
+  test "a document without client_name is refused rather than defaulted to the URL", %{
+    persistence: persistence
+  } do
     # `fetch` reads client_name with a default, but validation requires it, so
     # the default is unreachable. Pinned here so removing either is visible.
-    assert :error = Cimd.fetch(@url, @now, net(body: document(%{"client_name" => nil})))
+    assert :error =
+             Cimd.fetch(persistence, @url, @now, net(body: document(%{"client_name" => nil})))
   end
 
   ## The URL
 
-  test "a non-https client_id is refused without resolving or requesting" do
-    assert :error = Cimd.fetch("http://client.example.org/metadata.json", @now, net([]))
+  test "a non-https client_id is refused without resolving or requesting", %{
+    persistence: persistence
+  } do
+    assert :error =
+             Cimd.fetch(persistence, "http://client.example.org/metadata.json", @now, net([]))
+
     refute_received {:resolve, _, _}
     refute_received {:request, _, _}
   end
 
-  test "an https URL without a host is refused" do
-    assert :error = Cimd.fetch("https:///metadata.json", @now, net([]))
+  test "an https URL without a host is refused", %{persistence: persistence} do
+    assert :error = Cimd.fetch(persistence, "https:///metadata.json", @now, net([]))
     refute_received {:request, _, _}
   end
 
   ## One resolution, not two
 
-  test "the address the guard checked is the address the request is given" do
-    assert {:ok, _doc} = Cimd.fetch(@url, @now, net([]))
+  test "the address the guard checked is the address the request is given", %{
+    persistence: persistence
+  } do
+    assert {:ok, _doc} = Cimd.fetch(persistence, @url, @now, net([]))
     assert_received {:request, @url, @public}
   end
 
-  test "a host answering public and then loopback never reaches the loopback address" do
+  test "a host answering public and then loopback never reaches the loopback address", %{
+    persistence: persistence
+  } do
     # DNS rebinding: the attacker controls the host's DNS and answers the
     # guard's lookup with a public address and the connection's lookup with
     # 127.0.0.1. There is only one lookup now, so the second answer is never
     # asked for — and the request carries the address that was checked.
     net = net(addresses: [{:ok, @public}, {:ok, @loopback}])
 
-    assert {:ok, _doc} = Cimd.fetch(@url, @now, net)
+    assert {:ok, _doc} = Cimd.fetch(persistence, @url, @now, net)
 
     assert_received {:resolve, "client.example.org", :inet}
     refute_received {:resolve, _, _}
@@ -121,28 +133,32 @@ defmodule Vigil.OAuth.CimdTest do
 
   ## The SSRF guard
 
-  test "a host resolving to a private address is refused without requesting" do
-    assert :error = fetch_resolving_to(@loopback)
+  test "a host resolving to a private address is refused without requesting", %{
+    persistence: persistence
+  } do
+    assert :error = fetch_resolving_to(persistence, @loopback)
     assert_received {:resolve, "client.example.org", :inet}
     refute_received {:request, _, _}
   end
 
-  test "a host with no A record is retried as AAAA" do
+  test "a host with no A record is retried as AAAA", %{persistence: persistence} do
     net = net(addresses: [{:error, :nxdomain}, {:ok, {0x2606, 0x2800, 0, 0, 0, 0, 0, 1}}])
-    assert {:ok, _doc} = Cimd.fetch(@url, @now, net)
+    assert {:ok, _doc} = Cimd.fetch(persistence, @url, @now, net)
 
     assert_received {:resolve, "client.example.org", :inet}
     assert_received {:resolve, "client.example.org", :inet6}
   end
 
-  test "a host that resolves in neither family is refused" do
-    assert :error = Cimd.fetch(@url, @now, net(addresses: [{:error, :nxdomain}]))
+  test "a host that resolves in neither family is refused", %{persistence: persistence} do
+    assert :error = Cimd.fetch(persistence, @url, @now, net(addresses: [{:error, :nxdomain}]))
     refute_received {:request, _, _}
   end
 
   ## The ranges the guard refuses
 
-  test "the IPv4 ranges that must not be reachable are refused, one per range" do
+  test "the IPv4 ranges that must not be reachable are refused, one per range", %{
+    persistence: persistence
+  } do
     for {label, ip} <- [
           {"0.0.0.0/8 (this network)", {0, 0, 0, 0}},
           {"10.0.0.0/8 (private)", {10, 1, 2, 3}},
@@ -155,11 +171,11 @@ defmodule Vigil.OAuth.CimdTest do
           {"198.18.0.0/15 (benchmarking)", {198, 18, 0, 1}},
           {"198.18.0.0/15 upper half", {198, 19, 255, 254}}
         ] do
-      assert :error = fetch_resolving_to(ip), "#{label} was not refused"
+      assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
     end
   end
 
-  test "an address just outside each added range stays reachable" do
+  test "an address just outside each added range stays reachable", %{persistence: persistence} do
     for {label, ip} <- [
           {"1.0.0.0 is not 0.0.0.0/8", {1, 0, 0, 1}},
           {"100.63.x is below the CGNAT range", {100, 63, 255, 254}},
@@ -167,11 +183,13 @@ defmodule Vigil.OAuth.CimdTest do
           {"198.17.x is below the benchmarking range", {198, 17, 255, 254}},
           {"198.20.x is above the benchmarking range", {198, 20, 0, 1}}
         ] do
-      assert {:ok, _doc} = fetch_resolving_to(ip), "#{label} was refused"
+      assert {:ok, _doc} = fetch_resolving_to(persistence, ip), "#{label} was refused"
     end
   end
 
-  test "the IPv6 ranges that must not be reachable are refused, one per range" do
+  test "the IPv6 ranges that must not be reachable are refused, one per range", %{
+    persistence: persistence
+  } do
     for {label, ip} <- [
           {":: (unspecified)", {0, 0, 0, 0, 0, 0, 0, 0}},
           {"::1 (loopback)", {0, 0, 0, 0, 0, 0, 0, 1}},
@@ -180,11 +198,13 @@ defmodule Vigil.OAuth.CimdTest do
           {"fe80::/10 (link-local)", {0xFE80, 0, 0, 0, 0, 0, 0, 1}},
           {"febf::/10 upper edge", {0xFEBF, 0, 0, 0, 0, 0, 0, 1}}
         ] do
-      assert :error = fetch_resolving_to(ip), "#{label} was not refused"
+      assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
     end
   end
 
-  test "an IPv4-mapped IPv6 address is unfolded before the ranges are checked" do
+  test "an IPv4-mapped IPv6 address is unfolded before the ranges are checked", %{
+    persistence: persistence
+  } do
     # ::ffff:127.0.0.1 arrives as an eight-element tuple matching neither the
     # IPv6 loopback clause nor fc00::/7, and used to fall through to "public".
     for {label, ip} <- [
@@ -197,92 +217,111 @@ defmodule Vigil.OAuth.CimdTest do
           {"::ffff:0.0.0.0", {0, 0, 0, 0, 0, 0xFFFF, 0x0000, 0x0000}},
           {"::ffff:198.18.0.1", {0, 0, 0, 0, 0, 0xFFFF, 0xC612, 0x0001}}
         ] do
-      assert :error = fetch_resolving_to(ip), "#{label} was not refused"
+      assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
     end
   end
 
-  test "an IPv4-mapped public address stays reachable" do
+  test "an IPv4-mapped public address stays reachable", %{persistence: persistence} do
     # 93.184.216.34 mapped: the unfolding must not refuse everything it touches.
-    assert {:ok, _doc} = fetch_resolving_to({0, 0, 0, 0, 0, 0xFFFF, 0x5DB8, 0xD822})
+    assert {:ok, _doc} = fetch_resolving_to(persistence, {0, 0, 0, 0, 0, 0xFFFF, 0x5DB8, 0xD822})
   end
 
   ## The response
 
-  test "a non-200 response is refused" do
-    assert :error = Cimd.fetch(@url, @now, net(responses: [:error]))
+  test "a non-200 response is refused", %{persistence: persistence} do
+    assert :error = Cimd.fetch(persistence, @url, @now, net(responses: [:error]))
     assert_received {:request, @url, @public}
   end
 
-  test "a body over the size cap is refused even when the request hands one back" do
+  test "a body over the size cap is refused even when the request hands one back", %{
+    persistence: persistence
+  } do
     # The cap belongs to the fetch, not to one implementation of the request:
     # `net.request` is a seam, and nothing behind it may return an unbounded
     # body. `read_capped/2` enforces the same bound during the read.
     oversized = document(%{"client_name" => String.duplicate("a", 65_537)})
-    assert :error = Cimd.fetch(@url, @now, net(body: oversized))
+    assert :error = Cimd.fetch(persistence, @url, @now, net(body: oversized))
   end
 
-  test "a body that is not JSON is refused" do
-    assert :error = Cimd.fetch(@url, @now, net(body: "not json"))
+  test "a body that is not JSON is refused", %{persistence: persistence} do
+    assert :error = Cimd.fetch(persistence, @url, @now, net(body: "not json"))
   end
 
   ## Document validation
 
-  test "a document whose client_id is not the URL it came from is refused" do
+  test "a document whose client_id is not the URL it came from is refused", %{
+    persistence: persistence
+  } do
     net = net(body: document(%{"client_id" => "https://other.example.org/metadata.json"}))
-    assert :error = Cimd.fetch(@url, @now, net)
+    assert :error = Cimd.fetch(persistence, @url, @now, net)
   end
 
-  test "a document without a client_id is refused" do
+  test "a document without a client_id is refused", %{persistence: persistence} do
     body = ~s({"client_name": "Example", "redirect_uris": ["https://client.example.org/cb"]})
-    assert :error = Cimd.fetch(@url, @now, net(body: body))
+    assert :error = Cimd.fetch(persistence, @url, @now, net(body: body))
   end
 
-  test "a document whose client_name is not a string is refused" do
-    assert :error = Cimd.fetch(@url, @now, net(body: document(%{"client_name" => 42})))
+  test "a document whose client_name is not a string is refused", %{persistence: persistence} do
+    assert :error =
+             Cimd.fetch(persistence, @url, @now, net(body: document(%{"client_name" => 42})))
   end
 
-  test "a document whose redirect_uris is not a list is refused" do
+  test "a document whose redirect_uris is not a list is refused", %{persistence: persistence} do
     net = net(body: document(%{"redirect_uris" => "https://client.example.org/cb"}))
-    assert :error = Cimd.fetch(@url, @now, net)
+    assert :error = Cimd.fetch(persistence, @url, @now, net)
   end
 
-  test "a document whose redirect_uris is empty is refused" do
-    assert :error = Cimd.fetch(@url, @now, net(body: document(%{"redirect_uris" => []})))
+  test "a document whose redirect_uris is empty is refused", %{persistence: persistence} do
+    assert :error =
+             Cimd.fetch(
+               persistence,
+               @url,
+               @now,
+               net(body: document(%{"redirect_uris" => []}))
+             )
   end
 
-  test "a document with a redirect_uri that registration would refuse is refused" do
+  test "a document with a redirect_uri that registration would refuse is refused", %{
+    persistence: persistence
+  } do
     net = net(body: document(%{"redirect_uris" => ["http://evil.example.org/cb"]}))
-    assert :error = Cimd.fetch(@url, @now, net)
+    assert :error = Cimd.fetch(persistence, @url, @now, net)
   end
 
-  test "a loopback redirect_uri is accepted, as it is at registration" do
+  test "a loopback redirect_uri is accepted, as it is at registration", %{
+    persistence: persistence
+  } do
     net = net(body: document(%{"redirect_uris" => ["http://127.0.0.1/cb"]}))
-    assert {:ok, %{redirect_uris: ["http://127.0.0.1/cb"]}} = Cimd.fetch(@url, @now, net)
+
+    assert {:ok, %{redirect_uris: ["http://127.0.0.1/cb"]}} =
+             Cimd.fetch(persistence, @url, @now, net)
   end
 
   ## The cache
 
-  test "a second fetch inside the hour is answered from the cache without requesting" do
-    assert {:ok, doc} = Cimd.fetch(@url, @now, net([]))
+  test "a second fetch inside the hour is answered from the cache without requesting", %{
+    persistence: persistence
+  } do
+    assert {:ok, doc} = Cimd.fetch(persistence, @url, @now, net([]))
     assert_received {:resolve, _, _}
     assert_received {:request, @url, @public}
 
-    assert {:ok, ^doc} = Cimd.fetch(@url, @now + 3599, net([]))
+    assert {:ok, ^doc} = Cimd.fetch(persistence, @url, @now + 3599, net([]))
     refute_received {:request, _, _}
     refute_received {:resolve, _, _}
   end
 
-  test "a fetch after the hour has elapsed requests again" do
-    assert {:ok, _doc} = Cimd.fetch(@url, @now, net([]))
+  test "a fetch after the hour has elapsed requests again", %{persistence: persistence} do
+    assert {:ok, _doc} = Cimd.fetch(persistence, @url, @now, net([]))
     assert_received {:request, @url, @public}
 
-    assert {:ok, _doc} = Cimd.fetch(@url, @now + 3601, net([]))
+    assert {:ok, _doc} = Cimd.fetch(persistence, @url, @now + 3601, net([]))
     assert_received {:request, @url, @public}
   end
 
-  test "a refused document is not cached" do
-    assert :error = Cimd.fetch(@url, @now, net(responses: [:error]))
-    assert {:ok, _doc} = Cimd.fetch(@url, @now, net([]))
+  test "a refused document is not cached", %{persistence: persistence} do
+    assert :error = Cimd.fetch(persistence, @url, @now, net(responses: [:error]))
+    assert {:ok, _doc} = Cimd.fetch(persistence, @url, @now, net([]))
     assert_received {:request, @url, @public}
     assert_received {:request, @url, @public}
   end

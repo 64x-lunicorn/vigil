@@ -21,7 +21,7 @@ defmodule Vigil.OAuth.EndpointTest do
   setup do
     start_supervised!(Vigil.RateLimit)
     oauth = Vigil.OAuthCase.setup!()
-    %{state_dir: oauth.state_dir}
+    %{state_dir: oauth.state_dir, persistence: oauth.persistence}
   end
 
   defp call(conn), do: OAuth.Endpoint.call(conn, OAuth.Endpoint.init([]))
@@ -558,7 +558,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert get_query("/oauth/authorize", spend).status == 200
 
     # ...then ask with an https client_id, which is the only input that sends
-    # `Vigil.OAuth.Client.resolve/2` out to the network. 429 is the endpoint
+    # `Vigil.OAuth.Client.resolve/4` out to the network. 429 is the endpoint
     # refusing before it resolves anything; a fetch that had been attempted
     # would have failed and come back as 400 untrusted instead.
     conn =
@@ -803,10 +803,17 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Persistence
 
   test "a token survives an OAuth.Store restart against the same state dir", %{
-    state_dir: state_dir
+    state_dir: state_dir,
+    persistence: persistence
   } do
     token =
-      OAuth.Token.issue_out_of_band(@resource, "vault", 3600, System.system_time(:second))
+      OAuth.Token.issue_out_of_band(
+        persistence,
+        @resource,
+        "vault",
+        3600,
+        System.system_time(:second)
+      )
 
     stop_supervised!(Vigil.OAuth.Store)
     start_supervised!({Vigil.OAuth.Store, state_dir: state_dir})
@@ -823,28 +830,29 @@ defmodule Vigil.OAuth.EndpointTest do
 
   ## Janitor sweep (time injected, no sleeping)
 
-  test "an expired code is gone after a sweep" do
+  test "an expired code is gone after a sweep", %{persistence: persistence} do
     {201, client} = register(["https://client.example/cb"])
     {_verifier, challenge} = pkce_pair()
 
     {:ok, ctx} =
       OAuth.Flow.authorize_request(
+        persistence,
         authorize_query(client["client_id"], "https://client.example/cb", challenge)
       )
 
     # A code lives a minute, so one minted an hour ago has expired. Minted by
     # the module that owns the record, so what the sweep walks is the shape
     # production writes.
-    code = OAuth.Code.issue(ctx, System.system_time(:second) - 3600)
+    code = OAuth.Code.issue(persistence, ctx, System.system_time(:second) - 3600)
 
-    OAuth.Store.sweep_expired(System.system_time(:second))
+    persistence.sweep_expired.(System.system_time(:second))
 
-    assert OAuth.Store.take_code(code) == :error
+    assert persistence.take_code.(code) == :error
   end
 
   ## CIMD SSRF guard (deterministic — a literal loopback IP needs no network access)
 
-  test "a CIMD client_id resolving to a private IP is rejected" do
-    assert OAuth.Cimd.fetch("https://127.0.0.1/client-metadata.json") == :error
+  test "a CIMD client_id resolving to a private IP is rejected", %{persistence: persistence} do
+    assert OAuth.Cimd.fetch(persistence, "https://127.0.0.1/client-metadata.json") == :error
   end
 end
