@@ -444,13 +444,17 @@ else
 fi
 
 # 5. Redeem the code with the verifier.
+# curl already writes 000 into %{http_code} on a transport failure, so no
+# `|| echo` is needed — appending one produced "000000". The body is truncated
+# first so that a failed request cannot be read as the previous one's answer.
 redeem_code() {
+  : >"${WORK}/.token_body"
   curl -sS -o "${WORK}/.token_body" -w '%{http_code}' -X POST "${BASE_URL}/oauth/token" \
     --data-urlencode "grant_type=authorization_code" \
     --data-urlencode "code=${AUTH_CODE}" \
     --data-urlencode "client_id=${CLIENT_ID}" \
     --data-urlencode "redirect_uri=${REDIRECT_URI}" \
-    --data-urlencode "code_verifier=${CODE_VERIFIER}" 2>/dev/null || echo "000"
+    --data-urlencode "code_verifier=${CODE_VERIFIER}" 2>/dev/null
 }
 
 REDEEM_STATUS="$(redeem_code)"
@@ -482,10 +486,11 @@ fi
 
 # 8. Rotation.
 refresh_with() {
+  : >"${WORK}/.token_body"
   curl -sS -o "${WORK}/.token_body" -w '%{http_code}' -X POST "${BASE_URL}/oauth/token" \
     --data-urlencode "grant_type=refresh_token" \
     --data-urlencode "refresh_token=$1" \
-    --data-urlencode "client_id=${CLIENT_ID}" 2>/dev/null || echo "000"
+    --data-urlencode "client_id=${CLIENT_ID}" 2>/dev/null
 }
 
 REFRESH_STATUS="$(refresh_with "$FLOW_REFRESH")"
@@ -514,11 +519,18 @@ fi
 # holders is an attacker, and it cannot tell which.
 assert_eq "replaying the spent refresh token is refused" "400" "$(refresh_with "$FLOW_REFRESH")"
 
-mcp_call "$ROTATED_ACCESS" "current" > /dev/null
-if [ "$(mcp_status)" = "200" ]; then
-  fail "the replay revoked the whole token family" "the rotated access token still works"
+# Guarded: an empty ROTATED_ACCESS — step 8 having regressed and returned no
+# token — also gets a 401, and would score the strongest assertion in this
+# block as a pass it did not earn.
+if [ -z "$ROTATED_ACCESS" ]; then
+  fail "the replay revoked the whole token family" "no rotated token to revoke"
 else
-  pass "the replay revoked the whole token family"
+  mcp_call "$ROTATED_ACCESS" "current" > /dev/null
+  if [ "$(mcp_status)" = "200" ]; then
+    fail "the replay revoked the whole token family" "the rotated access token still works"
+  else
+    pass "the replay revoked the whole token family"
+  fi
 fi
 
 ## ── 6. reload, then shut down cleanly ────────────────────────────────────

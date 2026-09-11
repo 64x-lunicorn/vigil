@@ -41,10 +41,16 @@ NEXT_STEPS=()
 # scripts/test/verify_test.sh and scripts/test/update_test.sh do; nothing else
 # should.
 #
-# Shell names are unprefixed on purpose. `source_env_for_verify` does
-# `set -a; source "$ENV_FILE"`, and /etc/vigil/env owns the VIGIL_* namespace
-# — a layout variable spelled VIGIL_STATE_DIR could be overwritten by the file
-# it was used to find.
+# The *shell* names are unprefixed on purpose: `source_env_for_verify` does
+# `set -a; source "$ENV_FILE"`, and /etc/vigil/env owns the VIGIL_* namespace,
+# so a shell variable spelled VIGIL_STATE_DIR would be overwritten halfway
+# through a run by the file it was used to find.
+#
+# The *override* names collide with that namespace deliberately:
+# VIGIL_STATE_DIR is what init.sh writes into /etc/vigil/env and what
+# runtime.exs reads, and the scripts and the application had better agree about
+# where the state dir is. They are read once, here, before any env file is
+# sourced.
 # The directives below are on the names a sourcing script reads but this file
 # does not: ShellCheck cannot see across the `source` line.
 PREFIX="${VIGIL_PREFIX:-/opt/vigil}"
@@ -239,7 +245,9 @@ as_vigil() {
   # non-ASCII names then fail with "no such file or directory" on a path
   # File.ls itself just returned. C.UTF-8 is part of glibc, no locale-gen
   # needed.
-  su -s /bin/bash -c "cd ${STATE_DIR} && LANG=C.UTF-8 LC_ALL=C.UTF-8 ${quoted}" "$SERVICE_USER"
+  local quoted_home
+  quoted_home="$(printf '%q' "$STATE_DIR")"
+  su -s /bin/bash -c "cd ${quoted_home} && LANG=C.UTF-8 LC_ALL=C.UTF-8 ${quoted}" "$SERVICE_USER"
 }
 
 # run_step "<description>" -- <cmd...>  — honours --dry-run consistently.
@@ -469,9 +477,15 @@ verify_chunk_count() {
 
   # awk rather than `grep -oP ... | tail -1`: same reason as the SkillKey above,
   # and it takes the last match itself.
+  # Lowercase `chunks` is what Vigil.Store logs. The pattern was `Chunks` from
+  # the day it was written, so this check had never once read a count on a real
+  # host: it warned "could not read the chunk count" every time, and a parser
+  # regression that halved the vault went unnoticed. Both spellings are
+  # accepted rather than only the right one — the log line is not this file's
+  # to promise.
   chunks_now="$(journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null |
-    awk 'match($0, /[0-9]+ Chunks/) {
-           s = substr($0, RSTART, RLENGTH); sub(/ Chunks$/, "", s); last = s
+    awk 'match($0, /[0-9]+ [Cc]hunks/) {
+           s = substr($0, RSTART, RLENGTH); sub(/ [Cc]hunks$/, "", s); last = s
          }
          END { if (last != "") print last }' || true)"
   if [ -f "$last_chunks_file" ]; then
@@ -489,6 +503,13 @@ verify_chunk_count() {
   else
     warn "verify() [6]: could not read the chunk count from journalctl."
   fi
+
+  # Explicitly, because this check is advisory and that is the whole point of
+  # it. Inline it could not touch all_ok; as a function its status would be
+  # whatever the last command left behind — the write above — so a state dir
+  # that is full or read-only would roll a release back over a metric that is
+  # allowed to be missing entirely.
+  return 0
 }
 
 # 7. Write a test note → success (implies push, see write_and_commit), then delete it
@@ -603,16 +624,22 @@ verify_survives_write_error() {
   # if something between here and the restore aborts. The path is expanded into
   # the trap when the trap is set, rather than read from a local when it fires:
   # a RETURN trap that names a local runs after that local is gone.
+  # The mode it had, not a guessed one: a domain deliberately at 0700 or 2770
+  # was silently changed to 0750 by running verify().
+  local original_mode
+  original_mode="$(stat -c '%a' "$test_domain_dir" 2>/dev/null ||
+    stat -f '%Lp' "$test_domain_dir" 2>/dev/null || echo "750")"
+
   local quoted_dir
   quoted_dir="$(printf '%q' "$test_domain_dir")"
   # shellcheck disable=SC2064 # expanding now is the point — see above
-  trap "chmod 0750 ${quoted_dir} 2>/dev/null || true" RETURN
+  trap "chmod ${original_mode} ${quoted_dir} 2>/dev/null || true" RETURN
 
   chmod 0555 "$test_domain_dir" 2>/dev/null || check12_ok=0
   mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "create" \
     "{\"path\":\"${VIGIL_TEST_DOMAIN}/verify-crash-$$.md\",\"type\":\"reference\",\"content\":\"# X\\nx\",\"skill_key\":\"${VIGIL_SKILL_KEY:-}\"}" \
     >/dev/null 2>&1 || true
-  chmod 0750 "$test_domain_dir" 2>/dev/null || true
+  chmod "$original_mode" "$test_domain_dir" 2>/dev/null || true
   trap - RETURN
 
   if mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "search" '{"query":"vigil"}' >/dev/null 2>&1; then

@@ -30,9 +30,8 @@ PASS=0
 FAIL=0
 WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/vigil-verify-test.XXXXXX")" && pwd -P)"
 
-# shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap below
+# shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap installed below
 cleanup() { rm -rf "${WORK:?}"; }
-trap cleanup EXIT INT TERM
 
 pass() {
   echo "  ok   - $1"
@@ -61,6 +60,12 @@ mkdir -p "$VIGIL_STATE_DIR" "$VIGIL_VAULT_DIR/admin" "$VIGIL_VAULT_DIR/skills"
 
 # shellcheck source=scripts/lib.sh
 source "${REPO_ROOT}/scripts/lib.sh"
+
+# lib.sh installs `trap summary EXIT` when it is sourced, so the trap has to go
+# in after it — and has to keep the summary, which is what prints the run's
+# result. Installed before it, this one was silently replaced and every run left
+# its temp directory behind.
+trap 'summary; cleanup' EXIT INT TERM
 
 ## ── The stand-ins ────────────────────────────────────────────────────────
 
@@ -254,7 +259,10 @@ assert_output "quotes the reason the server gave" "host key verification failed"
 
 section "6/12  The chunk count is advisory, and remembered"
 reset_stubs
-echo "vigil: 4 domains, 12 notes, 41 Chunks" >"$JOURNAL"
+# Verbatim from Vigil.Store's own log line (lib/vigil/store.ex) — lowercase
+# `chunks`. A fabricated spelling here is what let the check pass while the
+# pattern it uses matched nothing on a real host.
+echo "vigil: 4 domains (admin, home, journal, training), 12 notes, 41 chunks" >"$JOURNAL"
 assert_check "passes on the first run, with nothing to compare against" verify_chunk_count 0
 
 if [ "$(cat "${VIGIL_STATE_DIR}/.last_chunks")" = "41" ]; then
@@ -263,7 +271,7 @@ else
   fail "records the count for the next run" "got $(cat "${VIGIL_STATE_DIR}/.last_chunks" 2>/dev/null)"
 fi
 
-echo "vigil: 4 domains, 12 notes, 9 Chunks" >"$JOURNAL"
+echo "vigil: 4 domains (admin, home, journal, training), 12 notes, 9 chunks" >"$JOURNAL"
 assert_check "a drop warns rather than failing the delivery" verify_chunk_count 0
 assert_output "says the count dropped" "chunk count dropped from 41 to 9"
 
@@ -356,13 +364,19 @@ reset_stubs
 VIGIL_TEST_DOMAIN="admin"
 mcp_errors create 'permission denied'
 mcp_responds search '{"hits":[]}'
+
+# Deliberately not 0750: the check used to restore that mode unconditionally,
+# and a fixture that already had it could not tell the difference between
+# putting the mode back and overwriting it with a guess.
+chmod 0705 "${VIGIL_VAULT_DIR}/admin"
+
 assert_check "passes when search still answers afterwards" verify_survives_write_error 0
 
 MODE="$(stat -c '%a' "${VIGIL_VAULT_DIR}/admin" 2>/dev/null || stat -f '%Lp' "${VIGIL_VAULT_DIR}/admin")"
-if [ "$MODE" = "750" ]; then
-  pass "puts the domain's permissions back"
+if [ "$MODE" = "705" ]; then
+  pass "puts the domain's own permissions back, not a guessed mode"
 else
-  fail "puts the domain's permissions back" "left mode ${MODE}"
+  fail "puts the domain's own permissions back, not a guessed mode" "left mode ${MODE}"
 fi
 
 reset_stubs

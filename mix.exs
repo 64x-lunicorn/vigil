@@ -24,6 +24,12 @@ defmodule Vigil.MixProject do
   # its generator beside the .dets files it wrote, and `mix test` otherwise
   # warns that a .exs there matches no test pattern — a warning that would stop
   # the suite under --warnings-as-errors.
+  #
+  # `:test_ignore_filters` arrived in Elixir 1.19 and .tool-versions still pins
+  # 1.18.3, where an unknown project key is ignored without complaint. It is
+  # also 1.19 that started emitting the warning, so on the pinned pair both the
+  # warning and this filter are absent, and on a newer one both are present.
+  # The pair is what matters, not either half.
   defp test_ignore_filters do
     [~r"^test/fixtures/"]
   end

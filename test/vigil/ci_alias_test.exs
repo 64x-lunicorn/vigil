@@ -23,7 +23,12 @@ defmodule Vigil.CiAliasTest do
   """
   use ExUnit.Case, async: true
 
-  @workflow Path.expand("../../.github/workflows/ci.yml", __DIR__)
+  # Both workflows that run mix: a check hidden in the scheduled one is just as
+  # unreachable from `mix ci` as one in the main gate.
+  @workflows [
+    Path.expand("../../.github/workflows/ci.yml", __DIR__),
+    Path.expand("../../.github/workflows/audit.yml", __DIR__)
+  ]
 
   # `mix deps.get` fetches, it does not check. CI needs it because a runner
   # starts with an empty deps/; a contributor already has one.
@@ -38,16 +43,38 @@ defmodule Vigil.CiAliasTest do
     |> Enum.map(&String.replace_prefix(&1, "cmd mix ", ""))
   end
 
+  # Every `mix …` a workflow runs, whether it is a one-line `run:` or a line
+  # inside a `run: |` block. Scanning only the one-line form left five blocks in
+  # ci.yml invisible, so a check added inside one would have lapsed out of this
+  # ratchet's reach without anything saying so.
   defp workflow_mix_commands do
-    @workflow
-    |> File.read!()
-    |> String.split("\n")
+    @workflows
+    |> Enum.flat_map(&(&1 |> File.read!() |> String.split("\n")))
     |> Enum.flat_map(fn line ->
-      case Regex.run(~r/^\s*(?:- name: .*)?\s*run: mix (.+)$/, String.trim_trailing(line)) do
-        [_, command] -> [command]
+      case Regex.run(~r/^(?:run:\s+)?(?:if\s+)?(?:!\s+)?mix\s+(\S.*)$/, String.trim(line)) do
+        [_, command] -> [command |> String.trim() |> strip_shell_noise()]
         nil -> []
       end
     end)
+    |> Enum.uniq()
+  end
+
+  # A command inside a block may be followed by a redirect or a continuation;
+  # what this file compares is the task and its flags.
+  #
+  # The regex requires `mix` to begin the trimmed line, after an optional
+  # `run:`, `if` or `!`. That is what separates a command from documentation:
+  # the audit workflow echoes "### mix hex.audit" into its run summary and
+  # names `mix deps.audit` inside an issue body, and neither is a check anybody
+  # runs. The cost of the rule is that a `mix` in the middle of a `&&` chain
+  # would go unseen; no workflow writes one, and a false command here would be
+  # worse than a missed one — it would fail the build over a sentence.
+  defp strip_shell_noise(command) do
+    command
+    |> String.split(~r/\s*(?:\d*[<>]|[|&;])|\s*\\$/, parts: 2)
+    |> hd()
+    |> String.trim()
+    |> String.trim_trailing("\"")
   end
 
   test "every step of the ci alias is one CI actually runs" do
@@ -62,7 +89,7 @@ defmodule Vigil.CiAliasTest do
       A check that only exists in the alias is a check CI does not enforce.
       Add it to the workflow, or drop it from the alias.
 
-      CI runs: #{Enum.map_join(commands, "\n         ", &("mix " <> &1))}
+      The workflows run: #{Enum.map_join(commands, "\n                    ", &("mix " <> &1))}
       """
     end
   end

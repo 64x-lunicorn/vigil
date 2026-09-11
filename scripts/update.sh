@@ -142,7 +142,7 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
     esac
   }
 
-  wait_until_healthy() { systemctl is-active --quiet vigil; }
+  wait_until_healthy() { systemctl is-active --quiet "$SERVICE"; }
 
   # verify() is the decision the automatic rollback hangs on, and it is a
   # property of the release that was switched to — which is how the test drives
@@ -207,10 +207,10 @@ if [ "$ROLLBACK" = "1" ]; then
     exit 0
   fi
 
-  systemctl stop vigil
+  systemctl stop "$SERVICE"
   ln -sfn "$OLD_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-  systemctl start vigil
+  systemctl start "$SERVICE"
   wait_until_healthy || exit 1
 
   # shellcheck disable=SC2034
@@ -230,7 +230,7 @@ fi
 step "1/8  Preflight"
 require_root "$@"
 
-if ! systemctl is-active --quiet vigil; then
+if ! systemctl is-active --quiet "$SERVICE"; then
   err "Service is not running — update.sh requires a running service."
   exit 2
 fi
@@ -380,13 +380,13 @@ step "6/8  Switch over"
 PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] systemctl stop vigil; symlink to ${TARGET_SHA}; systemctl start vigil"
+  log "[DRY RUN] systemctl stop ${SERVICE}; symlink to ${TARGET_SHA}; systemctl start ${SERVICE}"
 else
-  systemctl stop vigil
+  systemctl stop "$SERVICE"
   ln -sfn "${RELEASES}/${TARGET_SHA}" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   echo "$PREVIOUS_RELEASE" >"$PREVIOUS_RELEASE_FILE"
-  systemctl start vigil
+  systemctl start "$SERVICE"
   wait_until_healthy || exit 1
   ok "Switched to ${TARGET_SHA} (previous release: ${PREVIOUS_RELEASE})."
 fi
@@ -407,10 +407,10 @@ else
     record_done "verify(): all mandatory checks passed"
   else
     err "verify() failed — rolling back automatically to ${PREVIOUS_RELEASE}."
-    systemctl stop vigil
+    systemctl stop "$SERVICE"
     ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
     chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-    systemctl start vigil
+    systemctl start "$SERVICE"
     wait_until_healthy || true
 
     if verify; then

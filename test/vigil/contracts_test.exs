@@ -34,12 +34,16 @@ defmodule Vigil.ContractsTest do
     # server serves.
     @guide Path.expand("../../docs/guide.md", __DIR__)
 
-    test "every tool the server offers is named in docs/guide.md" do
+    # Backticked, not bare. `read`, `create`, `search`, `append` and `current`
+    # are ordinary English and appear dozens of times in the guide's prose, so
+    # a bare substring test is satisfied by a sentence that has nothing to do
+    # with the tool — it would stay green with the tool's documentation deleted.
+    test "every tool the server offers is documented in docs/guide.md" do
       guide = File.read!(@guide)
 
       for %{name: name} <- Tools.definitions() do
-        assert String.contains?(guide, name),
-               "#{name} is in the tool table and not in docs/guide.md"
+        assert String.contains?(guide, "`#{name}`"),
+               "#{name} is in the tool table, and docs/guide.md never names it as `#{name}`"
       end
     end
   end
