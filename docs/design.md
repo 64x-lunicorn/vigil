@@ -780,6 +780,14 @@ only the production adapter can be asked is asked there too: that a token
 outlives the process that stored it, and that the files it opens are readable
 by their owner alone.
 
+Eight test files used to `mkdir` a temp directory and open three `:dets` files
+apiece to ask a question about a token, and every one of them was serial for
+it. Six of the eight run in parallel now. Two are still serial, for reasons
+that have nothing to do with persistence: `Vigil.OAuth.EndpointTest` sets the
+rate-limit budgets and the trusted-proxy configuration in global application
+env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor` and
+`Vigil.RateLimit`, both registered under their module names.
+
 The speed is a consequence and not the argument, and here it is a small one.
 The argument is that 244 lines owning expiry, revocation, spent-token marking
 and the consent lockout had no test of their own — they were exercised

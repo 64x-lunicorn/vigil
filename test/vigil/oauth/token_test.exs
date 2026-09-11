@@ -6,10 +6,10 @@ defmodule Vigil.OAuth.TokenTest do
   was a `cond` inside a private function of the MCP router, and the only way
   to ask it was to build a conn with a Bearer header.
   """
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Store, Token}
+  alias Vigil.OAuth.Token
 
   @ttl_day 86_400
 
@@ -100,26 +100,37 @@ defmodule Vigil.OAuth.TokenTest do
       assert pair.access_token != pair.refresh_token
     end
 
-    test "both records descend from the grant they were given", %{pair: pair, grant: grant} do
-      {:ok, access} = Store.get_token(pair.access_token)
-      {:ok, refresh} = Store.get_token(pair.refresh_token)
+    test "both records descend from the grant they were given", %{
+      persistence: persistence,
+      pair: pair,
+      grant: grant
+    } do
+      {:ok, access} = persistence.get_token.(pair.access_token)
+      {:ok, refresh} = persistence.get_token.(pair.refresh_token)
 
       assert access.grant_id == grant
       assert refresh.grant_id == grant
     end
 
-    test "the access record is an access token and the refresh record is not", %{pair: pair} do
-      {:ok, access} = Store.get_token(pair.access_token)
-      {:ok, refresh} = Store.get_token(pair.refresh_token)
+    test "the access record is an access token and the refresh record is not", %{
+      persistence: persistence,
+      pair: pair
+    } do
+      {:ok, access} = persistence.get_token.(pair.access_token)
+      {:ok, refresh} = persistence.get_token.(pair.refresh_token)
 
       assert Token.classify(access) == :access
       assert Token.classify(refresh) == :refresh
       assert refresh.client_id == "client-1"
     end
 
-    test "the two expire on different schedules", %{pair: pair, now: now} do
-      {:ok, access} = Store.get_token(pair.access_token)
-      {:ok, refresh} = Store.get_token(pair.refresh_token)
+    test "the two expire on different schedules", %{
+      persistence: persistence,
+      pair: pair,
+      now: now
+    } do
+      {:ok, access} = persistence.get_token.(pair.access_token)
+      {:ok, refresh} = persistence.get_token.(pair.refresh_token)
 
       assert access.expires_at == now + 3600
       assert refresh.expires_at == now + 30 * @ttl_day
@@ -138,7 +149,7 @@ defmodule Vigil.OAuth.TokenTest do
           now
         )
 
-      {:ok, access} = Store.get_token(pair.access_token)
+      {:ok, access} = persistence.get_token.(pair.access_token)
 
       assert pair.scope == OAuth.read_scope()
       assert access.grant_id == "g-inherited"
@@ -178,8 +189,8 @@ defmodule Vigil.OAuth.TokenTest do
     } do
       pair = Token.issue_pair(persistence, rotated(grant: nil) |> Map.delete(:grant_id), now)
 
-      {:ok, access} = Store.get_token(pair.access_token)
-      {:ok, refresh} = Store.get_token(pair.refresh_token)
+      {:ok, access} = persistence.get_token.(pair.access_token)
+      {:ok, refresh} = persistence.get_token.(pair.refresh_token)
 
       assert is_binary(access.grant_id)
       assert access.grant_id == refresh.grant_id
@@ -222,7 +233,7 @@ defmodule Vigil.OAuth.TokenTest do
       token = Token.issue_out_of_band(persistence, resource(), OAuth.scope(), 0, now)
 
       assert Token.validate_access(persistence, token, resource(), now + 1) == :error
-      assert Store.get_token(token) == :error
+      assert persistence.get_token.(token) == :error
     end
 
     test "a refresh token presented as an access token is refused", %{
@@ -243,7 +254,7 @@ defmodule Vigil.OAuth.TokenTest do
       # after a leak, somebody else's — ability to renew.
       Token.validate_access(persistence, pair.refresh_token, resource(), now)
 
-      assert {:ok, record} = Store.get_token(pair.refresh_token)
+      assert {:ok, record} = persistence.get_token.(pair.refresh_token)
       assert Token.classify(record) == :refresh
     end
 
@@ -256,7 +267,7 @@ defmodule Vigil.OAuth.TokenTest do
       now: now
     } do
       legacy = Token.random()
-      Store.put_token(legacy, %{aud: resource(), expires_at: now + 3600})
+      persistence.put_token.(legacy, %{aud: resource(), expires_at: now + 3600})
 
       assert Token.validate_access(persistence, legacy, resource(), now) == {:ok, OAuth.scope()}
     end
@@ -282,7 +293,7 @@ defmodule Vigil.OAuth.TokenTest do
       pair: pair,
       now: now
     } do
-      {:ok, record} = Store.get_token(pair.refresh_token)
+      {:ok, record} = persistence.get_token.(pair.refresh_token)
       Token.spend_refresh(persistence, pair.refresh_token, record, now)
 
       assert {:spent, spent} = Token.fetch_refresh(persistence, pair.refresh_token)
@@ -305,7 +316,7 @@ defmodule Vigil.OAuth.TokenTest do
       # can. A real access record has no way through here.
       now = System.system_time(:second)
       pair = Token.issue_pair(persistence, redeemed(), now)
-      {:ok, access} = Store.get_token(pair.access_token)
+      {:ok, access} = persistence.get_token.(pair.access_token)
 
       assert_raise FunctionClauseError, fn ->
         Token.spend_refresh(persistence, pair.access_token, access, now)
@@ -317,11 +328,11 @@ defmodule Vigil.OAuth.TokenTest do
     } do
       now = System.system_time(:second)
       pair = Token.issue_pair(persistence, redeemed(), now)
-      {:ok, record} = Store.get_token(pair.refresh_token)
+      {:ok, record} = persistence.get_token.(pair.refresh_token)
 
       Token.spend_refresh(persistence, pair.refresh_token, record, now)
 
-      {:ok, spent} = Store.get_token(pair.refresh_token)
+      {:ok, spent} = persistence.get_token.(pair.refresh_token)
       assert spent.expires_at == record.expires_at
     end
   end
@@ -381,19 +392,34 @@ defmodule Vigil.OAuth.TokenTest do
       token =
         Token.issue_out_of_band(persistence, resource(), OAuth.scope(), 3650 * @ttl_day, now)
 
-      {:ok, record} = Store.get_token(token)
+      {:ok, record} = persistence.get_token.(token)
       assert is_binary(Token.grant_of(record))
 
-      Store.revoke_grant(Token.grant_of(record))
-      assert Store.get_token(token) == :error
+      persistence.revoke_grant.(Token.grant_of(record))
+      assert persistence.get_token.(token) == :error
     end
 
     test "it carries no refresh token", %{persistence: persistence} do
+      # One record written, and it is the token that came back. "How many rows
+      # are in the table" is not one of the fourteen questions, so the claim is
+      # made where it is actually about the minting: by watching what
+      # `issue_out_of_band/5` writes through the seam it was handed.
       now = System.system_time(:second)
-      token = Token.issue_out_of_band(persistence, resource(), OAuth.scope(), @ttl_day, now)
+      test = self()
+
+      watched = %{
+        persistence
+        | put_token: fn token, attrs ->
+            send(test, {:put_token, token})
+            persistence.put_token.(token, attrs)
+          end
+      }
+
+      token = Token.issue_out_of_band(watched, resource(), OAuth.scope(), @ttl_day, now)
 
       assert Token.fetch_refresh(persistence, token) == :error
-      assert length(Store.all_tokens()) == 1
+      assert_received {:put_token, ^token}
+      refute_received {:put_token, _}
     end
   end
 

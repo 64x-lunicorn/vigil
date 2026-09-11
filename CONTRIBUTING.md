@@ -64,8 +64,9 @@ the test suite and Dialyzer. The first Dialyzer run builds a PLT and takes a
 few minutes; later runs reuse it from `priv/plts/`.
 
 Tests run in `MIX_ENV=test`; do not run them with `MIX_ENV=prod` or source
-production environment files first. Test configuration pins vault and OAuth
-state paths independently of deployment environment variables.
+production environment files first. Test configuration pins the vault path,
+the OAuth state path and the authorization server's issuer, resource and
+consent password independently of deployment environment variables.
 
 For changes to the deployment scripts, also run ShellCheck and the existing
 shell tests:

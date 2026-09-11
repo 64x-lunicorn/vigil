@@ -1,40 +1,39 @@
 defmodule Vigil.OAuthCase do
   @moduledoc """
-  Shared setup helper for OAuth-protected MCP tests: configures issuer/resource/
-  password application env and starts a fresh `Vigil.OAuth.Store` against a
-  throwaway state dir. Call `setup!/0` from the test module's own `setup do ... end`.
+  The OAuth fixture: a persistence of this test's own, and the three
+  configured facts the flow reads back.
+
+  It used to build a throwaway state dir, start `Vigil.OAuth.Store` against it
+  and hand back the `:dets` adapter over the tables that process registers
+  globally. Eight files did that to ask a question about a token, and every
+  one of them had to be serial for it. `persistence` is now
+  `Vigil.OAuth.Persistence.Memory` — no filesystem, no state dir, no
+  registered name — so the files that ask through it run in parallel. The one
+  place that still opens a `:dets` file is the contract suite's production
+  half (`test/vigil/oauth/persistence_test.exs`).
+
+  `issuer`, `resource` and `auth_password` are read, not set: they are
+  configured once for the whole run in `config/runtime.exs`. A test that needs a
+  different persistence builds one; a test that needs different configuration
+  is still on its own, and is still serial for it.
   """
 
-  @doc """
-  Returns `%{state_dir:, issuer:, resource:, auth_password:, persistence:}`.
-  Registers `on_exit` cleanup.
+  alias Vigil.OAuth
+  alias Vigil.OAuth.Persistence
 
-  `persistence` is the `:dets`/`:ets` adapter over the store it just started —
-  the value every OAuth module now asks its questions through, and the one
-  production runs on. A test that wants a different one builds it itself.
-  """
+  @doc "Returns `%{issuer:, resource:, auth_password:, persistence:}`."
+  @spec setup!() :: %{
+          issuer: String.t(),
+          resource: String.t(),
+          auth_password: String.t(),
+          persistence: Persistence.t()
+        }
   def setup! do
-    state_dir =
-      Path.join(System.tmp_dir!(), "vigil_oauth_test_#{System.unique_integer([:positive])}")
-
-    env = [
-      issuer: "https://vault.factory-lab.org",
-      resource: "https://vault.factory-lab.org/mcp",
-      auth_password: "correct-horse-battery-staple"
-    ]
-
-    previous = for {k, _} <- env, do: {k, Application.get_env(:vigil, k)}
-    for {k, v} <- env, do: Application.put_env(:vigil, k, v)
-
-    ExUnit.Callbacks.on_exit(fn ->
-      for {k, v} <- previous, do: Application.put_env(:vigil, k, v)
-      File.rm_rf(state_dir)
-    end)
-
-    ExUnit.Callbacks.start_supervised!({Vigil.OAuth.Store, state_dir: state_dir})
-
-    Map.new(env)
-    |> Map.put(:state_dir, state_dir)
-    |> Map.put(:persistence, Vigil.OAuth.Store.over_tables())
+    %{
+      issuer: OAuth.issuer(),
+      resource: OAuth.resource(),
+      auth_password: OAuth.auth_password(),
+      persistence: Persistence.Memory.new()
+    }
   end
 end

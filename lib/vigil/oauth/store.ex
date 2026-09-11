@@ -11,12 +11,17 @@ defmodule Vigil.OAuth.Store do
   the `/mcp` hot path.
 
   `over_tables/0` is the adapter, a function here beside the implementation it
-  wires rather than closures assembled by a caller. Nothing in `lib/` names
-  the functions below: six modules ask through the value they are handed,
-  which is what makes the second adapter — `Vigil.OAuth.Persistence.Memory` —
-  and the tests that want one possible at all. The suite still reaches for
-  them directly, to assert against the tables a write landed in; moving it
-  onto the seam is its own ticket.
+  wires rather than closures assembled by a caller. Nothing names the
+  functions below any more — not `lib/`, where six modules ask through the
+  value they are handed, and not the suite, which asks the same way. The one
+  exception is `test/vigil/oauth/persistence_test.exs`, the contract suite,
+  which starts this process to run every claim against these tables as well
+  as against `Vigil.OAuth.Persistence.Memory`. It is the only test that opens
+  a `:dets` file at all.
+
+  Everything that is not one of the fourteen answers is private: the folds,
+  the per-table sweeps and the code delete exist for the answers above them
+  and for nothing else.
   """
   use GenServer
   require Logger
@@ -150,13 +155,6 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
-  def all_codes, do: :dets.foldl(fn {code, attrs}, acc -> [{code, attrs} | acc] end, [], @codes)
-
-  def delete_code(code) do
-    :dets.delete(@codes, code)
-    :dets.sync(@codes)
-  end
-
   ## Tokens (access + refresh share a table)
 
   def put_token(token, attrs) do
@@ -195,9 +193,6 @@ defmodule Vigil.OAuth.Store do
     end)
   end
 
-  def all_tokens,
-    do: :dets.foldl(fn {token, attrs}, acc -> [{token, attrs} | acc] end, [], @tokens)
-
   ## Rate limiting (consent password attempts, per IP)
 
   def rate_limited?(ip, now) do
@@ -227,7 +222,7 @@ defmodule Vigil.OAuth.Store do
     :ok
   end
 
-  def sweep_rate_limits(now) do
+  defp sweep_rate_limits(now) do
     sweep_table(@rate_limits, fn {_ip, _count, window_start} ->
       now - window_start > @rate_limit_window
     end)
@@ -247,16 +242,14 @@ defmodule Vigil.OAuth.Store do
     :ok
   end
 
-  @doc """
-  Drops CIMD cache entries whose hour is up.
-
-  This table is keyed on the `client_id` URL a client supplies, and it is
-  filled from `GET /oauth/authorize`, so it grows on input from outside. Two
-  separate things bound it: `Vigil.OAuth.Endpoint`'s per-address limit bounds
-  the rate at which a caller can add to it, and this sweep bounds the total by
-  dropping what has expired. Neither substitutes for the other.
-  """
-  def sweep_cimd_cache(now) do
+  # Drops CIMD cache entries whose hour is up.
+  #
+  # This table is keyed on the `client_id` URL a client supplies, and it is
+  # filled from `GET /oauth/authorize`, so it grows on input from outside. Two
+  # separate things bound it: `Vigil.OAuth.Endpoint`'s per-address limit bounds
+  # the rate at which a caller can add to it, and this sweep bounds the total by
+  # dropping what has expired. Neither substitutes for the other.
+  defp sweep_cimd_cache(now) do
     sweep_table(@cimd_cache, fn {_url, _doc, expires_at} -> expires_at <= now end)
   end
 
@@ -284,5 +277,17 @@ defmodule Vigil.OAuth.Store do
 
     sweep_rate_limits(now)
     sweep_cimd_cache(now)
+  end
+
+  ## The folds the answers above are built on
+
+  defp all_codes, do: :dets.foldl(fn {code, attrs}, acc -> [{code, attrs} | acc] end, [], @codes)
+
+  defp all_tokens,
+    do: :dets.foldl(fn {token, attrs}, acc -> [{token, attrs} | acc] end, [], @tokens)
+
+  defp delete_code(code) do
+    :dets.delete(@codes, code)
+    :dets.sync(@codes)
   end
 end
