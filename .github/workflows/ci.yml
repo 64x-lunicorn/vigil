@@ -200,8 +200,25 @@ jobs:
 
       # These scripts run as root on the vault host. A shell bug here is a
       # production incident, not a lint warning — hence a blocking check.
+      #
+      # Pinned and checksum-verified rather than taken from the runner image,
+      # for the same reason every other tool here is: the image's version
+      # changes under us. It was also the one tool that still came from the
+      # image, and that is exactly how it broke — a contributor on 0.11 got a
+      # clean local run while CI, on an older one, reported a warning 0.11 no
+      # longer emits. A gate that answers differently depending on where it is
+      # run is not a gate.
       - name: ShellCheck
-        run: shellcheck -x scripts/*.sh scripts/test/*.sh
+        env:
+          SHELLCHECK_VERSION: 0.11.0
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+        run: |
+          set -euo pipefail
+          curl -sSfL -o shellcheck.tar.xz             "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
+          tar -xJf shellcheck.tar.xz "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          "./shellcheck-v${SHELLCHECK_VERSION}/shellcheck" --version
+          "./shellcheck-v${SHELLCHECK_VERSION}/shellcheck" -x scripts/*.sh scripts/test/*.sh
 
       - name: init.sh --check-only stays read-only
         run: bash scripts/test/check_only_test.sh

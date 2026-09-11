@@ -65,8 +65,9 @@ step() {
   echo "── $1 ──"
 }
 
-# Two codes for one false positive: ShellCheck renamed it in 0.10 and the
-# version CI installs still reports the old one, so both have to be named.
+# Two codes for one false positive: ShellCheck renamed it in 0.10, and a
+# contributor may still be on a version that reports the old one. CI is pinned
+# to 0.11 and only needs SC2329; the second code is for the local run.
 # shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap below
 cleanup() {
   if [ -n "$WORK" ] && [ "$KEEP" = "0" ] && [ -d "$WORK" ]; then
