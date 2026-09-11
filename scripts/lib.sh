@@ -375,63 +375,82 @@ mcp_error_text() {
 # VIGIL_ALLOW_UNPROTECTED (0/1).
 # Returns 0 when every mandatory check passes, 1 otherwise.
 
-verify() {
-  local all_ok=1
-  local last_chunks_file="${STATE_DIR}/.last_chunks"
+# Each check is a function of its own: it prints its verdict and answers 0 or
+# 1, and verify() is the loop over them. That is what scripts/test/verify_test.sh
+# needs — the acceptance function the whole rollback decision hangs on used to
+# be one 210-line block that could only be run against a real vault host, so
+# the one thing nothing could test was the thing that decides whether a
+# delivery stands or is rolled back.
+#
+# Two values are shared, and are the globals they always were: VIGIL_SKILL_KEY,
+# fetched once up front, and VIGIL_TEST_DOMAIN, which check 7 discovers and
+# checks 9, 10 and 12 reuse.
 
-  echo
-  echo "=== verify() ==="
+# The SkillKey the checks that make a deliberate write attempt (7, 10, 12)
+# need. Check 9 deliberately omits it.
+verify_fetch_skill_key() {
+  local response
+  response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "skill_read" '{"name":"vigil-vault-conventions"}' 2>/dev/null || true)"
+  # sed rather than `grep -oP`: PCRE is a GNU extension, and verify() has to be
+  # runnable off the vault host for scripts/test/verify_test.sh to exist at all.
+  VIGIL_SKILL_KEY="$(echo "$response" | mcp_payload '.result.content' 2>/dev/null |
+    sed -n 's/.*SkillKey: \([0-9a-f][0-9a-f]*\).*/\1/p' | head -1 || true)"
+}
 
-  # Up front: fetch the current SkillKey, for the checks that deliberately
-  # make a valid write attempt (7, 10, 12). Check 9 deliberately omits it.
-  local skill_read_response
-  skill_read_response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "skill_read" '{"name":"vigil-vault-conventions"}' 2>/dev/null || true)"
-  VIGIL_SKILL_KEY="$(echo "$skill_read_response" | mcp_payload '.result.content' 2>/dev/null | grep -oP 'SkillKey: \K[0-9a-f]+' || true)"
-
-  # 1. Service active
+# 1. Service active
+verify_service_active() {
   if systemctl is-active --quiet "$SERVICE"; then
     echo "  ✓ [1] systemctl is-active ${SERVICE}"
   else
     echo "  ✗ [1] Service is not running — journalctl -u ${SERVICE} -n 50"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 2. Public endpoint answers with 403 (Cloudflare Access)
+# 2. Public endpoint answers with 403 (Cloudflare Access)
+verify_public_endpoint_protected() {
   if [ "$VIGIL_ALLOW_UNPROTECTED" = "1" ]; then
     warn "verify() [2] skipped (--allow-unprotected): Cloudflare Access check not performed."
-  else
-    local status
-    status="$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_RESOURCE}" || echo "000")"
-    if [ "$status" = "403" ]; then
-      echo "  ✓ [2] Public endpoint answers with 403 (Cloudflare Access active)"
-    else
-      echo "  ✗ [2] Public endpoint answers with ${status} instead of 403."
-      if [ "$status" = "401" ]; then
-        echo "        401 means the request reaches Elixir — Cloudflare Access is NOT in front."
-      elif [ "$status" = "200" ]; then
-        echo "        200 means the endpoint is completely unprotected."
-      fi
-      all_ok=0
-    fi
+    return 0
   fi
 
-  # 3. Local call with a valid RW token
+  local status
+  status="$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_RESOURCE}" || echo "000")"
+  if [ "$status" = "403" ]; then
+    echo "  ✓ [2] Public endpoint answers with 403 (Cloudflare Access active)"
+  else
+    echo "  ✗ [2] Public endpoint answers with ${status} instead of 403."
+    if [ "$status" = "401" ]; then
+      echo "        401 means the request reaches Elixir — Cloudflare Access is NOT in front."
+    elif [ "$status" = "200" ]; then
+      echo "        200 means the endpoint is completely unprotected."
+    fi
+    return 1
+  fi
+}
+
+# 3. Local call with a valid RW token
+verify_local_call_answers() {
   if mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "current" >/dev/null 2>&1; then
     echo "  ✓ [3] Local call with a valid RW token answers"
   else
     echo "  ✗ [3] Service does not answer a valid token (${VIGIL_LOCAL_URL}/mcp)"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 4. Git remote reachable
+# 4. Git remote reachable
+verify_git_remote_reachable() {
   if as_vigil git -C "$VIGIL_VAULT" ls-remote "$VIGIL_GIT_REMOTE" >/dev/null 2>&1; then
     echo "  ✓ [4] git ls-remote ${VIGIL_GIT_REMOTE} succeeded"
   else
     echo "  ✗ [4] git ls-remote ${VIGIL_GIT_REMOTE} failed — host key or deploy key missing"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 5. reload → no pull_failed
+# 5. reload → no pull_failed
+verify_reload_pulls() {
   local reload_response pull_failed
   reload_response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "reload")"
   pull_failed="$(echo "$reload_response" | mcp_payload '.result.pull_failed // empty')"
@@ -439,12 +458,22 @@ verify() {
     echo "  ✓ [5] reload → no pull_failed"
   else
     echo "  ✗ [5] reload reports pull_failed: ${pull_failed}"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 6. Chunk count has not dropped (warning, not an abort)
+# 6. Chunk count has not dropped (warning, not an abort)
+verify_chunk_count() {
+  local last_chunks_file="${STATE_DIR}/.last_chunks"
   local chunks_now chunks_before=0
-  chunks_now="$(journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null | grep -oP '\d+(?= Chunks)' | tail -1 || true)"
+
+  # awk rather than `grep -oP ... | tail -1`: same reason as the SkillKey above,
+  # and it takes the last match itself.
+  chunks_now="$(journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null |
+    awk 'match($0, /[0-9]+ Chunks/) {
+           s = substr($0, RSTART, RLENGTH); sub(/ Chunks$/, "", s); last = s
+         }
+         END { if (last != "") print last }' || true)"
   if [ -f "$last_chunks_file" ]; then
     chunks_before="$(cat "$last_chunks_file")"
   fi
@@ -460,17 +489,19 @@ verify() {
   else
     warn "verify() [6]: could not read the chunk count from journalctl."
   fi
+}
 
-  # 7. Write a test note → success (implies push, see write_and_commit), then delete it
-  #
-  # The domain is deliberately NOT hardcoded: init.sh asks for the domain
-  # list interactively, so a fixed "admin/" (or "journal/") would make
-  # verify() fail on any vault without that domain — and check 12 below needs
-  # the same directory to exist physically. Instead: try every domain
-  # directory in the vault and take the first one where a create actually goes
-  # through. That also skips domains with a naming.pattern (journal/ with
-  # YYYY-MM-DD.md, say) that an ad-hoc test path cannot satisfy, without
-  # having to parse _domains.yml in bash.
+# 7. Write a test note → success (implies push, see write_and_commit), then delete it
+#
+# The domain is deliberately NOT hardcoded: init.sh asks for the domain
+# list interactively, so a fixed "admin/" (or "journal/") would make
+# verify() fail on any vault without that domain — and check 12 below needs
+# the same directory to exist physically. Instead: try every domain
+# directory in the vault and take the first one where a create actually goes
+# through. That also skips domains with a naming.pattern (journal/ with
+# YYYY-MM-DD.md, say) that an ad-hoc test path cannot satisfy, without
+# having to parse _domains.yml in bash.
+verify_write_and_push() {
   local create_response delete_response
   local test_path="" last_error="no domain directories found in the vault"
   VIGIL_TEST_DOMAIN=""
@@ -495,86 +526,135 @@ verify() {
 
   if [ -z "$test_path" ]; then
     echo "  ✗ [7] Could not write a test note in any domain. Last error: ${last_error}"
-    all_ok=0
-  else
-    echo "  ✓ [7] Test note written and pushed (domain: ${VIGIL_TEST_DOMAIN})"
-    delete_response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "delete_note" \
-      "{\"path\":\"${test_path}\",\"confirm\":true,\"skill_key\":\"${VIGIL_SKILL_KEY:-}\"}")"
-    if echo "$delete_response" | mcp_is_error; then
-      warn "verify() [7]: test note could not be deleted again, please clean up manually: ${test_path}"
-    fi
+    return 1
   fi
 
-  # 8. No pending local commits
+  echo "  ✓ [7] Test note written and pushed (domain: ${VIGIL_TEST_DOMAIN})"
+  delete_response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "delete_note" \
+    "{\"path\":\"${test_path}\",\"confirm\":true,\"skill_key\":\"${VIGIL_SKILL_KEY:-}\"}")"
+  if echo "$delete_response" | mcp_is_error; then
+    warn "verify() [7]: test note could not be deleted again, please clean up manually: ${test_path}"
+  fi
+}
+
+# 8. No pending local commits
+verify_nothing_unpushed() {
   local pending
   pending="$(as_vigil git -C "$VIGIL_VAULT" rev-list --count "${VIGIL_GIT_REMOTE}/main..main" 2>/dev/null || echo "?")"
   if [ "$pending" = "0" ]; then
     echo "  ✓ [8] No pending local commits in the vault"
   else
     echo "  ✗ [8] ${pending} local commits not pushed"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 9. Write attempt without skill_key → error
-  # Path and domain are irrelevant here: the SkillKey gate in Vigil.MCP.Tools
-  # fires before any Store validation, so the call must never reach the
-  # domain at all.
-  local without_key_response
-  without_key_response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "create" \
+# 9. Write attempt without skill_key → error
+# Path and domain are irrelevant here: the SkillKey gate in Vigil.MCP.Tools
+# fires before any Store validation, so the call must never reach the
+# domain at all.
+verify_skill_key_enforced() {
+  local response
+  response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "create" \
     "{\"path\":\"${VIGIL_TEST_DOMAIN:-admin}/verify-nope-$$.md\",\"type\":\"reference\",\"content\":\"# X\\nx\"}")"
-  if echo "$without_key_response" | mcp_is_error && echo "$without_key_response" | mcp_error_text 2>/dev/null | grep -qi "SkillKey"; then
+  if echo "$response" | mcp_is_error && echo "$response" | mcp_error_text 2>/dev/null | grep -qi "SkillKey"; then
     echo "  ✓ [9] Writing without skill_key is rejected"
   else
     echo "  ✗ [9] SkillKey is not enforced"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 10. Write attempt with the RO token → permission error
-  local ro_response
-  ro_response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RO_TOKEN" "create" \
+# 10. Write attempt with the RO token → permission error
+verify_read_only_token_refused() {
+  local response
+  response="$(mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RO_TOKEN" "create" \
     "{\"path\":\"${VIGIL_TEST_DOMAIN:-admin}/verify-ro-$$.md\",\"type\":\"reference\",\"content\":\"# X\\nx\",\"skill_key\":\"${VIGIL_SKILL_KEY:-}\"}")"
-  if echo "$ro_response" | mcp_is_error; then
+  if echo "$response" | mcp_is_error; then
     echo "  ✓ [10] Write attempt with the RO token is rejected"
   else
     echo "  ✗ [10] Role separation is not working — the RO token could write"
-    all_ok=0
+    return 1
   fi
+}
 
-  # 11. Domain drift between _domains.yml and the actual directories
+# 11. Domain drift between _domains.yml and the actual directories
+verify_no_domain_drift() {
   if journalctl -u "$SERVICE" -n 50 --no-pager 2>/dev/null | grep -q "has no entry in _domains.yml\|has no matching directory"; then
     echo "  ✗ [11] Domain drift between _domains.yml and vault directories (see journalctl -u ${SERVICE})"
-    all_ok=0
+    return 1
   else
     echo "  ✓ [11] No domain drift in the recent logs"
   fi
+}
 
-  # 12. Provoke a write error, then check read/search still answer (the key check)
-  # Uses the demonstrably writable domain determined in check 7.
-  local check12_ok=1
-
+# 12. Provoke a write error, then check read/search still answer (the key check)
+# Uses the demonstrably writable domain determined in check 7.
+verify_survives_write_error() {
   if [ -z "${VIGIL_TEST_DOMAIN:-}" ]; then
     echo "  ✗ [12] skipped — check 7 found no writable domain"
-    all_ok=0
-  else
-    local test_domain_dir="${VIGIL_VAULT}/${VIGIL_TEST_DOMAIN}"
-    restore_permissions() { chmod 0750 "$test_domain_dir" 2>/dev/null || true; }
-    trap restore_permissions RETURN
-    chmod 0555 "$test_domain_dir" 2>/dev/null || check12_ok=0
-    mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "create" \
-      "{\"path\":\"${VIGIL_TEST_DOMAIN}/verify-crash-$$.md\",\"type\":\"reference\",\"content\":\"# X\\nx\",\"skill_key\":\"${VIGIL_SKILL_KEY:-}\"}" \
-      >/dev/null 2>&1 || true
-    restore_permissions
-    trap - RETURN
-
-    if mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "search" '{"query":"vigil"}' >/dev/null 2>&1; then
-      echo "  ✓ [12] Write error provoked, read/search still answer afterwards"
-    else
-      echo "  ✗ [12] Crash safety not effective — the Store dies on a write error"
-      all_ok=0
-      check12_ok=0
-    fi
-    [ "$check12_ok" = "1" ] || all_ok=0
+    return 1
   fi
+
+  local check12_ok=1
+  local test_domain_dir="${VIGIL_VAULT}/${VIGIL_TEST_DOMAIN}"
+
+  # The directory is made unwritable on purpose, so it has to be restored even
+  # if something between here and the restore aborts. The path is expanded into
+  # the trap when the trap is set, rather than read from a local when it fires:
+  # a RETURN trap that names a local runs after that local is gone.
+  local quoted_dir
+  quoted_dir="$(printf '%q' "$test_domain_dir")"
+  # shellcheck disable=SC2064 # expanding now is the point — see above
+  trap "chmod 0750 ${quoted_dir} 2>/dev/null || true" RETURN
+
+  chmod 0555 "$test_domain_dir" 2>/dev/null || check12_ok=0
+  mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "create" \
+    "{\"path\":\"${VIGIL_TEST_DOMAIN}/verify-crash-$$.md\",\"type\":\"reference\",\"content\":\"# X\\nx\",\"skill_key\":\"${VIGIL_SKILL_KEY:-}\"}" \
+    >/dev/null 2>&1 || true
+  chmod 0750 "$test_domain_dir" 2>/dev/null || true
+  trap - RETURN
+
+  if mcp_call "$VIGIL_LOCAL_URL" "$VIGIL_RW_TOKEN" "search" '{"query":"vigil"}' >/dev/null 2>&1; then
+    echo "  ✓ [12] Write error provoked, read/search still answer afterwards"
+  else
+    echo "  ✗ [12] Crash safety not effective — the Store dies on a write error"
+    check12_ok=0
+  fi
+
+  [ "$check12_ok" = "1" ]
+}
+
+# The checks, in the order they run. Named here so the list is one thing rather
+# than a sequence buried in a 210-line function — and so a test can ask for the
+# list rather than repeat it.
+VIGIL_VERIFY_CHECKS=(
+  verify_service_active
+  verify_public_endpoint_protected
+  verify_local_call_answers
+  verify_git_remote_reachable
+  verify_reload_pulls
+  verify_chunk_count
+  verify_write_and_push
+  verify_nothing_unpushed
+  verify_skill_key_enforced
+  verify_read_only_token_refused
+  verify_no_domain_drift
+  verify_survives_write_error
+)
+
+verify() {
+  local all_ok=1
+  local check
+
+  echo
+  echo "=== verify() ==="
+
+  verify_fetch_skill_key
+
+  for check in "${VIGIL_VERIFY_CHECKS[@]}"; do
+    "$check" || all_ok=0
+  done
 
   echo
   if [ "$all_ok" = "1" ]; then

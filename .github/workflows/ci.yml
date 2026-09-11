@@ -229,6 +229,11 @@ jobs:
       - name: update.sh switches over, rolls back and prunes correctly
         run: bash scripts/test/update_test.sh
 
+      # verify() is what the automatic rollback hangs on. Each of its twelve
+      # checks is driven against both outcomes here.
+      - name: verify() decides each check correctly
+        run: bash scripts/test/verify_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest
