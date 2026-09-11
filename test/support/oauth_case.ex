@@ -68,7 +68,9 @@ defmodule Vigil.OAuthCase do
   server is one statement, not three. `config/runtime.exs` says the same, for
   `lib/`. Single fields are written down again where a file's subject makes
   the string opaque — `Vigil.OAuth.PersistenceTest` and `Vigil.OAuth.TokenTest`
-  state an audience of their own, and say why where they state it.
+  state an audience of their own, and `Vigil.OAuth.StoreCompatibilityTest` the
+  one its frozen fixtures were already minted with. Each says why where it
+  states it.
   """
   @spec stated_settings() :: Settings.t()
   def stated_settings do
