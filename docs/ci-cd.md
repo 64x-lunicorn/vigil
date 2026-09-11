@@ -78,7 +78,7 @@ release.
 | :--- | :--- |
 | **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes (including the recorded interface contracts), no retired or vulnerable dependencies. |
 | **Static analysis** | Credo finds no issues; Dialyzer finds no new type errors. |
-| **Deployment scripts** | ShellCheck is clean, `init.sh --check-only` is still strictly read-only, and `update.sh` switches over, rolls back and prunes releases correctly. |
+| **Deployment scripts** | ShellCheck is clean, `init.sh --check-only` is still strictly read-only, `update.sh` switches over, rolls back and prunes releases correctly, and each of `verify()`'s twelve checks decides both outcomes correctly. |
 | **Release smoke test** | A real production release boots and serves. See below. |
 | **Workflow lint** | actionlint and zizmor: the pipeline's own configuration is checked like code. |
 | **Secret scan** | gitleaks over the full history, not just the diff. |
@@ -178,6 +178,32 @@ over HTTP:
   bare repository rather than the server's own claim
 - `reload` reports no `pull_failed`
 - the release shuts down on SIGTERM, which is what `systemctl stop` sends
+
+It also walks the authorization flow a real client walks, which no other check
+does: every other token in the pipeline is seeded out of band through
+`mix vigil.seed_token`, the path `verify()` and first access take. Dynamic
+registration, the consent page, PKCE, the code exchange and refresh rotation
+are well covered by the unit suite and were never run against a built release —
+which is exactly where a value that only exists in `MIX_ENV=prod` goes wrong.
+The flow is driven end to end, including that a wrong consent password mints no
+code, that a code is one-time use, that the redirect carries the RFC 9207 `iss`
+parameter the metadata advertises, and that replaying a spent refresh token
+revokes the whole token family (RFC 9700 §4.14.2) — the defence rotation exists
+for, and one that cannot be observed anywhere but end to end.
+
+**Acceptance.** [`scripts/test/verify_test.sh`](../scripts/test/verify_test.sh)
+covers `verify()`, which is what update.sh's automatic rollback hangs on. It was
+one 210-line block that could only run against a real vault host — systemd,
+journald, Cloudflare, a git remote and a booted release — so the one thing
+nothing could test was the thing that decides whether a delivery stands. It is
+twelve functions now, and each is driven against both outcomes: what stays real
+is every check's own logic, and what is replaced is only what it reaches for
+outside the process.
+
+The split also took two GNU-only constructs out of `verify()` — `grep -oP` for
+the chunk count and for the SkillKey — because a check that cannot run off the
+vault host cannot be tested at all. Same argument as `df --output` and
+`mapfile` before them.
 
 **Shell.** The deployment scripts run as root on the vault host, so a bug there
 is an incident, not a lint warning. ShellCheck is blocking, and

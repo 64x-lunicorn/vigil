@@ -16,24 +16,6 @@ FORCE=0
 UPDATE_UNIT=0
 ROLLBACK=0
 
-# Every path the script touches, named once. They were literals scattered over
-# eight steps, which made the set of things this script can reach something you
-# had to reconstruct by reading all of it — and left no way to run it anywhere
-# but a real vault host. The defaults are the production install; overriding
-# them is what scripts/test/update_test.sh does.
-PREFIX="${VIGIL_PREFIX:-/opt/vigil}"
-VAULT="${VIGIL_VAULT_DIR:-/var/lib/vigil/vault}"
-ENV_FILE="${VIGIL_ENV_FILE:-/etc/vigil/env}"
-UNIT_FILE="${VIGIL_UNIT_FILE:-/etc/systemd/system/vigil.service}"
-
-SERVICE_USER="${VIGIL_SERVICE_USER:-vigil}"
-SERVICE_GROUP="${VIGIL_SERVICE_GROUP:-vigil}"
-
-REPO="${PREFIX}/repo"
-RELEASES="${PREFIX}/releases"
-CURRENT="${PREFIX}/current"
-PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
-
 usage() {
   cat <<'EOF'
 scripts/update.sh — switch code revision.
@@ -111,23 +93,6 @@ fi
 
 ## ── Test seam ────────────────────────────────────────────────────────────
 
-# The path and account overrides above reach this script but not all of
-# scripts/lib.sh, which still hardcodes the production install in `as_vigil`,
-# `vigil_seed_token` and `verify()`. Half an override is worse than none: a run
-# with VIGIL_PREFIX pointing elsewhere would build in one install and then
-# verify the other. Until lib.sh takes them too they are what the test uses and
-# nothing else.
-if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" != "1" ]; then
-  for overridden in VIGIL_PREFIX VIGIL_VAULT_DIR VIGIL_ENV_FILE VIGIL_UNIT_FILE \
-    VIGIL_SERVICE_USER VIGIL_SERVICE_GROUP; do
-    if [ -n "${!overridden:-}" ]; then
-      err "${overridden} is set, but scripts/lib.sh still hardcodes the production paths."
-      err "These overrides exist for scripts/test/update_test.sh and are refused outside it."
-      exit 2
-    fi
-  done
-fi
-
 
 # With VIGIL_UPDATE_TEST_STUBS=1 the four things that need a real vault host —
 # root, the service account, systemd, a booted release — are replaced by
@@ -177,7 +142,7 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
     esac
   }
 
-  wait_until_healthy() { systemctl is-active --quiet vigil; }
+  wait_until_healthy() { systemctl is-active --quiet "$SERVICE"; }
 
   # verify() is the decision the automatic rollback hangs on, and it is a
   # property of the release that was switched to — which is how the test drives
@@ -242,10 +207,10 @@ if [ "$ROLLBACK" = "1" ]; then
     exit 0
   fi
 
-  systemctl stop vigil
+  systemctl stop "$SERVICE"
   ln -sfn "$OLD_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-  systemctl start vigil
+  systemctl start "$SERVICE"
   wait_until_healthy || exit 1
 
   # shellcheck disable=SC2034
@@ -265,7 +230,7 @@ fi
 step "1/8  Preflight"
 require_root "$@"
 
-if ! systemctl is-active --quiet vigil; then
+if ! systemctl is-active --quiet "$SERVICE"; then
   err "Service is not running — update.sh requires a running service."
   exit 2
 fi
@@ -415,13 +380,13 @@ step "6/8  Switch over"
 PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] systemctl stop vigil; symlink to ${TARGET_SHA}; systemctl start vigil"
+  log "[DRY RUN] systemctl stop ${SERVICE}; symlink to ${TARGET_SHA}; systemctl start ${SERVICE}"
 else
-  systemctl stop vigil
+  systemctl stop "$SERVICE"
   ln -sfn "${RELEASES}/${TARGET_SHA}" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   echo "$PREVIOUS_RELEASE" >"$PREVIOUS_RELEASE_FILE"
-  systemctl start vigil
+  systemctl start "$SERVICE"
   wait_until_healthy || exit 1
   ok "Switched to ${TARGET_SHA} (previous release: ${PREVIOUS_RELEASE})."
 fi
@@ -442,10 +407,10 @@ else
     record_done "verify(): all mandatory checks passed"
   else
     err "verify() failed — rolling back automatically to ${PREVIOUS_RELEASE}."
-    systemctl stop vigil
+    systemctl stop "$SERVICE"
     ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
     chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-    systemctl start vigil
+    systemctl start "$SERVICE"
     wait_until_healthy || true
 
     if verify; then

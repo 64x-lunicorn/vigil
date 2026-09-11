@@ -127,8 +127,9 @@ elif [ "$NEW_VAULT" != "1" ] && [ -z "$EXISTING_VAULT_URL" ]; then
   exit 2
 fi
 
-VAULT="/var/lib/vigil/vault"
-ENV_FILE="/etc/vigil/env"
+# VAULT and ENV_FILE come from scripts/lib.sh, which states the installation
+# layout once. They were repeated here as literals, which meant the same two
+# paths were defined in two files that must agree.
 
 ## ── Vault adoption phase ──────────────────────────────────────────────────
 #

@@ -287,7 +287,12 @@ defmodule Vigil.IndexTest do
     test "a limit is required: search/2 does not invent one" do
       index = ranking_index([ranking_chunk(%{file_title: "Treffer"})])
 
-      assert_raise KeyError, fn -> Index.search(index, %{query: "treffer"}) end
+      # Built rather than written as a literal: the type checker reads a literal
+      # here and warns about the very shape this test exists to pass, which
+      # would make the suite unable to run under --warnings-as-errors.
+      without_limit = Map.new(query: "treffer")
+
+      assert_raise KeyError, fn -> Index.search(index, without_limit) end
     end
   end
 

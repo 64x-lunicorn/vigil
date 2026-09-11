@@ -10,7 +10,8 @@ defmodule Vigil.MCP.ServerTest do
   # session table and the rate limiter, so this is the one async file that may
   # start those two.
   use ExUnit.Case, async: true
-  use Plug.Test
+  import Plug.Conn
+  import Plug.Test
 
   alias Vigil.Store
   alias Vigil.MCP.Server

@@ -110,8 +110,11 @@ jobs:
       - name: Audit dependencies for known vulnerabilities
         run: mix deps.audit
 
+      # --warnings-as-errors: `mix compile` only sees lib/ and test/support
+      # (elixirc_paths), so without this the test files are the one place a
+      # warning may stand — including a deprecation that will be a removal.
       - name: Test
-        run: mix test
+        run: mix test --warnings-as-errors
 
   static:
     name: Static analysis
@@ -228,6 +231,11 @@ jobs:
       # incident. This drives the real script against a throwaway prefix.
       - name: update.sh switches over, rolls back and prunes correctly
         run: bash scripts/test/update_test.sh
+
+      # verify() is what the automatic rollback hangs on. Each of its twelve
+      # checks is driven against both outcomes here.
+      - name: verify() decides each check correctly
+        run: bash scripts/test/verify_test.sh
 
   release-smoke:
     name: Release smoke test
