@@ -4,12 +4,11 @@ defmodule Vigil.MCP.ServerTest do
   # token; it asks an in-memory persistence of its own now, handed to the
   # router at init like any other caller.
   #
-  # The MCP surface's named singletons — the envelope, the rate limiter and
-  # the writer under its production registration, the name `Vigil.MCP.Server`
-  # finds it by — are still named, so this is the one async file that may
-  # start them. Everything else that wants them (`Vigil.RateLimitTest`,
-  # `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs
-  # after every async file has finished.
+  # The writer is this file's own now, under a name it supplies and hands to
+  # the router — which threads it to both halves of a response, the tool call
+  # and the envelope that wraps it. What is still found by a default is the
+  # session table and the rate limiter, so this is the one async file that may
+  # start those two.
   use ExUnit.Case, async: true
   use Plug.Test
 
@@ -18,13 +17,21 @@ defmodule Vigil.MCP.ServerTest do
   alias Vigil.MCP.Tools
   alias Vigil.OAuth
 
+  # One writer for this file, under a name of its own rather than the
+  # registration production uses.
+  @store __MODULE__.Writer
+
   setup do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
     start_supervised!(
       {Store,
-       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+       vault_path: vault,
+       exclude: [],
+       git_remote: "origin",
+       git: Vigil.Git.CommitLog.new(vault),
+       name: @store}
     )
 
     start_supervised!(Vigil.MCP.Envelope)
@@ -52,7 +59,8 @@ defmodule Vigil.MCP.ServerTest do
   # with, so handing the router this test's persistence is all it takes for
   # the token minted above to be the token verified here.
   defp opts(persistence, extra \\ []),
-    do: Server.init([oauth: OAuth.Endpoint.init(persistence: persistence)] ++ extra)
+    do:
+      Server.init([store: @store, oauth: OAuth.Endpoint.init(persistence: persistence)] ++ extra)
 
   defp post(persistence, token, body, headers \\ []) do
     conn =
@@ -250,7 +258,7 @@ defmodule Vigil.MCP.ServerTest do
   } do
     pinned = ~U[2026-07-09 11:20:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
-    assert {:ok, %{now: reported}} = Tools.dispatch("current", %{}, pinned)
+    assert {:ok, %{now: reported}} = Tools.dispatch(@store, "current", %{}, pinned)
     assert reported == DateTime.to_iso8601(pinned)
 
     conn =

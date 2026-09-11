@@ -14,12 +14,18 @@ defmodule Vigil.MCP.Server do
   plug(:match)
   plug(:dispatch)
 
-  # Resolves the rate limit budget, the limiter, OAuth persistence and the
-  # authorization server's own options once, when Bandit starts this plug (or a
-  # test calls init/1 directly — several do, with no options, and that must
-  # keep working), rather than reading application config on every request.
-  # Forwarding used to call `Vigil.OAuth.Endpoint.init/1` per request, which
-  # re-parsed the trusted proxy list every time.
+  # Resolves the writer, the rate limit budget, the limiter, OAuth persistence
+  # and the authorization server's own options once, when Bandit starts this
+  # plug (or a test calls init/1 directly — several do, with no options, and
+  # that must keep working), rather than reading application config on every
+  # request. Forwarding used to call `Vigil.OAuth.Endpoint.init/1` per request,
+  # which re-parsed the trusted proxy list every time.
+  #
+  # The writer is resolved here because both halves of a response are decided
+  # against it — the tool call and the envelope that wraps it — and this router
+  # is the only thing that knows they are the same vault. Defaulting in each
+  # half instead is how one of them came to be given a writer and the other
+  # left to find one by name.
   #
   # Persistence and the limiter are handed down to the authorization server's
   # options, and persistence is then read back out of them rather than resolved
@@ -34,6 +40,7 @@ defmodule Vigil.MCP.Server do
       end)
 
     opts
+    |> Keyword.put_new_lazy(:store, &Store.default_name/0)
     |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
       RateLimit.budget(:rate_limit_rpm, @default_rpm)
     end)
@@ -45,6 +52,7 @@ defmodule Vigil.MCP.Server do
   @impl true
   def call(conn, opts) do
     conn
+    |> put_private(:store, opts[:store])
     |> put_private(:rate_limit_budget, opts[:rate_limit_budget])
     |> put_private(:rate_limiter, opts[:limiter])
     |> put_private(:oauth_persistence, opts[:persistence])
@@ -154,7 +162,7 @@ defmodule Vigil.MCP.Server do
       protocolVersion: @protocol_version,
       serverInfo: %{name: "vigil", version: Application.spec(:vigil, :vsn) |> to_string()},
       capabilities: %{tools: %{}},
-      instructions: instructions_text()
+      instructions: instructions_text(conn.private.store)
     }
 
     conn
@@ -186,13 +194,14 @@ defmodule Vigil.MCP.Server do
 
       Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
 
-      {envelope, now} = Envelope.for_tool(session_id, name)
+      store = conn.private.store
+      {envelope, now} = Envelope.for_tool(session_id, name, store)
 
       result =
         if scope == OAuth.read_scope() and Tools.write_tool?(name) do
           {:error, "Read-only token: write access denied."}
         else
-          Tools.dispatch(name, arguments, now)
+          Tools.dispatch(store, name, arguments, now)
         end
 
       body = build_tool_call_result(result, envelope)
@@ -286,9 +295,10 @@ defmodule Vigil.MCP.Server do
     """
   end
 
-  defp instructions_text do
+  defp instructions_text(store) do
     base_instructions() <>
-      "\n\n## Domains (_domains.yml)\n\n```yaml\n" <> Store.instructions_domains_text() <> "\n```"
+      "\n\n## Domains (_domains.yml)\n\n```yaml\n" <>
+      Store.instructions_domains_text(store) <> "\n```"
   end
 
   ## shared helpers
