@@ -35,8 +35,9 @@ defmodule Vigil.RateLimit do
   The window's length belongs to the contract rather than to either adapter:
   "the window is fixed rather than sliding" is a claim the suite runs against
   both, and a window each adapter picked for itself would make that claim mean
-  two different things. `budget/2` belongs to neither too — it is read once,
-  where a router is initialized, and handed to `limited?` from there on.
+  two different things. `configured_budget/2` belongs to neither too — it is
+  the one read a router makes where it is initialized, and what it read is
+  handed to `limited?` from there on.
   """
   use GenServer
   require Logger
@@ -93,14 +94,15 @@ defmodule Vigil.RateLimit do
   def window_seconds, do: @window_seconds
 
   @doc """
-  The budget configured under `key`, judged by `budget/3`.
+  The one environment read the limiter makes: what the deployment configured
+  under `key`, judged by `budget/3`.
 
-  The one environment read the limiter makes, and a router makes it once at
-  `init/1`. An unset key reads as `default` here rather than as a
-  misconfiguration there: not configuring a budget is not a mistake, and
-  nothing is warned about.
+  A router makes this read once, at `init/1`. The default goes into the read
+  rather than after it, so an unset key reaches the judgement as a budget
+  already: not configuring one is not a mistake, and nothing is warned about.
   """
-  def budget(key, default), do: budget(key, Application.get_env(:vigil, key, default), default)
+  def configured_budget(key, default),
+    do: budget(key, Application.get_env(:vigil, key, default), default)
 
   @doc """
   `configured` as a budget, or `default` when it is not one.
@@ -109,13 +111,13 @@ defmodule Vigil.RateLimit do
   both can be handed a mistyped environment variable. Falling back keeps that
   from producing a limit that refuses everything or crashes on the comparison,
   and the warning keeps it from being invisible: a limit that is quietly not
-  the one you configured is worse than a loud one. `key` names the setting in
-  that warning, because a deployment configures three budgets and an operator
-  has to be able to tell which one it is about.
+  the one you configured is worse than a loud one.
 
-  What the deployment configured is an argument rather than a read of its own,
-  so the judgement can be stated against a budget instead of against global
-  application state.
+  `key` is taken for that warning and nothing else, and this is where it
+  belongs: the function that decides to ignore what a deployment configured is
+  the one that has to say so, and a deployment configures three budgets, so it
+  has to say which. A caller that warned on this function's behalf would leave
+  every other caller falling back in silence.
   """
   def budget(_key, rpm, _default) when is_integer(rpm) and rpm > 0, do: rpm
 

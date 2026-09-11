@@ -173,7 +173,7 @@ defmodule Vigil.RateLimitTest do
     # file arrives: the budgets under test are stated here, and nothing in an
     # async file writes a budget into global application env to state one.
     #
-    # `budget/2` is the read that produces that argument — one
+    # `configured_budget/2` is the read that produces that argument — one
     # `Application.get_env/3` with the default in it, so an unset key arrives
     # here as the default and is judged a budget rather than a
     # misconfiguration. It belongs to the composition root that does the
