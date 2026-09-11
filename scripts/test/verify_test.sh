@@ -26,28 +26,13 @@ IFS=$'\n\t'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-PASS=0
-FAIL=0
+# shellcheck source=scripts/test/harness.sh
+source "${SCRIPT_DIR}/harness.sh"
+
 WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/vigil-verify-test.XXXXXX")" && pwd -P)"
 
 # shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap installed below
 cleanup() { rm -rf "${WORK:?}"; }
-
-pass() {
-  echo "  ok   - $1"
-  PASS=$((PASS + 1))
-}
-
-fail() {
-  echo "  FAIL - $1" >&2
-  [ -n "${2:-}" ] && echo "         $2" >&2
-  FAIL=$((FAIL + 1))
-}
-
-section() {
-  echo
-  echo "── $1 ──"
-}
 
 ## ── The layout, pointed at the temp dir ──────────────────────────────────
 
@@ -423,9 +408,4 @@ fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 
-echo
-echo "──────────────────────────────────────────"
-echo "  passed: ${PASS}    failed: ${FAIL}"
-echo "──────────────────────────────────────────"
-
-[ "$FAIL" -eq 0 ]
+report

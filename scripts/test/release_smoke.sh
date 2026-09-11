@@ -47,35 +47,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-PASS=0
-FAIL=0
+# shellcheck source=scripts/test/harness.sh
+source "${SCRIPT_DIR}/harness.sh"
+
 WORK=""
 RELEASE_BIN=""
 SERVER_PID=""
-
-pass() {
-  echo "  ok   - $1"
-  PASS=$((PASS + 1))
-}
-
-fail() {
-  echo "  FAIL - $1" >&2
-  [ -n "${2:-}" ] && echo "         $2" >&2
-  FAIL=$((FAIL + 1))
-}
-
-assert_eq() {
-  if [ "$2" = "$3" ]; then
-    pass "$1"
-  else
-    fail "$1" "expected '$2', got '$3'"
-  fi
-}
-
-step() {
-  echo
-  echo "── $1 ──"
-}
 
 # The server must never outlive this script, however it exits: a stray BEAM
 # keeps holding the port and the dets files, and every later run then fails
@@ -162,7 +139,7 @@ mcp_why() { echo "HTTP $(mcp_status): $(mcp_text < "${WORK}/.mcp_body")"; }
 
 ## ── 1. Build the release ─────────────────────────────────────────────────
 
-step "1/6  Build MIX_ENV=prod release"
+section "1/6  Build MIX_ENV=prod release"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/vigil-smoke.XXXXXX")"
 VAULT="${WORK}/vault"
@@ -184,7 +161,7 @@ fi
 
 ## ── 2. Throwaway vault with a real git remote ────────────────────────────
 
-step "2/6  Provision a throwaway vault"
+section "2/6  Provision a throwaway vault"
 
 git init --quiet --bare -b main "$UPSTREAM"
 git init --quiet -b main "$VAULT"
@@ -217,7 +194,7 @@ pass "vault created, committed and pushed to its bare remote"
 
 ## ── 3. Seed tokens, then boot ────────────────────────────────────────────
 
-step "3/6  Seed tokens and start the release"
+section "3/6  Seed tokens and start the release"
 
 # Seeding must happen BEFORE the daemon starts: dets is single-writer, and a
 # second process opening the same files writes into a copy the running node
@@ -271,7 +248,7 @@ fi
 
 ## ── 4. Read path ─────────────────────────────────────────────────────────
 
-step "4/6  Read path"
+section "4/6  Read path"
 
 status="$(curl -o /dev/null -s -w '%{http_code}' -X POST "${BASE_URL}/mcp" \
   -H "Content-Type: application/json" \
@@ -302,7 +279,7 @@ fi
 
 ## ── 5. Write path: SkillKey, commit, push ────────────────────────────────
 
-step "5/6  Write path"
+section "5/6  Write path"
 
 # do_skill_read returns the current SkillKey even when the skill does not
 # exist, which is what makes bootstrapping a fresh vault possible at all.
@@ -354,7 +331,7 @@ fi
 
 ## ── 5b. The authorization flow a real client actually walks ──────────────
 
-step "5b/6  OAuth: register, authorize, consent, token, refresh"
+section "5b/6  OAuth: register, authorize, consent, token, refresh"
 
 # Every token used so far was seeded out of band through `mix vigil.seed_token`
 # — the path verify() and first access take. It is not the path Claude takes.
@@ -535,7 +512,7 @@ fi
 
 ## ── 6. reload, then shut down cleanly ────────────────────────────────────
 
-step "6/6  Reload and shutdown"
+section "6/6  Reload and shutdown"
 
 reload_response="$(mcp_call "$RW_TOKEN" reload)"
 if echo "$reload_response" | mcp_is_error; then
@@ -566,11 +543,7 @@ else
   fail "release shuts down on SIGTERM within 20s"
 fi
 SERVER_PID=""
+
 ## ── Summary ──────────────────────────────────────────────────────────────
 
-echo
-echo "════════════════════════════════════════"
-echo "  passed: ${PASS}   failed: ${FAIL}"
-echo "════════════════════════════════════════"
-
-[ "$FAIL" -eq 0 ]
+report

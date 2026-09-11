@@ -55,8 +55,13 @@ config :vigil,
 # files serial. Where they are read from is a separate question and has an
 # answer now: `Vigil.Settings.from_env/0`, once, where the supervision tree is
 # built (docs/design.md, "The deployment is resolved once"). Which also makes
-# the defaults above the only statement of each — nothing restates them in a
-# module.
+# the defaults above the only statement of each in `lib/` — no module there
+# restates them. In the suite the three are one value in one place,
+# `test/support/oauth_case.ex`: the server a test hands to a router or to a
+# decision when its subject is what that server was told rather than where it
+# read it from. Single fields are still written down elsewhere in the suite,
+# in the files whose subject makes the string opaque: an audience persistence
+# only stores and gives back, a password a flow only compares.
 #
 # `auth_password` doubles as the AP-4 SkillKey HMAC secret (`Vigil.SkillKey`),
 # which is why the suite cannot simply leave it unset.

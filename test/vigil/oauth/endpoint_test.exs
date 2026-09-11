@@ -9,11 +9,12 @@ defmodule Vigil.OAuth.EndpointTest do
   `Vigil.OAuth.PersistenceTest`.
 
   Nothing here is installed. The router resolves persistence, the limiter, the
-  budgets and the proxy configuration once, at init, and every one of them is
-  an option — so a test states the deployment it is testing instead of writing
-  it into global application env and undoing it afterwards. That is what makes
-  this file parallel, and it is also what lets a limit test name the budget it
-  is testing rather than spend the shipped one thirty requests at a time.
+  budgets, the proxy configuration and the server's own identity once, at
+  init, and every one of them is an option — so a test states the deployment
+  it is testing instead of writing it into global application env and undoing
+  it afterwards. That is what makes this file parallel, and it is also what
+  lets a limit test name the budget it is testing rather than spend the
+  shipped one thirty requests at a time.
   """
 
   use ExUnit.Case, async: true
@@ -25,9 +26,12 @@ defmodule Vigil.OAuth.EndpointTest do
   alias Vigil.OAuth.ClientAddr
   alias Vigil.RateLimit
 
-  @issuer "https://vault.factory-lab.org"
-  @resource "https://vault.factory-lab.org/mcp"
-  @password "correct-horse-battery-staple"
+  # The authorization server every router below is initialized with — stated,
+  # the way the persistence and the budgets are, rather than read back out of
+  # the deployment. `Vigil.OAuthCase` writes the triple down once for the
+  # suite, so what these paths serve is checked against what the router was
+  # told rather than against a second read of the configuration it read.
+  @settings Vigil.OAuthCase.stated_settings()
 
   setup do
     oauth = Vigil.OAuthCase.setup!()
@@ -43,6 +47,7 @@ defmodule Vigil.OAuth.EndpointTest do
     opts
     |> Keyword.put_new_lazy(:limiter, &RateLimit.Counter.new/0)
     |> Keyword.put_new(:client_addr, header: nil, trusted: [])
+    |> Keyword.put_new(:settings, @settings)
     |> OAuth.Endpoint.init()
   end
 
@@ -122,8 +127,8 @@ defmodule Vigil.OAuth.EndpointTest do
 
     assert conn.status == 200
     body = Jason.decode!(conn.resp_body)
-    assert body["resource"] == @resource
-    assert body["authorization_servers"] == [@issuer]
+    assert body["resource"] == @settings.resource
+    assert body["authorization_servers"] == [@settings.issuer]
   end
 
   ## Discovery
@@ -138,8 +143,8 @@ defmodule Vigil.OAuth.EndpointTest do
     assert c1.resp_body == c2.resp_body
 
     body = Jason.decode!(c1.resp_body)
-    assert body["resource"] == @resource
-    assert body["authorization_servers"] == [@issuer]
+    assert body["resource"] == @settings.resource
+    assert body["authorization_servers"] == [@settings.issuer]
   end
 
   test "authorization-server metadata advertises S256 PKCE and public-client auth", %{
@@ -151,7 +156,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert body["code_challenge_methods_supported"] == ["S256"]
     assert body["token_endpoint_auth_methods_supported"] == ["none"]
     assert body["client_id_metadata_document_supported"] == true
-    assert body["issuer"] == @issuer
+    assert body["issuer"] == @settings.issuer
   end
 
   ## DCR
@@ -237,7 +242,7 @@ defmodule Vigil.OAuth.EndpointTest do
         endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
+          "password" => @settings.auth_password,
           "decision" => "allow"
         })
       )
@@ -266,7 +271,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert body["scope"] == "vault"
 
     {:ok, record} = persistence.get_token.(body["access_token"])
-    assert record.aud == @resource
+    assert record.aud == @settings.resource
   end
 
   test "wrong code_verifier is rejected and the code becomes permanently unusable", %{
@@ -281,7 +286,7 @@ defmodule Vigil.OAuth.EndpointTest do
         endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
+          "password" => @settings.auth_password,
           "decision" => "allow"
         })
       )
@@ -370,7 +375,7 @@ defmodule Vigil.OAuth.EndpointTest do
         endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
+          "password" => @settings.auth_password,
           "decision" => "allow"
         })
       )
@@ -421,7 +426,7 @@ defmodule Vigil.OAuth.EndpointTest do
     persistence.put_token.(refresh, %{
       type: :refresh,
       client_id: "some-client",
-      aud: @resource,
+      aud: @settings.resource,
       expires_at: System.system_time(:second) - 1
     })
 
@@ -545,14 +550,14 @@ defmodule Vigil.OAuth.EndpointTest do
         endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
-          "password" => @password,
+          "password" => @settings.auth_password,
           "decision" => "allow"
         })
       )
 
     assert conn.status == 302
     [location] = get_resp_header(conn, "location")
-    assert extract_query_param(location, "iss") == @issuer
+    assert extract_query_param(location, "iss") == @settings.issuer
     assert extract_query_param(location, "code") != nil
   end
 
@@ -573,7 +578,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert conn.status == 302
     [location] = get_resp_header(conn, "location")
     assert extract_query_param(location, "error") == "access_denied"
-    assert extract_query_param(location, "iss") == @issuer
+    assert extract_query_param(location, "iss") == @settings.issuer
   end
 
   test "the metadata tells a client the iss parameter will be there", %{endpoint: endpoint} do

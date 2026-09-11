@@ -37,33 +37,10 @@ UPDATE_SH="${REPO_ROOT}/scripts/update.sh"
 KEEP=0
 [ "${1:-}" = "--keep" ] && KEEP=1
 
-PASS=0
-FAIL=0
+# shellcheck source=scripts/test/harness.sh
+source "${SCRIPT_DIR}/harness.sh"
+
 WORK=""
-
-pass() {
-  echo "  ok   - $1"
-  PASS=$((PASS + 1))
-}
-
-fail() {
-  echo "  FAIL - $1" >&2
-  [ -n "${2:-}" ] && echo "         $2" >&2
-  FAIL=$((FAIL + 1))
-}
-
-assert_eq() {
-  if [ "$2" = "$3" ]; then
-    pass "$1"
-  else
-    fail "$1" "expected '$2', got '$3'"
-  fi
-}
-
-step() {
-  echo
-  echo "── $1 ──"
-}
 
 # sha256sum on Linux, shasum on macOS. Named rather than inlined because the
 # state fingerprint below is compared across three runs of update.sh.
@@ -287,7 +264,7 @@ build_fake_mix
 
 ## ── 1. The happy path ────────────────────────────────────────────────────
 
-step "1/7  A healthy release is switched to"
+section "1/7  A healthy release is switched to"
 
 build_host
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
@@ -309,7 +286,7 @@ fi
 
 ## ── 2. A release that does not come up is rolled back ────────────────────
 
-step "2/7  A red verify() rolls back automatically"
+section "2/7  A red verify() rolls back automatically"
 
 build_host
 # The release update.sh is about to build is the one that will not come up.
@@ -327,7 +304,7 @@ assert_eq "the service was cycled twice, ending on the old release" \
 
 ## ── 3. When the rollback does not come up either ─────────────────────────
 
-step "3/7  A rollback that is also red is reported as such"
+section "3/7  A rollback that is also red is reported as such"
 
 build_host
 rm -rf "${PREFIX}/releases/v0"
@@ -348,7 +325,7 @@ fi
 
 ## ── 4. --rollback ────────────────────────────────────────────────────────
 
-step "4/7  --rollback returns to the recorded release"
+section "4/7  --rollback returns to the recorded release"
 
 # `.previous_release` is produced by a real update rather than written by hand,
 # so the round trip an operator actually performs is the one under test.
@@ -362,7 +339,7 @@ assert_eq "exits 0" "0" "$RC"
 assert_eq "current points at the recorded previous release" "v0" "$(current_release)"
 assert_eq "the service is running" "yes" "$(service_running)"
 
-step "4b   --rollback after an automatic rollback refuses instead of claiming success"
+section "4b   --rollback after an automatic rollback refuses instead of claiming success"
 
 # After an automatic rollback `current` and `.previous_release` name the same
 # release. Without a guard `--rollback` symlinked current onto itself, restarted
@@ -386,7 +363,7 @@ fi
 
 ## ── 5. Refusals leave the running service alone ──────────────────────────
 
-step "5/7  A red suite does not reach the switchover"
+section "5/7  A red suite does not reach the switchover"
 
 build_host
 FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
@@ -400,7 +377,7 @@ assert_eq "the service was never stopped" "yes" "$(service_running)"
 assert_eq "the code repo was put back on the running revision" "$OLD_SHA" \
   "$(git -C "${PREFIX}/repo" rev-parse --short HEAD)"
 
-step "5b   Unpushed vault commits abort the preflight"
+section "5b   Unpushed vault commits abort the preflight"
 
 build_host
 echo "# unpushed" >"${VAULT}/later.md"
@@ -413,7 +390,7 @@ assert_eq "current still points at the old release" "v0" "$(current_release)"
 
 ## ── 5c. Persisted auth state survives the delivery ───────────────────────
 
-step "5c   The OAuth tables are untouched by an update and by a rollback"
+section "5c   The OAuth tables are untouched by an update and by a rollback"
 
 # What this pins is the delivery mechanism, not the records: no BEAM runs here,
 # so the files are stand-ins. That an access token written by the *previous
@@ -440,7 +417,7 @@ assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 
-step "6/7  Cleanup keeps three releases and never the running one"
+section "6/7  Cleanup keeps three releases and never the running one"
 
 build_host
 for old in old1 old2 old3; do
@@ -465,7 +442,7 @@ else
   fail "the previous release was kept"
 fi
 
-step "6b   Cleanup prunes a dot-directory left by an interrupted build"
+section "6b   Cleanup prunes a dot-directory left by an interrupted build"
 
 # The retention rule has to select "directories directly under releases/",
 # which a bare glob of non-hidden entries does not give you: a `.tmp-` left by
@@ -490,7 +467,7 @@ fi
 
 ## ── 7. A prefix reached through a symlink ────────────────────────────────
 
-step "7/7  Cleanup keeps the running release behind a symlinked prefix"
+section "7/7  Cleanup keeps the running release behind a symlinked prefix"
 
 # The regression this pins: the cleanup compared `readlink -f` output against
 # the unresolved directory listing, so with any symlink in the prefix nothing
@@ -519,15 +496,10 @@ fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 
-echo
-echo "──────────────────────────────────────────"
-echo "  passed: ${PASS}    failed: ${FAIL}"
-echo "──────────────────────────────────────────"
-
 if [ "$FAIL" -gt 0 ]; then
   echo
   echo "Last update.sh output:"
   tail -30 "${WORK}/out.log" || true
-  exit 1
 fi
-exit 0
+
+report

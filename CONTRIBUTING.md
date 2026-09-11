@@ -94,6 +94,13 @@ switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
 refusals that must leave the running service alone, and the release retention
 rule. It needs no root, no systemd and no production paths.
 
+Those two and `release_smoke.sh` source
+[`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the
+reporting — `pass`, `fail`, `assert_eq`, `section`, and the `report` a suite
+ends on, which is what decides its exit code. `check_only_test.sh` is the
+exception: its `assert_eq` and `assert_contains` carry a message shape of
+their own. A new suite sources the harness.
+
 For changes to `mix.exs`, `config/`, the release or anything on the boot path,
 run the release smoke test. It builds a production release, boots it against a
 throwaway git-backed vault and exercises the read path, scope enforcement, the

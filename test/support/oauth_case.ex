@@ -51,16 +51,24 @@ defmodule Vigil.OAuthCase do
   end
 
   @doc """
-  An authorization server *stated* rather than read.
+  An authorization server *stated* rather than read: the suite's one statement
+  of an issuer, a resource and a consent password.
 
-  `setup!/0`'s `settings` is the deployment's own, for the files that assert
-  what a deployment serves. This is for the two whose subject is a decision
-  that turns on one of these fields and nothing else —
-  `Vigil.OAuth.FlowTest` checks a request's target and a consent's password
-  against it, `Vigil.OAuth.CodeTest` checks the audience a minted code
-  carries — so the value those assertions name is written down rather than
-  fetched. It is here, once, because two files wanting the same stated server
-  is one statement, not two.
+  `setup!/0`'s `settings` is the deployment's own, read from application env.
+  This is for the files whose subject is what a server is *told* rather than
+  where it read it from — `Vigil.OAuth.FlowTest` checks a request's target and
+  a consent's password against it, `Vigil.OAuth.CodeTest` checks the audience
+  a minted code carries, and `Vigil.OAuth.EndpointTest` initializes every
+  router it drives with it and asserts the discovery documents and the `iss`
+  parameter come back saying exactly this. Handed in, each of them checks the
+  server against what it was given; read back, each would only check
+  `config/runtime.exs` against itself.
+
+  It is one value in one place because three files wanting the same stated
+  server is one statement, not three. `config/runtime.exs` says the same, for
+  `lib/`. Single fields are written down again where a file's subject makes
+  the string opaque — `Vigil.OAuth.PersistenceTest` and `Vigil.OAuth.TokenTest`
+  state an audience of their own, and say why where they state it.
   """
   @spec stated_settings() :: Settings.t()
   def stated_settings do
