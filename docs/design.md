@@ -552,15 +552,33 @@ Appending at the end of a file, or opening a new section via the heading
 argument, is unaffected — there a heading opens a section rather than cutting
 one in half.
 
-**A section id is resolved once.** `replace_section` and `delete_section` take
-an id, and the policy resolves it through the same lenient lookup `read` uses —
-one retry through path normalization — so an id that reads is an id that
-writes. The write then goes to the resolved record's canonical path, never to
-one re-derived by splitting the id on its fragment. That is what makes the
-leniency safe: a normalized id writes where the lookup landed, not where the id
-pointed. The path check on the id's own path part still runs first, so an id
+**A section id is resolved once, through one function.** `replace_section` and
+`delete_section` take an id, and the policy resolves it through
+`Vigil.Index.find_chunk/2`, which goes through the same `resolve/2` that
+`read/2` and `links/2` do — so an id that reads is an id that writes by
+construction rather than by two walks agreeing. It was the second: `read`
+checked that the id's path part was safe to resolve and `find_chunk` did not,
+so `/bike/via-carolina.md#gear` — which normalizes onto a real chunk id —
+resolved for the write path and was refused for the read path.
+
+**Safety and the canonical form come back together**, from
+`Vigil.Slug.canonical_path/1`. Normalization slugifies every segment, which
+turns `_domains.yml` into `domains.yml` and `/abs/x.md` into `abs/x.md`, so a
+path checked only after it is normalized is a path whose check the
+normalization has laundered. That order used to be a fact each caller had to
+know — checked before normalization in `Vigil.Vault.Policy`, again after, under
+a comment explaining why. It is one function's now, and a caller that does not
+hold the order cannot get it wrong.
+
+The write then goes to the resolved record's canonical path, never to one
+re-derived by splitting the id on its fragment. That is what makes the leniency
+safe: a normalized id writes where the lookup landed, not where the id pointed.
+What may be written is still judged before what is there is looked up, so an id
 naming `skills/` or an excluded domain answers "Invalid path" rather than
-"Not found".
+"Not found" — a refusal must not confirm that a path it will not touch exists.
+`Vigil.Vault.SectionIdParityTest` is where the whole of this is asserted rather
+than documented: one table of id shapes, and `read`, `links`, `replace_section`
+and `delete_section` answering each of them.
 
 **The duplicate gate keys on the note's name.** Before `create` writes, the
 policy asks the vault for notes in the same domain that look like the one being
