@@ -24,18 +24,29 @@ defmodule Vigil.OAuth.Persistence.Memory do
 
   alias Vigil.OAuth.{Code, Persistence, Token}
 
-  @window Persistence.rate_limit_window()
-  @max_attempts Persistence.rate_limit_max_attempts()
+  @rate_limit_window Persistence.rate_limit_window()
+  @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
   @cimd_ttl Persistence.cimd_ttl()
 
   @empty %{clients: %{}, codes: %{}, tokens: %{}, rate_limits: %{}, cimd_cache: %{}}
 
   @doc """
-  A `Vigil.OAuth.Persistence` over a fresh, empty set of tables, and the agent
-  holding them.
+  A `Vigil.OAuth.Persistence` over a fresh, empty set of tables.
 
-  The agent is linked to the process that builds it, so it dies with the test
-  and nothing has to tear it down.
+  The agent behind it is linked to the process that builds it, so it dies with
+  the test and nothing has to tear it down.
+  """
+  @spec new() :: Persistence.t()
+  def new, do: holding() |> elem(0)
+
+  @doc """
+  As `new/0`, and the agent behind it.
+
+  For the one claim the contract cannot express: reclaiming an elapsed lockout
+  window or a stale cache entry is invisible through the seam — both already
+  read as absent before a sweep runs — so only the tables themselves show
+  whether the sweep took them. `count/2` is how that is asked here, and
+  `:ets.info/2` is how it is asked of the `:dets` adapter.
   """
   @spec holding() :: {Persistence.t(), pid()}
   def holding do
@@ -62,9 +73,10 @@ defmodule Vigil.OAuth.Persistence.Memory do
     {persistence, tables}
   end
 
-  @doc "As `holding/0`, for a caller with no interest in the agent behind it."
-  @spec new() :: Persistence.t()
-  def new, do: holding() |> elem(0)
+  @doc "How many rows one of the five tables is holding."
+  @spec count(pid(), :clients | :codes | :tokens | :rate_limits | :cimd_cache) ::
+          non_neg_integer()
+  def count(tables, table), do: Agent.get(tables, &map_size(&1[table]))
 
   ## The generic three
 
@@ -114,8 +126,11 @@ defmodule Vigil.OAuth.Persistence.Memory do
 
   defp rate_limited?(tables, address, now) do
     case Agent.get(tables, & &1.rate_limits[address]) do
-      {count, window_start} -> count >= @max_attempts and now - window_start <= @window
-      nil -> false
+      {count, window_start} ->
+        count >= @rate_limit_max_attempts and now - window_start <= @rate_limit_window
+
+      nil ->
+        false
     end
   end
 
@@ -125,8 +140,11 @@ defmodule Vigil.OAuth.Persistence.Memory do
     Agent.update(tables, fn state ->
       entry =
         case state.rate_limits[address] do
-          {count, window_start} when now - window_start <= @window -> {count + 1, window_start}
-          _ -> {1, now}
+          {count, window_start} when now - window_start <= @rate_limit_window ->
+            {count + 1, window_start}
+
+          _ ->
+            {1, now}
         end
 
       put_in(state.rate_limits[address], entry)
@@ -155,7 +173,10 @@ defmodule Vigil.OAuth.Persistence.Memory do
       state
       |> update_in([:codes], &Map.reject(&1, fn {_k, attrs} -> Code.expired?(attrs, now) end))
       |> update_in([:tokens], &Map.reject(&1, fn {_k, attrs} -> Token.expired?(attrs, now) end))
-      |> update_in([:rate_limits], &Map.reject(&1, fn {_k, {_c, at}} -> now - at > @window end))
+      |> update_in(
+        [:rate_limits],
+        &Map.reject(&1, fn {_k, {_c, at}} -> now - at > @rate_limit_window end)
+      )
       |> update_in([:cimd_cache], &Map.reject(&1, fn {_k, {_d, at}} -> at <= now end))
     end)
   end

@@ -19,9 +19,9 @@ defmodule Vigil.OAuth.Store do
   as against `Vigil.OAuth.Persistence.Memory`. It is the only test that opens
   a `:dets` file at all.
 
-  Everything that is not one of the fourteen answers is private: the folds,
-  the per-table sweeps and the code delete exist for the answers above them
-  and for nothing else.
+  Everything below `over_tables/0` is private, the fourteen answers included.
+  They are captured from inside this module, so the value is the only way to
+  reach them and the sentence above is a fact rather than a convention.
   """
   use GenServer
   require Logger
@@ -34,9 +34,10 @@ defmodule Vigil.OAuth.Store do
   @rate_limits :oauth_rate_limits
   @cimd_cache :oauth_cimd_cache
 
-  # The lockout's window and the cache's hour belong to the contract, not to
-  # this adapter: the in-memory one has to measure them the same way for the
-  # claims in `test/vigil/oauth/persistence_test.exs` to mean one thing.
+  # The lockout's budget and window and the cache's hour belong to the
+  # contract, not to this adapter: the in-memory one has to measure them the
+  # same way for the claims in `test/vigil/oauth/persistence_test.exs` to mean
+  # one thing. How they are counted is this adapter's own.
   @rate_limit_window Persistence.rate_limit_window()
   @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
   @cimd_ttl Persistence.cimd_ttl()
@@ -123,12 +124,12 @@ defmodule Vigil.OAuth.Store do
 
   ## Clients
 
-  def put_client(client_id, attrs) do
+  defp put_client(client_id, attrs) do
     :dets.insert(@clients, {client_id, attrs})
     :dets.sync(@clients)
   end
 
-  def get_client(client_id) do
+  defp get_client(client_id) do
     case :dets.lookup(@clients, client_id) do
       [{^client_id, attrs}] -> {:ok, attrs}
       [] -> :error
@@ -137,13 +138,13 @@ defmodule Vigil.OAuth.Store do
 
   ## Authorization codes
 
-  def put_code(code, attrs) do
+  defp put_code(code, attrs) do
     :dets.insert(@codes, {code, attrs})
     :dets.sync(@codes)
   end
 
-  @doc "Looks up and immediately deletes a code (one-time use)."
-  def take_code(code) do
+  # Looks up and immediately deletes a code (one-time use).
+  defp take_code(code) do
     case :dets.lookup(@codes, code) do
       [{^code, attrs}] ->
         :dets.delete(@codes, code)
@@ -157,37 +158,35 @@ defmodule Vigil.OAuth.Store do
 
   ## Tokens (access + refresh share a table)
 
-  def put_token(token, attrs) do
+  defp put_token(token, attrs) do
     :dets.insert(@tokens, {token, attrs})
     :dets.sync(@tokens)
   end
 
-  def get_token(token) do
+  defp get_token(token) do
     case :dets.lookup(@tokens, token) do
       [{^token, attrs}] -> {:ok, attrs}
       [] -> :error
     end
   end
 
-  def delete_token(token) do
+  defp delete_token(token) do
     :dets.delete(@tokens, token)
     :dets.sync(@tokens)
   end
 
-  @doc """
-  Deletes every token descended from one authorization grant.
+  # Deletes every token descended from one authorization grant.
+  #
+  # Keyed on the grant rather than the client on purpose: a client legitimately
+  # holds more than one grant over time, and revoking by `client_id` would take
+  # down authorizations that have nothing to do with the replay.
+  #
+  # A `nil` grant revokes nothing — that is what `Vigil.OAuth.Token.grant_of/1`
+  # answers for a token written before grants existed, and "every token whose
+  # grant is unknown" is not a family.
+  defp revoke_grant(nil), do: :ok
 
-  Keyed on the grant rather than the client on purpose: a client legitimately
-  holds more than one grant over time, and revoking by `client_id` would take
-  down authorizations that have nothing to do with the replay.
-
-  A `nil` grant revokes nothing — that is what `Vigil.OAuth.Token.grant_of/1`
-  answers for a token written before grants existed, and "every token whose
-  grant is unknown" is not a family.
-  """
-  def revoke_grant(nil), do: :ok
-
-  def revoke_grant(grant_id) do
+  defp revoke_grant(grant_id) do
     Enum.each(all_tokens(), fn {token, attrs} ->
       if Token.grant_of(attrs) == grant_id, do: delete_token(token)
     end)
@@ -195,7 +194,7 @@ defmodule Vigil.OAuth.Store do
 
   ## Rate limiting (consent password attempts, per IP)
 
-  def rate_limited?(ip, now) do
+  defp rate_limited?(ip, now) do
     case :ets.lookup(@rate_limits, ip) do
       [{^ip, count, window_start}] ->
         count >= @rate_limit_max_attempts and now - window_start <= @rate_limit_window
@@ -205,7 +204,7 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
-  def record_failure(ip, now) do
+  defp record_failure(ip, now) do
     case :ets.lookup(@rate_limits, ip) do
       [{^ip, count, window_start}] when now - window_start <= @rate_limit_window ->
         :ets.insert(@rate_limits, {ip, count + 1, window_start})
@@ -217,7 +216,7 @@ defmodule Vigil.OAuth.Store do
     :ok
   end
 
-  def reset_rate_limit(ip) do
+  defp reset_rate_limit(ip) do
     :ets.delete(@rate_limits, ip)
     :ok
   end
@@ -230,14 +229,14 @@ defmodule Vigil.OAuth.Store do
 
   ## CIMD cache (1h TTL, ephemeral)
 
-  def cimd_cache_get(url, now) do
+  defp cimd_cache_get(url, now) do
     case :ets.lookup(@cimd_cache, url) do
       [{^url, doc, expires_at}] when expires_at > now -> {:ok, doc}
       _ -> :error
     end
   end
 
-  def cimd_cache_put(url, doc, now) do
+  defp cimd_cache_put(url, doc, now) do
     :ets.insert(@cimd_cache, {url, doc, now + @cimd_ttl})
     :ok
   end
@@ -266,7 +265,7 @@ defmodule Vigil.OAuth.Store do
 
   ## Janitor sweeps
 
-  def sweep_expired(now) do
+  defp sweep_expired(now) do
     Enum.each(all_codes(), fn {code, attrs} ->
       if Code.expired?(attrs, now), do: delete_code(code)
     end)

@@ -79,11 +79,16 @@ defmodule Vigil.OAuth.Persistence do
 
   @type t :: %__MODULE__{}
 
-  # The three windows the answers above are measured in. They live with the
-  # contract rather than with either adapter because both have to agree on
-  # them: "the lockout expires with its window" is a claim the suite runs
-  # against both, and a window each adapter picked for itself would make that
-  # claim mean two different things.
+  # What the answers above are measured against: two numbers for the consent
+  # lockout, one for the cache's hour. They live with the contract rather than
+  # with either adapter because both have to agree on them — "the lockout
+  # expires with its window" is a claim the suite runs against both, and a
+  # window each adapter picked for itself would make that claim mean two
+  # different things.
+  #
+  # The *rules* applied under them are deliberately not shared: each adapter
+  # decides for itself what a window is made of and when it rolls over, which
+  # is what leaves the contract suite something to catch.
   @rate_limit_window 900
   @rate_limit_max_attempts 5
   @cimd_ttl 3600

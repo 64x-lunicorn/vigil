@@ -768,6 +768,12 @@ lockout expires with its window" is a claim the suite runs against both, and a
 window each adapter picked for itself would make that claim mean two different
 things. `Vigil.OAuth.Persistence` states them once and both read them.
 
+The *rules* applied under those numbers stay unshared, and that is the line:
+values both adapters must agree on move to the contract, logic both adapters
+implement stays in each. Sharing the counting too would make the two identical
+by construction, and a contract suite over two identical implementations
+proves nothing.
+
 **One suite runs against both adapters, and it is the only thing that opens a
 `:dets` file.** Everything persistence actually owns is asserted there, at the
 seam rather than through an endpoint: that an authorization code is
@@ -787,6 +793,21 @@ that have nothing to do with persistence: `Vigil.OAuth.EndpointTest` sets the
 rate-limit budgets and the trusted-proxy configuration in global application
 env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor` and
 `Vigil.RateLimit`, both registered under their module names.
+
+**`Vigil.MCP.ServerTest` is parallel on an exception, not on a name it
+supplies.** "One writer per vault, under a name its caller supplies" is what
+lets `Vigil.StoreTest` run in parallel, and this file cannot use it: `/mcp`
+reaches the writer through `Vigil.MCP.Tools`' default, the envelope reads the
+same default, and the rate limiter owns one globally named table — so the file
+starts `Vigil.Store` under its production registration, `Vigil.MCP.Envelope`
+and `Vigil.RateLimit`. It is parallel because it is the *only* async file that
+starts any of them, and everything else that wants them
+(`Vigil.RateLimitTest`, `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`)
+is serial and therefore runs after every async file has finished. A second
+async file starting any of the three breaks it, loudly and immediately —
+`start_supervised!` raises on `{:error, {:already_started, _}}`. Handing the
+MCP router a writer, an envelope and a limiter the way `Vigil.Store` is handed
+a name would remove the exception; that is not this change.
 
 The speed is a consequence and not the argument, and here it is a small one.
 The argument is that 244 lines owning expiry, revocation, spent-token marking

@@ -222,8 +222,9 @@ they cover different things:
 
 The first two rows are one table, `Vigil.RateLimit`'s, and the third is OAuth
 persistence's — the budget and the window are stated once, on the contract in
-`Vigil.OAuth.Persistence`, so both adapters behind it count the same way. `Vigil.OAuth.Janitor` sweeps both, on the schedule
-"Storage and cleanup" below sets out.
+`Vigil.OAuth.Persistence`, so both adapters behind it count the same way.
+`Vigil.OAuth.Janitor` sweeps both, on the schedule "Storage and cleanup" below
+sets out.
 
 The middle row is the one that bounds an unauthenticated caller, and it is
 checked *before* the handler runs rather than inside it, so a refusal costs

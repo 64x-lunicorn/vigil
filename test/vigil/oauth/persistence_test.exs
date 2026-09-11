@@ -22,11 +22,10 @@ defmodule Vigil.OAuth.PersistenceTest do
   use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Client, Code, Flow, Persistence, Store, Token}
+  alias Vigil.OAuth.{Persistence, Store, Token}
+  alias Vigil.OAuthCase
 
   @now 1_700_000_000
-  @redirect_uri "https://app.example/cb"
-  @challenge "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
   # The whole contract, with the arity each question is asked at. Written out
   # rather than read off the struct, because a test that derives the list from
@@ -89,23 +88,10 @@ defmodule Vigil.OAuth.PersistenceTest do
 
   ## What both adapters are asked
 
-  # A real authorization code, minted by the module that owns the record, so
+  # A real authorization code, minted by the modules that own the records, so
   # what is written is the shape production writes — `grant_id`, audience and
   # all — rather than a variant this file made up.
-  defp mint_code(persistence, now \\ @now) do
-    client = Client.register(persistence, "App", [@redirect_uri], now)
-
-    {:ok, ctx} =
-      Flow.authorize_request(persistence, %{
-        "client_id" => client.client_id,
-        "redirect_uri" => @redirect_uri,
-        "response_type" => "code",
-        "code_challenge" => @challenge,
-        "code_challenge_method" => "S256"
-      })
-
-    Code.issue(persistence, ctx, now)
-  end
+  defp mint_code(persistence, now \\ @now), do: OAuthCase.mint_code(persistence, now)
 
   defp token_attrs(overrides) do
     Map.merge(
@@ -145,7 +131,7 @@ defmodule Vigil.OAuth.PersistenceTest do
         code = mint_code(persistence)
 
         assert {:ok, record} = persistence.take_code.(code)
-        assert record.redirect_uri == @redirect_uri
+        assert record.redirect_uri == OAuthCase.redirect_uri()
         assert :error = persistence.take_code.(code)
       end
 
@@ -229,16 +215,26 @@ defmodule Vigil.OAuth.PersistenceTest do
 
       # A failure arriving after the window ran out opens a new one rather
       # than topping up the old count — otherwise an address locked out once
-      # would stay locked out on one attempt an hour.
+      # would stay locked out on one attempt an hour, and an address that had
+      # ever been locked out could never be locked out again.
+      #
+      # Asserted by spending the *new* window rather than by reading the old
+      # one: an elapsed window already answers "not limited", so `refute`
+      # alone passes whether the count rolled over or not.
       test "a failure after the window opens a new one", %{persistence: persistence} do
-        window = Persistence.rate_limit_window()
+        attempts = Persistence.rate_limit_max_attempts()
+        later = @now + Persistence.rate_limit_window() + 1
 
-        for _ <- 1..Persistence.rate_limit_max_attempts(),
-            do: persistence.record_failure.("ip", @now)
+        for _ <- 1..attempts, do: persistence.record_failure.("ip", @now)
 
-        later = @now + window + 1
         assert :ok = persistence.record_failure.("ip", later)
         refute persistence.rate_limited?.("ip", later)
+
+        for _ <- 1..(attempts - 2), do: persistence.record_failure.("ip", later)
+        refute persistence.rate_limited?.("ip", later)
+
+        assert :ok = persistence.record_failure.("ip", later)
+        assert persistence.rate_limited?.("ip", later)
       end
 
       test "the right password forgets an address's attempts", %{persistence: persistence} do
@@ -269,7 +265,6 @@ defmodule Vigil.OAuth.PersistenceTest do
       test "a sweep removes exactly what has expired and nothing else", %{
         persistence: persistence
       } do
-        window = Persistence.rate_limit_window()
         ttl = Persistence.cimd_ttl()
 
         # One entry that has expired at @now and one that has not, in each of
@@ -288,11 +283,16 @@ defmodule Vigil.OAuth.PersistenceTest do
         :ok = persistence.put_token.("spent-expired", spent)
         :ok = persistence.put_token.("spent-live", spent_live)
 
-        :ok = persistence.record_failure.("ip-stale", @now - window - 1)
-        :ok = persistence.record_failure.("ip-fresh", @now - window)
+        # The two ephemeral tables are here for the "and nothing else" half.
+        # Reclaiming an elapsed window or a stale cache entry is not
+        # observable through the contract — both already read as absent before
+        # the sweep runs, and `record_failure` opens a new window over a stale
+        # one by itself. Bounding their memory is the production adapter's,
+        # asserted against its tables under "the :dets tables alone".
+        for _ <- 1..(Persistence.rate_limit_max_attempts() - 1),
+            do: persistence.record_failure.("ip-live", @now)
 
         doc = %{client_id: "c", name: "C", redirect_uris: []}
-        :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
         :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
 
         assert :ok = persistence.sweep_expired.(@now)
@@ -305,18 +305,11 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert persistence.get_token.("spent-expired") == :error
         assert {:ok, _} = persistence.get_token.("spent-live")
 
-        # The windows are asserted by what they still count, because an
-        # elapsed window already reads as "not limited" — only a fresh failure
-        # shows whether the row itself was reclaimed.
-        for _ <- 1..(Persistence.rate_limit_max_attempts() - 1) do
-          persistence.record_failure.("ip-stale", @now)
-          persistence.record_failure.("ip-fresh", @now)
-        end
+        # A live window keeps the attempts it had: one more failure locks the
+        # address out, which it would not if the sweep had taken the row.
+        assert :ok = persistence.record_failure.("ip-live", @now)
+        assert persistence.rate_limited?.("ip-live", @now)
 
-        refute persistence.rate_limited?.("ip-stale", @now)
-        assert persistence.rate_limited?.("ip-fresh", @now)
-
-        assert persistence.cimd_cache_get.("https://stale.example/m", @now) == :error
         assert {:ok, ^doc} = persistence.cimd_cache_get.("https://fresh.example/m", @now)
       end
 
@@ -358,6 +351,35 @@ defmodule Vigil.OAuth.PersistenceTest do
       assert record.aud == OAuth.resource()
     end
 
+    # What the seam cannot see: an elapsed lockout window and a stale cache
+    # entry already read as absent, so only the tables themselves show whether
+    # the sweep reclaimed them. Unbounded growth is the whole point of
+    # sweeping these two — the CIMD cache is keyed on a URL a client supplies.
+    test "the sweep reclaims the ephemeral rows rather than only hiding them", %{
+      persistence: persistence
+    } do
+      window = Persistence.rate_limit_window()
+      ttl = Persistence.cimd_ttl()
+      doc = %{client_id: "c", name: "C", redirect_uris: []}
+
+      :ok = persistence.record_failure.("ip-stale", @now - window - 1)
+      :ok = persistence.record_failure.("ip-live", @now)
+      :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
+      :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
+
+      assert :ets.info(:oauth_rate_limits, :size) == 2
+      assert :ets.info(:oauth_cimd_cache, :size) == 2
+
+      assert :ok = persistence.sweep_expired.(@now)
+
+      assert :ets.lookup(:oauth_rate_limits, "ip-stale") == []
+      assert [{"ip-live", _count, _window}] = :ets.lookup(:oauth_rate_limits, "ip-live")
+      assert :ets.lookup(:oauth_cimd_cache, "https://stale.example/m") == []
+
+      assert [{"https://fresh.example/m", _doc, _expires}] =
+               :ets.lookup(:oauth_cimd_cache, "https://fresh.example/m")
+    end
+
     test "the files it opens are readable by their owner alone", %{state_dir: state_dir} do
       for file <- ["oauth_clients.dets", "oauth_codes.dets", "oauth_tokens.dets"] do
         assert {:ok, %File.Stat{mode: mode}} = File.stat(Path.join(state_dir, file))
@@ -377,7 +399,35 @@ defmodule Vigil.OAuth.PersistenceTest do
     end
   end
 
-  describe "the in-memory adapter" do
+  ## What only the in-memory adapter can be asked
+
+  describe "the in-memory adapter alone" do
+    # The same claim as the `:dets` half's, asked the way this adapter can be
+    # asked it. Sweeping the two ephemeral tables is invisible through the
+    # seam, so without a test on each side of it an adapter could skip the
+    # sweep entirely and the contract suite would stay green.
+    test "the sweep reclaims the ephemeral rows rather than only hiding them" do
+      {persistence, tables} = Persistence.Memory.holding()
+      window = Persistence.rate_limit_window()
+      ttl = Persistence.cimd_ttl()
+      doc = %{client_id: "c", name: "C", redirect_uris: []}
+
+      :ok = persistence.record_failure.("ip-stale", @now - window - 1)
+      :ok = persistence.record_failure.("ip-live", @now)
+      :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
+      :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
+
+      assert Persistence.Memory.count(tables, :rate_limits) == 2
+      assert Persistence.Memory.count(tables, :cimd_cache) == 2
+
+      assert :ok = persistence.sweep_expired.(@now)
+
+      assert Persistence.Memory.count(tables, :rate_limits) == 1
+      assert Persistence.Memory.count(tables, :cimd_cache) == 1
+      assert persistence.rate_limited?.("ip-live", @now) == false
+      assert {:ok, ^doc} = persistence.cimd_cache_get.("https://fresh.example/m", @now)
+    end
+
     test "answers every question, at the arity it is asked at" do
       adapter = Persistence.Memory.new()
 

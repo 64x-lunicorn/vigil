@@ -18,34 +18,18 @@ defmodule Vigil.OAuth.JanitorTest do
 
   use ExUnit.Case, async: false
 
-  alias Vigil.OAuth.{Client, Code, Flow, Janitor, Store}
+  alias Vigil.OAuth.{Janitor, Store}
+  alias Vigil.OAuthCase
   alias Vigil.RateLimit
 
   @now 1_700_000_000
-  @redirect_uri "https://client.example.org/cb"
   @limiter_windows :vigil_rate_limits
 
   setup do
-    Vigil.OAuthCase.setup!()
+    OAuthCase.setup!()
   end
 
-  # A real authorization code, minted by the module that owns the record at
-  # the instant given. A code lives a minute, so one minted an hour ago has
-  # expired at @now and one minted at @now has not.
-  defp mint_code(persistence, now) do
-    client = Client.register(persistence, "Client", [@redirect_uri], now)
-
-    {:ok, ctx} =
-      Flow.authorize_request(persistence, %{
-        "client_id" => client.client_id,
-        "redirect_uri" => @redirect_uri,
-        "response_type" => "code",
-        "code_challenge" => "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-        "code_challenge_method" => "S256"
-      })
-
-    Code.issue(persistence, ctx, now)
-  end
+  defp mint_code(persistence, now), do: OAuthCase.mint_code(persistence, now)
 
   # `:sys.get_state/1` is a call, so it is handled after the `:sweep` info
   # message already in the mailbox — a barrier rather than a sleep.
