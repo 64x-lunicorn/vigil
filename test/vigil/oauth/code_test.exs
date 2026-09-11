@@ -12,7 +12,7 @@ defmodule Vigil.OAuth.CodeTest do
   use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Code, Flow}
+  alias Vigil.OAuth.{Code, Flow, Server}
 
   # The authorization server the code is minted for. `Vigil.OAuth.Code` reads
   # the audience off the context the request was authorized with rather than
@@ -34,7 +34,7 @@ defmodule Vigil.OAuth.CodeTest do
       Flow.register(persistence, %{"redirect_uris" => [@redirect_uri]}, @now)
 
     {:ok, ctx} =
-      Flow.authorize_request(persistence, @settings, %{
+      Flow.authorize_request(Server.new(persistence, @settings), %{
         "client_id" => client_id,
         "redirect_uri" => @redirect_uri,
         "response_type" => "code",

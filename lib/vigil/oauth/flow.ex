@@ -19,21 +19,19 @@ defmodule Vigil.OAuth.Flow do
   Verification is an OAuth 2.1 decision like the ones here and just as free of
   a conn; it only used to live in the router because the record had no owner.
 
-  Where those records are kept is nobody's decision here either. Every
-  function below takes a `Vigil.OAuth.Persistence` and hands it on, so what
-  the decisions are made *against* is the caller's — in production
-  `Vigil.OAuth.Endpoint` resolves it once when the router is initialized.
-
-  Which authorization server these are decisions *for* is the caller's too.
-  The two checks that need it — the audience an `/authorize` request may ask
-  for, and the password a consent is checked against — take a
-  `Vigil.Settings`, resolved in the same place and at the same moment as the
-  persistence beside it.
+  Which authorization server these are decisions *for*, and where its records
+  are kept, is nobody's decision here either — and it is one question rather
+  than two. `authorize_request` and `consent` take a `Vigil.OAuth.Server`: the
+  `Vigil.OAuth.Persistence` every record they read or write lives in, and the
+  `Vigil.Settings` that names the audience a request may ask for and the
+  password a consent is checked against. No caller has ever held one without
+  the other, and in production `Vigil.OAuth.Endpoint` builds the pair once,
+  when the router is initialized. `register` and `grant` ask the settings
+  nothing, so they still take the persistence alone.
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Token}
-  alias Vigil.Settings
+  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Server, Token}
 
   @doc """
   Dynamic client registration. Returns the registration response, or
@@ -84,11 +82,10 @@ defmodule Vigil.OAuth.Flow do
   code minted from it is minted for the resource this request was authorized
   for and `Vigil.OAuth.Code` has no second opinion to hold.
   """
-  @spec authorize_request(Persistence.t(), Settings.t(), map(), integer(), map()) ::
+  @spec authorize_request(Server.t(), map(), integer(), map()) ::
           {:ok, map()} | {:error, term()}
   def authorize_request(
-        persistence,
-        settings,
+        %Server{persistence: persistence, settings: settings},
         params,
         now \\ System.system_time(:second),
         net \\ Cimd.net()
@@ -146,9 +143,15 @@ defmodule Vigil.OAuth.Flow do
   authorization code when the password is right. Recording the attempt is part
   of the decision, so the caller cannot forget to.
   """
-  @spec consent(Persistence.t(), Settings.t(), String.t(), String.t() | nil, map(), integer()) ::
+  @spec consent(Server.t(), String.t(), String.t() | nil, map(), integer()) ::
           :rate_limited | :wrong_password | {:ok, String.t()}
-  def consent(persistence, settings, ip, password, ctx, now \\ System.system_time(:second)) do
+  def consent(
+        %Server{persistence: persistence, settings: settings},
+        ip,
+        password,
+        ctx,
+        now \\ System.system_time(:second)
+      ) do
     cond do
       persistence.rate_limited?.(ip, now) ->
         :rate_limited

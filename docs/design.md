@@ -960,7 +960,8 @@ and reads it back out of those options, so both halves agree on what this
 server is called and what it protects by construction rather than by two
 resolutions happening to match. `Vigil.OAuth.Flow` takes it on the two
 decisions that need it: the audience an `/authorize` request may ask for, and
-the password a consent is checked against.
+the password a consent is checked against — as one value with the persistence
+those two decisions are made against, which is the section below.
 
 **The audience a code is minted for travels in `ctx`.** `authorize_request`
 already checks the request's target against the deployment's resource, so it
@@ -988,6 +989,51 @@ application env and put it back afterwards; it passes a timezone now.
 `Vigil.ContractsTest` said so in its own comment — "the OAuth metadata reads
 issuer/resource from application env" — and now hands both metadata functions
 the settings value the fixture already had.
+
+---
+
+## The flow decides for one authorization server
+
+`Vigil.OAuth.Server` is the pair every `/authorize` and every consent is
+decided with: the `Vigil.OAuth.Persistence` its records live in, and the
+`Vigil.Settings` that says what this server is called and what it protects.
+
+**The pair is the type the two arguments already were.** `authorize_request`
+took a persistence and a settings; `consent` took the same two again;
+`Vigil.OAuth.Endpoint` resolved both and passed both to each. A pair the
+flow's callers never resolve apart, never pass apart and never substitute
+apart is one value, and stating it as one takes the question of whether the
+two agree off the table: there is no decision that can be made with this
+deployment's records and another deployment's identity.
+
+**It appeared when the settings did.** Before the deployment was resolved once,
+the flow reached the environment itself for the audience and the password, so
+there was one argument and no clump. The pair is worth naming now rather than
+then because the shape has settled — and if it stops travelling together it
+should be taken apart again rather than kept for its own sake.
+
+**The router builds it, at `init/1`, out of what it has just resolved.** Not a
+sixth option a caller could hand in: `Vigil.MCP.Server` passes persistence,
+the limiter and the settings down to that router and reads all three back out
+of its options, so a separately supplied pair could disagree with the halves
+both routers agree on. It is derived from them instead, and the two accessors
+on the router that still need one half alone — registration and the token
+endpoint ask the settings nothing, the discovery documents ask persistence
+nothing — read it off the pair rather than hold a second copy.
+
+**`register` and `grant` keep taking the persistence alone.** Neither asks the
+settings anything: a registration is checked against the redirect URIs it
+offers, and a grant against the audience its own record carries. Giving them
+the pair for uniformity would hand both a value they must not read.
+
+**What `/mcp` verifies a token with is not this pair, and that is not an
+oversight.** `Vigil.MCP.Server` holds the persistence and the settings as two
+options and asks `Vigil.OAuth.Token.validate_access/3` with the first and one
+string off the second. It holds them apart because it needs them apart: the
+timezone stamps an envelope and the owner and the language shape the writing
+instructions, and neither is an OAuth decision at all. The pair is what the
+*flow* decides with, which is the only place both halves are asked the same
+question.
 
 ---
 
