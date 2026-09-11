@@ -1,0 +1,14 @@
+# Frozen fixture — see test/vigil/vault_format_test.exs. Do not edit.
+#
+# Both spellings the format allows: a bare description string, and the
+# expanded form carrying a naming rule.
+admin:     "Finances, insurance, contracts, authorities"
+training:  "Body: planning, nutrition, recovery, metrics"
+home:      "House, energy, trades"
+journal:
+  description: "Chronological, hidden from the default search"
+  naming:
+    pattern: '^\d{4}-\d{2}-\d{2}\.md$'
+    scope: filename
+    suggestion: date
+    hint: "Journal notes are named YYYY-MM-DD.md"
