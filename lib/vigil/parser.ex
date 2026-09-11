@@ -17,12 +17,13 @@ defmodule Vigil.Parser do
 
     `Vigil.Index.Chunk` denormalises `domain` and `file_title` onto the same
     two fields, under the same convention — it is not a second convention to
-    track.
+    track. Its own copy of the helpers below is what its holders call: the
+    two structs share field names, and a helper that took either would let a
+    rename on one side splice lines by the other side's numbers.
 
     Callers that need a 0-based index into a line list (to slice or splice
     it) should reach for `heading_index/1`, `body_start_index/1` and
-    `body_end_index/1` below rather than re-deriving the offset themselves;
-    they accept any chunk-shaped map, `Vigil.Index.Chunk` included.
+    `body_end_index/1` below rather than re-deriving the offset themselves.
     """
     defstruct [
       :id,
@@ -41,14 +42,16 @@ defmodule Vigil.Parser do
       :updated_at
     ]
 
+    @type t :: %__MODULE__{}
+
     @doc "0-based index of the chunk's own heading line."
-    def heading_index(%{heading_line: line}) when is_integer(line), do: line - 1
+    def heading_index(%__MODULE__{heading_line: line}) when is_integer(line), do: line - 1
 
     @doc "0-based index of the first line of the chunk's body — one past the heading."
-    def body_start_index(%{heading_line: line}) when is_integer(line), do: line
+    def body_start_index(%__MODULE__{heading_line: line}) when is_integer(line), do: line
 
     @doc "0-based index of the line right after the chunk's body ends."
-    def body_end_index(%{body_end_line: line}) when is_integer(line), do: line
+    def body_end_index(%__MODULE__{body_end_line: line}) when is_integer(line), do: line
   end
 
   defmodule File_ do

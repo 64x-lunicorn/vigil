@@ -39,6 +39,10 @@ defmodule Vigil.IndexTest do
 
   defp ranking_index(chunks), do: %Index{chunks: Map.new(chunks, &{&1.id, &1})}
 
+  # A chunk of the shape the parser produces. Built behind a function so the
+  # type checker does not read the deliberate mismatch below as unreachable.
+  defp parsed_chunk, do: struct(Parser.Chunk, heading_line: 6, body_end_line: 7)
+
   defp parse(rel_path) do
     content = File.read!(Path.join(@fixtures, rel_path))
     {:ok, file} = Parser.parse(rel_path, content, @git_meta)
@@ -693,6 +697,29 @@ defmodule Vigil.IndexTest do
                notes: length(files),
                chunks: files |> Enum.flat_map(& &1.chunks) |> length()
              }
+    end
+  end
+
+  # The same 1-based, inclusive line numbers the parser produces, and the same
+  # 0-based translation `Vigil.Vault.Edit` splices with — on the struct the
+  # write path actually holds, so the spec and the call name one module.
+  describe "Chunk line indices" do
+    test "0-based indices for the heading, the body's first line and the line after it", %{
+      index: index
+    } do
+      chunk = Index.find_chunk(index, "bike/via-carolina.md#fueling")
+
+      assert Index.Chunk.heading_index(chunk) == chunk.heading_line - 1
+      assert Index.Chunk.body_start_index(chunk) == chunk.heading_line
+      assert Index.Chunk.body_end_index(chunk) == chunk.body_end_line
+    end
+
+    test "a chunk of another shape is refused, however its fields are named" do
+      parsed = parsed_chunk()
+
+      assert_raise FunctionClauseError, fn -> Index.Chunk.heading_index(parsed) end
+      assert_raise FunctionClauseError, fn -> Index.Chunk.body_start_index(parsed) end
+      assert_raise FunctionClauseError, fn -> Index.Chunk.body_end_index(parsed) end
     end
   end
 end

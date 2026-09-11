@@ -57,7 +57,13 @@ defmodule Vigil.Index do
 
     `heading_line` and `body_end_line` follow the same 1-based, inclusive
     convention documented on `Vigil.Parser.Chunk` — see there for what they
-    mean and for the 0-based index helpers.
+    mean.
+
+    The 0-based index helpers below are this struct's own, for the callers
+    that hold this struct: `Vigil.Vault.Edit` splices a note's lines by them.
+    They match the struct rather than a chunk-shaped map, because the two
+    chunks share every field name the splice reads — so nothing but the
+    struct itself can tell the caller it is holding the other one.
     """
     defstruct [
       :id,
@@ -79,6 +85,18 @@ defmodule Vigil.Index do
     ]
 
     @type t :: %__MODULE__{}
+
+    @doc "0-based index of the chunk's own heading line."
+    @spec heading_index(t()) :: non_neg_integer()
+    def heading_index(%__MODULE__{heading_line: line}) when is_integer(line), do: line - 1
+
+    @doc "0-based index of the first line of the chunk's body — one past the heading."
+    @spec body_start_index(t()) :: non_neg_integer()
+    def body_start_index(%__MODULE__{heading_line: line}) when is_integer(line), do: line
+
+    @doc "0-based index of the line right after the chunk's body ends."
+    @spec body_end_index(t()) :: non_neg_integer()
+    def body_end_index(%__MODULE__{body_end_line: line}) when is_integer(line), do: line
   end
 
   defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}

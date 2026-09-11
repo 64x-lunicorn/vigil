@@ -11,7 +11,11 @@ defmodule Vigil.Vault.Edit do
 
   The target of a splice is an `%Vigil.Index.Chunk{}` — the value `Store`
   already holds from the index. `Edit` depends on `Vigil.Index` for the
-  struct; `Index` does not depend back.
+  struct and for the line-index helpers it splices by; `Index` does not
+  depend back. The parser's chunk carries the same field names and is not
+  the same value: the specs and the calls here name one struct, so a rename
+  on either side is a compile error rather than a silent splice by the other
+  side's numbers.
 
   `Vigil.Vault.Policy` already guarantees a non-nil chunk
   with a non-nil heading before a splice is reached, but that guarantee lives
@@ -19,13 +23,13 @@ defmodule Vigil.Vault.Edit do
   down, so the precondition is checked here too — an error tuple, not a raise.
   """
 
-  alias Vigil.{Index, Markdown}
-  alias Vigil.Parser.Chunk
+  alias Vigil.Index.Chunk
+  alias Vigil.Markdown
 
-  @type target :: {:section, Index.Chunk.t()} | {:new_section, String.t()} | :end
+  @type target :: {:section, Chunk.t()} | {:new_section, String.t()} | :end
 
   @doc "The heading line stays; the body under it becomes `new_body`."
-  @spec replace_body(String.t(), Index.Chunk.t() | nil, String.t()) ::
+  @spec replace_body(String.t(), Chunk.t() | nil, String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
   def replace_body(content, chunk, new_body) do
     with :ok <- validate_chunk(chunk) do
@@ -47,7 +51,7 @@ defmodule Vigil.Vault.Edit do
   (docs/design.md, "How a file is written"). Only one: a wider gap someone
   set on purpose survives, one line narrower.
   """
-  @spec delete_section(String.t(), Index.Chunk.t() | nil) ::
+  @spec delete_section(String.t(), Chunk.t() | nil) ::
           {:ok, String.t()} | {:error, String.t()}
   def delete_section(content, chunk) do
     with :ok <- validate_chunk(chunk) do
@@ -122,8 +126,8 @@ defmodule Vigil.Vault.Edit do
 
   defp validate_chunk(nil), do: {:error, "no such section"}
 
-  defp validate_chunk(%{heading: nil}),
+  defp validate_chunk(%Chunk{heading: nil}),
     do: {:error, "a section without a heading cannot be edited"}
 
-  defp validate_chunk(_chunk), do: :ok
+  defp validate_chunk(%Chunk{}), do: :ok
 end
