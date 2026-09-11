@@ -16,24 +16,6 @@ FORCE=0
 UPDATE_UNIT=0
 ROLLBACK=0
 
-# Every path the script touches, named once. They were literals scattered over
-# eight steps, which made the set of things this script can reach something you
-# had to reconstruct by reading all of it — and left no way to run it anywhere
-# but a real vault host. The defaults are the production install; overriding
-# them is what scripts/test/update_test.sh does.
-PREFIX="${VIGIL_PREFIX:-/opt/vigil}"
-VAULT="${VIGIL_VAULT_DIR:-/var/lib/vigil/vault}"
-ENV_FILE="${VIGIL_ENV_FILE:-/etc/vigil/env}"
-UNIT_FILE="${VIGIL_UNIT_FILE:-/etc/systemd/system/vigil.service}"
-
-SERVICE_USER="${VIGIL_SERVICE_USER:-vigil}"
-SERVICE_GROUP="${VIGIL_SERVICE_GROUP:-vigil}"
-
-REPO="${PREFIX}/repo"
-RELEASES="${PREFIX}/releases"
-CURRENT="${PREFIX}/current"
-PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
-
 usage() {
   cat <<'EOF'
 scripts/update.sh — switch code revision.
@@ -110,23 +92,6 @@ if [ "$SKIP_TESTS" = "1" ]; then
 fi
 
 ## ── Test seam ────────────────────────────────────────────────────────────
-
-# The path and account overrides above reach this script but not all of
-# scripts/lib.sh, which still hardcodes the production install in `as_vigil`,
-# `vigil_seed_token` and `verify()`. Half an override is worse than none: a run
-# with VIGIL_PREFIX pointing elsewhere would build in one install and then
-# verify the other. Until lib.sh takes them too they are what the test uses and
-# nothing else.
-if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" != "1" ]; then
-  for overridden in VIGIL_PREFIX VIGIL_VAULT_DIR VIGIL_ENV_FILE VIGIL_UNIT_FILE \
-    VIGIL_SERVICE_USER VIGIL_SERVICE_GROUP; do
-    if [ -n "${!overridden:-}" ]; then
-      err "${overridden} is set, but scripts/lib.sh still hardcodes the production paths."
-      err "These overrides exist for scripts/test/update_test.sh and are refused outside it."
-      exit 2
-    fi
-  done
-fi
 
 
 # With VIGIL_UPDATE_TEST_STUBS=1 the four things that need a real vault host —

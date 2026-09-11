@@ -29,6 +29,49 @@ DONE_ITEMS=()
 WARNINGS=()
 NEXT_STEPS=()
 
+## ── The installation layout ──────────────────────────────────────────────
+#
+# Every path and account the shared functions below reach for, named once.
+# update.sh named its own set in #140 and the functions here kept their
+# literals, which meant an override reached half the script — so update.sh had
+# to refuse the overrides outside its own test. They live here now, and that
+# refusal is gone.
+#
+# The defaults are the production install. Overriding them is what
+# scripts/test/verify_test.sh and scripts/test/update_test.sh do; nothing else
+# should.
+#
+# Shell names are unprefixed on purpose. `source_env_for_verify` does
+# `set -a; source "$ENV_FILE"`, and /etc/vigil/env owns the VIGIL_* namespace
+# — a layout variable spelled VIGIL_STATE_DIR could be overwritten by the file
+# it was used to find.
+# The directives below are on the names a sourcing script reads but this file
+# does not: ShellCheck cannot see across the `source` line.
+PREFIX="${VIGIL_PREFIX:-/opt/vigil}"
+STATE_DIR="${VIGIL_STATE_DIR:-/var/lib/vigil}"
+# shellcheck disable=SC2034 # read by the sourcing script
+VAULT="${VIGIL_VAULT_DIR:-${STATE_DIR}/vault}"
+# shellcheck disable=SC2034 # read by the sourcing script
+ENV_FILE="${VIGIL_ENV_FILE:-/etc/vigil/env}"
+# shellcheck disable=SC2034 # read by the sourcing script
+UNIT_FILE="${VIGIL_UNIT_FILE:-/etc/systemd/system/vigil.service}"
+
+SERVICE="${VIGIL_SERVICE_NAME:-vigil}"
+SERVICE_USER="${VIGIL_SERVICE_USER:-vigil}"
+# shellcheck disable=SC2034 # read by the sourcing script
+SERVICE_GROUP="${VIGIL_SERVICE_GROUP:-vigil}"
+
+REPO="${PREFIX}/repo"
+# shellcheck disable=SC2034 # read by the sourcing script
+RELEASES="${PREFIX}/releases"
+CURRENT="${PREFIX}/current"
+# shellcheck disable=SC2034 # read by the sourcing script
+PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
+
+# What wait_until_healthy polls. Unauthenticated and answered before any token
+# exists, which is what makes it usable as a readiness probe.
+HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/.well-known/oauth-protected-resource}"
+
 ## ── Logging ──────────────────────────────────────────────────────────────
 
 _timestamp() { date +%H:%M:%S; }
@@ -183,7 +226,7 @@ confirm_destructive() {
 
 # as_vigil <cmd...>  — e.g. as_vigil git -C "$VAULT" fetch
 #                        or   as_vigil bash -c 'cd ... && mix test'
-# Always starts from /var/lib/vigil (vigil's home), never from the caller's
+# Always starts from the service account's home (the state dir), never from the caller's
 # cwd. root often runs these scripts from directories vigil cannot access
 # (/root/... for instance); without an explicit cd even a plain "git
 # --version" fails with "Permission denied" while stat'ing the inherited
@@ -196,7 +239,7 @@ as_vigil() {
   # non-ASCII names then fail with "no such file or directory" on a path
   # File.ls itself just returned. C.UTF-8 is part of glibc, no locale-gen
   # needed.
-  su -s /bin/bash -c "cd /var/lib/vigil && LANG=C.UTF-8 LC_ALL=C.UTF-8 ${quoted}" vigil
+  su -s /bin/bash -c "cd ${STATE_DIR} && LANG=C.UTF-8 LC_ALL=C.UTF-8 ${quoted}" "$SERVICE_USER"
 }
 
 # run_step "<description>" -- <cmd...>  — honours --dry-run consistently.
@@ -233,11 +276,11 @@ write_file_atomically() {
 # "noconnection"/connection refused because the BEAM has not finished booting.
 wait_until_healthy() {
   local i=0
-  while ! curl -fsS "http://localhost:4000/.well-known/oauth-protected-resource" >/dev/null 2>&1; do
+  while ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; do
     i=$((i + 1))
     if [ "$i" -ge 30 ]; then
-      err "Service did not become healthy within 30s. journalctl -u vigil -n 50:"
-      journalctl -u vigil -n 50 --no-pager >&2
+      err "Service did not become healthy within 30s. journalctl -u ${SERVICE} -n 50:"
+      journalctl -u "$SERVICE" -n 50 --no-pager >&2
       return 1
     fi
     sleep 1
@@ -264,13 +307,14 @@ wait_until_healthy() {
 # variant that carried no grant_id.
 vigil_seed_token() {
   local resource="$1" scope="$2"
-  if systemctl is-active --quiet vigil; then
+  if systemctl is-active --quiet "$SERVICE"; then
     local ausdruck
     ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(\"${resource}\", \"${scope}\", 3650 * 86400, System.system_time(:second)))"
-    as_vigil /opt/vigil/current/bin/vigil rpc "$ausdruck" | tail -1
+    as_vigil "${CURRENT}/bin/vigil" rpc "$ausdruck" | tail -1
   else
-    # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
-    as_vigil bash -c 'cd /opt/vigil/repo && MIX_ENV=prod mix vigil.seed_token --state-dir /var/lib/vigil --resource "$1" --scope "$2" --ttl-days 3650' _ "$resource" "$scope" | tail -1
+    # shellcheck disable=SC2016 # $1..$3 are expanded by the inner bash -c, not here
+    as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix vigil.seed_token --state-dir "$2" --resource "$3" --scope "$4" --ttl-days 3650' \
+      _ "$REPO" "$STATE_DIR" "$resource" "$scope" | tail -1
   fi
 }
 
@@ -333,7 +377,7 @@ mcp_error_text() {
 
 verify() {
   local all_ok=1
-  local last_chunks_file="/var/lib/vigil/.last_chunks"
+  local last_chunks_file="${STATE_DIR}/.last_chunks"
 
   echo
   echo "=== verify() ==="
@@ -345,10 +389,10 @@ verify() {
   VIGIL_SKILL_KEY="$(echo "$skill_read_response" | mcp_payload '.result.content' 2>/dev/null | grep -oP 'SkillKey: \K[0-9a-f]+' || true)"
 
   # 1. Service active
-  if systemctl is-active --quiet vigil; then
-    echo "  ✓ [1] systemctl is-active vigil"
+  if systemctl is-active --quiet "$SERVICE"; then
+    echo "  ✓ [1] systemctl is-active ${SERVICE}"
   else
-    echo "  ✗ [1] Service is not running — journalctl -u vigil -n 50"
+    echo "  ✗ [1] Service is not running — journalctl -u ${SERVICE} -n 50"
     all_ok=0
   fi
 
@@ -400,7 +444,7 @@ verify() {
 
   # 6. Chunk count has not dropped (warning, not an abort)
   local chunks_now chunks_before=0
-  chunks_now="$(journalctl -u vigil -n 20 --no-pager 2>/dev/null | grep -oP '\d+(?= Chunks)' | tail -1 || true)"
+  chunks_now="$(journalctl -u "$SERVICE" -n 20 --no-pager 2>/dev/null | grep -oP '\d+(?= Chunks)' | tail -1 || true)"
   if [ -f "$last_chunks_file" ]; then
     chunks_before="$(cat "$last_chunks_file")"
   fi
@@ -497,8 +541,8 @@ verify() {
   fi
 
   # 11. Domain drift between _domains.yml and the actual directories
-  if journalctl -u vigil -n 50 --no-pager 2>/dev/null | grep -q "has no entry in _domains.yml\|has no matching directory"; then
-    echo "  ✗ [11] Domain drift between _domains.yml and vault directories (see journalctl -u vigil)"
+  if journalctl -u "$SERVICE" -n 50 --no-pager 2>/dev/null | grep -q "has no entry in _domains.yml\|has no matching directory"; then
+    echo "  ✗ [11] Domain drift between _domains.yml and vault directories (see journalctl -u ${SERVICE})"
     all_ok=0
   else
     echo "  ✓ [11] No domain drift in the recent logs"
