@@ -73,6 +73,21 @@ jobs:
           version-file: .tool-versions
           version-type: strict
 
+      # setup-beam reports its `otp-version` already prefixed — `OTP-27.3.4`,
+      # not `27.3.4`. Every consumer here writes a prefix of its own, so the
+      # value is stripped once, here, rather than corrected at each use: the
+      # first release went out as `vigil-0.1.1-otpOTP-27.3.4-...` because two
+      # places read the raw output and neither adjusted it. `#OTP-` removes the
+      # prefix when it is there and leaves the value alone when it is not, so
+      # this holds if setup-beam ever reports the bare version.
+      - name: State the OTP version once
+        id: otp
+        env:
+          OTP: ${{ steps.beam.outputs.otp-version }}
+        run: |
+          set -euo pipefail
+          echo "version=${OTP#OTP-}" >> "$GITHUB_OUTPUT"
+
       - name: Fetch dependencies
         env:
           MIX_ENV: prod
@@ -112,7 +127,7 @@ jobs:
         id: package
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          OTP: ${{ steps.beam.outputs.otp-version }}
+          OTP: ${{ steps.otp.outputs.version }}
         run: |
           set -euo pipefail
           name="vigil-${VERSION}-otp${OTP}-linux-x86_64"
@@ -178,7 +193,7 @@ jobs:
           ## Artifacts
 
           The attached tarball is a prebuilt OTP release for linux-x86_64 on
-          OTP ${{ steps.beam.outputs.otp-version }}, for hosts without a build
+          OTP ${{ steps.otp.outputs.version }}, for hosts without a build
           toolchain. Verify it before use:
 
           \`\`\`bash
