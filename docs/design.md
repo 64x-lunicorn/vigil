@@ -340,12 +340,18 @@ Three layers guard every write, in this order.
 **1. Security.** No `..`, no absolute paths, no backslashes, no null bytes, and
 no path segment starting with `.` or `_`. Checked before *and* after
 normalization — which is not a fact each caller has to hold.
-`Vigil.Slug.canonical_path/1` is the two steps in that one order, and the
-callers that want a path the vault might store ask it rather than the halves:
-`Vigil.Vault.Policy` for a section id's path part, `Vigil.Index.resolve/2` for
-every read and for the write gate's own lookup. `safe_path/1` stays public for
-the two write operations that want what normalization says about a path no
-filename can be derived from, and they spell the order out.
+`Vigil.Slug.canonical/1` is the two steps in that one order with both checks,
+and every caller that turns a path a caller typed into the path the vault
+stores asks it or the `canonical_path/1` beside it. The two differ on one
+answer and nothing else: a path no filename can be derived from comes back
+unchanged from `canonical_path/1`, because a reader answers for it the way it
+answers a miss, and as `{:error, :empty}` from `canonical/1`, because
+`Vigil.Vault.Policy`'s `:create` and `:move_note` have a sentence of their own
+to say about it — and because `:create` also reports what normalization
+changed. `safe_path/1` stays public for the write gate's other question —
+whether a path names a writable note at all — which is asked of a path that is
+not being normalized there: the one an operation on an existing note was
+given, or the canonical form an earlier step already produced.
 
 The order is load-bearing: normalization slugifies every segment, so it turns
 `_domains.yml` into `domains.yml` and `/abs/x.md` into `abs/x.md`. A path
@@ -571,13 +577,14 @@ so `/bike/via-carolina.md#gear` — which normalizes onto a real chunk id —
 resolved for the write path and was refused for the read path.
 
 **Safety and the canonical form come back together**, from
-`Vigil.Slug.canonical_path/1`. Normalization slugifies every segment, which
-turns `_domains.yml` into `domains.yml` and `/abs/x.md` into `abs/x.md`, so a
-path checked only after it is normalized is a path whose check the
-normalization has laundered. That order used to be a fact each caller had to
-know — checked before normalization in `Vigil.Vault.Policy`, again after, under
-a comment explaining why. It is one function's now, and a caller that does not
-hold the order cannot get it wrong.
+`Vigil.Slug.canonical/1` and the `canonical_path/1` over it. Normalization
+slugifies every segment, which turns `_domains.yml` into `domains.yml` and
+`/abs/x.md` into `abs/x.md`, so a path checked only after it is normalized is
+a path whose check the normalization has laundered. That order used to be a
+fact each caller had to know — checked before normalization in
+`Vigil.Vault.Policy`, again after, under a comment explaining why. It is one
+function's now, and a caller that does not hold the order cannot get it
+wrong.
 
 The write then goes to the resolved record's canonical path, never to one
 re-derived by splitting the id on its fragment. That is what makes the leniency
@@ -889,7 +896,11 @@ counted and how one is reclaimed stays each adapter's own — a match-spec
 delete against ETS, a map split against the agent — which is what leaves the
 contract suite something to catch. `budget/2` belongs to neither adapter: it
 reads what the deployment configured, once, where a router is initialized, and
-is handed to `limited?` as an argument from there on.
+is handed to `limited?` as an argument from there on. What was read is judged
+by `budget/3`, which takes it as an argument — so what counts as a budget can
+be stated against a budget rather than against global application state, and
+the limiter's own suite states the budgets it is about instead of writing them
+into an application env every other async file shares.
 
 **The missing-table guard is the production adapter's alone.** That table is
 owned by the limiter's process and is gone while that process restarts, so a
@@ -915,15 +926,16 @@ the hot path.
 
 `Vigil.Settings` is what the deployment says about itself: the vault's
 timezone, the authorization server's identity — issuer, resource, consent
-password — and the two strings that shape the writing instructions handed to
-the MCP client. `Vigil.Settings.from_env/0` is the only place those six keys
-are read, `Vigil.Application` calls it once where the supervision tree is
-built, and everything below takes the result as an option.
+password, and the window an AP-4 SkillKey rotates on — and the two strings
+that shape the writing instructions handed to the MCP client.
+`Vigil.Settings.from_env/0` is the only place those seven keys are read,
+`Vigil.Application` calls it once where the supervision tree is built, and
+everything below takes the result as an option.
 
 **The shape is `Vigil.SkillKey`'s**, which bundled the HMAC secret and the
 rotation window into one value because neither derives a token alone, and made
-every function there take the bundle. What is new is the reason: these six do
-not derive anything together. They are one value because of *where they are
+every function there take the bundle. What is new is the reason: these seven
+do not derive anything together. They are one value because of *where they are
 read*. An environment read belongs in the composition root, and eight modules
 that each asked for one key with a default of its own had no way to be handed
 another deployment.
@@ -935,11 +947,13 @@ see it, and not at the first write. The module-side copies — `Vigil.Clock`'s
 `"Europe/Berlin"`, `Vigil.MCP.Server`'s `"the vault owner"` and `"English"` —
 are gone with the reads that used them.
 
-**Where each one lands.** `Vigil.Store` keeps the timezone in its state for a
-write that arrived without an instant of its own, and publishes it in the
-table beside the vault path, so a caller resolving its own instant reads the
-deployment the writer was built with. `Vigil.MCP.Envelope.for_tool/5` takes it
-as its fifth argument, for the same reason the four before it are arguments.
+**Where each one lands.** `Vigil.Store` publishes the timezone in its table
+beside the vault path, so a caller resolving its own instant reads the
+deployment the writer was built with — and reads it back out of that table
+itself, for a write that arrived without an instant of its own. It is not in
+the state as well: one copy of the fact, and nothing that could hold a second
+one that has drifted. `Vigil.MCP.Envelope.for_tool/5` takes it as its fifth
+argument, for the same reason the four before it are arguments.
 `Vigil.MCP.Server` resolves the value at `init/1` and hands it down to
 `Vigil.OAuth.Endpoint` exactly as it hands down persistence and the limiter —
 and reads it back out of those options, so both halves agree on what this
@@ -956,11 +970,18 @@ checked against, and `Code` has no second opinion to hold.
 
 **What the composition root reads is out of scope and stays there.** The vault
 path, the exclusions, the git remote, the state dir and the port are read in
-`Vigil.Application` and handed to the children that need them. One exception
-is left standing on purpose: `Vigil.SkillKey.config/0` still reads
-`auth_password` for itself, where it is the AP-4 HMAC secret rather than the
-consent password, bundled with the rotation window that nothing else wants.
-That bundle is the shape this section copies, not something it replaces.
+`Vigil.Application` and handed to the children that need them.
+
+**The SkillKey is derived from what was resolved, not read again.** The
+consent password is the AP-4 HMAC secret in a second role, so `Vigil.SkillKey`
+takes it from the settings rather than from the environment, and the rotation
+window joined them there — one resolution, and `VIGIL_SKILLKEY_TTL`'s default
+stated once in `config/runtime.exs` like every other. `Vigil.SkillKey.key/1`
+is where the deployment's settings become the bundle that module's functions
+take, and `Vigil.MCP.Server` hands that bundle to `Vigil.MCP.Tools.dispatch/5`
+the way it hands the timezone to the envelope. The gate and the `skill_read`
+that hands a key out are then two callers of one value, and neither can be
+pointed at a deployment the other is not.
 
 **Two more test files run in parallel.** `Vigil.ClockTest` set `:tz` in global
 application env and put it back afterwards; it passes a timezone now.

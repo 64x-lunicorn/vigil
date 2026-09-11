@@ -97,7 +97,7 @@ defmodule Vigil.Vault.Facts do
   contract does everywhere else here (docs/design.md, "The write path").
 
   `now` is the instant the write's own response's envelope was decided at
-  (`Vigil.MCP.Envelope.for_tool/4`) and `today` is that instant's own date, in
+  (`Vigil.MCP.Envelope.for_tool/5`) and `today` is that instant's own date, in
   that instant's own zone. It is derived from what was handed in rather than
   read from a clock here — see docs/design.md, "The write path", for what a
   second clock read behind the writer cost.

@@ -158,8 +158,9 @@ defmodule Vigil.Slug do
   the caller's own rule; `Vigil.Vault.Policy` adds the write ones on top,
   `Vigil.Index` adds none.
 
-  Where it goes relative to `normalize_path/1` is `canonical_path/1`'s to
-  know, not each caller's: a caller that needs both wants that one.
+  Where it goes relative to `normalize_path/1` is `canonical/1`'s to know, not
+  each caller's: a caller that needs both wants that function, or
+  `canonical_path/1` beside it.
 
   Returns `:ok` or `{:error, "Invalid path"}` — the message callers hand back
   verbatim.
@@ -177,30 +178,47 @@ defmodule Vigil.Slug do
   end
 
   @doc """
-  The canonical form of a vault-relative path, or the refusal `safe_path/1`
-  gives.
+  The canonical form of a vault-relative path and whether normalizing it
+  changed anything, or the refusal the path earns.
 
-  The two steps in the one order they are safe in. `normalize_path/1`
-  slugifies every segment, which turns `_domains.yml` into `domains.yml`,
-  `/abs/x.md` into `abs/x.md` and `a\\b.md` into `a-b.md` — so a path checked
-  only *after* it is normalized is a path whose check the normalization has
-  laundered. Checking before and after is the rule, and this is where it is
-  stated: every caller that turns a path a caller typed into the path the
-  vault stores needs it, and a caller cannot get the order wrong if it does
-  not hold the order.
+  The two steps in the one order they are safe in, and both checks.
+  `normalize_path/1` slugifies every segment, which turns `_domains.yml` into
+  `domains.yml`, `/abs/x.md` into `abs/x.md` and `a\\b.md` into `a-b.md` — so a
+  path checked only *after* it is normalized is a path whose check the
+  normalization has laundered. The check after it is the other half of the
+  same rule: normalization must not be able to hand back a path that would
+  have been refused. Checking before and after is the rule, and this is where
+  it is stated: every caller that turns a path a caller typed into the path
+  the vault stores needs it, and a caller cannot get the order wrong if it
+  does not hold the order.
 
-  A path no filename can be derived from comes back unchanged rather than as
-  an error. It will not be found either way, and a caller should answer for it
+  `{:error, :empty}` is a path no filename can be derived from — the one
+  answer the two callers want differently, which is why `canonical_path/1` is
+  the other function rather than an option here.
+  """
+  @spec canonical(String.t()) :: {:ok, String.t(), boolean} | {:error, :empty | String.t()}
+  def canonical(path) do
+    with :ok <- safe_path(path),
+         {:ok, normalized, changed?} <- normalize_path(path),
+         :ok <- safe_path(normalized) do
+      {:ok, normalized, changed?}
+    end
+  end
+
+  @doc """
+  `canonical/1` for a caller that wants the path alone, and for which a path
+  no filename can be derived from is not an error.
+
+  Such a path comes back unchanged rather than as an error. It will not be found either way, and a caller should answer for it
   the way it answers a miss — `Vigil.Index` does, and `Vigil.Vault.Policy`
-  wants the same verdict.
+  wants the same verdict when it is resolving a section id.
   """
   @spec canonical_path(String.t()) :: {:ok, String.t()} | {:error, String.t()}
   def canonical_path(path) do
-    with :ok <- safe_path(path) do
-      case normalize_path(path) do
-        {:ok, normalized, _changed?} -> {:ok, normalized}
-        {:error, _reason} -> {:ok, path}
-      end
+    case canonical(path) do
+      {:ok, normalized, _changed?} -> {:ok, normalized}
+      {:error, :empty} -> {:ok, path}
+      {:error, message} -> {:error, message}
     end
   end
 

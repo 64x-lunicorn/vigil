@@ -1,5 +1,5 @@
 defmodule Vigil.MCP.ToolsDispatchTest do
-  # Every test here hands `dispatch/4` a writer of its own — the stub by pid,
+  # Every test here hands `dispatch/5` a writer of its own — the stub by pid,
   # the one describe that needs a real Store by a name nothing else uses — so
   # this file queues behind no registered atom and runs beside the rest.
   #
@@ -16,6 +16,11 @@ defmodule Vigil.MCP.ToolsDispatchTest do
   # a call that must not carry it.
   @now ~U[2026-07-09 11:20:00Z]
 
+  # The deployment's SkillKey, stated rather than resolved — one more thing
+  # this file hands `dispatch/5` rather than sharing with the rest of the
+  # suite, so `skill_key/0` below signs with the key the gate checks against.
+  @key %{secret: "dispatch-test-secret", window: 3600}
+
   # Answers every `{op, params}` the way the tool layer's caller does — by
   # forwarding it to the test and replying with whatever the test asked for.
   # Nothing about a tool is known here: that is the point, since what dispatch
@@ -23,7 +28,7 @@ defmodule Vigil.MCP.ToolsDispatchTest do
   defmodule StoreStub do
     use GenServer
 
-    # Registered under no name at all: the writer travels to `dispatch/4` as
+    # Registered under no name at all: the writer travels to `dispatch/5` as
     # the pid `start_supervised!/1` hands back, which is one writer per test
     # rather than one atom the whole file takes turns on.
     def start_link({test, reply}), do: GenServer.start_link(__MODULE__, {test, reply})
@@ -42,13 +47,14 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     start_supervised!({StoreStub, {self(), reply}})
   end
 
-  defp skill_key, do: Vigil.SkillKey.current(Vigil.SkillKey.config())
+  defp skill_key, do: Vigil.SkillKey.current(@key)
 
   describe "the call each tool makes comes from the table" do
     test "search sends its declared operation with every declared parameter" do
       store = start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch(store, "search", %{"query" => "tires"}, @now)
+      assert {:ok, :stub_result} =
+               Tools.dispatch(store, "search", %{"query" => "tires"}, @now, @key)
 
       assert_receive {:store_call, {:search, params}}
 
@@ -64,7 +70,7 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "a parameterless tool sends an empty params map" do
       store = start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch(store, "reload", %{}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "reload", %{}, @now, @key)
       assert_receive {:store_call, {:reload, %{}}}
     end
 
@@ -75,17 +81,17 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "a tool declaring now: is handed the response's instant" do
       store = start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch(store, "current", %{}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "current", %{}, @now, @key)
       assert_receive {:store_call, {:current, %{now: @now}}}
 
-      assert {:ok, :stub_result} = Tools.dispatch(store, "lint", %{}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "lint", %{}, @now, @key)
       assert_receive {:store_call, {:lint, %{now: @now}}}
     end
 
     test "a tool that declares no instant is not handed one" do
       store = start_store()
 
-      Tools.dispatch(store, "search", %{"query" => "tires"}, @now)
+      Tools.dispatch(store, "search", %{"query" => "tires"}, @now, @key)
       assert_receive {:store_call, {:search, params}}
       refute Map.has_key?(params, :now)
     end
@@ -103,7 +109,8 @@ defmodule Vigil.MCP.ToolsDispatchTest do
                    "confirm" => true,
                    "skill_key" => skill_key()
                  },
-                 @now
+                 @now,
+                 @key
                )
 
       assert_receive {:store_call, {:move_note, params}}
@@ -124,7 +131,8 @@ defmodule Vigil.MCP.ToolsDispatchTest do
           "type" => "decision",
           "prefer" => "reference"
         },
-        @now
+        @now,
+        @key
       )
 
       assert_receive {:store_call, {:search, params}}
@@ -135,10 +143,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "links' direction default converts on the same path a supplied value does" do
       store = start_store()
 
-      Tools.dispatch(store, "links", %{"id" => "bike/x.md"}, @now)
+      Tools.dispatch(store, "links", %{"id" => "bike/x.md"}, @now, @key)
       assert_receive {:store_call, {:links, %{direction: :both, depth: 1}}}
 
-      Tools.dispatch(store, "links", %{"id" => "bike/x.md", "direction" => "out"}, @now)
+      Tools.dispatch(store, "links", %{"id" => "bike/x.md", "direction" => "out"}, @now, @key)
       assert_receive {:store_call, {:links, %{direction: :out}}}
     end
 
@@ -156,7 +164,8 @@ defmodule Vigil.MCP.ToolsDispatchTest do
           "ends" => "2026-01-02T00:00:00Z",
           "skill_key" => skill_key()
         },
-        @now
+        @now,
+        @key
       )
 
       assert_receive {:store_call, {:create, params}}
@@ -174,7 +183,8 @@ defmodule Vigil.MCP.ToolsDispatchTest do
           "type" => "reference",
           "skill_key" => skill_key()
         },
-        @now
+        @now,
+        @key
       )
 
       assert_receive {:store_call, {:update_frontmatter, params}}
@@ -195,7 +205,8 @@ defmodule Vigil.MCP.ToolsDispatchTest do
           "content" => "# X",
           "skill_key" => skill_key()
         },
-        @now
+        @now,
+        @key
       )
 
       assert_receive {:store_call, {:create, params}}
@@ -213,7 +224,8 @@ defmodule Vigil.MCP.ToolsDispatchTest do
           "content" => "---\nname: x\n---\n# X\n",
           "skill_key" => skill_key()
         },
-        @now
+        @now,
+        @key
       )
 
       assert_receive {:store_call, {:skill_write, params}}
@@ -256,24 +268,24 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     # skill read answered against another writer's vault is a read of the
     # wrong vault, and nothing about the answer would say so.
     test "the vault path comes from the writer that was handed in", %{store: store, vault: vault} do
-      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch(store, "skill_list", %{}, @now)
+      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch(store, "skill_list", %{}, @now, @key)
       assert Vigil.Store.vault_path(store) == vault
     end
 
     test "skill_list answers while the writer is suspended", %{store: store} do
-      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch(store, "skill_list", %{}, @now)
+      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch(store, "skill_list", %{}, @now, @key)
     end
 
     test "skill_read answers while the writer is suspended, key and all", %{store: store} do
       assert {:ok, %{name: "tdd", content: content}} =
-               Tools.dispatch(store, "skill_read", %{"name" => "tdd"}, @now)
+               Tools.dispatch(store, "skill_read", %{"name" => "tdd"}, @now, @key)
 
       assert content =~ "SkillKey:"
     end
 
     test "a missing skill still hands back the bootstrap key", %{store: store} do
       assert {:error, message} =
-               Tools.dispatch(store, "skill_read", %{"name" => "does-not-exist"}, @now)
+               Tools.dispatch(store, "skill_read", %{"name" => "does-not-exist"}, @now, @key)
 
       assert message =~ "tdd"
       assert message =~ "SkillKey:"
@@ -284,21 +296,22 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     test "an operation that cannot fail answers with its value, which becomes {:ok, value}" do
       store = start_store([%{id: "bike/x.md#a"}])
 
-      assert Tools.dispatch(store, "search", %{"query" => "tires"}, @now) ==
+      assert Tools.dispatch(store, "search", %{"query" => "tires"}, @now, @key) ==
                {:ok, [%{id: "bike/x.md#a"}]}
     end
 
     test "an operation that can fail answers with a result tuple, passed through unchanged" do
       store = start_store({:error, "no such note"})
 
-      assert Tools.dispatch(store, "read", %{"id" => "bike/nope.md"}, @now) ==
+      assert Tools.dispatch(store, "read", %{"id" => "bike/nope.md"}, @now, @key) ==
                {:error, "no such note"}
     end
 
     test "an {:ok, value} answer is not wrapped twice" do
       store = start_store({:ok, %{title: "X"}})
 
-      assert Tools.dispatch(store, "read", %{"id" => "bike/x.md"}, @now) == {:ok, %{title: "X"}}
+      assert Tools.dispatch(store, "read", %{"id" => "bike/x.md"}, @now, @key) ==
+               {:ok, %{title: "X"}}
     end
   end
 end

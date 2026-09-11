@@ -93,24 +93,36 @@ defmodule Vigil.RateLimit do
   def window_seconds, do: @window_seconds
 
   @doc """
-  The budget configured under `key`, or `default` when what is there is not a
-  budget at all.
+  The budget configured under `key`, judged by `budget/3`.
 
-  Both surfaces take their budget from application config, which means both can
-  be handed a mistyped environment variable. Falling back keeps that from
-  producing a limit that refuses everything or crashes on the comparison, and
-  the warning keeps it from being invisible: a limit that is quietly not the
-  one you configured is worse than a loud one.
+  The one environment read the limiter makes, and a router makes it once at
+  `init/1`. An unset key reads as `default` here rather than as a
+  misconfiguration there: not configuring a budget is not a mistake, and
+  nothing is warned about.
   """
-  def budget(key, default) do
-    case Application.get_env(:vigil, key, default) do
-      rpm when is_integer(rpm) and rpm > 0 ->
-        rpm
+  def budget(key, default), do: budget(key, Application.get_env(:vigil, key, default), default)
 
-      other ->
-        Logger.warning("#{key} is #{inspect(other)}, not a positive integer — using #{default}")
-        default
-    end
+  @doc """
+  `configured` as a budget, or `default` when it is not one.
+
+  Both surfaces take their budget from application configuration, which means
+  both can be handed a mistyped environment variable. Falling back keeps that
+  from producing a limit that refuses everything or crashes on the comparison,
+  and the warning keeps it from being invisible: a limit that is quietly not
+  the one you configured is worse than a loud one. `key` names the setting in
+  that warning, because a deployment configures three budgets and an operator
+  has to be able to tell which one it is about.
+
+  What the deployment configured is an argument rather than a read of its own,
+  so the judgement can be stated against a budget instead of against global
+  application state.
+  """
+  def budget(_key, rpm, _default) when is_integer(rpm) and rpm > 0, do: rpm
+
+  def budget(key, configured, default) do
+    Logger.warning("#{key} is #{inspect(configured)}, not a positive integer — using #{default}")
+
+    default
   end
 
   # True if `key` has exceeded `budget` requests for the fixed window

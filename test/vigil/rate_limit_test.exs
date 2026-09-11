@@ -166,51 +166,50 @@ defmodule Vigil.RateLimitTest do
     end
   end
 
-  describe "budget/2" do
-    # Both surfaces read their budget from application config, so what counts
-    # as a budget is the limiter's question rather than each caller's. It
-    # belongs to neither adapter: it is read once, where a router is
-    # initialized, and handed to `limited?` as an argument from there on.
+  describe "budget/3" do
+    # What counts as a budget is the limiter's question rather than each
+    # caller's, so both surfaces ask it the same way. What the deployment
+    # configured arrives as an argument, the way every other claim in this
+    # file arrives: the budgets under test are stated here, and nothing in an
+    # async file writes a budget into global application env to state one.
     #
-    # This is the one place left in the suite that writes a budget into global
-    # application env, and it is not a test stating a deployment: reading that
-    # key *is* what `budget/2` does, so there is nothing else to ask it
-    # against. The key is this file's own and nothing else reads it, so the
-    # write stays local even though the env it lands in is not.
-    setup do
-      on_exit(fn -> Application.delete_env(:vigil, :test_budget) end)
-      :ok
-    end
+    # `budget/2` is the read that produces that argument — one
+    # `Application.get_env/3` with the default in it, so an unset key arrives
+    # here as the default and is judged a budget rather than a
+    # misconfiguration. It belongs to the composition root that does the
+    # reading, and that is where it is covered: `Vigil.OAuth.EndpointTest`
+    # asks `init/1` for the budgets it resolved and names what the deployment
+    # configured, without writing any of it.
 
     test "a positive integer is the budget" do
-      Application.put_env(:vigil, :test_budget, 42)
-      assert RateLimit.budget(:test_budget, 60) == 42
+      assert RateLimit.budget(:rate_limit_rpm, 42, 60) == 42
     end
 
-    test "an unset key falls back to the default without complaining" do
+    test "the default is a budget too, which is how an unset key stays quiet" do
       log =
-        ExUnit.CaptureLog.capture_log(fn -> assert RateLimit.budget(:test_budget, 60) == 60 end)
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert RateLimit.budget(:rate_limit_rpm, 60, 60) == 60
+        end)
 
       # Not `log == ""`: `capture_log` captures the whole node's Logger output,
       # not this process's, so in a parallel suite another file's load line can
       # land inside the block. What the claim is about is this key — an unset
       # budget is not a misconfiguration and must not be reported as one — and
       # the test below asserts the exact opposite for a value that is one.
-      refute log =~ "test_budget"
+      refute log =~ "rate_limit_rpm"
     end
 
     test "a value that is not a budget falls back to the default, loudly" do
       for bad <- [0, -1, nil, "30", 1.5] do
-        Application.put_env(:vigil, :test_budget, bad)
-
         log =
           ExUnit.CaptureLog.capture_log(fn ->
-            assert RateLimit.budget(:test_budget, 60) == 60
+            assert RateLimit.budget(:rate_limit_rpm, bad, 60) == 60
           end)
 
         # A limit that is quietly not the one you configured is worse than a
-        # loud one: the operator has to be able to find out.
-        assert log =~ "test_budget"
+        # loud one: the operator has to be able to find out, and the warning
+        # names the setting because a deployment configures three of them.
+        assert log =~ "rate_limit_rpm"
         assert log =~ "not a positive integer"
       end
     end

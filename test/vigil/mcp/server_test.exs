@@ -78,6 +78,11 @@ defmodule Vigil.MCP.ServerTest do
     )
   end
 
+  # The SkillKey the router under test gates on. This file hands the router no
+  # settings, so it resolves the deployment's — and a token signed with any
+  # other key would be refused by the gate rather than by the assertion.
+  defp deployment_key, do: Vigil.SkillKey.key(Vigil.Settings.from_env())
+
   defp post(persistence, token, body, headers \\ []) do
     conn =
       conn(:post, "/mcp", Jason.encode!(body))
@@ -294,7 +299,9 @@ defmodule Vigil.MCP.ServerTest do
   } do
     pinned = ~U[2026-07-09 11:20:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
-    assert {:ok, %{now: reported}} = Tools.dispatch(@store, "current", %{}, pinned)
+    assert {:ok, %{now: reported}} =
+             Tools.dispatch(@store, "current", %{}, pinned, deployment_key())
+
     assert reported == DateTime.to_iso8601(pinned)
 
     conn =
@@ -368,7 +375,7 @@ defmodule Vigil.MCP.ServerTest do
             path: "bike/terra-speed.md",
             type: "reference",
             content: "# X\nx",
-            skill_key: Vigil.SkillKey.current(Vigil.SkillKey.config())
+            skill_key: Vigil.SkillKey.current(deployment_key())
           }
         }
       },
@@ -410,7 +417,7 @@ defmodule Vigil.MCP.ServerTest do
       token: token,
       vault: vault
     } do
-      key = Vigil.SkillKey.current(Vigil.SkillKey.config())
+      key = Vigil.SkillKey.current(deployment_key())
 
       conn =
         post(
@@ -441,7 +448,7 @@ defmodule Vigil.MCP.ServerTest do
 
     test "a skill_key from two hours ago is rejected", %{persistence: persistence, token: token} do
       stale_key =
-        Vigil.SkillKey.current(Vigil.SkillKey.config(), System.system_time(:second) - 7200)
+        Vigil.SkillKey.current(deployment_key(), System.system_time(:second) - 7200)
 
       conn =
         post(
@@ -497,7 +504,7 @@ defmodule Vigil.MCP.ServerTest do
       token: token,
       vault: vault
     } do
-      key = Vigil.SkillKey.current(Vigil.SkillKey.config())
+      key = Vigil.SkillKey.current(deployment_key())
 
       no_key =
         post(
@@ -861,7 +868,7 @@ defmodule Vigil.MCP.ServerTest do
       token: token,
       vault: vault
     } do
-      key = Vigil.SkillKey.current(Vigil.SkillKey.config())
+      key = Vigil.SkillKey.current(deployment_key())
       calls = dispatch_calls()
 
       assert MapSet.new(calls, fn {name, _args, _verify} -> name end) ==
