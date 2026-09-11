@@ -191,17 +191,42 @@ seed_oauth_state() {
   for table in clients codes tokens; do
     echo "pretend-dets-${table}-written-before-the-update" \
       >"${STATE_DIR}/oauth_${table}.dets"
+    # 0600, as Vigil.OAuth.Store opens them: these hold bearer tokens, and a
+    # fingerprint over default permissions could not tell a widening apart.
+    chmod 600 "${STATE_DIR}/oauth_${table}.dets"
   done
+  # Deliberately also seeded, and deliberately outside the fingerprint below.
   echo "17" >"${STATE_DIR}/.last_chunks"
 }
 
-# The state dir's contents, as one comparable string.
+# The three dets files, with their permissions, as one comparable string.
+#
+# Scoped to oauth_*.dets rather than the whole state dir: verify() writes the
+# fresh chunk count to .last_chunks on every real update and every rollback
+# (scripts/lib.sh), so a whole-directory assertion would be green here only
+# because this harness stubs verify() out, and would turn red for intended
+# behaviour the moment it did not.
+#
+# Mode is part of the fingerprint: these files hold bearer tokens, they are
+# chmod 0600 by the store, and "untouched" has to mean the permissions too.
 state_fingerprint() {
-  find "$STATE_DIR" -maxdepth 1 -type f -print |
+  find "$STATE_DIR" -maxdepth 1 -type f -name 'oauth_*.dets' -print |
     sort |
     while IFS= read -r file; do
-      printf '%s %s\n' "$(basename "$file")" "$(sha256_of "$file" | cut -d' ' -f1)"
+      printf '%s %s %s\n' \
+        "$(basename "$file")" \
+        "$(sha256_of "$file" | cut -d' ' -f1)" \
+        "$(mode_of "$file")"
     done
+}
+
+# stat is spelled differently on the two platforms this runs on.
+mode_of() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"
+  else
+    stat -f '%Lp' "$1"
+  fi
 }
 
 build_host() {
@@ -388,7 +413,7 @@ assert_eq "current still points at the old release" "v0" "$(current_release)"
 
 ## ── 5c. Persisted auth state survives the delivery ───────────────────────
 
-step "5c   The OAuth state dir is untouched by an update and by a rollback"
+step "5c   The OAuth tables are untouched by an update and by a rollback"
 
 # What this pins is the delivery mechanism, not the records: no BEAM runs here,
 # so the files are stand-ins. That an access token written by the *previous
@@ -400,7 +425,7 @@ BEFORE="$(state_fingerprint)"
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "the update exits 0" "0" "$RC"
-assert_eq "the state dir is byte-identical after the update" "$BEFORE" "$(state_fingerprint)"
+assert_eq "the tables are byte-identical after the update" "$BEFORE" "$(state_fingerprint)"
 
 # And again through the path that moves the symlink twice.
 build_host
@@ -411,7 +436,7 @@ touch "${BROKEN_TARGET}/.verify-fails"
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
-assert_eq "the state dir is byte-identical after the rollback" "$BEFORE" "$(state_fingerprint)"
+assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_fingerprint)"
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 

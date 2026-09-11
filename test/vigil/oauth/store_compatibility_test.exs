@@ -25,7 +25,7 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
   # state dir rather than OAuthCase's.
   use ExUnit.Case, async: false
 
-  alias Vigil.OAuth.{Persistence, Store, Token}
+  alias Vigil.OAuth.{Store, Token}
 
   @fixture Path.expand("../../fixtures/oauth_store_pre_seam", __DIR__)
   @resource "https://vault.factory-lab.org/mcp"
@@ -64,29 +64,42 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
     :dets.foldl(fn record, acc -> [record | acc] end, [], :oauth_tokens)
   end
 
-  defp token_with_scope(scope) do
+  # The long-lived token `verify()` and first access are handed: no :type, and
+  # still alive at @now. Named precisely because the fixture also holds the
+  # hour-long access token of the redeemed pair, which has the same scope and
+  # has expired by then.
+  defp out_of_band_token(scope) do
     {token, _attrs} =
-      Enum.find(tokens(), fn {_token, attrs} -> Map.get(attrs, :scope) == scope end)
+      Enum.find(tokens(), fn {_token, attrs} ->
+        attrs.scope == scope and not Map.has_key?(attrs, :type) and attrs.expires_at > @now
+      end)
 
     token
   end
 
+  # The refresh record, found by the field that makes it one.
+  defp refresh_record do
+    Enum.find(tokens(), fn {_token, attrs} -> Map.get(attrs, :type) == :refresh end)
+  end
+
   test "the fixture opens at all — three tables, written by the old code" do
-    assert length(tokens()) == 2
+    # Two out-of-band tokens, plus the access/refresh pair a redemption made.
+    assert length(tokens()) == 4
     assert :dets.info(:oauth_clients, :size) == 1
-    assert :dets.info(:oauth_codes, :size) == 0
+    # One authorization code, minted and left unredeemed.
+    assert :dets.info(:oauth_codes, :size) == 1
   end
 
   test "an access token minted by the previous version still authenticates", %{
     persistence: persistence
   } do
-    token = token_with_scope("vault")
+    token = out_of_band_token("vault")
 
     assert Token.validate_access(persistence, token, @resource, @now) == {:ok, "vault"}
   end
 
   test "a read-only token keeps the scope it was issued with", %{persistence: persistence} do
-    token = token_with_scope("vault:read")
+    token = out_of_band_token("vault:read")
 
     assert Token.validate_access(persistence, token, @resource, @now) == {:ok, "vault:read"}
   end
@@ -94,7 +107,7 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
   test "a token is still refused for a resource it was not issued for", %{
     persistence: persistence
   } do
-    token = token_with_scope("vault")
+    token = out_of_band_token("vault")
 
     assert Token.validate_access(persistence, token, "https://elsewhere.example/mcp", @now) ==
              :error
@@ -103,7 +116,7 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
   test "the old token record still carries every field the reader asks of it", %{
     persistence: persistence
   } do
-    {:ok, record} = persistence.get_token.(token_with_scope("vault"))
+    {:ok, record} = persistence.get_token.(out_of_band_token("vault"))
 
     assert record.aud == @resource
     assert record.scope == "vault"
@@ -123,7 +136,67 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
     assert attrs.redirect_uris == ["https://claude.ai/api/mcp/auth_callback"]
   end
 
-  test "the adapter this reads through is the production one" do
-    assert %Persistence{} = Store.over_tables()
+  describe "the refresh token, which is what strands a client when it breaks" do
+    # An access token lives an hour. Every client connected before a deploy is
+    # therefore rotating within the hour after it, against a refresh record the
+    # old code wrote — and out-of-band tokens, which carry none of these
+    # fields, cannot stand in for that.
+    test "is still recognised as a refresh token", %{persistence: persistence} do
+      {token, _} = refresh_record()
+
+      assert {:ok, data} = Token.fetch_refresh(persistence, token)
+      assert data.scope == "vault"
+      assert data.aud == @resource
+      assert is_binary(data.client_id)
+      assert is_binary(data.grant_id)
+    end
+
+    test "is refused when presented as an access token", %{persistence: persistence} do
+      {token, _} = refresh_record()
+
+      assert Token.validate_access(persistence, token, @resource, @now) == :error
+    end
+
+    test "still rotates, and the pair it produces stays in its grant", %{
+      persistence: persistence
+    } do
+      {token, attrs} = refresh_record()
+      {:ok, data} = Token.fetch_refresh(persistence, token)
+
+      pair = Token.issue_pair(persistence, data, @now)
+
+      assert {:ok, "vault"} =
+               Token.validate_access(persistence, pair.access_token, @resource, @now)
+
+      {:ok, rotated} = persistence.get_token.(pair.refresh_token)
+      assert rotated.grant_id == attrs.grant_id
+    end
+
+    test "is marked spent rather than deleted, so a replay is still visible", %{
+      persistence: persistence
+    } do
+      {token, _} = refresh_record()
+      {:ok, data} = Token.fetch_refresh(persistence, token)
+
+      :ok = Token.spend_refresh(persistence, token, data, @now)
+
+      assert {:ok, spent} = persistence.get_token.(token)
+      assert spent.spent_at == @now
+
+      # Not :error — a spent refresh answers with the record, which is how a
+      # replay is told apart from a token that never existed.
+      assert {:spent, _record} = Token.fetch_refresh(persistence, token)
+    end
+  end
+
+  test "an authorization code written by the previous version still reads back" do
+    [{_code, attrs}] = :dets.foldl(fn record, acc -> [record | acc] end, [], :oauth_codes)
+
+    assert attrs.resource == @resource
+    assert attrs.scope == "vault"
+    assert attrs.redirect_uri == "https://claude.ai/api/mcp/auth_callback"
+    assert is_binary(attrs.code_challenge)
+    assert is_binary(attrs.grant_id)
+    assert attrs.expires_at > @issued_at
   end
 end
