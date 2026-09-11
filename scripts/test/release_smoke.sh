@@ -352,6 +352,187 @@ else
     "remote is still at ${before_sha}"
 fi
 
+## ── 5b. The authorization flow a real client actually walks ──────────────
+
+step "5b/6  OAuth: register, authorize, consent, token, refresh"
+
+# Every token used so far was seeded out of band through `mix vigil.seed_token`
+# — the path verify() and first access take. It is not the path Claude takes.
+# Dynamic registration, /authorize, the consent page, PKCE, the code exchange
+# and refresh rotation are covered by the unit suite and were never once run
+# against a built release, which is exactly where a value that only exists in
+# MIX_ENV=prod goes wrong.
+
+REDIRECT_URI="https://claude.ai/api/mcp/auth_callback"
+
+# PKCE (RFC 7636, S256): a verifier, and the base64url of its SHA-256.
+CODE_VERIFIER="smoke-verifier-0123456789abcdefghijklmnopqrstuvwxyz"
+CODE_CHALLENGE="$(printf '%s' "$CODE_VERIFIER" |
+  openssl dgst -binary -sha256 |
+  openssl base64 |
+  tr '+/' '-_' |
+  tr -d '=\n')"
+
+authorize_form() {
+  curl -sS "$@" -X POST "${BASE_URL}/oauth/authorize" \
+    --data-urlencode "response_type=code" \
+    --data-urlencode "client_id=${CLIENT_ID}" \
+    --data-urlencode "redirect_uri=${REDIRECT_URI}" \
+    --data-urlencode "code_challenge=${CODE_CHALLENGE}" \
+    --data-urlencode "code_challenge_method=S256" \
+    --data-urlencode "state=smoke-state" \
+    --data-urlencode "scope=vault" \
+    --data-urlencode "decision=allow" \
+    --data-urlencode "password=${CONSENT_PASSWORD}"
+}
+
+# 1. Dynamic client registration (RFC 7591).
+REGISTER_RESPONSE="$(curl -sS -X POST "${BASE_URL}/oauth/register" \
+  -H "Content-Type: application/json" \
+  -d "{\"client_name\":\"Smoke test client\",\"redirect_uris\":[\"${REDIRECT_URI}\"]}" || true)"
+CLIENT_ID="$(echo "$REGISTER_RESPONSE" | jq -r '.client_id // empty')"
+
+if [ -n "$CLIENT_ID" ]; then
+  pass "registration returns a client_id"
+else
+  fail "registration returns a client_id" "$REGISTER_RESPONSE"
+fi
+
+AUTHORIZE_QUERY="response_type=code&client_id=${CLIENT_ID}&redirect_uri=$(
+  printf '%s' "$REDIRECT_URI" | jq -sRr @uri
+)&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256&state=smoke-state&scope=vault"
+
+# 2. The consent page. A GET renders it and issues nothing.
+CONSENT_PAGE="$(curl -sS "${BASE_URL}/oauth/authorize?${AUTHORIZE_QUERY}" || true)"
+if echo "$CONSENT_PAGE" | grep -q 'name="password"'; then
+  pass "authorize renders the consent page"
+else
+  fail "authorize renders the consent page" "$(echo "$CONSENT_PAGE" | head -3)"
+fi
+
+# 3. A wrong password must not mint a code.
+CONSENT_PASSWORD="definitely-not-the-password"
+WRONG_LOCATION="$(authorize_form -o /dev/null -D - | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+if printf '%s' "$WRONG_LOCATION" | grep -q '[?&]code='; then
+  fail "a wrong consent password mints no code" "Location: ${WRONG_LOCATION}"
+else
+  pass "a wrong consent password mints no code"
+fi
+
+# 4. Consent, and read the code out of the Location header.
+CONSENT_PASSWORD="$AUTH_PASSWORD"
+LOCATION="$(authorize_form -o /dev/null -D - | tr -d '\r' | sed -n 's/^[Ll]ocation: //p')"
+
+AUTH_CODE="$(printf '%s' "$LOCATION" | sed -n 's/.*[?&]code=\([^&]*\).*/\1/p')"
+RETURNED_STATE="$(printf '%s' "$LOCATION" | sed -n 's/.*[?&]state=\([^&]*\).*/\1/p')"
+RETURNED_ISS="$(printf '%s' "$LOCATION" | sed -n 's/.*[?&]iss=\([^&]*\).*/\1/p')"
+
+if [ -n "$AUTH_CODE" ]; then
+  pass "consent redirects to the client with a code"
+else
+  fail "consent redirects to the client with a code" "Location: ${LOCATION}"
+fi
+
+assert_eq "the state is handed back unchanged" "smoke-state" "$RETURNED_STATE"
+
+# RFC 9207. The authorization-server metadata advertises this, so a client is
+# entitled to reject a response that arrives without it.
+if [ -n "$RETURNED_ISS" ]; then
+  pass "the redirect carries the iss parameter (RFC 9207)"
+else
+  fail "the redirect carries the iss parameter (RFC 9207)" "Location: ${LOCATION}"
+fi
+
+# 5. Redeem the code with the verifier.
+# curl already writes 000 into %{http_code} on a transport failure, so no
+# `|| echo` is needed — appending one produced "000000". The body is truncated
+# first so that a failed request cannot be read as the previous one's answer.
+redeem_code() {
+  : >"${WORK}/.token_body"
+  curl -sS -o "${WORK}/.token_body" -w '%{http_code}' -X POST "${BASE_URL}/oauth/token" \
+    --data-urlencode "grant_type=authorization_code" \
+    --data-urlencode "code=${AUTH_CODE}" \
+    --data-urlencode "client_id=${CLIENT_ID}" \
+    --data-urlencode "redirect_uri=${REDIRECT_URI}" \
+    --data-urlencode "code_verifier=${CODE_VERIFIER}" 2>/dev/null
+}
+
+REDEEM_STATUS="$(redeem_code)"
+TOKEN_RESPONSE="$(cat "${WORK}/.token_body" 2>/dev/null || true)"
+FLOW_ACCESS="$(echo "$TOKEN_RESPONSE" | jq -r '.access_token // empty')"
+FLOW_REFRESH="$(echo "$TOKEN_RESPONSE" | jq -r '.refresh_token // empty')"
+
+assert_eq "the code exchange answers 200" "200" "$REDEEM_STATUS"
+
+if [ -n "$FLOW_ACCESS" ] && [ -n "$FLOW_REFRESH" ]; then
+  pass "the code redeems into an access and a refresh token"
+else
+  fail "the code redeems into an access and a refresh token" "$TOKEN_RESPONSE"
+fi
+
+assert_eq "the token type is Bearer" "Bearer" \
+  "$(echo "$TOKEN_RESPONSE" | jq -r '.token_type // empty')"
+
+# 6. The code is one-time use.
+assert_eq "replaying the code is refused" "400" "$(redeem_code)"
+
+# 7. The token the flow produced is accepted where it counts.
+mcp_call "$FLOW_ACCESS" "current" > /dev/null
+if [ "$(mcp_status)" = "200" ]; then
+  pass "the flow's access token is accepted by /mcp"
+else
+  fail "the flow's access token is accepted by /mcp" "$(mcp_why)"
+fi
+
+# 8. Rotation.
+refresh_with() {
+  : >"${WORK}/.token_body"
+  curl -sS -o "${WORK}/.token_body" -w '%{http_code}' -X POST "${BASE_URL}/oauth/token" \
+    --data-urlencode "grant_type=refresh_token" \
+    --data-urlencode "refresh_token=$1" \
+    --data-urlencode "client_id=${CLIENT_ID}" 2>/dev/null
+}
+
+REFRESH_STATUS="$(refresh_with "$FLOW_REFRESH")"
+REFRESH_RESPONSE="$(cat "${WORK}/.token_body" 2>/dev/null || true)"
+ROTATED_ACCESS="$(echo "$REFRESH_RESPONSE" | jq -r '.access_token // empty')"
+ROTATED_REFRESH="$(echo "$REFRESH_RESPONSE" | jq -r '.refresh_token // empty')"
+
+assert_eq "the refresh exchange answers 200" "200" "$REFRESH_STATUS"
+
+if [ -n "$ROTATED_ACCESS" ] && [ -n "$ROTATED_REFRESH" ] && [ "$ROTATED_REFRESH" != "$FLOW_REFRESH" ]; then
+  pass "the refresh token rotates into a new pair"
+else
+  fail "the refresh token rotates into a new pair" "$REFRESH_RESPONSE"
+fi
+
+mcp_call "$ROTATED_ACCESS" "current" > /dev/null
+if [ "$(mcp_status)" = "200" ]; then
+  pass "the rotated access token is accepted by /mcp"
+else
+  fail "the rotated access token is accepted by /mcp" "$(mcp_why)"
+fi
+
+# 9. Replaying the spent refresh token revokes the family (RFC 9700 §4.14.2).
+# This is the defence rotation exists for, and the one place it can be checked
+# end to end: a replay is the moment the server learns that exactly one of two
+# holders is an attacker, and it cannot tell which.
+assert_eq "replaying the spent refresh token is refused" "400" "$(refresh_with "$FLOW_REFRESH")"
+
+# Guarded: an empty ROTATED_ACCESS — step 8 having regressed and returned no
+# token — also gets a 401, and would score the strongest assertion in this
+# block as a pass it did not earn.
+if [ -z "$ROTATED_ACCESS" ]; then
+  fail "the replay revoked the whole token family" "no rotated token to revoke"
+else
+  mcp_call "$ROTATED_ACCESS" "current" > /dev/null
+  if [ "$(mcp_status)" = "200" ]; then
+    fail "the replay revoked the whole token family" "the rotated access token still works"
+  else
+    pass "the replay revoked the whole token family"
+  fi
+fi
+
 ## ── 6. reload, then shut down cleanly ────────────────────────────────────
 
 step "6/6  Reload and shutdown"

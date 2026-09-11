@@ -75,12 +75,19 @@ shell tests:
 shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
 bash scripts/test/update_test.sh
+bash scripts/test/verify_test.sh
 ```
 
 CI pins ShellCheck to the version named in
 [`ci.yml`](.github/workflows/ci.yml) and verifies its checksum. If your local
 ShellCheck is older it may report findings that version no longer emits, and
 miss ones it does — match it when a local run and CI disagree.
+
+`verify_test.sh` drives each of `verify()`'s twelve checks against both
+outcomes, with `systemctl`, `journalctl`, `curl`, `mcp_call` and `as_vigil`
+replaced by stand-ins and the installation layout pointed at a temp directory.
+Every check's own logic — its conditions, its verdict, its exit code — is the
+real one.
 
 `update_test.sh` drives `update.sh` against a throwaway prefix: the
 switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
