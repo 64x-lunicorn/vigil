@@ -84,6 +84,17 @@ write-commit-push path and shutdown:
 bash scripts/test/release_smoke.sh
 ```
 
+If your change touches the MCP tool table (`Vigil.MCP.Tools`) or the OAuth
+metadata (`Vigil.OAuth`), the recorded contracts under
+`test/fixtures/contracts/` will no longer match and the suite will say so.
+These files are what already-connected clients see, so a change to one is a
+change to a published interface. Read the diff the failure prints; if it is
+what you meant, record it and commit the updated file with the change:
+
+```bash
+UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs
+```
+
 These checks use throwaway fixture vaults and do not require root or a
 production installation. Do not run the root-level deployment workflow just
 to validate a contribution.

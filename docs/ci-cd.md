@@ -76,7 +76,7 @@ release.
 
 | Job | What it proves |
 | :--- | :--- |
-| **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes, no retired or vulnerable dependencies. |
+| **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes (including the recorded interface contracts), no retired or vulnerable dependencies. |
 | **Static analysis** | Credo finds no issues; Dialyzer finds no new type errors. |
 | **Deployment scripts** | ShellCheck is clean, and `init.sh --check-only` is still strictly read-only. |
 | **Release smoke test** | A real production release boots and serves. See below. |
@@ -146,6 +146,18 @@ Purely stylistic checks are off — a gate nobody can make green on day one gets
 bypassed rather than respected.
 
 **Behaviour.** `mix test`, in `MIX_ENV=test` against the fixture vault.
+
+**Published interfaces.** The MCP tool list and the two OAuth metadata
+documents are recorded verbatim under
+[`test/fixtures/contracts/`](../test/fixtures/contracts/) and compared byte for
+byte by
+[`contracts_test.exs`](../test/vigil/contracts_test.exs). These documents are
+contracts with software that is already connected, and a renamed parameter, a
+reordered enum or a dropped field is a one-line change here and a broken client
+out there. A test that asserts field by field cannot see it: such a test only
+knows about the fields somebody thought to name in it. Recording a change is
+deliberate — `UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs` — and
+the diff in the pull request is the review of the interface change.
 
 **Boot and runtime.**
 [`scripts/test/release_smoke.sh`](../scripts/test/release_smoke.sh) is the
