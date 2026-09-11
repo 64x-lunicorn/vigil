@@ -13,6 +13,7 @@ defmodule Vigil.Store do
     Skills
   }
 
+  alias Vigil.Settings
   alias Vigil.Vault.{Decision, Domains, Facts, Layout, Plan, Policy}
 
   # The name a writer registers under, and — the same atom — the name of the
@@ -92,8 +93,8 @@ defmodule Vigil.Store do
   # the caller's process rather than behind the writer's mailbox for the
   # reason bd7e842 removed the other one: a clock read on the far side of the
   # writer can land in a different minute than the response it belongs to.
-  def call(store, :lint, %{} = params), do: request(store, :lint, with_now(params))
-  def call(store, :current, %{} = params), do: request(store, :current, with_now(params))
+  def call(store, :lint, %{} = params), do: request(store, :lint, with_now(store, params))
+  def call(store, :current, %{} = params), do: request(store, :current, with_now(store, params))
   def call(store, :reload, %{} = params), do: request(store, :reload, params)
 
   def call(store, :skill_write, %{name: _, content: _} = params),
@@ -101,7 +102,8 @@ defmodule Vigil.Store do
 
   defp request(store, op, params), do: GenServer.call(store, {op, params})
 
-  defp with_now(params), do: Map.put_new_lazy(params, :now, &Clock.now/0)
+  defp with_now(store, params),
+    do: Map.put_new_lazy(params, :now, fn -> Clock.now(published_tz(store)) end)
 
   # The five the index answers. Each names the Vigil.Index function that
   # answers it, which is what lets one `handle_call` clause cover all of them.
@@ -153,6 +155,14 @@ defmodule Vigil.Store do
   # never happened.
   defp published_events(store), do: :ets.lookup_element(store, :events, 2)
 
+  # The vault's timezone, published beside its path so a caller resolving its
+  # own instant reads the deployment the writer was built with rather than the
+  # application environment. Written once at init and never again — and kept
+  # only here, not in the state as well: the writer reads it back out of its
+  # own table, so there is one copy of the fact and nothing that could hold a
+  # second one that has drifted.
+  defp published_tz(store), do: :ets.lookup_element(store, :tz, 2)
+
   ## GenServer
 
   @impl true
@@ -172,11 +182,17 @@ defmodule Vigil.Store do
     # vault nobody is going to shell out into.
     git = Keyword.get_lazy(opts, :git, fn -> over_repository!(vault_path) end)
 
+    # What the deployment says about itself, resolved once where the tree is
+    # built and handed in. Only the timezone is this writer's business, and
+    # only for a write that arrived without an instant of its own.
+    settings = Keyword.get_lazy(opts, :settings, &Settings.from_env/0)
+
     if :ets.whereis(name) == :undefined do
       :ets.new(name, [:set, :named_table, :public, read_concurrency: true])
     end
 
     :ets.insert(name, {:vault_path, vault_path})
+    :ets.insert(name, {:tz, settings.tz})
 
     state = %{
       table: name,
@@ -389,7 +405,7 @@ defmodule Vigil.Store do
   # request the tool table describes, unchanged. A caller with no envelope
   # to share (a test pinning a moment aside) gets the writer's own clock.
   defp write(op, request, state) do
-    {now, request} = Map.pop(request, :now, Clock.now())
+    {now, request} = Map.pop(request, :now, Clock.now(published_tz(state.table)))
 
     with {:ok, resolved} <- Policy.check(op, request, facts(state, now)),
          :ok <- ensure_directories(op, resolved, state),

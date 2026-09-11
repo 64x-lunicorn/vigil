@@ -14,6 +14,12 @@ defmodule Vigil.OAuth.CodeTest do
   alias Vigil.OAuth
   alias Vigil.OAuth.{Code, Flow}
 
+  # The authorization server the code is minted for. `Vigil.OAuth.Code` reads
+  # the audience off the context the request was authorized with rather than
+  # from configuration, so the assertions below check the record carries
+  # exactly the resource this stated server names.
+  @settings Vigil.OAuthCase.stated_settings()
+
   @redirect_uri "https://app.example/cb"
   @verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
   @challenge "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
@@ -28,7 +34,7 @@ defmodule Vigil.OAuth.CodeTest do
       Flow.register(persistence, %{"redirect_uris" => [@redirect_uri]}, @now)
 
     {:ok, ctx} =
-      Flow.authorize_request(persistence, %{
+      Flow.authorize_request(persistence, @settings, %{
         "client_id" => client_id,
         "redirect_uri" => @redirect_uri,
         "response_type" => "code",
@@ -61,7 +67,7 @@ defmodule Vigil.OAuth.CodeTest do
       assert record.client_id == ctx.client.client_id
       assert record.redirect_uri == @redirect_uri
       assert record.code_challenge == @challenge
-      assert record.resource == OAuth.resource()
+      assert record.resource == @settings.resource
       assert record.scope == OAuth.scope()
     end
 
@@ -92,7 +98,7 @@ defmodule Vigil.OAuth.CodeTest do
       code = Code.issue(persistence, ctx, @now)
 
       assert {:ok, record} = Code.redeem(persistence, code, request(ctx), @now)
-      assert Code.audience_of(record) == OAuth.resource()
+      assert Code.audience_of(record) == @settings.resource
     end
 
     test "a code the store has never seen", %{persistence: persistence} do

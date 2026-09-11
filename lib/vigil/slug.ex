@@ -156,8 +156,10 @@ defmodule Vigil.Slug do
   It is deliberately not a *permission* check — `skills/tdd.md` and a note in
   an excluded domain both pass here. Which paths a caller may read or write is
   the caller's own rule; `Vigil.Vault.Policy` adds the write ones on top,
-  `Vigil.Index` adds none. Callers apply it before and after `normalize_path/1`,
-  so normalization cannot turn a rejected path into an accepted one.
+  `Vigil.Index` adds none.
+
+  Where it goes relative to `normalize_path/1` is `canonical_path/1`'s to
+  know, not each caller's: a caller that needs both wants that one.
 
   Returns `:ok` or `{:error, "Invalid path"}` — the message callers hand back
   verbatim.
@@ -171,6 +173,34 @@ defmodule Vigil.Slug do
       String.contains?(path, <<0>>) -> @invalid_path
       Enum.any?(String.split(path, "/"), &reserved_segment?/1) -> @invalid_path
       true -> :ok
+    end
+  end
+
+  @doc """
+  The canonical form of a vault-relative path, or the refusal `safe_path/1`
+  gives.
+
+  The two steps in the one order they are safe in. `normalize_path/1`
+  slugifies every segment, which turns `_domains.yml` into `domains.yml`,
+  `/abs/x.md` into `abs/x.md` and `a\\b.md` into `a-b.md` — so a path checked
+  only *after* it is normalized is a path whose check the normalization has
+  laundered. Checking before and after is the rule, and this is where it is
+  stated: every caller that turns a path a caller typed into the path the
+  vault stores needs it, and a caller cannot get the order wrong if it does
+  not hold the order.
+
+  A path no filename can be derived from comes back unchanged rather than as
+  an error. It will not be found either way, and a caller should answer for it
+  the way it answers a miss — `Vigil.Index` does, and `Vigil.Vault.Policy`
+  wants the same verdict.
+  """
+  @spec canonical_path(String.t()) :: {:ok, String.t()} | {:error, String.t()}
+  def canonical_path(path) do
+    with :ok <- safe_path(path) do
+      case normalize_path(path) do
+        {:ok, normalized, _changed?} -> {:ok, normalized}
+        {:error, _reason} -> {:ok, path}
+      end
     end
   end
 

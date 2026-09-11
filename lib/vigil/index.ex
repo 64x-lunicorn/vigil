@@ -169,24 +169,25 @@ defmodule Vigil.Index do
   def backlinks(index, key), do: backlinks_for(index, key)
 
   @doc """
-  The chunk a section id resolves to, or `nil` — through the same lenient
-  resolution `read/2` uses, so an id that reads is an id that writes. The
-  record carries the canonical path, which is what makes leniency safe: the
-  write goes where the lookup landed, not where the id pointed.
+  The chunk a section id resolves to, or `nil` — through `resolve/2`, the same
+  function `read/2` and `links/2` go through, so an id that reads is an id
+  that writes by construction rather than by two walks agreeing. The record
+  carries the canonical path, which is what makes leniency safe: the write
+  goes where the lookup landed, not where the id pointed.
+
+  `nil` covers all three ways an id fails to name a chunk — a path that is not
+  safe to resolve, a chunk that is not there, and an id with no fragment,
+  which names a note rather than a section. The write gate has already refused
+  the first before it asks (`Vigil.Vault.Policy` judges what may be written
+  before it resolves what is there), so collapsing them here loses no wording.
 
   One of the three questions only the index can answer for the write gate;
   `replace_section` and `delete_section` resolve their id with it.
   """
   def find_chunk(index, id) do
-    case String.split(id, "#", parts: 2) do
-      [path_part, _fragment] ->
-        case lookup_chunk(index, id, path_part) do
-          {:ok, chunk} -> chunk
-          :not_found -> nil
-        end
-
-      [_without_fragment] ->
-        nil
+    case resolve(index, id) do
+      {:ok, :chunk, chunk} -> chunk
+      _ -> nil
     end
   end
 
@@ -436,27 +437,35 @@ defmodule Vigil.Index do
   # caller, `:not_found` is a miss that must. What a reader builds on a verdict
   # stays its own — `read` renders the record, `links` walks out from it — but
   # the walk that reaches the verdict is stated here alone. It was stated
-  # twice, identically, apart from what each built on success.
+  # twice, identically, apart from what each built on success; `find_chunk/2`
+  # is the third, and goes through this too, which is what makes its claim
+  # about the write path true rather than agreed.
+  #
+  # Safety and the canonical form come back together, from `Vigil.Slug`: the
+  # order they have to be applied in is that module's to hold, not something
+  # restated at each place that needs a path the vault might store.
   defp resolve(index, id) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    case Slug.safe_path(path_part) do
+    case Slug.canonical_path(path_part) do
       {:error, _} ->
         :unsafe_path
 
-      :ok ->
+      {:ok, canonical_path} ->
         if String.contains?(id, "#") do
-          with {:ok, chunk} <- lookup_chunk(index, id, path_part), do: {:ok, :chunk, chunk}
+          with {:ok, chunk} <- lookup_chunk(index, id, canonical_path),
+               do: {:ok, :chunk, chunk}
         else
-          with {:ok, note} <- lookup_note(index, id), do: {:ok, :note, note}
+          with {:ok, note} <- lookup_note(index, id, canonical_path), do: {:ok, :note, note}
         end
     end
   end
 
-  # If the exact lookup misses, the path part is normalized via
-  # Slug.normalize_path/1 and tried again — the record that comes back
-  # carries the canonical stored id/path anyway.
-  defp lookup_chunk(index, exact_id, path_part) do
+  # The exact id first, so a note whose filename the vault stores unslugified
+  # is still found under the name it has. Only when that misses is the
+  # canonical form tried — the record that comes back carries the stored
+  # id/path anyway, which is what makes the leniency safe.
+  defp lookup_chunk(index, exact_id, canonical_path) do
     case Map.fetch(index.chunks, exact_id) do
       {:ok, chunk} ->
         {:ok, chunk}
@@ -464,26 +473,22 @@ defmodule Vigil.Index do
       :error ->
         [_, fragment] = String.split(exact_id, "#", parts: 2)
 
-        with {:ok, normalized_path, true} <- Slug.normalize_path(path_part),
-             {:ok, chunk} <- Map.fetch(index.chunks, "#{normalized_path}##{fragment}") do
-          {:ok, chunk}
-        else
-          _ -> :not_found
+        case Map.fetch(index.chunks, "#{canonical_path}##{fragment}") do
+          {:ok, chunk} -> {:ok, chunk}
+          :error -> :not_found
         end
     end
   end
 
-  defp lookup_note(index, exact_path) do
+  defp lookup_note(index, exact_path, canonical_path) do
     case Map.fetch(index.notes, exact_path) do
       {:ok, note} ->
         {:ok, note}
 
       :error ->
-        with {:ok, normalized_path, true} <- Slug.normalize_path(exact_path),
-             {:ok, note} <- Map.fetch(index.notes, normalized_path) do
-          {:ok, note}
-        else
-          _ -> :not_found
+        case Map.fetch(index.notes, canonical_path) do
+          {:ok, note} -> {:ok, note}
+          :error -> :not_found
         end
     end
   end

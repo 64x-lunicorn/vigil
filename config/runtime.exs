@@ -52,8 +52,11 @@ config :vigil,
 # around itself. A fixture that mutates global application env cannot be
 # shared by files running in parallel, and after `test/support/oauth_case.ex`
 # stopped needing a state dir this was the only thing left holding the OAuth
-# files serial. Where they are read from is a separate question and is
-# unchanged: `Vigil.OAuth` still asks `Application.fetch_env!/2` for each.
+# files serial. Where they are read from is a separate question and has an
+# answer now: `Vigil.Settings.from_env/0`, once, where the supervision tree is
+# built (docs/design.md, "The deployment is resolved once"). Which also makes
+# the defaults above the only statement of each — nothing restates them in a
+# module.
 #
 # `auth_password` doubles as the AP-4 SkillKey HMAC secret (`Vigil.SkillKey`),
 # which is why the suite cannot simply leave it unset.

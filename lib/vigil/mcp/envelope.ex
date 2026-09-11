@@ -49,22 +49,26 @@ defmodule Vigil.MCP.Envelope do
 
   @doc """
   The envelope for one response to `tool` in `session_id`, decided against the
-  vault `store` holds and recorded in the session table `sessions` names.
-  Returns `{envelope, now}`.
+  vault `store` holds and recorded in the session table `sessions` names,
+  stamped with the current time in `tz`. Returns `{envelope, now}`.
 
   One entry point for every tool: the router hands over the session table, the
-  session, the tool's name and the writer, and asks nothing else. The instant
-  comes back with the envelope because the response has exactly one — the tool that answers *what time is
-  it* is handed the same one its envelope was decided at, rather than reading
-  a second clock a moment later on the other side of the writer.
+  session, the tool's name, the writer and the vault's timezone, and asks
+  nothing else. The timezone is the last of them for the same reason as the
+  first four — it is the deployment's, resolved once where the router is
+  initialized (`Vigil.Settings`), not read here per response. The instant
+  comes back with the envelope because the response has exactly one — the tool
+  that answers *what time is it* is handed the same one its envelope was
+  decided at, rather than reading a second clock a moment later on the other
+  side of the writer.
 
   Taking the clock and the snapshot together here is also what makes them
   agree: a snapshot from a different instant than the one it is compared
   against would compile and silently mis-decide a phase change, and there is
   no longer a signature that can express it.
   """
-  def for_tool(sessions, session_id, tool, store) do
-    now = Clock.now()
+  def for_tool(sessions, session_id, tool, store, tz) do
+    now = Clock.now(tz)
 
     {envelope, session_state} =
       Decision.for_tool(tool, previous(sessions, session_id), now, Store.snapshot(store, now))

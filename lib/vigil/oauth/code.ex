@@ -25,7 +25,6 @@ defmodule Vigil.OAuth.Code do
   `invalid_grant`, so a caller learns nothing from which check rejected it.
   """
 
-  alias Vigil.OAuth
   alias Vigil.OAuth.{Persistence, Token}
 
   @ttl 60
@@ -41,10 +40,12 @@ defmodule Vigil.OAuth.Code do
   Mints a one-time authorization code for an approved consent and writes its
   record, returning the code.
 
-  `ctx` is what `Vigil.OAuth.Flow.authorize_request/4` decided: the client,
-  the redirect URI it was checked against, the PKCE challenge, and the scope.
-  Everything else the record carries is this module's — the audience it was
-  minted for, the grant it opens, and the minute it lives.
+  `ctx` is what `Vigil.OAuth.Flow.authorize_request/5` decided: the client,
+  the redirect URI it was checked against, the PKCE challenge, the scope, and
+  the audience the request was authorized for. The audience comes from there
+  rather than from configuration read a second time here, so a code cannot be
+  minted for a resource the request was never checked against. What is left
+  for this module is the grant the code opens and the minute it lives.
   """
   def issue(persistence, ctx, now \\ System.system_time(:second)) do
     code = Token.random()
@@ -53,7 +54,7 @@ defmodule Vigil.OAuth.Code do
       client_id: ctx.client.client_id,
       redirect_uri: ctx.redirect_uri,
       code_challenge: ctx.code_challenge,
-      resource: OAuth.resource(),
+      resource: ctx.resource,
       scope: ctx.scope,
       # The authorization grant this code, and every token redeemed from it,
       # belongs to. It is what "revoke the whole family" is expressed in.

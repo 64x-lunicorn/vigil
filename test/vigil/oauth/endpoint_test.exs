@@ -8,61 +8,83 @@ defmodule Vigil.OAuth.EndpointTest do
   token outlives the process that stored it is the `:dets` adapter's, in
   `Vigil.OAuth.PersistenceTest`.
 
-  Still serial, and no longer for anything to do with persistence: these tests
-  set the two rate-limit budgets and the trusted-proxy configuration in global
-  application env and start `Vigil.RateLimit`, which is registered under its
-  module name.
+  Nothing here is installed. The router resolves persistence, the limiter, the
+  budgets and the proxy configuration once, at init, and every one of them is
+  an option — so a test states the deployment it is testing instead of writing
+  it into global application env and undoing it afterwards. That is what makes
+  this file parallel, and it is also what lets a limit test name the budget it
+  is testing rather than spend the shipped one thirty requests at a time.
   """
 
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   import Plug.Conn
   import Plug.Test
 
   alias Vigil.MCP.Server
   alias Vigil.OAuth
+  alias Vigil.OAuth.ClientAddr
+  alias Vigil.RateLimit
 
   @issuer "https://vault.factory-lab.org"
   @resource "https://vault.factory-lab.org/mcp"
   @password "correct-horse-battery-staple"
 
   setup do
-    start_supervised!(Vigil.RateLimit)
-    Vigil.OAuthCase.setup!()
+    oauth = Vigil.OAuthCase.setup!()
+    Map.put(oauth, :endpoint, endpoint(persistence: oauth.persistence))
   end
 
-  # The router resolves persistence once, at init — so this is where the
-  # authorization server is handed the test's own, and `/mcp` is handed the
-  # same one through the authorization server's options rather than resolving
-  # a second time.
-  defp call(conn, persistence),
-    do: OAuth.Endpoint.call(conn, OAuth.Endpoint.init(persistence: persistence))
-
-  defp server_call(conn, persistence),
-    do: Server.call(conn, Server.init(oauth: OAuth.Endpoint.init(persistence: persistence)))
-
-  defp get_json(persistence, path) do
-    conn(:get, path) |> call(persistence)
+  # A router of this test's own, initialized once and passed to every request
+  # it makes. Counting state is built here rather than in `setup`, so each
+  # router holds its own windows and no test spends a budget another is
+  # counting in; the deployment has no proxy unless the test says it has one.
+  # What a test does not name, `init/1` resolves the way production does.
+  defp endpoint(opts) do
+    opts
+    |> Keyword.put_new_lazy(:limiter, &RateLimit.Counter.new/0)
+    |> Keyword.put_new(:client_addr, header: nil, trusted: [])
+    |> OAuth.Endpoint.init()
   end
 
-  defp post_json(persistence, path, map) do
+  # The budgets are arguments. A test names the one it is testing and the rest
+  # are put out of reach, so the only limit a request here can hit is the one
+  # the test asked about.
+  defp budgets(named), do: Map.merge(%{authorize: 1_000, token: 1_000, register: 1_000}, named)
+
+  # A deployment behind a proxy, in the shape `Vigil.OAuth.ClientAddr.config/0`
+  # would have resolved from the environment.
+  defp behind_proxy(header, cidrs), do: [header: header, trusted: ClientAddr.parse_trusted(cidrs)]
+
+  # `/mcp` is handed the authorization server's options rather than resolving
+  # its own, so the token this router verifies and the token that server
+  # minted are in the same place by construction.
+  defp call(conn, endpoint), do: OAuth.Endpoint.call(conn, endpoint)
+
+  defp server_call(conn, endpoint), do: Server.call(conn, Server.init(oauth: endpoint))
+
+  defp get_json(endpoint, path) do
+    conn(:get, path) |> call(endpoint)
+  end
+
+  defp post_json(endpoint, path, map) do
     conn(:post, path, Jason.encode!(map))
     |> put_req_header("content-type", "application/json")
-    |> call(persistence)
+    |> call(endpoint)
   end
 
-  defp post_form(persistence, path, params) do
+  defp post_form(endpoint, path, params) do
     conn(:post, path, URI.encode_query(params))
     |> put_req_header("content-type", "application/x-www-form-urlencoded")
-    |> call(persistence)
+    |> call(endpoint)
   end
 
-  defp get_query(persistence, path, params) do
-    conn(:get, path <> "?" <> URI.encode_query(params)) |> call(persistence)
+  defp get_query(endpoint, path, params) do
+    conn(:get, path <> "?" <> URI.encode_query(params)) |> call(endpoint)
   end
 
-  defp register(persistence, redirect_uris, name \\ "Test Client") do
+  defp register(endpoint, redirect_uris, name \\ "Test Client") do
     conn =
-      post_json(persistence, "/oauth/register", %{client_name: name, redirect_uris: redirect_uris})
+      post_json(endpoint, "/oauth/register", %{client_name: name, redirect_uris: redirect_uris})
 
     {conn.status, Jason.decode!(conn.resp_body)}
   end
@@ -94,9 +116,9 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Forwarding
 
   test "Vigil.MCP.Server forwards a path it does not own to the authorization server", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    conn = conn(:get, "/.well-known/oauth-protected-resource") |> server_call(persistence)
+    conn = conn(:get, "/.well-known/oauth-protected-resource") |> server_call(endpoint)
 
     assert conn.status == 200
     body = Jason.decode!(conn.resp_body)
@@ -107,10 +129,10 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Discovery
 
   test "both protected-resource discovery paths return identical JSON, no auth required", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    c1 = get_json(persistence, "/.well-known/oauth-protected-resource")
-    c2 = get_json(persistence, "/.well-known/oauth-protected-resource/mcp")
+    c1 = get_json(endpoint, "/.well-known/oauth-protected-resource")
+    c2 = get_json(endpoint, "/.well-known/oauth-protected-resource/mcp")
 
     assert c1.status == 200
     assert c1.resp_body == c2.resp_body
@@ -121,9 +143,9 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "authorization-server metadata advertises S256 PKCE and public-client auth", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    conn = get_json(persistence, "/.well-known/oauth-authorization-server")
+    conn = get_json(endpoint, "/.well-known/oauth-authorization-server")
     body = Jason.decode!(conn.resp_body)
 
     assert body["code_challenge_methods_supported"] == ["S256"]
@@ -134,35 +156,35 @@ defmodule Vigil.OAuth.EndpointTest do
 
   ## DCR
 
-  test "DCR registration succeeds and never returns a client_secret", %{persistence: persistence} do
-    {status, body} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  test "DCR registration succeeds and never returns a client_secret", %{endpoint: endpoint} do
+    {status, body} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     assert status == 201
     assert body["client_id"] != nil
     refute Map.has_key?(body, "client_secret")
   end
 
   test "DCR rejects a redirect_uri that is neither https nor loopback http", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    {status, body} = register(persistence, ["http://evil.example.com/cb"])
+    {status, body} = register(endpoint, ["http://evil.example.com/cb"])
     assert status == 400
     assert body["error"] == "invalid_redirect_uri"
   end
 
-  test "DCR accepts a bare http://localhost redirect_uri", %{persistence: persistence} do
-    {status, _body} = register(persistence, ["http://localhost/callback"])
+  test "DCR accepts a bare http://localhost redirect_uri", %{endpoint: endpoint} do
+    {status, _body} = register(endpoint, ["http://localhost/callback"])
     assert status == 201
   end
 
   ## Redirect-URI matching
 
-  test "loopback redirect matching ignores the port but not the path", %{persistence: persistence} do
-    {201, client} = register(persistence, ["http://localhost/callback"])
+  test "loopback redirect matching ignores the port but not the path", %{endpoint: endpoint} do
+    {201, client} = register(endpoint, ["http://localhost/callback"])
     {_verifier, challenge} = pkce_pair()
 
     ok =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query(client["client_id"], "http://localhost:3118/callback", challenge)
       )
@@ -171,7 +193,7 @@ defmodule Vigil.OAuth.EndpointTest do
 
     wrong_path =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query(client["client_id"], "http://localhost:3118/other", challenge)
       )
@@ -181,7 +203,7 @@ defmodule Vigil.OAuth.EndpointTest do
 
     wrong_host =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query(client["client_id"], "http://evil.tld/callback", challenge)
       )
@@ -192,14 +214,17 @@ defmodule Vigil.OAuth.EndpointTest do
 
   ## Full PKCE flow
 
-  test "full authorization_code + PKCE flow issues an access token", %{persistence: persistence} do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  test "full authorization_code + PKCE flow issues an access token", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     get_conn =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query(client["client_id"], redirect_uri, challenge)
       )
@@ -209,7 +234,7 @@ defmodule Vigil.OAuth.EndpointTest do
 
     post_conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "password" => @password,
@@ -225,7 +250,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert code != nil
 
     token_conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "authorization_code",
         "code" => code,
         "redirect_uri" => redirect_uri,
@@ -245,15 +270,15 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "wrong code_verifier is rejected and the code becomes permanently unusable", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     post_conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "password" => @password,
@@ -265,7 +290,7 @@ defmodule Vigil.OAuth.EndpointTest do
     code = extract_query_param(location, "code")
 
     bad_conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "authorization_code",
         "code" => code,
         "redirect_uri" => redirect_uri,
@@ -277,7 +302,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert Jason.decode!(bad_conn.resp_body)["error"] == "invalid_grant"
 
     retry_conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "authorization_code",
         "code" => code,
         "redirect_uri" => redirect_uri,
@@ -289,12 +314,12 @@ defmodule Vigil.OAuth.EndpointTest do
     assert Jason.decode!(retry_conn.resp_body)["error"] == "invalid_grant"
   end
 
-  test "code_challenge_method=plain is rejected with a bare 400", %{persistence: persistence} do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  test "code_challenge_method=plain is rejected with a bare 400", %{endpoint: endpoint} do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
 
     conn =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         %{
           "response_type" => "code",
@@ -312,6 +337,7 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Audience
 
   test "an access token issued for a different resource is rejected at /mcp", %{
+    endpoint: endpoint,
     persistence: persistence
   } do
     bad_token = OAuth.Token.random()
@@ -325,7 +351,7 @@ defmodule Vigil.OAuth.EndpointTest do
       conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{bad_token}")
-      |> server_call(persistence)
+      |> server_call(endpoint)
 
     assert conn.status == 401
   end
@@ -333,15 +359,15 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Refresh
 
   test "refresh rotates both tokens; the old refresh token becomes invalid", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     post_conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "password" => @password,
@@ -353,7 +379,7 @@ defmodule Vigil.OAuth.EndpointTest do
     code = extract_query_param(location, "code")
 
     token_conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "authorization_code",
         "code" => code,
         "redirect_uri" => redirect_uri,
@@ -364,7 +390,7 @@ defmodule Vigil.OAuth.EndpointTest do
     tokens = Jason.decode!(token_conn.resp_body)
 
     refresh_conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "refresh_token",
         "refresh_token" => tokens["refresh_token"],
         "client_id" => client["client_id"]
@@ -376,7 +402,7 @@ defmodule Vigil.OAuth.EndpointTest do
     assert new_tokens["refresh_token"] != tokens["refresh_token"]
 
     reuse_conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "refresh_token",
         "refresh_token" => tokens["refresh_token"],
         "client_id" => client["client_id"]
@@ -386,7 +412,10 @@ defmodule Vigil.OAuth.EndpointTest do
     assert Jason.decode!(reuse_conn.resp_body)["error"] == "invalid_grant"
   end
 
-  test "an expired refresh token yields exactly invalid_grant", %{persistence: persistence} do
+  test "an expired refresh token yields exactly invalid_grant", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
     refresh = OAuth.Token.random()
 
     persistence.put_token.(refresh, %{
@@ -397,7 +426,7 @@ defmodule Vigil.OAuth.EndpointTest do
     })
 
     conn =
-      post_form(persistence, "/oauth/token", %{
+      post_form(endpoint, "/oauth/token", %{
         "grant_type" => "refresh_token",
         "refresh_token" => refresh,
         "client_id" => "some-client"
@@ -410,15 +439,15 @@ defmodule Vigil.OAuth.EndpointTest do
   ## Password / rate limiting
 
   test "wrong password re-renders the consent page without a redirect or a code", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "password" => "falsch",
@@ -431,8 +460,8 @@ defmodule Vigil.OAuth.EndpointTest do
     assert conn.resp_body =~ "Wrong password"
   end
 
-  test "the sixth wrong-password attempt within 15 minutes gets 429", %{persistence: persistence} do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  test "the sixth wrong-password attempt within 15 minutes gets 429", %{endpoint: endpoint} do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
@@ -442,7 +471,7 @@ defmodule Vigil.OAuth.EndpointTest do
         "decision" => "allow"
       })
 
-    results = for _ <- 1..6, do: post_form(persistence, "/oauth/authorize", params).status
+    results = for _ <- 1..6, do: post_form(endpoint, "/oauth/authorize", params).status
 
     assert Enum.take(results, 5) == [200, 200, 200, 200, 200]
     assert List.last(results) == 429
@@ -453,57 +482,67 @@ defmodule Vigil.OAuth.EndpointTest do
   test "behind a trusted proxy the consent limit is counted per forwarded client", %{
     persistence: persistence
   } do
-    trust_proxy!("cf-connecting-ip", ["203.0.113.0/24"])
-    params = wrong_password_params(persistence)
+    endpoint =
+      endpoint(
+        persistence: persistence,
+        client_addr: behind_proxy("cf-connecting-ip", ["203.0.113.0/24"])
+      )
+
+    params = wrong_password_params(endpoint)
 
     # Five failures exhaust this client's budget and the sixth is refused...
     for _ <- 1..5 do
-      assert consent_as(persistence, params, {203, 0, 113, 7}, "198.51.100.9").status == 200
+      assert consent_as(endpoint, params, {203, 0, 113, 7}, "198.51.100.9").status == 200
     end
 
-    assert consent_as(persistence, params, {203, 0, 113, 7}, "198.51.100.9").status == 429
+    assert consent_as(endpoint, params, {203, 0, 113, 7}, "198.51.100.9").status == 429
 
     # ...and the next client through the same proxy still has its own.
-    assert consent_as(persistence, params, {203, 0, 113, 7}, "198.51.100.20").status == 200
+    assert consent_as(endpoint, params, {203, 0, 113, 7}, "198.51.100.20").status == 200
   end
 
   test "a forwarded header from an untrusted peer buys the caller nothing", %{
     persistence: persistence
   } do
-    trust_proxy!("cf-connecting-ip", ["203.0.113.0/24"])
-    params = wrong_password_params(persistence)
+    endpoint =
+      endpoint(
+        persistence: persistence,
+        client_addr: behind_proxy("cf-connecting-ip", ["203.0.113.0/24"])
+      )
+
+    params = wrong_password_params(endpoint)
 
     # The peer is not the proxy, so claiming a fresh address on every attempt
     # does not get a fresh budget: all six land in the peer's own bucket.
     results =
-      for i <- 1..6, do: consent_as(persistence, params, {192, 0, 2, 5}, "198.51.100.#{i}").status
+      for i <- 1..6, do: consent_as(endpoint, params, {192, 0, 2, 5}, "198.51.100.#{i}").status
 
     assert Enum.take(results, 5) == [200, 200, 200, 200, 200]
     assert List.last(results) == 429
   end
 
   test "with no proxy configured the header is ignored and the peer is the bucket", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    params = wrong_password_params(persistence)
+    params = wrong_password_params(endpoint)
 
     results =
       for i <- 1..6,
-          do: consent_as(persistence, params, {203, 0, 113, 7}, "198.51.100.#{i}").status
+          do: consent_as(endpoint, params, {203, 0, 113, 7}, "198.51.100.#{i}").status
 
     assert List.last(results) == 429
   end
 
   ## Issuer identification (RFC 9207)
 
-  test "the authorization response says which server issued it", %{persistence: persistence} do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  test "the authorization response says which server issued it", %{endpoint: endpoint} do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "password" => @password,
@@ -517,14 +556,14 @@ defmodule Vigil.OAuth.EndpointTest do
     assert extract_query_param(location, "code") != nil
   end
 
-  test "an error redirect says which server issued it too", %{persistence: persistence} do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  test "an error redirect says which server issued it too", %{endpoint: endpoint} do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "decision" => "deny"
@@ -537,9 +576,9 @@ defmodule Vigil.OAuth.EndpointTest do
     assert extract_query_param(location, "iss") == @issuer
   end
 
-  test "the metadata tells a client the iss parameter will be there", %{persistence: persistence} do
+  test "the metadata tells a client the iss parameter will be there", %{endpoint: endpoint} do
     body =
-      Jason.decode!(get_json(persistence, "/.well-known/oauth-authorization-server").resp_body)
+      Jason.decode!(get_json(endpoint, "/.well-known/oauth-authorization-server").resp_body)
 
     assert body["authorization_response_iss_parameter_supported"] == true
   end
@@ -555,14 +594,14 @@ defmodule Vigil.OAuth.EndpointTest do
   test "registration past its budget is refused with an RFC 6749 error body", %{
     persistence: persistence
   } do
-    budgets!(register: 2)
+    endpoint = endpoint(persistence: persistence, limits: budgets(%{register: 2}))
 
     body = %{client_name: "Test Client", redirect_uris: ["https://claude.ai/cb"]}
 
-    assert post_json(persistence, "/oauth/register", body).status == 201
-    assert post_json(persistence, "/oauth/register", body).status == 201
+    assert post_json(endpoint, "/oauth/register", body).status == 201
+    assert post_json(endpoint, "/oauth/register", body).status == 201
 
-    conn = post_json(persistence, "/oauth/register", body)
+    conn = post_json(endpoint, "/oauth/register", body)
     assert conn.status == 429
     assert Jason.decode!(conn.resp_body)["error"] == "temporarily_unavailable"
   end
@@ -570,14 +609,14 @@ defmodule Vigil.OAuth.EndpointTest do
   test "the token endpoint past its budget is refused with an RFC 6749 error body", %{
     persistence: persistence
   } do
-    budgets!(token: 1)
+    endpoint = endpoint(persistence: persistence, limits: budgets(%{token: 1}))
 
     # Under budget the answer is the flow's own: an unknown code is a bad
     # grant. Over it, the endpoint answers before the flow is consulted.
-    assert post_form(persistence, "/oauth/token", %{"grant_type" => "authorization_code"}).status ==
+    assert post_form(endpoint, "/oauth/token", %{"grant_type" => "authorization_code"}).status ==
              400
 
-    conn = post_form(persistence, "/oauth/token", %{"grant_type" => "authorization_code"})
+    conn = post_form(endpoint, "/oauth/token", %{"grant_type" => "authorization_code"})
     assert conn.status == 429
     assert Jason.decode!(conn.resp_body)["error"] == "temporarily_unavailable"
     # The wait is stated, so a client renewing reactively does not have to guess.
@@ -588,16 +627,16 @@ defmodule Vigil.OAuth.EndpointTest do
   test "the consent page past its budget is refused as HTML, not as JSON", %{
     persistence: persistence
   } do
-    budgets!(authorize: 1)
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+    endpoint = endpoint(persistence: persistence, limits: budgets(%{authorize: 1}))
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
 
     query =
       authorize_query(client["client_id"], "https://claude.ai/api/mcp/auth_callback", challenge)
 
-    assert get_query(persistence, "/oauth/authorize", query).status == 200
+    assert get_query(endpoint, "/oauth/authorize", query).status == 200
 
-    conn = get_query(persistence, "/oauth/authorize", query)
+    conn = get_query(endpoint, "/oauth/authorize", query)
     assert conn.status == 429
     assert get_resp_header(conn, "content-type") == ["text/html; charset=utf-8"]
     # The same headers the rest of the HTML surface carries — a refusal is
@@ -607,15 +646,15 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "a refused /authorize never reaches the CIMD fetch", %{persistence: persistence} do
-    budgets!(authorize: 1)
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+    endpoint = endpoint(persistence: persistence, limits: budgets(%{authorize: 1}))
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
 
     # Spend the budget on a client that needs no fetch...
     spend =
       authorize_query(client["client_id"], "https://claude.ai/api/mcp/auth_callback", challenge)
 
-    assert get_query(persistence, "/oauth/authorize", spend).status == 200
+    assert get_query(endpoint, "/oauth/authorize", spend).status == 200
 
     # ...then ask with an https client_id, which is the only input that sends
     # `Vigil.OAuth.Client.resolve/4` out to the network. 429 is the endpoint
@@ -623,7 +662,7 @@ defmodule Vigil.OAuth.EndpointTest do
     # would have failed and come back as 400 untrusted instead.
     conn =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query(
           "https://cimd.invalid/metadata.json",
@@ -638,46 +677,32 @@ defmodule Vigil.OAuth.EndpointTest do
   test "behind a trusted proxy the endpoint budgets are per forwarded client", %{
     persistence: persistence
   } do
-    budgets!(register: 1)
-    trust_proxy!("cf-connecting-ip", ["203.0.113.0/24"])
+    endpoint =
+      endpoint(
+        persistence: persistence,
+        limits: budgets(%{register: 1}),
+        client_addr: behind_proxy("cf-connecting-ip", ["203.0.113.0/24"])
+      )
 
     body = %{client_name: "Test Client", redirect_uris: ["https://claude.ai/cb"]}
 
-    assert register_as(persistence, body, {203, 0, 113, 7}, "198.51.100.9").status == 201
-    assert register_as(persistence, body, {203, 0, 113, 7}, "198.51.100.9").status == 429
+    assert register_as(endpoint, body, {203, 0, 113, 7}, "198.51.100.9").status == 201
+    assert register_as(endpoint, body, {203, 0, 113, 7}, "198.51.100.9").status == 429
 
     # A different client through the same proxy still has its own budget.
-    assert register_as(persistence, body, {203, 0, 113, 7}, "198.51.100.20").status == 201
+    assert register_as(endpoint, body, {203, 0, 113, 7}, "198.51.100.20").status == 201
   end
 
-  defp register_as(persistence, body, peer, forwarded) do
+  defp register_as(endpoint, body, peer, forwarded) do
     conn(:post, "/oauth/register", Jason.encode!(body))
     |> put_req_header("content-type", "application/json")
     |> put_req_header("cf-connecting-ip", forwarded)
     |> Map.put(:remote_ip, peer)
-    |> call(persistence)
+    |> call(endpoint)
   end
 
-  # The budgets are arguments; these tests would otherwise have to spend the
-  # production ones, thirty requests at a time.
-  defp budgets!(overrides) do
-    previous = [
-      oauth_rate_limit_rpm: Application.get_env(:vigil, :oauth_rate_limit_rpm),
-      oauth_register_rate_limit_rpm: Application.get_env(:vigil, :oauth_register_rate_limit_rpm)
-    ]
-
-    for {endpoint, budget} <- overrides do
-      case endpoint do
-        :register -> Application.put_env(:vigil, :oauth_register_rate_limit_rpm, budget)
-        _ -> Application.put_env(:vigil, :oauth_rate_limit_rpm, budget)
-      end
-    end
-
-    on_exit(fn -> restore_env(previous) end)
-  end
-
-  defp wrong_password_params(persistence) do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  defp wrong_password_params(endpoint) do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
@@ -687,32 +712,12 @@ defmodule Vigil.OAuth.EndpointTest do
     })
   end
 
-  defp consent_as(persistence, params, peer, forwarded) do
+  defp consent_as(endpoint, params, peer, forwarded) do
     conn(:post, "/oauth/authorize", URI.encode_query(params))
     |> put_req_header("content-type", "application/x-www-form-urlencoded")
     |> put_req_header("cf-connecting-ip", forwarded)
     |> Map.put(:remote_ip, peer)
-    |> call(persistence)
-  end
-
-  defp trust_proxy!(header, cidrs) do
-    previous = [
-      trusted_proxy_header: Application.get_env(:vigil, :trusted_proxy_header),
-      trusted_proxies: Application.get_env(:vigil, :trusted_proxies)
-    ]
-
-    Application.put_env(:vigil, :trusted_proxy_header, header)
-    Application.put_env(:vigil, :trusted_proxies, cidrs)
-
-    on_exit(fn -> restore_env(previous) end)
-  end
-
-  # A key that was unset has to be deleted again, not set to nil: an explicit
-  # nil is a value, and `Application.get_env/3`'s default only covers absence.
-  defp restore_env(previous) do
-    for {k, v} <- previous do
-      if is_nil(v), do: Application.delete_env(:vigil, k), else: Application.put_env(:vigil, k, v)
-    end
+    |> call(endpoint)
   end
 
   ## Response headers on the HTML
@@ -721,12 +726,12 @@ defmodule Vigil.OAuth.EndpointTest do
   # types a password, so the headers on it are worth asserting rather than
   # hoping for.
 
-  defp consent_page(persistence) do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+  defp consent_page(endpoint) do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
 
     get_query(
-      persistence,
+      endpoint,
       "/oauth/authorize",
       authorize_query(client["client_id"], "https://claude.ai/api/mcp/auth_callback", challenge)
     )
@@ -747,9 +752,9 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the consent page denies by default and permits only what it uses", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    conn = consent_page(persistence)
+    conn = consent_page(endpoint)
     assert conn.status == 200
 
     directives = csp_directives(conn)
@@ -770,9 +775,9 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the consent page carries the three headers a password form deserves", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    conn = consent_page(persistence)
+    conn = consent_page(endpoint)
 
     assert header(conn, "x-content-type-options") == "nosniff"
     assert header(conn, "referrer-policy") == "no-referrer"
@@ -781,9 +786,9 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the nonce in the policy is the nonce on the page, and is fresh each time", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    conn = consent_page(persistence)
+    conn = consent_page(endpoint)
 
     [nonce] =
       Regex.run(~r/style-src 'nonce-([^']+)'/, header(conn, "content-security-policy"))
@@ -791,7 +796,7 @@ defmodule Vigil.OAuth.EndpointTest do
 
     assert conn.resp_body =~ ~s(<style nonce="#{nonce}">)
 
-    second = consent_page(persistence)
+    second = consent_page(endpoint)
 
     [other] =
       Regex.run(~r/style-src 'nonce-([^']+)'/, header(second, "content-security-policy")) |> tl()
@@ -800,12 +805,12 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the page renders no external asset and runs no script, as the policy claims", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
     # `default-src 'none'` is only honest while this stays true. The URLs in
     # the hidden fields are data, not asset references, so the check is for
     # the things that would actually load something.
-    body = consent_page(persistence).resp_body
+    body = consent_page(endpoint).resp_body
 
     refute body =~ "<script"
     refute body =~ "<link"
@@ -815,15 +820,15 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the error variant still renders and still carries the headers", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    {201, client} = register(persistence, ["https://claude.ai/api/mcp/auth_callback"])
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
     {_verifier, challenge} = pkce_pair()
     redirect_uri = "https://claude.ai/api/mcp/auth_callback"
 
     conn =
       post_form(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         Map.merge(authorize_query(client["client_id"], redirect_uri, challenge), %{
           "password" => "falsch",
@@ -843,14 +848,14 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the loopback-warning variant still renders and still carries the headers", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
-    {201, client} = register(persistence, ["http://localhost/callback"])
+    {201, client} = register(endpoint, ["http://localhost/callback"])
     {_verifier, challenge} = pkce_pair()
 
     conn =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query(client["client_id"], "http://localhost:3118/callback", challenge)
       )
@@ -864,11 +869,11 @@ defmodule Vigil.OAuth.EndpointTest do
   end
 
   test "the HTML error page refuses framing too, and needs no style-src", %{
-    persistence: persistence
+    endpoint: endpoint
   } do
     conn =
       get_query(
-        persistence,
+        endpoint,
         "/oauth/authorize",
         authorize_query("nobody", "https://evil.tld/cb", "x")
       )
@@ -887,13 +892,18 @@ defmodule Vigil.OAuth.EndpointTest do
 
   ## Janitor sweep (time injected, no sleeping)
 
-  test "an expired code is gone after a sweep", %{persistence: persistence} do
-    {201, client} = register(persistence, ["https://client.example/cb"])
+  test "an expired code is gone after a sweep", %{
+    endpoint: endpoint,
+    persistence: persistence,
+    settings: settings
+  } do
+    {201, client} = register(endpoint, ["https://client.example/cb"])
     {_verifier, challenge} = pkce_pair()
 
     {:ok, ctx} =
       OAuth.Flow.authorize_request(
         persistence,
+        settings,
         authorize_query(client["client_id"], "https://client.example/cb", challenge)
       )
 

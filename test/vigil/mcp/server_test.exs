@@ -6,13 +6,15 @@ defmodule Vigil.MCP.ServerTest do
   #
   # The writer is this file's own now, under a name it supplies and hands to
   # the router — which threads it to both halves of a response, the tool call
-  # and the envelope that wraps it. What is still found by a default is the
-  # session table and the rate limiter, so this is the one async file that may
-  # start those two.
+  # and the envelope that wraps it. The session table is the same: a name of
+  # this file's own. The limiter is the test's own too, counting in a process
+  # rather than in the node's one table — `Vigil.RateLimitTest` is the only
+  # file that starts that, and it is async because it is the only one.
   use ExUnit.Case, async: true
   import Plug.Conn
   import Plug.Test
 
+  alias Vigil.RateLimit
   alias Vigil.Store
   alias Vigil.MCP.Server
   alias Vigil.MCP.Tools
@@ -37,7 +39,6 @@ defmodule Vigil.MCP.ServerTest do
     )
 
     start_supervised!({Vigil.MCP.Envelope, name: @sessions})
-    start_supervised!(Vigil.RateLimit)
 
     oauth = Vigil.OAuthCase.setup!()
 
@@ -60,12 +61,19 @@ defmodule Vigil.MCP.ServerTest do
   # `/mcp` verifies against whatever the authorization server was initialized
   # with, so handing the router this test's persistence is all it takes for
   # the token minted above to be the token verified here.
+  # The limiter defaults to counting state this router alone holds, so a test
+  # that is not about rate limiting cannot spend a budget another test is
+  # counting in, and nothing here needs the node's one table. A test that *is*
+  # about rate limiting names one instead, and every request in it is counted
+  # against the same windows.
   defp opts(persistence, extra \\ []) do
+    {limiter, extra} = Keyword.pop_lazy(extra, :limiter, &RateLimit.Counter.new/0)
+
     Server.init(
       [
         store: @store,
         sessions: @sessions,
-        oauth: OAuth.Endpoint.init(persistence: persistence)
+        oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter)
       ] ++ extra
     )
   end
@@ -88,7 +96,7 @@ defmodule Vigil.MCP.ServerTest do
   test "the router's persistence and limiter are the authorization server's", %{
     persistence: persistence
   } do
-    limiter = Vigil.RateLimit.Counter.new()
+    limiter = RateLimit.Counter.new()
 
     handed_in =
       Server.init(oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter))
@@ -103,7 +111,7 @@ defmodule Vigil.MCP.ServerTest do
 
     assert default[:persistence] == OAuth.Store.over_tables()
     assert default[:oauth][:persistence] == default[:persistence]
-    assert default[:limiter] == Vigil.RateLimit.over_table()
+    assert default[:limiter] == RateLimit.over_table()
     assert default[:oauth][:limiter] == default[:limiter]
   end
 
@@ -742,24 +750,29 @@ defmodule Vigil.MCP.ServerTest do
     # integration test of the wiring — Server.init/1 resolving the budget
     # and handle_mcp/1 enforcing it — without needing dozens of requests;
     # Vigil.RateLimitTest covers the limiter's own behavior directly.
-    defp post_with_budget(persistence, token, body, budget, headers) do
+    defp post_with_budget(persistence, limiter, token, body, budget, headers) do
       conn =
         conn(:post, "/mcp", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer #{token}")
 
       conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
-      Server.call(conn, opts(persistence, rate_limit_budget: budget))
+      Server.call(conn, opts(persistence, rate_limit_budget: budget, limiter: limiter))
     end
 
     test "the (budget+1)th tools/call within a minute is rejected with 429", %{
       persistence: persistence,
       token: token
     } do
+      # One set of windows for every request below, so the fourth is counted
+      # against the same state as the first.
+      limiter = RateLimit.Counter.new()
+
       for n <- 1..3 do
         conn =
           post_with_budget(
             persistence,
+            limiter,
             token,
             %{
               jsonrpc: "2.0",
@@ -777,6 +790,7 @@ defmodule Vigil.MCP.ServerTest do
       conn =
         post_with_budget(
           persistence,
+          limiter,
           token,
           %{
             jsonrpc: "2.0",

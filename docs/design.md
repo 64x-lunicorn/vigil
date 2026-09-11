@@ -339,13 +339,22 @@ Three layers guard every write, in this order.
 
 **1. Security.** No `..`, no absolute paths, no backslashes, no null bytes, and
 no path segment starting with `.` or `_`. Checked before *and* after
-normalization.
+normalization — which is not a fact each caller has to hold.
+`Vigil.Slug.canonical_path/1` is the two steps in that one order, and the
+callers that want a path the vault might store ask it rather than the halves:
+`Vigil.Vault.Policy` for a section id's path part, `Vigil.Index.resolve/2` for
+every read and for the write gate's own lookup. `safe_path/1` stays public for
+the two write operations that want what normalization says about a path no
+filename can be derived from, and they spell the order out.
 
-The rule lives in `Vigil.Slug`, beside the normalization it is applied under,
-and both sides ask it: `Vigil.Vault.Policy` before a write, `Vigil.Index`
-before a read. It is not a permission check — `skills/tdd.md` passes it — which
-is why `read` and `links` can apply it without inheriting the write rules, and
-why a reader may still reach a note in a domain that is no longer writable.
+The order is load-bearing: normalization slugifies every segment, so it turns
+`_domains.yml` into `domains.yml` and `/abs/x.md` into `abs/x.md`. A path
+checked only afterwards is a path whose check the normalization has laundered.
+
+The rule lives in `Vigil.Slug`, beside the normalization it is applied under.
+It is not a permission check — `skills/tdd.md` passes it — which is why `read`
+and `links` can apply it without inheriting the write rules, and why a reader
+may still reach a note in a domain that is no longer writable.
 
 **2. Normalization.** `Vigil.Slug` produces one canonical form: NFC, trim,
 lowercase, explicit transliteration (`ä`→`ae`, `ø`→`oe`, `ß`→`ss`, …), generic
@@ -552,15 +561,33 @@ Appending at the end of a file, or opening a new section via the heading
 argument, is unaffected — there a heading opens a section rather than cutting
 one in half.
 
-**A section id is resolved once.** `replace_section` and `delete_section` take
-an id, and the policy resolves it through the same lenient lookup `read` uses —
-one retry through path normalization — so an id that reads is an id that
-writes. The write then goes to the resolved record's canonical path, never to
-one re-derived by splitting the id on its fragment. That is what makes the
-leniency safe: a normalized id writes where the lookup landed, not where the id
-pointed. The path check on the id's own path part still runs first, so an id
+**A section id is resolved once, through one function.** `replace_section` and
+`delete_section` take an id, and the policy resolves it through
+`Vigil.Index.find_chunk/2`, which goes through the same `resolve/2` that
+`read/2` and `links/2` do — so an id that reads is an id that writes by
+construction rather than by two walks agreeing. It was the second: `read`
+checked that the id's path part was safe to resolve and `find_chunk` did not,
+so `/bike/via-carolina.md#gear` — which normalizes onto a real chunk id —
+resolved for the write path and was refused for the read path.
+
+**Safety and the canonical form come back together**, from
+`Vigil.Slug.canonical_path/1`. Normalization slugifies every segment, which
+turns `_domains.yml` into `domains.yml` and `/abs/x.md` into `abs/x.md`, so a
+path checked only after it is normalized is a path whose check the
+normalization has laundered. That order used to be a fact each caller had to
+know — checked before normalization in `Vigil.Vault.Policy`, again after, under
+a comment explaining why. It is one function's now, and a caller that does not
+hold the order cannot get it wrong.
+
+The write then goes to the resolved record's canonical path, never to one
+re-derived by splitting the id on its fragment. That is what makes the leniency
+safe: a normalized id writes where the lookup landed, not where the id pointed.
+What may be written is still judged before what is there is looked up, so an id
 naming `skills/` or an excluded domain answers "Invalid path" rather than
-"Not found".
+"Not found" — a refusal must not confirm that a path it will not touch exists.
+`Vigil.Vault.SectionIdParityTest` is where the whole of this is asserted rather
+than documented: one table of id shapes, and `read`, `links`, `replace_section`
+and `delete_section` answering each of them.
 
 **The duplicate gate keys on the note's name.** Before `create` writes, the
 policy asks the vault for notes in the same domain that look like the one being
@@ -796,22 +823,28 @@ by their owner alone.
 
 Eight test files used to `mkdir` a temp directory and open three `:dets` files
 apiece to ask a question about a token, and every one of them was serial for
-it. Six of the eight run in parallel now. Two are still serial, for reasons
-that have nothing to do with persistence: `Vigil.OAuth.EndpointTest` sets the
-rate-limit budgets and the trusted-proxy configuration in global application
-env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor`, which is
-registered under its module name.
+it. All eight run in parallel now. The last two stopped being serial for
+reasons that had nothing to do with persistence either:
+`Vigil.OAuth.EndpointTest` wrote the rate-limit budgets and the trusted-proxy
+configuration into global application env and now states both as router
+options, and `Vigil.OAuth.JanitorTest` drove the janitor registered under its
+module name and now starts unregistered ones it reaches by pid.
 
 **`Vigil.MCP.ServerTest` supplies its own writer now**, the way
 `Vigil.StoreTest` does: the router takes one at `init/1` and threads it to
 both halves of a response, so the file starts no `Vigil.Store` under the
-production registration. What it still finds by a default is the session table
-and the rate limiter, and it is the one async file that may start those two —
-everything else that wants them (`Vigil.RateLimitTest`,
-`Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs after
-every async file has finished. A second async file starting either breaks it
-loudly and immediately: `start_supervised!` raises on
-`{:error, {:already_started, _}}`.
+production registration. The session table is its own too, under a name it
+supplies, and so is the limiter — counting in a process rather than in the
+node's one table. Nothing it drives is found by a default any more.
+
+**One file starts `Vigil.RateLimit`**: `Vigil.RateLimitTest`, where the
+production adapter's table is the thing under test. It is async *because* it
+is the only one — the table is the node's, so a second file starting it would
+clash over the registered name and over what is in the table, and the two
+tests that need the table gone could not say so. That stays true by force
+rather than by convention: `start_supervised!` raises on
+`{:error, {:already_started, _}}`, so a second file starting it breaks loudly
+and immediately.
 
 The speed is a consequence and not the argument, and here it is a small one.
 The argument is that 244 lines owning expiry, revocation, spent-token marking
@@ -875,6 +908,65 @@ which is the point of that list belonging to the janitor; what changed is that
 the limiter stopped being the one entry on it that was a hard-coded module
 reference. Nothing per request, and nothing reaching for a registered name on
 the hot path.
+
+---
+
+## The deployment is resolved once
+
+`Vigil.Settings` is what the deployment says about itself: the vault's
+timezone, the authorization server's identity — issuer, resource, consent
+password — and the two strings that shape the writing instructions handed to
+the MCP client. `Vigil.Settings.from_env/0` is the only place those six keys
+are read, `Vigil.Application` calls it once where the supervision tree is
+built, and everything below takes the result as an option.
+
+**The shape is `Vigil.SkillKey`'s**, which bundled the HMAC secret and the
+rotation window into one value because neither derives a token alone, and made
+every function there take the bundle. What is new is the reason: these six do
+not derive anything together. They are one value because of *where they are
+read*. An environment read belongs in the composition root, and eight modules
+that each asked for one key with a default of its own had no way to be handed
+another deployment.
+
+**Every default is `config/runtime.exs`'s**, stated once as the fallback of
+the environment variable it comes from. `from_env/0` fetches rather than
+defaults, so a key that is somehow unset fails at boot where an operator can
+see it, and not at the first write. The module-side copies — `Vigil.Clock`'s
+`"Europe/Berlin"`, `Vigil.MCP.Server`'s `"the vault owner"` and `"English"` —
+are gone with the reads that used them.
+
+**Where each one lands.** `Vigil.Store` keeps the timezone in its state for a
+write that arrived without an instant of its own, and publishes it in the
+table beside the vault path, so a caller resolving its own instant reads the
+deployment the writer was built with. `Vigil.MCP.Envelope.for_tool/5` takes it
+as its fifth argument, for the same reason the four before it are arguments.
+`Vigil.MCP.Server` resolves the value at `init/1` and hands it down to
+`Vigil.OAuth.Endpoint` exactly as it hands down persistence and the limiter —
+and reads it back out of those options, so both halves agree on what this
+server is called and what it protects by construction rather than by two
+resolutions happening to match. `Vigil.OAuth.Flow` takes it on the two
+decisions that need it: the audience an `/authorize` request may ask for, and
+the password a consent is checked against.
+
+**The audience a code is minted for travels in `ctx`.** `authorize_request`
+already checks the request's target against the deployment's resource, so it
+puts that resource in the context it returns and `Vigil.OAuth.Code` mints
+against it. A code cannot be minted for a resource its request was never
+checked against, and `Code` has no second opinion to hold.
+
+**What the composition root reads is out of scope and stays there.** The vault
+path, the exclusions, the git remote, the state dir and the port are read in
+`Vigil.Application` and handed to the children that need them. One exception
+is left standing on purpose: `Vigil.SkillKey.config/0` still reads
+`auth_password` for itself, where it is the AP-4 HMAC secret rather than the
+consent password, bundled with the rotation window that nothing else wants.
+That bundle is the shape this section copies, not something it replaces.
+
+**Two more test files run in parallel.** `Vigil.ClockTest` set `:tz` in global
+application env and put it back afterwards; it passes a timezone now.
+`Vigil.ContractsTest` said so in its own comment — "the OAuth metadata reads
+issuer/resource from application env" — and now hands both metadata functions
+the settings value the fixture already had.
 
 ---
 
@@ -995,8 +1087,10 @@ same one. So it resolves both at `init/1` — the writer, defaulting to
 `Vigil.MCP.Tools.dispatch` and to `Vigil.MCP.Envelope.for_tool` alike.
 Defaulting inside each half instead is how one of them came to be handed a
 writer and the other left to find one by name, so neither takes a default of
-its own: `for_tool/4` is asked which session table and which writer, every
-time. Session state is per router rather than one table for the node.
+its own: `for_tool/5` is asked which session table and which writer, every
+time — and, since the deployment is resolved once too, which timezone to stamp
+the response with. Session state is per router rather than one table for the
+node.
 
 This is the reason the assistant never has to guess what time it is.
 

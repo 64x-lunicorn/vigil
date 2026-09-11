@@ -16,11 +16,14 @@ defmodule Vigil.RateLimitTest do
   thing that can go wrong with a second one, which is why the contract is
   tested rather than assumed.
 
-  Still serial, and only for the production adapter: its table is the node's
-  one, owned by a process registered under `Vigil.RateLimit`, which
-  `Vigil.MCP.ServerTest` also starts.
+  This file is the only one that starts `Vigil.RateLimit`, and it is async
+  because it is the only one: the production adapter's table is the node's
+  one, owned by a process registered under that module, so a second file
+  starting it would clash with this one over the name and over what is in the
+  table. Every other file that needs a limiter builds a counting one of its
+  own.
   """
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.RateLimit
 
@@ -56,8 +59,9 @@ defmodule Vigil.RateLimitTest do
 
   ## The two adapters
 
-  # The node's one named table, owned by the process this starts. Nothing else
-  # async may start it, so this file is serial.
+  # The node's one named table, owned by the process this starts. No other file
+  # starts it, so the table these tests count in is theirs — and the two tests
+  # below that need it *gone* can say so.
   defp named_table(_ctx) do
     start_supervised!(RateLimit)
     {:ok, limiter: RateLimit.over_table()}
@@ -167,6 +171,12 @@ defmodule Vigil.RateLimitTest do
     # as a budget is the limiter's question rather than each caller's. It
     # belongs to neither adapter: it is read once, where a router is
     # initialized, and handed to `limited?` as an argument from there on.
+    #
+    # This is the one place left in the suite that writes a budget into global
+    # application env, and it is not a test stating a deployment: reading that
+    # key *is* what `budget/2` does, so there is nothing else to ask it
+    # against. The key is this file's own and nothing else reads it, so the
+    # write stays local even though the env it lands in is not.
     setup do
       on_exit(fn -> Application.delete_env(:vigil, :test_budget) end)
       :ok
@@ -181,7 +191,12 @@ defmodule Vigil.RateLimitTest do
       log =
         ExUnit.CaptureLog.capture_log(fn -> assert RateLimit.budget(:test_budget, 60) == 60 end)
 
-      assert log == ""
+      # Not `log == ""`: `capture_log` captures the whole node's Logger output,
+      # not this process's, so in a parallel suite another file's load line can
+      # land inside the block. What the claim is about is this key — an unset
+      # budget is not a misconfiguration and must not be reported as one — and
+      # the test below asserts the exact opposite for a value that is one.
+      refute log =~ "test_budget"
     end
 
     test "a value that is not a budget falls back to the default, loudly" do

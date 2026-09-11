@@ -13,19 +13,19 @@ defmodule Vigil.OAuth.JanitorTest do
   all, that it reschedules, and that it survives the limiter's table being
   gone.
 
-  Still serial, and no longer for anything either seam holds:
-  `Vigil.OAuth.Janitor` is registered under its module name and these tests
-  drive it.
+  Every janitor here is started unregistered and driven by pid. The name is
+  the janitor's fifth argument for that reason: registered under its module it
+  is the node's one janitor, and a file that drives that one can only be the
+  node's one file driving it.
   """
 
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.OAuth.{Janitor, Store}
   alias Vigil.OAuthCase
   alias Vigil.RateLimit
 
   @now 1_700_000_000
-  @limiter_windows :vigil_rate_limits
 
   setup do
     OAuthCase.setup!()
@@ -35,13 +35,15 @@ defmodule Vigil.OAuth.JanitorTest do
 
   # `:sys.get_state/1` is a call, so it is handled after the `:sweep` info
   # message already in the mailbox — a barrier rather than a sleep.
-  defp sweep_now do
-    send(Janitor, :sweep)
-    :sys.get_state(Janitor)
+  defp sweep_now(janitor) do
+    send(janitor, :sweep)
+    :sys.get_state(janitor)
   end
 
+  # Unregistered, so the janitor this test drives is this test's own and
+  # nothing else on the node can reach it.
   defp start_janitor(opts \\ []) do
-    start_supervised!({Janitor, opts})
+    start_supervised!({Janitor, Keyword.put_new(opts, :name, nil)})
   end
 
   ## The seam
@@ -56,10 +58,12 @@ defmodule Vigil.OAuth.JanitorTest do
 
     recording = %{persistence | sweep_expired: fn now -> send(test, {:swept, now}) end}
 
-    start_janitor(interval: :timer.minutes(5), now: fn -> @now end, persistence: recording)
+    janitor =
+      start_janitor(interval: :timer.minutes(5), now: fn -> @now end, persistence: recording)
+
     code = mint_code(persistence, @now - 3600)
 
-    sweep_now()
+    sweep_now(janitor)
 
     assert_received {:swept, @now}
     # The recording adapter swept nothing, so the expired code is still there:
@@ -73,8 +77,14 @@ defmodule Vigil.OAuth.JanitorTest do
     test = self()
     recording = %{persistence | sweep_expired: fn now -> send(test, {:swept, now}) end}
 
-    start_janitor(interval: :timer.minutes(5), now: fn -> @now - 7200 end, persistence: recording)
-    sweep_now()
+    janitor =
+      start_janitor(
+        interval: :timer.minutes(5),
+        now: fn -> @now - 7200 end,
+        persistence: recording
+      )
+
+    sweep_now(janitor)
 
     assert_received {:swept, swept_at}
     assert swept_at == @now - 7200
@@ -100,34 +110,44 @@ defmodule Vigil.OAuth.JanitorTest do
       | sweep_expired: fn now -> send(test, {:limiter_swept, now}) end
     }
 
-    start_janitor(
-      interval: :timer.minutes(5),
-      now: fn -> @now end,
-      persistence: persistence,
-      limiter: recording
-    )
+    janitor =
+      start_janitor(
+        interval: :timer.minutes(5),
+        now: fn -> @now end,
+        persistence: persistence,
+        limiter: recording
+      )
 
-    sweep_now()
+    sweep_now(janitor)
 
     assert_received {:limiter_swept, @now}
   end
 
-  test "a sweep with the limiter restarting has nothing to reclaim and takes nobody down", %{
+  test "a sweep that reclaims nothing is not an error and leaves the janitor running", %{
     persistence: persistence
   } do
     # The production limiter's table is owned by the limiter's process and is
     # gone while that process is restarting. The janitor is a sibling, not a
-    # dependant: it must survive that window — which it does because the
-    # production adapter answers "nothing reclaimed" rather than raising, a
-    # guard that is that adapter's own and no part of the limiter contract.
-    start_janitor(interval: :timer.minutes(5), now: fn -> @now end, persistence: persistence)
+    # dependant: it must survive that window. What reaches it is whatever the
+    # value answers — the production adapter answers "nothing reclaimed"
+    # rather than raising, a guard that is that adapter's own, no part of the
+    # limiter contract, and asserted where it lives, in `Vigil.RateLimitTest`.
+    # The janitor's half is this: an empty sweep is not an error, and the
+    # janitor that asked for it is still there afterwards.
+    empty = RateLimit.Counter.new()
+    assert empty.sweep_expired.(@now) == 0
 
-    assert :ets.whereis(@limiter_windows) == :undefined
+    janitor =
+      start_janitor(
+        interval: :timer.minutes(5),
+        now: fn -> @now end,
+        persistence: persistence,
+        limiter: empty
+      )
 
-    janitor = Process.whereis(Janitor)
-    sweep_now()
+    sweep_now(janitor)
 
-    assert Process.whereis(Janitor) == janitor
+    assert Process.alive?(janitor)
   end
 
   ## The interval
@@ -156,8 +176,7 @@ defmodule Vigil.OAuth.JanitorTest do
   ## The production defaults
 
   test "the interval, the instant, the persistence and the limiter default to production" do
-    start_janitor()
-    state = :sys.get_state(Janitor)
+    state = start_janitor() |> :sys.get_state()
 
     assert state.interval == :timer.minutes(5)
     assert_in_delta state.now.(), System.system_time(:second), 2

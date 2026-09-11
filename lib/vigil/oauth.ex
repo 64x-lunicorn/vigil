@@ -1,11 +1,16 @@
 defmodule Vigil.OAuth do
   @moduledoc """
-  The facts both halves of the HTTP surface need: who this authorization
-  server says it is, what it protects, and the two scopes it issues.
+  The two scopes this authorization server issues, and the two metadata
+  documents it publishes about itself.
 
-  `Vigil.MCP.Server` needs them to challenge and to check an access token's
-  audience; `Vigil.OAuth.Endpoint` needs them to issue one.
+  Who the server says it is, what it protects and what it checks a human
+  against are not read here: they are three of the deployment's settings,
+  resolved once (`Vigil.Settings`) and handed in. Both metadata functions take
+  that value, which is why a test can state an authorization server rather
+  than install one.
   """
+
+  alias Vigil.Settings
 
   @scope "vault"
   @read_scope "vault:read"
@@ -19,27 +24,25 @@ defmodule Vigil.OAuth do
   @doc "Every scope this server issues."
   def scopes, do: [@scope, @read_scope]
 
-  def issuer, do: Application.fetch_env!(:vigil, :issuer)
-  def resource, do: Application.fetch_env!(:vigil, :resource)
-  def auth_password, do: Application.fetch_env!(:vigil, :auth_password)
-
   @doc "RFC 9728 protected-resource metadata."
-  def protected_resource_metadata do
+  @spec protected_resource_metadata(Settings.t()) :: map()
+  def protected_resource_metadata(settings) do
     %{
-      resource: resource(),
-      authorization_servers: [issuer()],
+      resource: settings.resource,
+      authorization_servers: [settings.issuer],
       scopes_supported: scopes(),
       bearer_methods_supported: ["header"]
     }
   end
 
   @doc "RFC 8414 authorization-server metadata."
-  def authorization_server_metadata do
+  @spec authorization_server_metadata(Settings.t()) :: map()
+  def authorization_server_metadata(settings) do
     %{
-      issuer: issuer(),
-      authorization_endpoint: issuer() <> "/oauth/authorize",
-      token_endpoint: issuer() <> "/oauth/token",
-      registration_endpoint: issuer() <> "/oauth/register",
+      issuer: settings.issuer,
+      authorization_endpoint: settings.issuer <> "/oauth/authorize",
+      token_endpoint: settings.issuer <> "/oauth/token",
+      registration_endpoint: settings.issuer <> "/oauth/register",
       scopes_supported: scopes(),
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],

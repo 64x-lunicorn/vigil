@@ -23,10 +23,17 @@ defmodule Vigil.OAuth.Flow do
   function below takes a `Vigil.OAuth.Persistence` and hands it on, so what
   the decisions are made *against* is the caller's — in production
   `Vigil.OAuth.Endpoint` resolves it once when the router is initialized.
+
+  Which authorization server these are decisions *for* is the caller's too.
+  The two checks that need it — the audience an `/authorize` request may ask
+  for, and the password a consent is checked against — take a
+  `Vigil.Settings`, resolved in the same place and at the same moment as the
+  persistence beside it.
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Token}
+  alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Token}
+  alias Vigil.Settings
 
   @doc """
   Dynamic client registration. Returns the registration response, or
@@ -72,9 +79,16 @@ defmodule Vigil.OAuth.Flow do
   client can be driven through the whole authorization request with a test
   adapter and an injected time — the production values are the defaults, so
   `Vigil.OAuth.Endpoint` calling this with neither changes nothing.
+
+  The audience the request was checked against travels on in `ctx`, so the
+  code minted from it is minted for the resource this request was authorized
+  for and `Vigil.OAuth.Code` has no second opinion to hold.
   """
+  @spec authorize_request(Persistence.t(), Settings.t(), map(), integer(), map()) ::
+          {:ok, map()} | {:error, term()}
   def authorize_request(
         persistence,
+        settings,
         params,
         now \\ System.system_time(:second),
         net \\ Cimd.net()
@@ -86,13 +100,13 @@ defmodule Vigil.OAuth.Flow do
          true <- is_binary(redirect_uri) and redirect_uri != "",
          {:ok, client} <- Client.resolve(persistence, client_id, now, net),
          true <- RedirectUri.matches?(client.redirect_uris, redirect_uri) do
-      authorize_details(params, client, redirect_uri)
+      authorize_details(params, settings, client, redirect_uri)
     else
       _ -> {:error, :untrusted}
     end
   end
 
-  defp authorize_details(params, client, redirect_uri) do
+  defp authorize_details(params, settings, client, redirect_uri) do
     state = params["state"]
 
     cond do
@@ -105,7 +119,7 @@ defmodule Vigil.OAuth.Flow do
       params["code_challenge_method"] != "S256" ->
         {:error, :bad_code_challenge_method}
 
-      not (is_nil(params["resource"]) or params["resource"] == OAuth.resource()) ->
+      not (is_nil(params["resource"]) or params["resource"] == settings.resource) ->
         {:error, {:redirect, redirect_uri, "invalid_target", state}}
 
       params["scope"] not in [nil, "", OAuth.scope(), OAuth.read_scope()] ->
@@ -118,6 +132,7 @@ defmodule Vigil.OAuth.Flow do
            redirect_uri: redirect_uri,
            code_challenge: params["code_challenge"],
            state: state,
+           resource: settings.resource,
            scope: params["scope"] || OAuth.scope()
          }}
     end
@@ -131,12 +146,14 @@ defmodule Vigil.OAuth.Flow do
   authorization code when the password is right. Recording the attempt is part
   of the decision, so the caller cannot forget to.
   """
-  def consent(persistence, ip, password, ctx, now \\ System.system_time(:second)) do
+  @spec consent(Persistence.t(), Settings.t(), String.t(), String.t() | nil, map(), integer()) ::
+          :rate_limited | :wrong_password | {:ok, String.t()}
+  def consent(persistence, settings, ip, password, ctx, now \\ System.system_time(:second)) do
     cond do
       persistence.rate_limited?.(ip, now) ->
         :rate_limited
 
-      Plug.Crypto.secure_compare(password || "", OAuth.auth_password()) ->
+      Plug.Crypto.secure_compare(password || "", settings.auth_password) ->
         persistence.reset_rate_limit.(ip)
         {:ok, Code.issue(persistence, ctx, now)}
 
