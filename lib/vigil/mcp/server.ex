@@ -14,25 +14,37 @@ defmodule Vigil.MCP.Server do
   plug(:match)
   plug(:dispatch)
 
-  # Resolves the rate limit budget and the authorization server's own options
-  # once, when Bandit starts this plug (or a test calls init/1 directly —
-  # several do, with no options, and that must keep working), rather than
-  # reading application config on every request. Forwarding used to call
-  # `Vigil.OAuth.Endpoint.init/1` per request, which re-parsed the trusted
+  # Resolves the rate limit budget, OAuth persistence and the authorization
+  # server's own options once, when Bandit starts this plug (or a test calls
+  # init/1 directly — several do, with no options, and that must keep working),
+  # rather than reading application config on every request. Forwarding used to
+  # call `Vigil.OAuth.Endpoint.init/1` per request, which re-parsed the trusted
   # proxy list every time.
+  #
+  # Persistence is the authorization server's options', and it is read back out
+  # of them rather than resolved twice: the token this router verifies and the
+  # token that server minted are then kept in the same place by construction,
+  # including when a caller hands the server's options in ready-made.
   @impl true
   def init(opts) do
+    oauth =
+      Keyword.get_lazy(opts, :oauth, fn ->
+        Vigil.OAuth.Endpoint.init(Keyword.take(opts, [:persistence]))
+      end)
+
     opts
     |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
       RateLimit.budget(:rate_limit_rpm, @default_rpm)
     end)
-    |> Keyword.put_new_lazy(:oauth, fn -> Vigil.OAuth.Endpoint.init([]) end)
+    |> Keyword.put(:oauth, oauth)
+    |> Keyword.put(:persistence, Keyword.fetch!(oauth, :persistence))
   end
 
   @impl true
   def call(conn, opts) do
     conn
     |> put_private(:rate_limit_budget, opts[:rate_limit_budget])
+    |> put_private(:oauth_persistence, opts[:persistence])
     |> put_private(:oauth_opts, opts[:oauth])
     |> super(opts)
   end
@@ -82,12 +94,16 @@ defmodule Vigil.MCP.Server do
   # token arrived in, and that every refusal answers the same challenge.
   defp validate_access_token(conn) do
     with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
-         {:ok, scope} <- OAuth.Token.validate_access(token, OAuth.resource()) do
+         {:ok, scope} <- OAuth.Token.validate_access(persistence(conn), token, OAuth.resource()) do
       {:ok, scope, token}
     else
       _ -> {:error, :challenge}
     end
   end
+
+  # Where the record this token is checked against is kept. Resolved in
+  # `init/1`, out of the authorization server's own options.
+  defp persistence(conn), do: conn.private.oauth_persistence
 
   defp send_401_challenge(conn) do
     challenge =

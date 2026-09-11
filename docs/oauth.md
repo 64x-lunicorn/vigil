@@ -22,6 +22,16 @@ signature library as a dependency and a class of bug (wrong `aud` claims) that
 cannot exist with a lookup. The audience is stored at issue time and compared
 at verification time.
 
+**Persistence is reached through a value.** What the server remembers is
+declared as fourteen questions in `Vigil.OAuth.Persistence` — a struct of
+functions with no defaults — and the `:dets`/`:ets` implementation is an
+adapter behind it, `Vigil.OAuth.Store.over_tables/0`. The six modules that
+read and write records ask through the value they are handed rather than
+naming a globally registered module with hard-coded table atoms, and the
+routers resolve the production adapter once, when they are initialized. See
+[design.md](design.md), "OAuth persistence is reached through a value", for
+the reasoning and the shape it follows.
+
 **The token record has one owner.** `Vigil.OAuth.Token` is the module that
 says what a stored token is. It writes every one that exists — the pair a
 grant redemption produces, the lone long-lived token that
@@ -586,11 +596,15 @@ and a client stays until it is deleted.
 
 | Swept | Owner | Reclaimed when |
 |---|---|---|
-| authorization codes | `Vigil.OAuth.Store` | `Vigil.OAuth.Code` says the code has expired |
-| access and refresh tokens | `Vigil.OAuth.Store` | `Vigil.OAuth.Token` says the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
-| consent-failure counters | `Vigil.OAuth.Store` | the 15-minute lockout window has elapsed |
-| CIMD cache entries | `Vigil.OAuth.Store` | the cached hour is up |
+| authorization codes | OAuth persistence | `Vigil.OAuth.Code` says the code has expired |
+| access and refresh tokens | OAuth persistence | `Vigil.OAuth.Token` says the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
+| consent-failure counters | OAuth persistence | the 15-minute lockout window has elapsed |
+| CIMD cache entries | OAuth persistence | the cached hour is up |
 | request-limit windows | `Vigil.RateLimit` | the one-minute window has elapsed |
+
+The first four are one question — persistence's `sweep_expired` — asked
+through the value the janitor holds; `Vigil.OAuth.Store` is the adapter that
+answers it today.
 
 No cron, no job library — just `Process.send_after/3`.
 
@@ -600,10 +614,10 @@ keyed by client address, so one sweep covers both. Only the third row is the
 15-minute consent lockout, and it covers wrong passwords on the consent form
 and nothing else.
 
-The janitor's list is its own rather than `Vigil.OAuth.Store`'s inventory. It
-was that inventory in effect until #89, and the one swept table `Store` does
-not own was swept by nobody. A module belongs on the list as soon as it owns a
-table with an expiry, whatever namespace it lives in.
+The janitor's list is its own rather than the OAuth store's inventory. It was
+that inventory in effect until #89, and the one swept table that store does
+not own was swept by nobody. Something belongs on the list as soon as it owns
+a table with an expiry, whatever namespace it lives in.
 
 Reclaiming is `Vigil.RateLimit`'s own business rather than the janitor's: what
 counts as an elapsed window is the same fact `limited?/3` decides on, and a
@@ -622,8 +636,9 @@ alone leaves the rate unbounded. That argument is not the cache's alone: it is
 why the request-limit table is swept too, since a per-key budget bounds how
 fast rows arrive and nothing else bounds how many there are.
 
-The interval and the instant are both arguments with production defaults, so a
-test can drive one sweep rather than wait five minutes for it. The instant is a
+The interval, the instant and the persistence are all arguments with
+production defaults, so a test can drive one sweep rather than wait five
+minutes for it, and drive it against an adapter of its own. The instant is a
 function, not a value: the janitor outlives any single one.
 
 > **Note:** `:dets` is not safe for concurrent access from multiple OS

@@ -15,7 +15,6 @@ defmodule Vigil.OAuth.TokenTest do
 
   setup do
     Vigil.OAuthCase.setup!()
-    :ok
   end
 
   defp resource, do: OAuth.resource()
@@ -85,11 +84,11 @@ defmodule Vigil.OAuth.TokenTest do
     end
   end
 
-  describe "issue_pair/2" do
-    setup do
+  describe "issue_pair/3" do
+    setup %{persistence: persistence} do
       now = System.system_time(:second)
       grant = Vigil.Uuid.v4()
-      pair = Token.issue_pair(redeemed(grant: grant), now)
+      pair = Token.issue_pair(persistence, redeemed(grant: grant), now)
       %{now: now, grant: grant, pair: pair}
     end
 
@@ -126,10 +125,18 @@ defmodule Vigil.OAuth.TokenTest do
       assert refresh.expires_at == now + 30 * @ttl_day
     end
 
-    test "the pair inherits the scope and the grant of what it descends from", %{now: now} do
+    test "the pair inherits the scope and the grant of what it descends from", %{
+      persistence: persistence,
+      now: now
+    } do
       # Both are read off the record here rather than at the two call sites,
       # so a redemption cannot inherit them one way and a rotation another.
-      pair = Token.issue_pair(redeemed(grant: "g-inherited", scope: OAuth.read_scope()), now)
+      pair =
+        Token.issue_pair(
+          persistence,
+          redeemed(grant: "g-inherited", scope: OAuth.read_scope()),
+          now
+        )
 
       {:ok, access} = Store.get_token(pair.access_token)
 
@@ -137,29 +144,39 @@ defmodule Vigil.OAuth.TokenTest do
       assert access.grant_id == "g-inherited"
     end
 
-    test "the pair inherits the audience of what it descends from", %{now: now} do
+    test "the pair inherits the audience of what it descends from", %{
+      persistence: persistence,
+      now: now
+    } do
       # The audience used to be a parameter, because a code stores it as
       # `:resource` and a refresh token as `:aud`. Both records answer for
       # themselves now, and the same pair comes out either way.
       for record <- [redeemed(), rotated()] do
-        pair = Token.issue_pair(record, now)
+        pair = Token.issue_pair(persistence, record, now)
 
-        assert Token.validate_access(pair.access_token, OAuth.resource(), now) ==
+        assert Token.validate_access(persistence, pair.access_token, OAuth.resource(), now) ==
                  {:ok, OAuth.scope()}
       end
     end
 
-    test "a code minted for another resource issues a pair good only there", %{now: now} do
-      pair = Token.issue_pair(redeemed(resource: "https://andere.tld/mcp"), now)
+    test "a code minted for another resource issues a pair good only there", %{
+      persistence: persistence,
+      now: now
+    } do
+      pair = Token.issue_pair(persistence, redeemed(resource: "https://andere.tld/mcp"), now)
 
-      assert Token.validate_access(pair.access_token, OAuth.resource(), now) == :error
+      assert Token.validate_access(persistence, pair.access_token, OAuth.resource(), now) ==
+               :error
 
-      assert Token.validate_access(pair.access_token, "https://andere.tld/mcp", now) ==
+      assert Token.validate_access(persistence, pair.access_token, "https://andere.tld/mcp", now) ==
                {:ok, OAuth.scope()}
     end
 
-    test "a record from before grants existed still mints into a family", %{now: now} do
-      pair = Token.issue_pair(rotated(grant: nil) |> Map.delete(:grant_id), now)
+    test "a record from before grants existed still mints into a family", %{
+      persistence: persistence,
+      now: now
+    } do
+      pair = Token.issue_pair(persistence, rotated(grant: nil) |> Map.delete(:grant_id), now)
 
       {:ok, access} = Store.get_token(pair.access_token)
       {:ok, refresh} = Store.get_token(pair.refresh_token)
@@ -169,110 +186,140 @@ defmodule Vigil.OAuth.TokenTest do
     end
   end
 
-  describe "validate_access/3" do
-    setup do
+  describe "validate_access/4" do
+    setup %{persistence: persistence} do
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), now)
+      pair = Token.issue_pair(persistence, redeemed(), now)
       %{now: now, pair: pair}
     end
 
-    test "a freshly minted access token is valid at its scope", %{pair: pair, now: now} do
-      assert Token.validate_access(pair.access_token, resource(), now) == {:ok, OAuth.scope()}
+    test "a freshly minted access token is valid at its scope", %{
+      persistence: persistence,
+      pair: pair,
+      now: now
+    } do
+      assert Token.validate_access(persistence, pair.access_token, resource(), now) ==
+               {:ok, OAuth.scope()}
     end
 
-    test "a read-only token validates at the read scope", %{now: now} do
-      pair = Token.issue_pair(redeemed(scope: OAuth.read_scope()), now)
+    test "a read-only token validates at the read scope", %{persistence: persistence, now: now} do
+      pair = Token.issue_pair(persistence, redeemed(scope: OAuth.read_scope()), now)
 
-      assert Token.validate_access(pair.access_token, resource(), now) ==
+      assert Token.validate_access(persistence, pair.access_token, resource(), now) ==
                {:ok, OAuth.read_scope()}
     end
 
-    test "a token minted for another resource is refused", %{pair: pair, now: now} do
-      assert Token.validate_access(pair.access_token, "https://andere.tld/mcp", now) == :error
+    test "a token minted for another resource is refused", %{
+      persistence: persistence,
+      pair: pair,
+      now: now
+    } do
+      assert Token.validate_access(persistence, pair.access_token, "https://andere.tld/mcp", now) ==
+               :error
     end
 
-    test "an expired token is refused and reclaimed", %{now: now} do
-      token = Token.issue_out_of_band(resource(), OAuth.scope(), 0, now)
+    test "an expired token is refused and reclaimed", %{persistence: persistence, now: now} do
+      token = Token.issue_out_of_band(persistence, resource(), OAuth.scope(), 0, now)
 
-      assert Token.validate_access(token, resource(), now + 1) == :error
+      assert Token.validate_access(persistence, token, resource(), now + 1) == :error
       assert Store.get_token(token) == :error
     end
 
-    test "a refresh token presented as an access token is refused", %{pair: pair, now: now} do
-      assert Token.validate_access(pair.refresh_token, resource(), now) == :error
+    test "a refresh token presented as an access token is refused", %{
+      persistence: persistence,
+      pair: pair,
+      now: now
+    } do
+      assert Token.validate_access(persistence, pair.refresh_token, resource(), now) == :error
     end
 
-    test "refusing a refresh token does not spend or delete it", %{pair: pair, now: now} do
+    test "refusing a refresh token does not spend or delete it", %{
+      persistence: persistence,
+      pair: pair,
+      now: now
+    } do
       # It is a valid refresh token that was handed to the wrong endpoint.
       # Deleting it here would let anyone holding it destroy their own — or,
       # after a leak, somebody else's — ability to renew.
-      Token.validate_access(pair.refresh_token, resource(), now)
+      Token.validate_access(persistence, pair.refresh_token, resource(), now)
 
       assert {:ok, record} = Store.get_token(pair.refresh_token)
       assert Token.classify(record) == :refresh
     end
 
-    test "an unknown token is refused", %{now: now} do
-      assert Token.validate_access(Token.random(), resource(), now) == :error
+    test "an unknown token is refused", %{persistence: persistence, now: now} do
+      assert Token.validate_access(persistence, Token.random(), resource(), now) == :error
     end
 
-    test "a record written before scopes existed grants the full scope", %{now: now} do
+    test "a record written before scopes existed grants the full scope", %{
+      persistence: persistence,
+      now: now
+    } do
       legacy = Token.random()
       Store.put_token(legacy, %{aud: resource(), expires_at: now + 3600})
 
-      assert Token.validate_access(legacy, resource(), now) == {:ok, OAuth.scope()}
+      assert Token.validate_access(persistence, legacy, resource(), now) == {:ok, OAuth.scope()}
     end
   end
 
-  describe "fetch_refresh/1" do
-    setup do
+  describe "fetch_refresh/2" do
+    setup %{persistence: persistence} do
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), now)
+      pair = Token.issue_pair(persistence, redeemed(), now)
       %{now: now, pair: pair}
     end
 
-    test "a live refresh token comes back with its record", %{pair: pair} do
-      assert {:ok, record} = Token.fetch_refresh(pair.refresh_token)
+    test "a live refresh token comes back with its record", %{
+      persistence: persistence,
+      pair: pair
+    } do
+      assert {:ok, record} = Token.fetch_refresh(persistence, pair.refresh_token)
       assert record.client_id == "client-1"
     end
 
-    test "a spent refresh token is a replay, not a live one", %{pair: pair, now: now} do
+    test "a spent refresh token is a replay, not a live one", %{
+      persistence: persistence,
+      pair: pair,
+      now: now
+    } do
       {:ok, record} = Store.get_token(pair.refresh_token)
-      Token.spend_refresh(pair.refresh_token, record, now)
+      Token.spend_refresh(persistence, pair.refresh_token, record, now)
 
-      assert {:spent, spent} = Token.fetch_refresh(pair.refresh_token)
+      assert {:spent, spent} = Token.fetch_refresh(persistence, pair.refresh_token)
       assert spent.spent_at == now
     end
 
-    test "an access token is not a refresh token", %{pair: pair} do
-      assert Token.fetch_refresh(pair.access_token) == :error
+    test "an access token is not a refresh token", %{persistence: persistence, pair: pair} do
+      assert Token.fetch_refresh(persistence, pair.access_token) == :error
     end
 
-    test "an unknown token is not a refresh token" do
-      assert Token.fetch_refresh(Token.random()) == :error
+    test "an unknown token is not a refresh token", %{persistence: persistence} do
+      assert Token.fetch_refresh(persistence, Token.random()) == :error
     end
   end
 
-  describe "spend_refresh/3" do
-    test "only a refresh record can be spent" do
+  describe "spend_refresh/4" do
+    test "only a refresh record can be spent", %{persistence: persistence} do
       # `classify/1` reads `:spent_at` as "replayed" only because rotation is
       # the one thing that writes the marker and this is the only place it
       # can. A real access record has no way through here.
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), now)
+      pair = Token.issue_pair(persistence, redeemed(), now)
       {:ok, access} = Store.get_token(pair.access_token)
 
       assert_raise FunctionClauseError, fn ->
-        Token.spend_refresh(pair.access_token, access, now)
+        Token.spend_refresh(persistence, pair.access_token, access, now)
       end
     end
 
-    test "the marker keeps the record's own expiry, so the janitor still reclaims it" do
+    test "the marker keeps the record's own expiry, so the janitor still reclaims it", %{
+      persistence: persistence
+    } do
       now = System.system_time(:second)
-      pair = Token.issue_pair(redeemed(), now)
+      pair = Token.issue_pair(persistence, redeemed(), now)
       {:ok, record} = Store.get_token(pair.refresh_token)
 
-      Token.spend_refresh(pair.refresh_token, record, now)
+      Token.spend_refresh(persistence, pair.refresh_token, record, now)
 
       {:ok, spent} = Store.get_token(pair.refresh_token)
       assert spent.expires_at == record.expires_at
@@ -288,11 +335,11 @@ defmodule Vigil.OAuth.TokenTest do
     # The default is a rule about token records, and it stops there. A code
     # lives sixty seconds, so no code from before scopes existed can be in a
     # store — and a code without one is a record this server did not write.
-    test "the default does not reach an authorization code", %{} do
+    test "the default does not reach an authorization code", %{persistence: persistence} do
       now = System.system_time(:second)
 
       assert_raise KeyError, fn ->
-        Token.issue_pair(redeemed() |> Map.delete(:scope), now)
+        Token.issue_pair(persistence, redeemed() |> Map.delete(:scope), now)
       end
     end
 
@@ -316,16 +363,23 @@ defmodule Vigil.OAuth.TokenTest do
   end
 
   describe "issue_out_of_band/4" do
-    test "mints an access token that validates at the resource" do
+    test "mints an access token that validates at the resource", %{persistence: persistence} do
       now = System.system_time(:second)
-      token = Token.issue_out_of_band(resource(), OAuth.read_scope(), 3650 * @ttl_day, now)
 
-      assert Token.validate_access(token, resource(), now) == {:ok, OAuth.read_scope()}
+      token =
+        Token.issue_out_of_band(persistence, resource(), OAuth.read_scope(), 3650 * @ttl_day, now)
+
+      assert Token.validate_access(persistence, token, resource(), now) ==
+               {:ok, OAuth.read_scope()}
     end
 
-    test "the seeded token is a family of one rather than a token with no family" do
+    test "the seeded token is a family of one rather than a token with no family", %{
+      persistence: persistence
+    } do
       now = System.system_time(:second)
-      token = Token.issue_out_of_band(resource(), OAuth.scope(), 3650 * @ttl_day, now)
+
+      token =
+        Token.issue_out_of_band(persistence, resource(), OAuth.scope(), 3650 * @ttl_day, now)
 
       {:ok, record} = Store.get_token(token)
       assert is_binary(Token.grant_of(record))
@@ -334,11 +388,11 @@ defmodule Vigil.OAuth.TokenTest do
       assert Store.get_token(token) == :error
     end
 
-    test "it carries no refresh token" do
+    test "it carries no refresh token", %{persistence: persistence} do
       now = System.system_time(:second)
-      token = Token.issue_out_of_band(resource(), OAuth.scope(), @ttl_day, now)
+      token = Token.issue_out_of_band(persistence, resource(), OAuth.scope(), @ttl_day, now)
 
-      assert Token.fetch_refresh(token) == :error
+      assert Token.fetch_refresh(persistence, token) == :error
       assert length(Store.all_tokens()) == 1
     end
   end

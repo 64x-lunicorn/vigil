@@ -24,14 +24,20 @@ defmodule Vigil.MCP.ServerTest do
 
     oauth = Vigil.OAuthCase.setup!()
 
-    %{vault: vault, token: seed_token(oauth), oauth: oauth}
+    %{vault: vault, token: seed_token(oauth), oauth: oauth, persistence: oauth.persistence}
   end
 
   # A real access token, minted by the module that owns the record. The tests
   # that hand-write one below do it on purpose: those are the shapes `/mcp`
   # has to refuse, and no minting path produces them.
   defp seed_token(oauth, scope \\ OAuth.scope()) do
-    OAuth.Token.issue_out_of_band(oauth.resource, scope, 3600, System.system_time(:second))
+    OAuth.Token.issue_out_of_band(
+      oauth.persistence,
+      oauth.resource,
+      scope,
+      3600,
+      System.system_time(:second)
+    )
   end
 
   defp post(token, body, headers \\ []) do
@@ -42,6 +48,23 @@ defmodule Vigil.MCP.ServerTest do
 
     conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
     Server.call(conn, Server.init([]))
+  end
+
+  # Verification and minting are the same store by construction, not two
+  # resolutions that happen to agree: the router reads persistence back out of
+  # the authorization server's own options, including when those are handed in
+  # ready-made.
+  test "the router's persistence is the authorization server's", %{persistence: persistence} do
+    handed_in = Server.init(oauth: OAuth.Endpoint.init(persistence: persistence))
+
+    assert handed_in[:persistence] == persistence
+    assert handed_in[:oauth][:persistence] == persistence
+
+    # And with nothing handed in, both halves reach production's adapter.
+    default = Server.init([])
+
+    assert default[:persistence] == OAuth.Store.over_tables()
+    assert default[:oauth][:persistence] == default[:persistence]
   end
 
   test "request without a token gets 401 with a WWW-Authenticate challenge" do

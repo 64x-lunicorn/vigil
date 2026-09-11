@@ -20,16 +20,15 @@ defmodule Vigil.OAuth.JanitorTest do
 
   setup do
     Vigil.OAuthCase.setup!()
-    :ok
   end
 
   ## Seeding
 
   # One entry that has expired at @now and one that has not, in each of the
-  # four tables `Vigil.OAuth.Store` owns. `Vigil.RateLimit`'s table is the
-  # fifth the sweep walks and is seeded by the tests that cover it.
-  defp seed do
-    codes = %{expired: mint_code(@now - 3600), live: mint_code(@now)}
+  # four tables OAuth persistence owns. `Vigil.RateLimit`'s table is the fifth
+  # the sweep walks and is seeded by the tests that cover it.
+  defp seed(persistence) do
+    codes = %{expired: mint_code(persistence, @now - 3600), live: mint_code(persistence, @now)}
 
     Store.put_token("token-expired", token_attrs(@now))
     Store.put_token("token-live", token_attrs(@now + 3600))
@@ -37,8 +36,8 @@ defmodule Vigil.OAuth.JanitorTest do
     # A rotated refresh token is marked spent rather than deleted, so it is a
     # row the sweep has to reclaim on its own expiry like any other. Only a
     # refresh record can be spent, so these are refresh-shaped.
-    Token.spend_refresh("token-spent-expired", refresh_attrs(@now), @now - 60)
-    Token.spend_refresh("token-spent-live", refresh_attrs(@now + 3600), @now - 60)
+    Token.spend_refresh(persistence, "token-spent-expired", refresh_attrs(@now), @now - 60)
+    Token.spend_refresh(persistence, "token-spent-live", refresh_attrs(@now + 3600), @now - 60)
 
     # sweep_rate_limits/1 drops a window older than 15 minutes.
     Store.record_failure("198.51.100.1", @now - 901)
@@ -56,12 +55,12 @@ defmodule Vigil.OAuth.JanitorTest do
   # shape production writes, `grant_id` and all, rather than a variant this
   # file made up. A code lives a minute, so one minted an hour ago has expired
   # at @now and one minted at @now has not.
-  defp mint_code(now) do
+  defp mint_code(persistence, now) do
     {:ok, %{client_id: client_id}} =
-      Flow.register(%{"redirect_uris" => ["https://client.example.org/cb"]})
+      Flow.register(persistence, %{"redirect_uris" => ["https://client.example.org/cb"]})
 
     {:ok, ctx} =
-      Flow.authorize_request(%{
+      Flow.authorize_request(persistence, %{
         "client_id" => client_id,
         "redirect_uri" => "https://client.example.org/cb",
         "response_type" => "code",
@@ -69,7 +68,7 @@ defmodule Vigil.OAuth.JanitorTest do
         "code_challenge_method" => "S256"
       })
 
-    Code.issue(ctx, now)
+    Code.issue(persistence, ctx, now)
   end
 
   defp token_attrs(expires_at) do
@@ -100,9 +99,11 @@ defmodule Vigil.OAuth.JanitorTest do
 
   ## One sweep, driven
 
-  test "a sweep drops what expired and keeps what did not, in all four tables" do
+  test "a sweep drops what expired and keeps what did not, in all four tables", %{
+    persistence: persistence
+  } do
     start_janitor(interval: :timer.minutes(5), now: fn -> @now end)
-    codes = seed()
+    codes = seed(persistence)
 
     assert keys(Store.all_codes()) == Enum.sort([codes.expired, codes.live])
 
@@ -148,11 +149,13 @@ defmodule Vigil.OAuth.JanitorTest do
     assert :ets.info(@cimd_cache, :size) == 0
   end
 
-  test "the sweep reads its instant from the janitor, not from the wall clock" do
+  test "the sweep reads its instant from the janitor, not from the wall clock", %{
+    persistence: persistence
+  } do
     # Everything seeded expires long before real "now", so a janitor holding an
     # instant from before them must keep all of it.
     start_janitor(interval: :timer.minutes(5), now: fn -> @now - 7200 end)
-    codes = seed()
+    codes = seed(persistence)
 
     sweep_now()
 
@@ -212,13 +215,15 @@ defmodule Vigil.OAuth.JanitorTest do
 
   ## The interval
 
-  test "the janitor sweeps again on its own, at the interval it was given" do
+  test "the janitor sweeps again on its own, at the interval it was given", %{
+    persistence: persistence
+  } do
     start_janitor(interval: 10, now: fn -> @now end)
 
     # A code put *after* the first sweeps have run is still collected, which
     # only holds if the janitor rescheduled rather than swept once.
     Process.sleep(50)
-    mint_code(@now - 3600)
+    mint_code(persistence, @now - 3600)
 
     assert eventually(fn -> keys(Store.all_codes()) == [] end)
   end
@@ -233,11 +238,34 @@ defmodule Vigil.OAuth.JanitorTest do
 
   ## The production defaults
 
-  test "the interval and the instant default to the production values" do
+  test "the interval, the instant and the persistence default to the production values" do
     start_janitor()
     state = :sys.get_state(Janitor)
 
     assert state.interval == :timer.minutes(5)
     assert_in_delta state.now.(), System.system_time(:second), 2
+    assert state.persistence == Store.over_tables()
+  end
+
+  ## The seam
+
+  test "the sweep goes through the persistence the janitor was handed", %{
+    persistence: persistence
+  } do
+    # Every expiry OAuth persistence owns is swept by asking it, not by naming
+    # the module that happens to hold the tables — so a janitor handed another
+    # adapter sweeps that one. Handing it one that only records is the whole
+    # claim: what production sweeps is untouched here.
+    test = self()
+
+    recording = %{persistence | sweep_expired: fn now -> send(test, {:swept, now}) end}
+
+    start_janitor(interval: :timer.minutes(5), now: fn -> @now end, persistence: recording)
+    codes = seed(persistence)
+
+    sweep_now()
+
+    assert_received {:swept, @now}
+    assert keys(Store.all_codes()) == Enum.sort([codes.expired, codes.live])
   end
 end

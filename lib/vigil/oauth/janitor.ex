@@ -1,15 +1,17 @@
 defmodule Vigil.OAuth.Janitor do
   @moduledoc """
-  Wakes on an interval and asks every module that owns a table with an expiry
-  to sweep what has expired.
+  Wakes on an interval and asks everything that owns a table with an expiry to
+  sweep what has expired.
 
   The list is the janitor's own rather than one module's inventory. While it
-  was `Vigil.OAuth.Store`'s in effect, the one swept table `Store` does not own
+  was the OAuth store's in effect, the one swept table that store does not own
   was swept by nobody; `docs/oauth.md` records what that cost.
 
-  Both facts it needs are arguments with production defaults: the interval it
-  sleeps for and the instant it sweeps against. Baked in, the only way to
-  observe a sweep was to wait five minutes.
+  Three facts it needs are arguments with production defaults: the interval it
+  sleeps for, the instant it sweeps against, and the persistence whose expiries
+  it sweeps. The first two baked in, the only way to observe a sweep was to
+  wait five minutes; the third baked in, a sweep could only ever be observed
+  against the one globally registered `:dets` store.
 
   The instant arrives as a function rather than a value because the janitor
   outlives any one of them — a fixed instant would be right for the first
@@ -17,10 +19,10 @@ defmodule Vigil.OAuth.Janitor do
   """
   use GenServer
 
-  @interval :timer.minutes(5)
+  alias Vigil.OAuth.Store
+  alias Vigil.RateLimit
 
-  # Each answers `sweep_expired/1` with the instant to sweep against.
-  @sweepers [Vigil.OAuth.Store, Vigil.RateLimit]
+  @interval :timer.minutes(5)
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -28,7 +30,8 @@ defmodule Vigil.OAuth.Janitor do
   def init(opts) do
     state = %{
       interval: Keyword.get(opts, :interval, @interval),
-      now: Keyword.get(opts, :now, fn -> System.system_time(:second) end)
+      now: Keyword.get(opts, :now, fn -> System.system_time(:second) end),
+      persistence: Keyword.get_lazy(opts, :persistence, &Store.over_tables/0)
     }
 
     schedule(state)
@@ -38,10 +41,16 @@ defmodule Vigil.OAuth.Janitor do
   @impl true
   def handle_info(:sweep, state) do
     now = state.now.()
-    Enum.each(@sweepers, & &1.sweep_expired(now))
+    Enum.each(sweeps(state), & &1.(now))
     schedule(state)
     {:noreply, state}
   end
+
+  # Each takes the instant to sweep against. OAuth persistence sweeps four
+  # tables of its own through the value the janitor was handed;
+  # `Vigil.RateLimit` owns its one and is named here, which is the whole point
+  # of this list belonging to the janitor.
+  defp sweeps(state), do: [state.persistence.sweep_expired, &RateLimit.sweep_expired/1]
 
   defp schedule(state), do: Process.send_after(self(), :sweep, state.interval)
 end

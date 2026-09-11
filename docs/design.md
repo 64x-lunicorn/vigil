@@ -715,6 +715,46 @@ order they came in.
 
 ---
 
+## OAuth persistence is reached through a value
+
+The same shape, for what the authorization server remembers. Six modules —
+`Vigil.OAuth.Client`, `Code`, `Token`, `Cimd`, `Flow` and `Janitor` — used to
+reach storage by naming one globally registered module with hard-coded table
+atoms. Nothing varied across it, so there was nowhere to substitute, and the
+244 lines that own expiry, revocation, spent-token marking and the consent
+lockout had no test of their own: they were exercised incidentally, through
+endpoint tests.
+
+**The value is the whole of what those six ask.** Fourteen questions,
+declared in `Vigil.OAuth.Persistence`: a client written and read, a code
+written and taken, a token written, read, deleted and revoked by family, the
+consent attempts counted per address, the CIMD cache read and written — and
+the sweep. The sweep is part of this surface rather than a concern beside it:
+every expiry it drops belongs to one of the tables above, and the janitor asks
+for it through the value it was handed like any other caller.
+
+**It is a struct of functions with no defaults**, built by `struct!/2`, the
+same rule as `Vigil.Git` and `Vigil.Vault.Facts`. Here the rule earns its keep
+twice over: every one of these questions guards something, and every plausible
+answer to a question nobody wired sits on the permissive side of the gate it
+feeds. A `get_token` answering `:error` makes every token unknown; a
+`rate_limited?` answering `false` turns the consent lockout off.
+
+The production adapter is `Vigil.OAuth.Store.over_tables/0`, a function beside
+the `:dets`/`:ets` implementation it wires. That module keeps the files'
+lifecycle — opened under the state dir, `chmod 0600`, closed on terminate —
+and stops being something the other five name.
+
+**The routers resolve it once.** `Vigil.OAuth.Endpoint.init/1` builds the
+production adapter when it is not handed one, exactly as it resolves its proxy
+configuration and its budgets, and `Vigil.MCP.Server.init/1` passes its own
+down to that router — so the token `/mcp` verifies and the token the
+authorization server minted are kept in the same place by construction.
+Nothing per request, and nothing reaching for application config on the hot
+path.
+
+---
+
 ## How a file is written
 
 Vigil is the only writer (principle 2), so the shape of a file on disk is
@@ -849,10 +889,10 @@ Five layers, each doing one job:
    answering a guess. The consent form counts wrong passwords only, per
    address, over a much longer window. One limiter, `Vigil.RateLimit`, serves
    the first two; the third is a lockout rather than a request limit and
-   belongs to `Vigil.OAuth.Store`. Every one of them is swept by
-   `Vigil.OAuth.Janitor`, whose list of modules to ask is its own: a module
-   belongs on it as soon as it owns a table with an expiry, whatever namespace
-   it lives in. A budget bounds how fast rows arrive and a sweep
+   belongs to OAuth persistence. Every one of them is swept by
+   `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
+   persistence for the expiries persistence owns, and names `Vigil.RateLimit`
+   for the one it does not. A budget bounds how fast rows arrive and a sweep
    bounds how many there are, and neither substitutes for the other.
 
 **Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of

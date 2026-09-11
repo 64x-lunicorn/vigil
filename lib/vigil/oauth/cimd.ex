@@ -11,7 +11,7 @@ defmodule Vigil.OAuth.Cimd do
   lookups differently, which is DNS rebinding and the standard bypass for a
   guard shaped that way.
   """
-  alias Vigil.OAuth.{Store, RedirectUri}
+  alias Vigil.OAuth.RedirectUri
 
   @timeout 5_000
   @max_bytes 65_536
@@ -28,9 +28,12 @@ defmodule Vigil.OAuth.Cimd do
   """
   def net, do: %{request: &http_get/2, resolve: &:inet.getaddr/2}
 
-  @doc "Fetches and validates a CIMD document, cached for 1h. Returns {:ok, client_meta} | :error."
-  def fetch(url, now \\ System.system_time(:second), net \\ net()) do
-    case Store.cimd_cache_get(url, now) do
+  @doc """
+  Fetches and validates a CIMD document, cached for 1h through the persistence
+  it is handed. Returns `{:ok, client_meta}` or `:error`.
+  """
+  def fetch(persistence, url, now \\ System.system_time(:second), net \\ net()) do
+    case persistence.cimd_cache_get.(url, now) do
       {:ok, doc} ->
         {:ok, doc}
 
@@ -51,7 +54,7 @@ defmodule Vigil.OAuth.Cimd do
             redirect_uris: Map.get(json, "redirect_uris", [])
           }
 
-          Store.cimd_cache_put(url, doc, now)
+          persistence.cimd_cache_put.(url, doc, now)
           {:ok, doc}
         else
           _ -> :error

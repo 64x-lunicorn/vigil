@@ -1,16 +1,27 @@
 defmodule Vigil.OAuth.Store do
   @moduledoc """
-  Persistence for OAuth clients, authorization codes, and tokens.
+  The `:dets`/`:ets` adapter behind `Vigil.OAuth.Persistence`: where what the
+  authorization server remembers actually lives.
 
   Three `:dets` files (survive restarts) plus two ephemeral `:ets` tables
-  (rate-limit counters, CIMD cache). `:dets` serializes its own writes, so
-  callers use the module functions directly — no `GenServer.call` indirection
-  on the `/mcp` hot path.
+  (rate-limit counters, CIMD cache). The process owns the files' lifecycle —
+  opened under the state dir at init, `chmod 0600`, closed on terminate — and
+  nothing else: `:dets` serializes its own writes, so the questions below are
+  answered in the caller's process, with no `GenServer.call` indirection on
+  the `/mcp` hot path.
+
+  `over_tables/0` is the adapter, a function here beside the implementation it
+  wires rather than closures assembled by a caller. Nothing in `lib/` names
+  the functions below: six modules ask through the value they are handed,
+  which is what makes the second adapter — and the tests that want one —
+  possible at all. The suite still reaches for them directly, to assert
+  against the tables a write landed in; moving it onto the seam is its own
+  ticket.
   """
   use GenServer
   require Logger
 
-  alias Vigil.OAuth.{Code, Token}
+  alias Vigil.OAuth.{Code, Persistence, Token}
 
   @clients :oauth_clients
   @codes :oauth_codes
@@ -76,6 +87,30 @@ defmodule Vigil.OAuth.Store do
   def terminate(_reason, _state) do
     for name <- [@clients, @codes, @tokens], do: :dets.close(name)
     :ok
+  end
+
+  @doc """
+  The production adapter: every question answered against the tables this
+  process owns.
+  """
+  @spec over_tables() :: Persistence.t()
+  def over_tables do
+    Persistence.new(
+      put_client: &put_client/2,
+      get_client: &get_client/1,
+      put_code: &put_code/2,
+      take_code: &take_code/1,
+      put_token: &put_token/2,
+      get_token: &get_token/1,
+      delete_token: &delete_token/1,
+      revoke_grant: &revoke_grant/1,
+      rate_limited?: &rate_limited?/2,
+      record_failure: &record_failure/2,
+      reset_rate_limit: &reset_rate_limit/1,
+      cimd_cache_get: &cimd_cache_get/2,
+      cimd_cache_put: &cimd_cache_put/3,
+      sweep_expired: &sweep_expired/1
+    )
   end
 
   ## Clients

@@ -9,7 +9,7 @@ defmodule Vigil.OAuth.Endpoint do
   use Plug.Router
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow}
+  alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow, Store}
   alias Vigil.RateLimit
 
   @default_rpm 30
@@ -20,12 +20,16 @@ defmodule Vigil.OAuth.Endpoint do
 
   # Resolves what the deployment says about its proxy and its budgets once,
   # when the router is initialized, rather than re-parsing a CIDR list and
-  # re-reading application config on every request.
+  # re-reading application config on every request. Persistence is resolved
+  # here for the same reason and one more: it is the one thing every decision
+  # below is made *against*, and a caller that substitutes it — the MCP router
+  # passes its own down — must do so for the whole router, not per request.
   @impl true
   def init(opts) do
     opts
     |> Keyword.put_new_lazy(:client_addr, &ClientAddr.config/0)
     |> Keyword.put_new_lazy(:limits, &configured_limits/0)
+    |> Keyword.put_new_lazy(:persistence, &Store.over_tables/0)
   end
 
   @impl true
@@ -33,6 +37,7 @@ defmodule Vigil.OAuth.Endpoint do
     conn
     |> put_private(:oauth_client_addr, opts[:client_addr])
     |> put_private(:oauth_limits, opts[:limits])
+    |> put_private(:oauth_persistence, opts[:persistence])
     |> super(opts)
   end
 
@@ -101,7 +106,7 @@ defmodule Vigil.OAuth.Endpoint do
   #
   # It runs before the handler rather than inside it, so the refusal costs
   # nothing that the request was trying to buy — in particular `/authorize`
-  # refuses before `Vigil.OAuth.Client.resolve/2` can go out to the network.
+  # refuses before `Vigil.OAuth.Client.resolve/4` can go out to the network.
   #
   # A refusal takes the shape of the surface it refuses: the consent page is
   # HTML a browser renders, and the other two are read by a program.
@@ -146,7 +151,7 @@ defmodule Vigil.OAuth.Endpoint do
   defp handle_register(conn) do
     with {:ok, body, conn} <- Plug.Conn.read_body(conn),
          {:ok, json} <- Jason.decode(body) do
-      case Flow.register(json) do
+      case Flow.register(persistence(conn), json) do
         {:ok, registration} -> send_json(conn, 201, registration)
         {:error, error} -> send_json(conn, 400, %{error: error})
       end
@@ -158,7 +163,7 @@ defmodule Vigil.OAuth.Endpoint do
   ## Authorization
 
   defp with_authorize_request(conn, params, on_ok) do
-    case Flow.authorize_request(params) do
+    case Flow.authorize_request(persistence(conn), params) do
       {:ok, ctx} ->
         on_ok.(conn, ctx)
 
@@ -182,7 +187,7 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp process_allow(conn, ctx, params) do
-    case Flow.consent(client_addr(conn), params["password"], ctx) do
+    case Flow.consent(persistence(conn), client_addr(conn), params["password"], ctx) do
       {:ok, code} ->
         redirect_with_query(conn, ctx.redirect_uri, put_state(%{"code" => code}, ctx.state))
 
@@ -227,7 +232,7 @@ defmodule Vigil.OAuth.Endpoint do
     params = URI.decode_query(body)
     conn = put_resp_header(conn, "cache-control", "no-store")
 
-    case Flow.grant(params) do
+    case Flow.grant(persistence(conn), params) do
       {:ok, tokens} -> send_json(conn, 200, tokens)
       {:error, status, error} -> send_json(conn, status, %{error: error})
     end
@@ -263,6 +268,11 @@ defmodule Vigil.OAuth.Endpoint do
   defp put_state(query, nil), do: query
   defp put_state(query, ""), do: query
   defp put_state(query, state), do: Map.put(query, "state", state)
+
+  # What every decision on this router is made against: the clients, codes and
+  # tokens it reads and writes. Resolved in `init/1`, the same as the two
+  # above it.
+  defp persistence(conn), do: conn.private.oauth_persistence
 
   # Which address a limit is counted against. `Vigil.OAuth.ClientAddr` owns the
   # decision; this only says where the configuration was put. Not "ip": the
