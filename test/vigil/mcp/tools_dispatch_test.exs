@@ -1,12 +1,13 @@
 defmodule Vigil.MCP.ToolsDispatchTest do
-  # The stub registers itself under `Vigil.Store`'s name, so this file cannot
-  # run beside anything that starts the real one — including the one describe
-  # below that starts the real Store itself, which is why nothing here is
-  # async. That name is production's registration, and the MCP surface reaches
-  # the writer by it and names no other; this file is one of the three that
-  # exercise it. The vault-backed files hand the Store a name of their own and
-  # run in parallel (Vigil.StoreTest).
-  use ExUnit.Case, async: false
+  # Every test here hands `dispatch/4` a writer of its own — the stub by pid,
+  # the one describe that needs a real Store by a name nothing else uses — so
+  # this file queues behind no registered atom and runs beside the rest.
+  #
+  # What it therefore does not exercise is the default: a dispatch that hands
+  # in no writer reaches `Vigil.Store.default_name/0`, production's
+  # registration, and `Vigil.MCP.ServerTest` drives that path end to end
+  # through the router, against a Store registered under it.
+  use ExUnit.Case, async: true
 
   alias Vigil.MCP.Tools
 
@@ -22,8 +23,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
   defmodule StoreStub do
     use GenServer
 
-    def start_link({test, reply}),
-      do: GenServer.start_link(__MODULE__, {test, reply}, name: Vigil.Store)
+    # Registered under no name at all: the writer travels to `dispatch/4` as
+    # the pid `start_supervised!/1` hands back, which is one writer per test
+    # rather than one atom the whole file takes turns on.
+    def start_link({test, reply}), do: GenServer.start_link(__MODULE__, {test, reply})
 
     @impl true
     def init(state), do: {:ok, state}
@@ -37,16 +40,15 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
   defp start_store(reply \\ :stub_result) do
     start_supervised!({StoreStub, {self(), reply}})
-    :ok
   end
 
   defp skill_key, do: Vigil.SkillKey.current(Vigil.SkillKey.config())
 
   describe "the call each tool makes comes from the table" do
     test "search sends its declared operation with every declared parameter" do
-      start_store()
+      store = start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch("search", %{"query" => "tires"}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "search", %{"query" => "tires"}, @now)
 
       assert_receive {:store_call, {:search, params}}
 
@@ -60,9 +62,9 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     end
 
     test "a parameterless tool sends an empty params map" do
-      start_store()
+      store = start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch("reload", %{}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "reload", %{}, @now)
       assert_receive {:store_call, {:reload, %{}}}
     end
 
@@ -71,28 +73,29 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     # time its own envelope could contradict. It travels with the params
     # because the Store's tool-facing interface has one shape.
     test "a tool declaring now: is handed the response's instant" do
-      start_store()
+      store = start_store()
 
-      assert {:ok, :stub_result} = Tools.dispatch("current", %{}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "current", %{}, @now)
       assert_receive {:store_call, {:current, %{now: @now}}}
 
-      assert {:ok, :stub_result} = Tools.dispatch("lint", %{}, @now)
+      assert {:ok, :stub_result} = Tools.dispatch(store, "lint", %{}, @now)
       assert_receive {:store_call, {:lint, %{now: @now}}}
     end
 
     test "a tool that declares no instant is not handed one" do
-      start_store()
+      store = start_store()
 
-      Tools.dispatch("search", %{"query" => "tires"}, @now)
+      Tools.dispatch(store, "search", %{"query" => "tires"}, @now)
       assert_receive {:store_call, {:search, params}}
       refute Map.has_key?(params, :now)
     end
 
     test "move_note's two same-typed paths travel under the names the table gives them" do
-      start_store({:ok, %{moved: true}})
+      store = start_store({:ok, %{moved: true}})
 
       assert {:ok, %{moved: true}} =
                Tools.dispatch(
+                 store,
                  "move_note",
                  %{
                    "from" => "training/a.md",
@@ -111,9 +114,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
   describe "enum parameters arrive in their internal form" do
     test "search's type and prefer are atoms, not the strings the schema publishes" do
-      start_store()
+      store = start_store()
 
       Tools.dispatch(
+        store,
         "search",
         %{
           "query" => "tires",
@@ -129,19 +133,20 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     end
 
     test "links' direction default converts on the same path a supplied value does" do
-      start_store()
+      store = start_store()
 
-      Tools.dispatch("links", %{"id" => "bike/x.md"}, @now)
+      Tools.dispatch(store, "links", %{"id" => "bike/x.md"}, @now)
       assert_receive {:store_call, {:links, %{direction: :both, depth: 1}}}
 
-      Tools.dispatch("links", %{"id" => "bike/x.md", "direction" => "out"}, @now)
+      Tools.dispatch(store, "links", %{"id" => "bike/x.md", "direction" => "out"}, @now)
       assert_receive {:store_call, {:links, %{direction: :out}}}
     end
 
     test "create's type is converted too, not left a string for one clause only" do
-      start_store({:ok, %{created: true}})
+      store = start_store({:ok, %{created: true}})
 
       Tools.dispatch(
+        store,
         "create",
         %{
           "path" => "bike/x.md",
@@ -159,9 +164,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     end
 
     test "update_frontmatter's type is converted on the same rule" do
-      start_store({:ok, %{updated: true}})
+      store = start_store({:ok, %{updated: true}})
 
       Tools.dispatch(
+        store,
         "update_frontmatter",
         %{
           "path" => "bike/x.md",
@@ -178,9 +184,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
   describe "skill_key authorizes the call and does not travel with it" do
     test "create's params carry no skill_key" do
-      start_store({:ok, %{created: true}})
+      store = start_store({:ok, %{created: true}})
 
       Tools.dispatch(
+        store,
         "create",
         %{
           "path" => "bike/x.md",
@@ -196,9 +203,10 @@ defmodule Vigil.MCP.ToolsDispatchTest do
     end
 
     test "skill_write's params carry no skill_key either" do
-      start_store({:ok, %{written: true}})
+      store = start_store({:ok, %{written: true}})
 
       Tools.dispatch(
+        store,
         "skill_write",
         %{
           "name" => "x",
@@ -224,40 +232,49 @@ defmodule Vigil.MCP.ToolsDispatchTest do
       vault = Vigil.FixtureVault.build()
       on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
-      start_supervised!(
-        {Vigil.Store,
-         vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
-      )
+      # A writer of this test's own, named so its published table can be read
+      # by name — which is exactly what the two skill reads do with it.
+      name = :"skill_read_writer_#{System.unique_integer([:positive])}"
 
-      writer = Process.whereis(Vigil.Store)
+      writer =
+        start_supervised!(
+          {Vigil.Store,
+           name: name,
+           vault_path: vault,
+           exclude: [],
+           git_remote: "origin",
+           git: Vigil.Git.CommitLog.new(vault)}
+        )
+
       :sys.suspend(writer)
       on_exit(fn -> if Process.alive?(writer), do: :sys.resume(writer) end)
 
-      %{vault: vault}
+      %{vault: vault, store: name}
     end
 
-    # Production registration, exercised deliberately: nothing in the tool
-    # layer is told where the writer is, so a Store that did not register
-    # under its own module name would leave both skill reads with no vault
-    # path to answer from.
-    test "the tool layer finds the writer under its module name" do
-      assert Process.whereis(Vigil.Store)
-      assert Vigil.Store.vault_path() =~ "vigil_test_"
+    # The writer the call was handed is the one the vault path comes off: a
+    # skill read answered against another writer's vault is a read of the
+    # wrong vault, and nothing about the answer would say so.
+    test "the vault path comes from the writer that was handed in", %{store: store, vault: vault} do
+      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch(store, "skill_list", %{}, @now)
+      assert Vigil.Store.vault_path(store) == vault
     end
 
-    test "skill_list answers while the writer is suspended" do
-      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch("skill_list", %{}, @now)
+    test "skill_list answers while the writer is suspended", %{store: store} do
+      assert {:ok, [%{name: "tdd"}]} = Tools.dispatch(store, "skill_list", %{}, @now)
     end
 
-    test "skill_read answers while the writer is suspended, key and all" do
+    test "skill_read answers while the writer is suspended, key and all", %{store: store} do
       assert {:ok, %{name: "tdd", content: content}} =
-               Tools.dispatch("skill_read", %{"name" => "tdd"}, @now)
+               Tools.dispatch(store, "skill_read", %{"name" => "tdd"}, @now)
 
       assert content =~ "SkillKey:"
     end
 
-    test "a missing skill still hands back the bootstrap key" do
-      assert {:error, message} = Tools.dispatch("skill_read", %{"name" => "does-not-exist"}, @now)
+    test "a missing skill still hands back the bootstrap key", %{store: store} do
+      assert {:error, message} =
+               Tools.dispatch(store, "skill_read", %{"name" => "does-not-exist"}, @now)
+
       assert message =~ "tdd"
       assert message =~ "SkillKey:"
     end
@@ -265,22 +282,23 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
   describe "the Store's answer is lifted into a result without a flag per tool" do
     test "an operation that cannot fail answers with its value, which becomes {:ok, value}" do
-      start_store([%{id: "bike/x.md#a"}])
+      store = start_store([%{id: "bike/x.md#a"}])
 
-      assert Tools.dispatch("search", %{"query" => "tires"}, @now) ==
+      assert Tools.dispatch(store, "search", %{"query" => "tires"}, @now) ==
                {:ok, [%{id: "bike/x.md#a"}]}
     end
 
     test "an operation that can fail answers with a result tuple, passed through unchanged" do
-      start_store({:error, "no such note"})
+      store = start_store({:error, "no such note"})
 
-      assert Tools.dispatch("read", %{"id" => "bike/nope.md"}, @now) == {:error, "no such note"}
+      assert Tools.dispatch(store, "read", %{"id" => "bike/nope.md"}, @now) ==
+               {:error, "no such note"}
     end
 
     test "an {:ok, value} answer is not wrapped twice" do
-      start_store({:ok, %{title: "X"}})
+      store = start_store({:ok, %{title: "X"}})
 
-      assert Tools.dispatch("read", %{"id" => "bike/x.md"}, @now) == {:ok, %{title: "X"}}
+      assert Tools.dispatch(store, "read", %{"id" => "bike/x.md"}, @now) == {:ok, %{title: "X"}}
     end
   end
 end

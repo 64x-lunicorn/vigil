@@ -6,7 +6,7 @@ defmodule Vigil.MCP.Tools do
   flag, the `call` the tool makes, whether that call resolves an instant
   (`now:`), and each parameter's name, type, and whether it is required. Three things are generated from it — `definitions/0`
   (the JSON schema handed to the client on `tools/list`), the argument
-  validation `dispatch/2` runs on `tools/call`, and the `Store.call/2` that
+  validation `dispatch/4` runs on `tools/call`, and the `Store.call/3` that
   follows it. A schema, its validation and the call they describe cannot drift
   out of agreement when they are the same table. Adding a tool is adding a
   row.
@@ -19,7 +19,14 @@ defmodule Vigil.MCP.Tools do
 
   `Vigil.Store` answers all but two of the operations. `skill_list` and
   `skill_read` are answered against `Vigil.Skills` in the caller's own
-  process — see `answer/2`.
+  process — see `answer/3`.
+
+  Which writer that is, is the caller's to say. `dispatch/4` takes it and
+  defaults to `Vigil.Store.default_name/0`, the registration production runs
+  under and hands in no name for. A caller that supplies one reaches a writer
+  of its own — the same thing `Vigil.Store`'s own interface has always taken,
+  and what lets a test file exercising this layer run beside the others
+  instead of queueing behind one registered atom.
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
@@ -478,7 +485,7 @@ defmodule Vigil.MCP.Tools do
   defp find_tool(name), do: Enum.find(@tools, &(&1.name == name))
 
   @doc """
-  Dispatches a `tools/call` to the Store at `now`, the instant the response's
+  Dispatches a `tools/call` to `store` at `now`, the instant the response's
   envelope was decided at.
 
   Validates `args` against the declared tool's parameters first — a
@@ -494,9 +501,14 @@ defmodule Vigil.MCP.Tools do
   to report a time its own envelope could contradict across a minute
   boundary. `now` has no default here: an instant a caller forgot to pass is
   a second clock read, which is the thing being removed.
+
+  `store` is the writer the call is made against, the one thing here that a
+  deployment and a test file legitimately disagree about. It defaults to the
+  registration production runs under, so the MCP surface hands in no name.
   """
-  @spec dispatch(String.t(), map(), DateTime.t()) :: {:ok, term()} | {:error, String.t()}
-  def dispatch(name, args, now) do
+  @spec dispatch(GenServer.server(), String.t(), map(), DateTime.t()) ::
+          {:ok, term()} | {:error, String.t()}
+  def dispatch(store \\ Store.default_name(), name, args, now) do
     case find_tool(name) do
       nil ->
         {:error, "Unknown tool: #{name}"}
@@ -505,7 +517,7 @@ defmodule Vigil.MCP.Tools do
         with :ok <- maybe_require_skill_key(tool, args),
              {:ok, params} <- validate_params(tool.params, args) do
           params = params |> Map.delete(@skill_key) |> maybe_put_now(tool, now)
-          tool.call |> answer(params) |> to_result()
+          tool.call |> answer(params, store) |> to_result()
         end
     end
   end
@@ -518,9 +530,13 @@ defmodule Vigil.MCP.Tools do
   # commit and push in order with note writes. Answering the reads here is
   # what keeps a skill read — the mandatory bootstrap in front of every write
   # (AP-4) — from queueing behind the push at the end of the write before it.
-  defp answer(:skill_list, %{}), do: Skills.list(Store.vault_path())
-  defp answer(:skill_read, %{name: name}), do: Skills.read(name, Store.vault_path())
-  defp answer(op, params), do: Store.call(op, params)
+  #
+  # They still read the path off the writer that was handed in, not off the
+  # default one: a vault is the writer's, and a read answered against another
+  # writer's vault is a read of the wrong vault.
+  defp answer(:skill_list, %{}, store), do: Skills.list(Store.vault_path(store))
+  defp answer(:skill_read, %{name: name}, store), do: Skills.read(name, Store.vault_path(store))
+  defp answer(op, params, store), do: Store.call(store, op, params)
 
   defp maybe_put_now(params, %{now: true}, now), do: Map.put(params, :now, now)
   defp maybe_put_now(params, _tool, _now), do: params

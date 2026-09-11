@@ -607,13 +607,20 @@ key; an inherited `commit.gpgsign=true` would otherwise fail every single
 write.
 
 **One writer per vault, under a name its caller supplies.** `Vigil.Store`
-registers under its own module name by default, and that registration is the
-whole of how the MCP surface finds it: `Vigil.MCP.Tools`, `Vigil.MCP.Envelope`
-and `Vigil.MCP.Server` name no store. A caller that hands in a name gets a
-writer of its own, publishing through a table of that same name — which is
-what lets the vault-backed test files run in parallel, one writer per file,
-instead of the whole suite queueing behind a single registration. Principle 2
-is about a vault having one writer, not about a node having one.
+registers under its own module name by default, and a caller that hands in a
+name gets a writer of its own, publishing through a table of that same name —
+which is what lets the vault-backed test files run in parallel, one writer per
+file, instead of the whole suite queueing behind a single registration.
+Principle 2 is about a vault having one writer, not about a node having one.
+
+**The tool layer takes the writer too.** `Vigil.MCP.Tools.dispatch/4` is
+handed the store it calls, and the two skill reads resolve the vault path from
+that same store rather than from the default one — a skill read answered
+against another writer's vault is a read of the wrong vault. It defaults to
+`Vigil.Store.default_name/0`, so production hands in no name and reaches its
+own registration, and the atom is stated once, where the writer registers it,
+rather than once per caller. What still names no store is `Vigil.MCP.Envelope`
+and `Vigil.MCP.Server`.
 
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
