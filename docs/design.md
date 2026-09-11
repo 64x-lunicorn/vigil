@@ -989,13 +989,14 @@ true rather than true in one of two branches.
 **The router names the writer, and the envelope with it.** Both halves of a
 response — the tool call and the envelope that wraps it — are decided against
 one vault, and `Vigil.MCP.Server` is the only thing that knows they are the
-same one. So it resolves the writer at `init/1`, defaulting to
-`Vigil.Store.default_name/0`, and hands it to `Vigil.MCP.Tools.dispatch` and
-to `Vigil.MCP.Envelope.for_tool` alike. Defaulting in each half instead is how
-one of them came to be handed a writer and the other left to find one by name.
-The envelope's session table carries the name its caller supplies, as the
-writer's registration already does, so session state is per instance rather
-than one table for the node.
+same one. So it resolves both at `init/1` — the writer, defaulting to
+`Vigil.Store.default_name/0`, and the session table, defaulting to
+`Vigil.MCP.Envelope.default_name/0` — and hands the writer to
+`Vigil.MCP.Tools.dispatch` and to `Vigil.MCP.Envelope.for_tool` alike.
+Defaulting inside each half instead is how one of them came to be handed a
+writer and the other left to find one by name, so neither takes a default of
+its own: `for_tool/4` is asked which session table and which writer, every
+time. Session state is per router rather than one table for the node.
 
 This is the reason the assistant never has to guess what time it is.
 
@@ -1026,8 +1027,9 @@ Five layers, each doing one job:
    belongs to OAuth persistence. Every one of them is swept by
    `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
    persistence for the expiries persistence owns, and the limiter for the
-   windows it does not — each through a value it was handed, neither by name. A budget bounds how fast rows arrive and a sweep
-   bounds how many there are, and neither substitutes for the other.
+   windows it does not — each through a value it was handed, neither by name.
+   A budget bounds how fast rows arrive and a sweep bounds how many there are,
+   and neither substitutes for the other.
 
 **Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of
 the TCP connection, which behind layer 1 is the proxy — so a per-address limit

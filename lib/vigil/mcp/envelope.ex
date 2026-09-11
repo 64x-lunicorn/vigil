@@ -10,12 +10,14 @@ defmodule Vigil.MCP.Envelope do
   is what keeps a response at one call into the writer: the tool's own.
 
   The session table carries the name its caller supplied, the way
-  `Vigil.Store`'s registration already does: production supplies none and gets
-  the one the MCP router finds by default, and a caller that supplies a name
-  gets session state of its own rather than sharing one table with the node.
-  The writer the snapshot comes from is an argument for the same reason — one
-  response is decided against one vault, and which vault that is belongs to the
-  router that took the request, not to a default read here.
+  `Vigil.Store`'s registration already does: production supplies none and the
+  router falls back to `default_name/0`, and a caller that supplies a name gets
+  session state of its own rather than sharing one table with the node. The
+  writer the snapshot comes from is an argument for the same reason. Neither is
+  defaulted here: one response is decided against one session table and one
+  vault, and which ones those are belongs to the router that took the request —
+  a default read on this side is how the envelope came to reach a writer nobody
+  had handed it.
 
   What the envelope says is `Vigil.MCP.Envelope.Decision`'s to decide,
   including which form a given tool gets. This module holds the state that
@@ -47,12 +49,12 @@ defmodule Vigil.MCP.Envelope do
 
   @doc """
   The envelope for one response to `tool` in `session_id`, decided against the
-  vault `store` holds and recording the session state it leaves behind.
+  vault `store` holds and recorded in the session table `sessions` names.
   Returns `{envelope, now}`.
 
-  One entry point for every tool: the router hands over the session, the tool's
-  name and the writer, and asks nothing else. The instant comes back with the envelope
-  because the response has exactly one — the tool that answers *what time is
+  One entry point for every tool: the router hands over the session table, the
+  session, the tool's name and the writer, and asks nothing else. The instant
+  comes back with the envelope because the response has exactly one — the tool that answers *what time is
   it* is handed the same one its envelope was decided at, rather than reading
   a second clock a moment later on the other side of the writer.
 
@@ -61,18 +63,18 @@ defmodule Vigil.MCP.Envelope do
   against would compile and silently mis-decide a phase change, and there is
   no longer a signature that can express it.
   """
-  def for_tool(envelope \\ @default_name, session_id, tool, store) do
+  def for_tool(sessions, session_id, tool, store) do
     now = Clock.now()
 
-    {envelope_body, session_state} =
-      Decision.for_tool(tool, previous(envelope, session_id), now, Store.snapshot(store, now))
+    {envelope, session_state} =
+      Decision.for_tool(tool, previous(sessions, session_id), now, Store.snapshot(store, now))
 
-    :ets.insert(envelope, {session_id, session_state})
-    {envelope_body, now}
+    :ets.insert(sessions, {session_id, session_state})
+    {envelope, now}
   end
 
-  defp previous(envelope, session_id) do
-    case :ets.lookup(envelope, session_id) do
+  defp previous(sessions, session_id) do
+    case :ets.lookup(sessions, session_id) do
       [{^session_id, session_state}] -> session_state
       [] -> nil
     end

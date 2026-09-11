@@ -117,12 +117,16 @@ defmodule Vigil.OAuth.Endpoint do
     budget = Map.fetch!(conn.private.oauth_limits, endpoint)
     key = {:oauth, endpoint, client_addr(conn)}
 
-    if conn.private.oauth_limiter.limited?.(key, budget, System.system_time(:second)) do
+    if limiter(conn).limited?.(key, budget, System.system_time(:second)) do
       refuse(conn, endpoint)
     else
       handler.(conn)
     end
   end
+
+  # Where the windows this request is counted in are kept. Resolved in
+  # `init/1`, like the persistence every decision below is made against.
+  defp limiter(conn), do: conn.private.oauth_limiter
 
   defp refuse(conn, :authorize) do
     conn

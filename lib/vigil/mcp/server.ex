@@ -21,17 +21,18 @@ defmodule Vigil.MCP.Server do
   # request. Forwarding used to call `Vigil.OAuth.Endpoint.init/1` per request,
   # which re-parsed the trusted proxy list every time.
   #
-  # The writer is resolved here because both halves of a response are decided
-  # against it — the tool call and the envelope that wraps it — and this router
-  # is the only thing that knows they are the same vault. Defaulting in each
-  # half instead is how one of them came to be given a writer and the other
-  # left to find one by name.
+  # The writer and the session table are resolved here because both halves of a
+  # response are decided against them — the tool call and the envelope that
+  # wraps it — and this router is the only thing that knows they are the same
+  # vault and the same session. Defaulting inside each half instead is how one
+  # of them came to be given a writer and the other left to find one by name,
+  # so neither half defaults: both are asked for on every call.
   #
   # Persistence and the limiter are handed down to the authorization server's
-  # options, and persistence is then read back out of them rather than resolved
-  # twice: the token this router verifies and the token that server minted are
-  # kept in the same place by construction, including when a caller hands the
-  # server's options in ready-made.
+  # options and read back out of them rather than resolved twice: the token
+  # this router verifies and the token that server minted are kept in the same
+  # place by construction, and so are the windows both count in — including
+  # when a caller hands the server's options in ready-made.
   @impl true
   def init(opts) do
     oauth =
@@ -41,18 +42,20 @@ defmodule Vigil.MCP.Server do
 
     opts
     |> Keyword.put_new_lazy(:store, &Store.default_name/0)
+    |> Keyword.put_new_lazy(:sessions, &Envelope.default_name/0)
     |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
       RateLimit.budget(:rate_limit_rpm, @default_rpm)
     end)
-    |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
     |> Keyword.put(:oauth, oauth)
     |> Keyword.put(:persistence, Keyword.fetch!(oauth, :persistence))
+    |> Keyword.put(:limiter, Keyword.fetch!(oauth, :limiter))
   end
 
   @impl true
   def call(conn, opts) do
     conn
     |> put_private(:store, opts[:store])
+    |> put_private(:sessions, opts[:sessions])
     |> put_private(:rate_limit_budget, opts[:rate_limit_budget])
     |> put_private(:rate_limiter, opts[:limiter])
     |> put_private(:oauth_persistence, opts[:persistence])
@@ -195,7 +198,7 @@ defmodule Vigil.MCP.Server do
       Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
 
       store = conn.private.store
-      {envelope, now} = Envelope.for_tool(session_id, name, store)
+      {envelope, now} = Envelope.for_tool(conn.private.sessions, session_id, name, store)
 
       result =
         if scope == OAuth.read_scope() and Tools.write_tool?(name) do

@@ -12,7 +12,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   # one after another, so a name per file is all the isolation an async suite
   # needs.
   @store __MODULE__.Writer
-  @envelope __MODULE__.Sessions
+  @sessions __MODULE__.Sessions
 
   # What the envelope *says* is Vigil.MCP.Envelope.Decision's, and
   # DecisionTest pins every form it can take against a hand-built snapshot.
@@ -25,7 +25,7 @@ defmodule Vigil.MCP.EnvelopeTest do
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
     start_store(vault)
-    start_supervised!({Envelope, name: @envelope})
+    start_supervised!({Envelope, name: @sessions})
     %{vault: vault}
   end
 
@@ -42,7 +42,7 @@ defmodule Vigil.MCP.EnvelopeTest do
 
   # The envelope for one response in this file's session table, decided against
   # this file's vault.
-  defp for_tool(session_id, tool), do: Envelope.for_tool(@envelope, session_id, tool, @store)
+  defp for_tool(session_id, tool), do: Envelope.for_tool(@sessions, session_id, tool, @store)
 
   defp create_event!(path, title, starts, ends) do
     {:ok, _} =
@@ -124,8 +124,8 @@ defmodule Vigil.MCP.EnvelopeTest do
   end
 
   test "the table is public, so no response pays a call into the owning process" do
-    assert :ets.info(@envelope, :protection) == :public
-    assert :ets.info(@envelope, :owner) == Process.whereis(@envelope)
+    assert :ets.info(@sessions, :protection) == :public
+    assert :ets.info(@sessions, :owner) == Process.whereis(@sessions)
   end
 
   # The other half of the same claim: the snapshot the envelope is decided
