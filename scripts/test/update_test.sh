@@ -65,8 +65,19 @@ step() {
   echo "── $1 ──"
 }
 
-# Two codes for one false positive: ShellCheck renamed it in 0.10 and the
-# version CI installs still reports the old one, so both have to be named.
+# sha256sum on Linux, shasum on macOS. Named rather than inlined because the
+# state fingerprint below is compared across three runs of update.sh.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  else
+    shasum -a 256 "$@"
+  fi
+}
+
+# Two codes for one false positive: ShellCheck renamed it in 0.10, and a
+# contributor may still be on a version that reports the old one. CI is pinned
+# to 0.11 and only needs SC2329; the second code is for the local run.
 # shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap below
 cleanup() {
   if [ -n "$WORK" ] && [ "$KEEP" = "0" ] && [ -d "$WORK" ]; then
@@ -168,6 +179,56 @@ make_release() {
   echo "${PREFIX}/releases/${name}"
 }
 
+# Everything the authorization server has persisted lives beside the vault, in
+# the state dir. update.sh must never write there: the tokens in these files
+# are what an already-connected client authenticates with, and a delivery that
+# resets them is a delivery that silently logs Claude out.
+STATE_DIR=""
+
+seed_oauth_state() {
+  STATE_DIR="$(dirname "$VAULT")"
+  mkdir -p "$STATE_DIR"
+  for table in clients codes tokens; do
+    echo "pretend-dets-${table}-written-before-the-update" \
+      >"${STATE_DIR}/oauth_${table}.dets"
+    # 0600, as Vigil.OAuth.Store opens them: these hold bearer tokens, and a
+    # fingerprint over default permissions could not tell a widening apart.
+    chmod 600 "${STATE_DIR}/oauth_${table}.dets"
+  done
+  # Deliberately also seeded, and deliberately outside the fingerprint below.
+  echo "17" >"${STATE_DIR}/.last_chunks"
+}
+
+# The three dets files, with their permissions, as one comparable string.
+#
+# Scoped to oauth_*.dets rather than the whole state dir: verify() writes the
+# fresh chunk count to .last_chunks on every real update and every rollback
+# (scripts/lib.sh), so a whole-directory assertion would be green here only
+# because this harness stubs verify() out, and would turn red for intended
+# behaviour the moment it did not.
+#
+# Mode is part of the fingerprint: these files hold bearer tokens, they are
+# chmod 0600 by the store, and "untouched" has to mean the permissions too.
+state_fingerprint() {
+  find "$STATE_DIR" -maxdepth 1 -type f -name 'oauth_*.dets' -print |
+    sort |
+    while IFS= read -r file; do
+      printf '%s %s %s\n' \
+        "$(basename "$file")" \
+        "$(sha256_of "$file" | cut -d' ' -f1)" \
+        "$(mode_of "$file")"
+    done
+}
+
+# stat is spelled differently on the two platforms this runs on.
+mode_of() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"
+  else
+    stat -f '%Lp' "$1"
+  fi
+}
+
 build_host() {
   rm -rf "${WORK:?}/opt" "${WORK:?}/var" "${WORK:?}/etc"
   mkdir -p "$PREFIX/releases" "$(dirname "$ENV_FILE")"
@@ -183,6 +244,7 @@ ENV
   : >"${PREFIX}/.service-active"
   FAKE_MIX_LOG="${WORK}/mix.log"
   : >"$FAKE_MIX_LOG"
+  seed_oauth_state
 }
 
 # Runs the real update.sh against the throwaway host. Prints its exit code.
@@ -348,6 +410,33 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "exits 2 — nothing was touched" "2" "$RC"
 assert_eq "current still points at the old release" "v0" "$(current_release)"
+
+## ── 5c. Persisted auth state survives the delivery ───────────────────────
+
+step "5c   The OAuth tables are untouched by an update and by a rollback"
+
+# What this pins is the delivery mechanism, not the records: no BEAM runs here,
+# so the files are stand-ins. That an access token written by the *previous
+# version* still validates under the new one is a question about the records
+# and is pinned in test/vigil/oauth/store_compatibility_test.exs.
+
+build_host
+BEFORE="$(state_fingerprint)"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the update exits 0" "0" "$RC"
+assert_eq "the tables are byte-identical after the update" "$BEFORE" "$(state_fingerprint)"
+
+# And again through the path that moves the symlink twice.
+build_host
+BEFORE="$(state_fingerprint)"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_fingerprint)"
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 
