@@ -62,12 +62,12 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp configured_limits do
-    rpm = RateLimit.budget(:oauth_rate_limit_rpm, @default_rpm)
+    rpm = RateLimit.configured_budget(:oauth_rate_limit_rpm, @default_rpm)
 
     %{
       authorize: rpm,
       token: rpm,
-      register: RateLimit.budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
+      register: RateLimit.configured_budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
     }
   end
 

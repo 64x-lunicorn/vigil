@@ -54,7 +54,7 @@ defmodule Vigil.MCP.Server do
     |> Keyword.put_new_lazy(:store, &Store.default_name/0)
     |> Keyword.put_new_lazy(:sessions, &Envelope.default_name/0)
     |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
-      RateLimit.budget(:rate_limit_rpm, @default_rpm)
+      RateLimit.configured_budget(:rate_limit_rpm, @default_rpm)
     end)
     |> Keyword.put(:oauth, oauth)
     |> Keyword.merge(shared_with_oauth!(oauth))

@@ -894,13 +894,20 @@ the suite runs against both adapters, and a minute each adapter picked for
 itself would make that claim mean two different things. How a window is
 counted and how one is reclaimed stays each adapter's own — a match-spec
 delete against ETS, a map split against the agent — which is what leaves the
-contract suite something to catch. `budget/2` belongs to neither adapter: it
-reads what the deployment configured, once, where a router is initialized, and
-is handed to `limited?` as an argument from there on. What was read is judged
-by `budget/3`, which takes it as an argument — so what counts as a budget can
-be stated against a budget rather than against global application state, and
-the limiter's own suite states the budgets it is about instead of writing them
-into an application env every other async file shares.
+contract suite something to catch. `configured_budget/2` belongs to neither
+adapter: it reads what the deployment configured, once, where a router is
+initialized, and is handed to `limited?` as an argument from there on. What was
+read is judged by `budget/3`, which takes it as an argument — so what counts as
+a budget can be stated against a budget rather than against global application
+state, and the limiter's own suite states the budgets it is about instead of
+writing them into an application env every other async file shares.
+
+**The read and the judgement have names of their own.** They are two
+responsibilities, and one name over both left a call site unable to tell which
+of them it was looking at without counting arguments. `budget/3` takes the
+setting's name as well, because the warning is the judgement's own: the
+function that decides to ignore what a deployment configured is the one that
+has to say which of the three it ignored.
 
 **The missing-table guard is the production adapter's alone.** That table is
 owned by the limiter's process and is gone while that process restarts, so a
