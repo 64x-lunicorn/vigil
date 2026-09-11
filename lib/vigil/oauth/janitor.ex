@@ -7,12 +7,20 @@ defmodule Vigil.OAuth.Janitor do
   was the OAuth store's in effect, the one swept table that store does not own
   was swept by nobody; `docs/oauth.md` records what that cost.
 
-  Four facts it needs are arguments with production defaults: the interval it
+  Five facts it needs are arguments with production defaults: the interval it
   sleeps for, the instant it sweeps against, the persistence whose expiries it
-  sweeps, and the rate limiter whose elapsed windows it reclaims. The first two
-  baked in, the only way to observe a sweep was to wait five minutes; the last
-  two baked in, a sweep could only ever be observed against the one globally
-  registered `:dets` store and the one globally named limiter table.
+  sweeps, the rate limiter whose elapsed windows it reclaims, and the name it
+  registers under. The first two baked in, the only way to observe a sweep was
+  to wait five minutes; the next two baked in, a sweep could only ever be
+  observed against the one globally registered `:dets` store and the one
+  globally named limiter table.
+
+  The name is the last of them and is an argument for the same reason: a
+  janitor registered under this module is the node's one janitor, so two of
+  them cannot exist at once and a test that drives one cannot run beside
+  anything else that does. `name: nil` starts an unregistered janitor its
+  starter reaches by pid, which is what `test/vigil/oauth/janitor_test.exs`
+  asks for.
 
   The instant arrives as a function rather than a value because the janitor
   outlives any one of them — a fixed instant would be right for the first
@@ -25,7 +33,14 @@ defmodule Vigil.OAuth.Janitor do
 
   @interval :timer.minutes(5)
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  def start_link(opts) do
+    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
+
+    case name do
+      nil -> GenServer.start_link(__MODULE__, opts)
+      name -> GenServer.start_link(__MODULE__, opts, name: name)
+    end
+  end
 
   @impl true
   def init(opts) do

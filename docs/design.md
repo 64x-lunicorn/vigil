@@ -796,22 +796,28 @@ by their owner alone.
 
 Eight test files used to `mkdir` a temp directory and open three `:dets` files
 apiece to ask a question about a token, and every one of them was serial for
-it. Six of the eight run in parallel now. Two are still serial, for reasons
-that have nothing to do with persistence: `Vigil.OAuth.EndpointTest` sets the
-rate-limit budgets and the trusted-proxy configuration in global application
-env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor`, which is
-registered under its module name.
+it. All eight run in parallel now. The last two stopped being serial for
+reasons that had nothing to do with persistence either:
+`Vigil.OAuth.EndpointTest` wrote the rate-limit budgets and the trusted-proxy
+configuration into global application env and now states both as router
+options, and `Vigil.OAuth.JanitorTest` drove the janitor registered under its
+module name and now starts unregistered ones it reaches by pid.
 
 **`Vigil.MCP.ServerTest` supplies its own writer now**, the way
 `Vigil.StoreTest` does: the router takes one at `init/1` and threads it to
 both halves of a response, so the file starts no `Vigil.Store` under the
-production registration. What it still finds by a default is the session table
-and the rate limiter, and it is the one async file that may start those two —
-everything else that wants them (`Vigil.RateLimitTest`,
-`Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs after
-every async file has finished. A second async file starting either breaks it
-loudly and immediately: `start_supervised!` raises on
-`{:error, {:already_started, _}}`.
+production registration. The session table is its own too, under a name it
+supplies, and so is the limiter — counting in a process rather than in the
+node's one table. Nothing it drives is found by a default any more.
+
+**One file starts `Vigil.RateLimit`**: `Vigil.RateLimitTest`, where the
+production adapter's table is the thing under test. It is async *because* it
+is the only one — the table is the node's, so a second file starting it would
+clash over the registered name and over what is in the table, and the two
+tests that need the table gone could not say so. That stays true by force
+rather than by convention: `start_supervised!` raises on
+`{:error, {:already_started, _}}`, so a second file starting it breaks loudly
+and immediately.
 
 The speed is a consequence and not the argument, and here it is a small one.
 The argument is that 244 lines owning expiry, revocation, spent-token marking
