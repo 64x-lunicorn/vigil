@@ -580,9 +580,16 @@ a running GenServer. `Vigil.Store` is left with the sequence — ask the policy,
 read the note, build the plan, execute it — and the effect.
 
 Order matters: perform the action, commit, reparse into the index, then push.
-It is stated once, where a plan is executed. If the push fails the local commit
-stays and the tool returns an error naming what is committed locally but not
-pushed — the change, the deletion, or the move. Nothing is rolled back.
+It is stated once, where a plan is executed — one clause for all three actions,
+with what differs between them answered per action, one small function per
+question: which effect to ask `Vigil.Commit` for, what the index does with what
+comes back, what the success report says, and what object a push failure names. A report that can only be
+*observed across* the effect — the references a move broke, a diff of incoming
+links before against the rebuilt index after — is asked before the effect and
+answered against the index it left behind, so that no action has to be a
+special case of the sequence. If the push fails the local commit stays and the
+tool returns an error naming what is committed locally but not pushed — the
+change, the deletion, or the move. Nothing is rolled back.
 
 **Confirm is the last gate, not the first.** `delete_note` and `move_note`
 resolve their paths before asking for confirmation, so a path naming `skills/`,

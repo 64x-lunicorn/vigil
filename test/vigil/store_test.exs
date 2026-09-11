@@ -30,7 +30,7 @@ defmodule Vigil.StoreTest do
        vault_path: vault,
        exclude: Keyword.get(opts, :exclude, []),
        git_remote: Keyword.get(opts, :git_remote, "origin"),
-       git: CommitLog.new(vault),
+       git: Keyword.get_lazy(opts, :git, fn -> CommitLog.new(vault) end),
        name: @store}
     )
   end
@@ -922,6 +922,10 @@ defmodule Vigil.StoreTest do
   # write path no test could fail on, because exercising it meant building a
   # repository. An adapter that records its calls can be asked what order they
   # came in.
+  #
+  # One clause in Vigil.Store executes all three plan actions, and all three are
+  # driven through it here: what the adapter was asked to do, in what order, and
+  # where the index stood by the time the last of those calls came in.
   describe "the order a plan is executed in" do
     test "perform, commit, reparse, push", %{vault: vault} do
       :ok = stop_supervised(Store)
@@ -939,10 +943,7 @@ defmodule Vigil.StoreTest do
           end
       }
 
-      start_supervised!(
-        {Store,
-         vault_path: vault, exclude: [], git_remote: "nonexistent-remote", git: git, name: @store}
-      )
+      start_store(vault, git: git, git_remote: "nonexistent-remote")
 
       assert {:error, msg} =
                Store.call(@store, :create, %{
@@ -966,6 +967,71 @@ defmodule Vigil.StoreTest do
       # only be if the reparse ran before the push rather than after it.
       assert {:ok, %{title: "Ordered"}} =
                Store.call(@store, :read, %{id: "bike/ordered.md", backlinks: false})
+    end
+
+    # A delete and a move are one call each — `git rm` and `git mv` perform the
+    # action and commit it in the same breath — so what these two pin is the
+    # rest of the order: the effect, then the index, then the push.
+    #
+    # The index is read at push time, through the event notes the writer
+    # publishes: that is the one reading of it available from outside the
+    # mailbox, and a call into the writer from in here would deadlock behind
+    # the write in progress. Both act on the fixture's one event note, so what
+    # the publication says is the whole answer.
+    defp start_push_probing_store(vault, test_process) do
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+
+      probing = %{
+        git
+        | push: fn vault_path, remote ->
+            send(test_process, {:events_at_push, :ets.lookup_element(@store, :events, 2)})
+            git.push.(vault_path, remote)
+          end
+      }
+
+      start_store(vault, git: probing, git_remote: "nonexistent-remote")
+      log
+    end
+
+    test "a delete: remove and commit, index, push", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      log = start_push_probing_store(vault, self())
+
+      assert {:error, msg} =
+               Store.call(@store, :delete_note, %{path: "bike/via-carolina.md", confirm: true})
+
+      assert msg =~ "Deletion committed locally, but push failed"
+
+      assert [
+               {:pull, "nonexistent-remote"},
+               {:remove_commit, "bike/via-carolina.md", "delete: bike/via-carolina.md"},
+               {:push, "nonexistent-remote"}
+             ] = CommitLog.calls(log)
+
+      assert_received {:events_at_push, []}
+    end
+
+    test "a move: rename and commit, index, push", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      log = start_push_probing_store(vault, self())
+
+      assert {:error, msg} =
+               Store.call(@store, :move_note, %{
+                 from: "bike/via-carolina.md",
+                 to: "bike/via-carolina-2026.md",
+                 confirm: true
+               })
+
+      assert msg =~ "Move committed locally, but push failed"
+
+      assert [
+               {:pull, "nonexistent-remote"},
+               {:move_commit, "bike/via-carolina.md", "bike/via-carolina-2026.md",
+                "move: bike/via-carolina.md -> bike/via-carolina-2026.md"},
+               {:push, "nonexistent-remote"}
+             ] = CommitLog.calls(log)
+
+      assert_received {:events_at_push, [%{path: "bike/via-carolina-2026.md"}]}
     end
   end
 
