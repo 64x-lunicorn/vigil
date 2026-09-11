@@ -13,11 +13,16 @@ defmodule Vigil.OAuth.TokenTest do
 
   @ttl_day 86_400
 
+  # The audience a token is minted for and checked against. To this module it
+  # is an opaque string — which is why the test states one rather than reading
+  # the deployment's back out of configuration.
+  @resource "https://vault.factory-lab.org/mcp"
+
   setup do
     Vigil.OAuthCase.setup!()
   end
 
-  defp resource, do: OAuth.resource()
+  defp resource, do: @resource
 
   # An authorization code being redeemed: a client, a scope, a grant — and the
   # audience it was minted for, under the name Vigil.OAuth.Code writes it
@@ -26,7 +31,7 @@ defmodule Vigil.OAuth.TokenTest do
   defp redeemed(overrides \\ []) do
     %{
       client_id: "client-1",
-      resource: Keyword.get(overrides, :resource, OAuth.resource()),
+      resource: Keyword.get(overrides, :resource, @resource),
       scope: Keyword.get(overrides, :scope, OAuth.scope()),
       grant_id: Keyword.get(overrides, :grant, Vigil.Uuid.v4())
     }
@@ -38,7 +43,7 @@ defmodule Vigil.OAuth.TokenTest do
     %{
       type: :refresh,
       client_id: "client-1",
-      aud: Keyword.get(overrides, :aud, OAuth.resource()),
+      aud: Keyword.get(overrides, :aud, @resource),
       scope: Keyword.get(overrides, :scope, OAuth.scope()),
       grant_id: Keyword.get(overrides, :grant, Vigil.Uuid.v4()),
       expires_at: Keyword.get(overrides, :expires_at, System.system_time(:second) + 100)
@@ -165,7 +170,7 @@ defmodule Vigil.OAuth.TokenTest do
       for record <- [redeemed(), rotated()] do
         pair = Token.issue_pair(persistence, record, now)
 
-        assert Token.validate_access(persistence, pair.access_token, OAuth.resource(), now) ==
+        assert Token.validate_access(persistence, pair.access_token, @resource, now) ==
                  {:ok, OAuth.scope()}
       end
     end
@@ -176,7 +181,7 @@ defmodule Vigil.OAuth.TokenTest do
     } do
       pair = Token.issue_pair(persistence, redeemed(resource: "https://andere.tld/mcp"), now)
 
-      assert Token.validate_access(persistence, pair.access_token, OAuth.resource(), now) ==
+      assert Token.validate_access(persistence, pair.access_token, @resource, now) ==
                :error
 
       assert Token.validate_access(persistence, pair.access_token, "https://andere.tld/mcp", now) ==

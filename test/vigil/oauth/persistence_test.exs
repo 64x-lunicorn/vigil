@@ -27,6 +27,11 @@ defmodule Vigil.OAuth.PersistenceTest do
 
   @now 1_700_000_000
 
+  # The audience the token records below carry. Persistence stores it and
+  # gives it back; what it says is nothing this seam decides, so the test
+  # states one rather than reading the deployment's.
+  @resource "https://vault.factory-lab.org/mcp"
+
   # The whole contract, with the arity each question is asked at. Written out
   # rather than read off the struct, because a test that derives the list from
   # the thing it checks passes whatever that thing says.
@@ -97,7 +102,7 @@ defmodule Vigil.OAuth.PersistenceTest do
     Map.merge(
       %{
         grant_id: "grant-1",
-        aud: OAuth.resource(),
+        aud: @resource,
         scope: OAuth.scope(),
         expires_at: @now + 3600
       },
@@ -138,7 +143,7 @@ defmodule Vigil.OAuth.PersistenceTest do
       test "a token is written, read and deleted", %{persistence: persistence} do
         assert :ok = persistence.put_token.("token-1", token_attrs(%{}))
         assert {:ok, %{aud: aud}} = persistence.get_token.("token-1")
-        assert aud == OAuth.resource()
+        assert aud == @resource
 
         assert :ok = persistence.delete_token.("token-1")
         assert :error = persistence.get_token.("token-1")
@@ -342,13 +347,13 @@ defmodule Vigil.OAuth.PersistenceTest do
       persistence: persistence,
       state_dir: state_dir
     } do
-      token = Token.issue_out_of_band(persistence, OAuth.resource(), OAuth.scope(), 3600, @now)
+      token = Token.issue_out_of_band(persistence, @resource, OAuth.scope(), 3600, @now)
 
       stop_supervised!(Store)
       start_supervised!({Store, state_dir: state_dir})
 
       assert {:ok, record} = Store.over_tables().get_token.(token)
-      assert record.aud == OAuth.resource()
+      assert record.aud == @resource
     end
 
     # What the seam cannot see: an elapsed lockout window and a stale cache

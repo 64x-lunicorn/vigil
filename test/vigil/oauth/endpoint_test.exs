@@ -894,7 +894,8 @@ defmodule Vigil.OAuth.EndpointTest do
 
   test "an expired code is gone after a sweep", %{
     endpoint: endpoint,
-    persistence: persistence
+    persistence: persistence,
+    settings: settings
   } do
     {201, client} = register(endpoint, ["https://client.example/cb"])
     {_verifier, challenge} = pkce_pair()
@@ -902,6 +903,7 @@ defmodule Vigil.OAuth.EndpointTest do
     {:ok, ctx} =
       OAuth.Flow.authorize_request(
         persistence,
+        settings,
         authorize_query(client["client_id"], "https://client.example/cb", challenge)
       )
 

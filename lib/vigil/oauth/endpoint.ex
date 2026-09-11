@@ -11,6 +11,7 @@ defmodule Vigil.OAuth.Endpoint do
   alias Vigil.OAuth
   alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow, Store}
   alias Vigil.RateLimit
+  alias Vigil.Settings
 
   @default_rpm 30
   @default_register_rpm 5
@@ -18,13 +19,18 @@ defmodule Vigil.OAuth.Endpoint do
   plug(:match)
   plug(:dispatch)
 
-  # Resolves what the deployment says about its proxy and its budgets once,
-  # when the router is initialized, rather than re-parsing a CIDR list and
-  # re-reading application config on every request. Persistence and the rate
-  # limiter are resolved here for the same reason and one more: they are what
-  # every decision below is made *against*, and a caller that substitutes one —
-  # the MCP router passes its own down — must do so for the whole router, not
-  # per request.
+  # Resolves what the deployment says about itself once, when the router is
+  # initialized, rather than re-parsing a CIDR list and re-reading application
+  # config on every request. Persistence and the rate limiter are resolved
+  # here for the same reason and one more: they are what every decision below
+  # is made *against*, and a caller that substitutes one — the MCP router
+  # passes its own down — must do so for the whole router, not per request.
+  #
+  # `settings` is who this server says it is, what it protects and what it
+  # checks a consent against. It arrives as one value rather than three reads
+  # because production resolves it once for the whole tree; the default here
+  # is for a caller that hands in nothing, the same rule the four beside it
+  # follow.
   @impl true
   def init(opts) do
     opts
@@ -32,6 +38,7 @@ defmodule Vigil.OAuth.Endpoint do
     |> Keyword.put_new_lazy(:limits, &configured_limits/0)
     |> Keyword.put_new_lazy(:persistence, &Store.over_tables/0)
     |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
+    |> Keyword.put_new_lazy(:settings, &Settings.from_env/0)
   end
 
   @impl true
@@ -41,6 +48,7 @@ defmodule Vigil.OAuth.Endpoint do
     |> put_private(:oauth_limits, opts[:limits])
     |> put_private(:oauth_persistence, opts[:persistence])
     |> put_private(:oauth_limiter, opts[:limiter])
+    |> put_private(:oauth_settings, opts[:settings])
     |> super(opts)
   end
 
@@ -57,15 +65,15 @@ defmodule Vigil.OAuth.Endpoint do
   ## Discovery
 
   get "/.well-known/oauth-protected-resource" do
-    send_json(conn, 200, OAuth.protected_resource_metadata())
+    send_json(conn, 200, OAuth.protected_resource_metadata(settings(conn)))
   end
 
   get "/.well-known/oauth-protected-resource/mcp" do
-    send_json(conn, 200, OAuth.protected_resource_metadata())
+    send_json(conn, 200, OAuth.protected_resource_metadata(settings(conn)))
   end
 
   get "/.well-known/oauth-authorization-server" do
-    send_json(conn, 200, OAuth.authorization_server_metadata())
+    send_json(conn, 200, OAuth.authorization_server_metadata(settings(conn)))
   end
 
   ## Flow
@@ -170,7 +178,7 @@ defmodule Vigil.OAuth.Endpoint do
   ## Authorization
 
   defp with_authorize_request(conn, params, on_ok) do
-    case Flow.authorize_request(persistence(conn), params) do
+    case Flow.authorize_request(persistence(conn), settings(conn), params) do
       {:ok, ctx} ->
         on_ok.(conn, ctx)
 
@@ -194,7 +202,13 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp process_allow(conn, ctx, params) do
-    case Flow.consent(persistence(conn), client_addr(conn), params["password"], ctx) do
+    case Flow.consent(
+           persistence(conn),
+           settings(conn),
+           client_addr(conn),
+           params["password"],
+           ctx
+         ) do
       {:ok, code} ->
         redirect_with_query(conn, ctx.redirect_uri, put_state(%{"code" => code}, ctx.state))
 
@@ -214,7 +228,7 @@ defmodule Vigil.OAuth.Endpoint do
       "code_challenge" => ctx.code_challenge,
       "code_challenge_method" => "S256",
       "state" => ctx.state || "",
-      "resource" => OAuth.resource(),
+      "resource" => ctx.resource,
       "scope" => ctx.scope
     }
 
@@ -265,7 +279,7 @@ defmodule Vigil.OAuth.Endpoint do
   # server today, so this closes a gap rather than an incident.
   defp redirect_with_query(conn, redirect_uri, query) do
     separator = if String.contains?(redirect_uri, "?"), do: "&", else: "?"
-    query = Map.put(query, "iss", OAuth.issuer())
+    query = Map.put(query, "iss", settings(conn).issuer)
 
     conn
     |> put_resp_header("location", redirect_uri <> separator <> URI.encode_query(query))
@@ -280,6 +294,10 @@ defmodule Vigil.OAuth.Endpoint do
   # tokens it reads and writes. Resolved in `init/1`, the same as the two
   # above it.
   defp persistence(conn), do: conn.private.oauth_persistence
+
+  # What this authorization server says it is and what it protects. Resolved
+  # in `init/1`, the same as the three above it.
+  defp settings(conn), do: conn.private.oauth_settings
 
   # Which address a limit is counted against. `Vigil.OAuth.ClientAddr` owns the
   # decision; this only says where the configuration was put. Not "ip": the

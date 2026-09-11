@@ -884,6 +884,65 @@ the hot path.
 
 ---
 
+## The deployment is resolved once
+
+`Vigil.Settings` is what the deployment says about itself: the vault's
+timezone, the authorization server's identity — issuer, resource, consent
+password — and the two strings that shape the writing instructions handed to
+the MCP client. `Vigil.Settings.from_env/0` is the only place those six keys
+are read, `Vigil.Application` calls it once where the supervision tree is
+built, and everything below takes the result as an option.
+
+**The shape is `Vigil.SkillKey`'s**, which bundled the HMAC secret and the
+rotation window into one value because neither derives a token alone, and made
+every function there take the bundle. What is new is the reason: these six do
+not derive anything together. They are one value because of *where they are
+read*. An environment read belongs in the composition root, and eight modules
+that each asked for one key with a default of its own had no way to be handed
+another deployment.
+
+**Every default is `config/runtime.exs`'s**, stated once as the fallback of
+the environment variable it comes from. `from_env/0` fetches rather than
+defaults, so a key that is somehow unset fails at boot where an operator can
+see it, and not at the first write. The module-side copies — `Vigil.Clock`'s
+`"Europe/Berlin"`, `Vigil.MCP.Server`'s `"the vault owner"` and `"English"` —
+are gone with the reads that used them.
+
+**Where each one lands.** `Vigil.Store` keeps the timezone in its state for a
+write that arrived without an instant of its own, and publishes it in the
+table beside the vault path, so a caller resolving its own instant reads the
+deployment the writer was built with. `Vigil.MCP.Envelope.for_tool/5` takes it
+as its fifth argument, for the same reason the four before it are arguments.
+`Vigil.MCP.Server` resolves the value at `init/1` and hands it down to
+`Vigil.OAuth.Endpoint` exactly as it hands down persistence and the limiter —
+and reads it back out of those options, so both halves agree on what this
+server is called and what it protects by construction rather than by two
+resolutions happening to match. `Vigil.OAuth.Flow` takes it on the two
+decisions that need it: the audience an `/authorize` request may ask for, and
+the password a consent is checked against.
+
+**The audience a code is minted for travels in `ctx`.** `authorize_request`
+already checks the request's target against the deployment's resource, so it
+puts that resource in the context it returns and `Vigil.OAuth.Code` mints
+against it. A code cannot be minted for a resource its request was never
+checked against, and `Code` has no second opinion to hold.
+
+**What the composition root reads is out of scope and stays there.** The vault
+path, the exclusions, the git remote, the state dir and the port are read in
+`Vigil.Application` and handed to the children that need them. One exception
+is left standing on purpose: `Vigil.SkillKey.config/0` still reads
+`auth_password` for itself, where it is the AP-4 HMAC secret rather than the
+consent password, bundled with the rotation window that nothing else wants.
+That bundle is the shape this section copies, not something it replaces.
+
+**Two more test files run in parallel.** `Vigil.ClockTest` set `:tz` in global
+application env and put it back afterwards; it passes a timezone now.
+`Vigil.ContractsTest` said so in its own comment — "the OAuth metadata reads
+issuer/resource from application env" — and now hands both metadata functions
+the settings value the fixture already had.
+
+---
+
 ## How a file is written
 
 Vigil is the only writer (principle 2), so the shape of a file on disk is
@@ -1001,8 +1060,10 @@ same one. So it resolves both at `init/1` — the writer, defaulting to
 `Vigil.MCP.Tools.dispatch` and to `Vigil.MCP.Envelope.for_tool` alike.
 Defaulting inside each half instead is how one of them came to be handed a
 writer and the other left to find one by name, so neither takes a default of
-its own: `for_tool/4` is asked which session table and which writer, every
-time. Session state is per router rather than one table for the node.
+its own: `for_tool/5` is asked which session table and which writer, every
+time — and, since the deployment is resolved once too, which timezone to stamp
+the response with. Session state is per router rather than one table for the
+node.
 
 This is the reason the assistant never has to guess what time it is.
 

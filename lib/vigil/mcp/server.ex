@@ -28,16 +28,18 @@ defmodule Vigil.MCP.Server do
   # of them came to be given a writer and the other left to find one by name,
   # so neither half defaults: both are asked for on every call.
   #
-  # Persistence and the limiter are handed down to the authorization server's
-  # options and read back out of them rather than resolved twice: the token
-  # this router verifies and the token that server minted are kept in the same
-  # place by construction, and so are the windows both count in — including
-  # when a caller hands the server's options in ready-made.
+  # Persistence, the limiter and the deployment's settings are handed down to
+  # the authorization server's options and read back out of them rather than
+  # resolved twice: the token this router verifies and the token that server
+  # minted are kept in the same place by construction, the windows both count
+  # in are the same windows, and both halves agree on what this server is
+  # called and what it protects — including when a caller hands the server's
+  # options in ready-made.
   @impl true
   def init(opts) do
     oauth =
       Keyword.get_lazy(opts, :oauth, fn ->
-        Vigil.OAuth.Endpoint.init(Keyword.take(opts, [:persistence, :limiter]))
+        Vigil.OAuth.Endpoint.init(Keyword.take(opts, [:persistence, :limiter, :settings]))
       end)
 
     opts
@@ -49,6 +51,7 @@ defmodule Vigil.MCP.Server do
     |> Keyword.put(:oauth, oauth)
     |> Keyword.put(:persistence, Keyword.fetch!(oauth, :persistence))
     |> Keyword.put(:limiter, Keyword.fetch!(oauth, :limiter))
+    |> Keyword.put(:settings, Keyword.fetch!(oauth, :settings))
   end
 
   @impl true
@@ -60,6 +63,7 @@ defmodule Vigil.MCP.Server do
     |> put_private(:rate_limiter, opts[:limiter])
     |> put_private(:oauth_persistence, opts[:persistence])
     |> put_private(:oauth_opts, opts[:oauth])
+    |> put_private(:settings, opts[:settings])
     |> super(opts)
   end
 
@@ -108,7 +112,8 @@ defmodule Vigil.MCP.Server do
   # token arrived in, and that every refusal answers the same challenge.
   defp validate_access_token(conn) do
     with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
-         {:ok, scope} <- OAuth.Token.validate_access(persistence(conn), token, OAuth.resource()) do
+         {:ok, scope} <-
+           OAuth.Token.validate_access(persistence(conn), token, settings(conn).resource) do
       {:ok, scope, token}
     else
       _ -> {:error, :challenge}
@@ -119,9 +124,16 @@ defmodule Vigil.MCP.Server do
   # `init/1`, out of the authorization server's own options.
   defp persistence(conn), do: conn.private.oauth_persistence
 
+  # What the deployment says about itself: the resource a token is checked
+  # against, the issuer a challenge points at, the timezone a response is
+  # stamped with, and the two strings the writing instructions are shaped by.
+  # Resolved in `init/1`, out of the authorization server's own options, for
+  # the same reason persistence is.
+  defp settings(conn), do: conn.private.settings
+
   defp send_401_challenge(conn) do
     challenge =
-      "Bearer resource_metadata=\"#{OAuth.issuer()}/.well-known/oauth-protected-resource\", scope=\"#{OAuth.scope()}\""
+      "Bearer resource_metadata=\"#{settings(conn).issuer}/.well-known/oauth-protected-resource\", scope=\"#{OAuth.scope()}\""
 
     conn
     |> put_resp_header("www-authenticate", challenge)
@@ -165,7 +177,7 @@ defmodule Vigil.MCP.Server do
       protocolVersion: @protocol_version,
       serverInfo: %{name: "vigil", version: Application.spec(:vigil, :vsn) |> to_string()},
       capabilities: %{tools: %{}},
-      instructions: instructions_text(conn.private.store)
+      instructions: instructions_text(conn.private.store, settings(conn))
     }
 
     conn
@@ -198,7 +210,9 @@ defmodule Vigil.MCP.Server do
       Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
 
       store = conn.private.store
-      {envelope, now} = Envelope.for_tool(conn.private.sessions, session_id, name, store)
+
+      {envelope, now} =
+        Envelope.for_tool(conn.private.sessions, session_id, name, store, settings(conn).tz)
 
       result =
         if scope == OAuth.read_scope() and Tools.write_tool?(name) do
@@ -262,12 +276,12 @@ defmodule Vigil.MCP.Server do
 
   # Sent to the client on `initialize`. These are writing rules for the vault,
   # not rules for this server, which is why the two things they depend on —
-  # who the vault belongs to and which language it is written in — come from
-  # configuration rather than being hardcoded. `VIGIL_VAULT_LANGUAGE` governs
-  # the language of the *notes*; the server itself always speaks English.
-  defp base_instructions do
-    owner = Application.get_env(:vigil, :vault_owner, "the vault owner")
-    language = Application.get_env(:vigil, :vault_language, "English")
+  # who the vault belongs to and which language it is written in — are the
+  # deployment's rather than hardcoded. `VIGIL_VAULT_LANGUAGE` governs the
+  # language of the *notes*; the server itself always speaks English.
+  defp base_instructions(settings) do
+    owner = settings.vault_owner
+    language = settings.vault_language
 
     """
     Voice: use #{owner}'s own phrasing verbatim, do not smooth it out. What they
@@ -298,8 +312,8 @@ defmodule Vigil.MCP.Server do
     """
   end
 
-  defp instructions_text(store) do
-    base_instructions() <>
+  defp instructions_text(store, settings) do
+    base_instructions(settings) <>
       "\n\n## Domains (_domains.yml)\n\n```yaml\n" <>
       Store.instructions_domains_text(store) <> "\n```"
   end

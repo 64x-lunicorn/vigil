@@ -14,6 +14,11 @@ defmodule Vigil.MCP.EnvelopeTest do
   @store __MODULE__.Writer
   @sessions __MODULE__.Sessions
 
+  # The vault's timezone, stated rather than read: the envelope stamps a
+  # response with the current time in it, and which zone that is belongs to
+  # the deployment the router was built with (`Vigil.Settings`).
+  @tz "Europe/Berlin"
+
   # What the envelope *says* is Vigil.MCP.Envelope.Decision's, and
   # DecisionTest pins every form it can take against a hand-built snapshot.
   # What is left for this module — and so for this file — is the three things
@@ -42,7 +47,8 @@ defmodule Vigil.MCP.EnvelopeTest do
 
   # The envelope for one response in this file's session table, decided against
   # this file's vault.
-  defp for_tool(session_id, tool), do: Envelope.for_tool(@sessions, session_id, tool, @store)
+  defp for_tool(session_id, tool),
+    do: Envelope.for_tool(@sessions, session_id, tool, @store, @tz)
 
   defp create_event!(path, title, starts, ends) do
     {:ok, _} =

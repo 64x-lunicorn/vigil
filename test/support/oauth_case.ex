@@ -12,14 +12,17 @@ defmodule Vigil.OAuthCase do
   place that still opens a `:dets` file is the contract suite's production
   half (`test/vigil/oauth/persistence_test.exs`).
 
-  `issuer`, `resource` and `auth_password` are read, not set: they are
-  configured once for the whole run in `config/runtime.exs`. A test that needs a
-  different persistence builds one; a test that needs different configuration
-  is still on its own, and is still serial for it.
+  `settings` is what the deployment says about itself
+  (`Vigil.Settings.from_env/0`), read once here and handed on: `issuer`,
+  `resource` and `auth_password` are the three of its fields the OAuth tests
+  assert against, and they are pinned for the whole run in
+  `config/runtime.exs`. Nothing here writes application env, so a test that
+  needs a different authorization server builds a settings value of its own
+  and hands it in, the same way it builds a persistence of its own.
   """
 
-  alias Vigil.OAuth
   alias Vigil.OAuth.{Client, Code, Flow, Persistence}
+  alias Vigil.Settings
 
   @redirect_uri "https://client.example.org/cb"
 
@@ -27,18 +30,22 @@ defmodule Vigil.OAuthCase do
   # no interest in PKCE does not have to hash anything to mint a code.
   @challenge "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
 
-  @doc "Returns `%{issuer:, resource:, auth_password:, persistence:}`."
+  @doc "Returns `%{settings:, issuer:, resource:, auth_password:, persistence:}`."
   @spec setup!() :: %{
+          settings: Settings.t(),
           issuer: String.t(),
           resource: String.t(),
           auth_password: String.t(),
           persistence: Persistence.t()
         }
   def setup! do
+    settings = Settings.from_env()
+
     %{
-      issuer: OAuth.issuer(),
-      resource: OAuth.resource(),
-      auth_password: OAuth.auth_password(),
+      settings: settings,
+      issuer: settings.issuer,
+      resource: settings.resource,
+      auth_password: settings.auth_password,
       persistence: Persistence.Memory.new()
     }
   end
@@ -57,7 +64,7 @@ defmodule Vigil.OAuthCase do
     client = Client.register(persistence, "Client", [@redirect_uri], now)
 
     {:ok, ctx} =
-      Flow.authorize_request(persistence, %{
+      Flow.authorize_request(persistence, Settings.from_env(), %{
         "client_id" => client.client_id,
         "redirect_uri" => @redirect_uri,
         "response_type" => "code",
