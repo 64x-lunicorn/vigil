@@ -88,7 +88,13 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          project_version="$(mix run --no-start --no-deps-check -e 'IO.puts(Mix.Project.config()[:version])' | tail -1)"
+          # --no-compile: this step reads a value mix.exs declares, and
+          # building the application to learn it is what made the first tag
+          # fail. Only `mix deps.get` has run by now — it fetches sources
+          # without building them — so `mix run` compiled lib/ against an
+          # uncompiled plug and stopped at `use Plug.Router`. `--no-deps-check`
+          # silences the staleness check, not the build.
+          project_version="$(mix run --no-start --no-compile --no-deps-check -e 'IO.puts(Mix.Project.config()[:version])' | tail -1)"
           tag_version="${REF_NAME#v}"
           echo "mix.exs: ${project_version} / tag: ${tag_version}"
           if [ "${project_version}" != "${tag_version}" ]; then
