@@ -8,7 +8,7 @@ defmodule Vigil.OAuth.FlowTest do
   """
   use ExUnit.Case, async: true
 
-  alias Vigil.OAuth.{Code, Flow}
+  alias Vigil.OAuth.{Code, Flow, Server}
 
   # The authorization server these decisions are made for, stated rather than
   # read back out of the deployment. Two of its six fields are what the
@@ -21,6 +21,12 @@ defmodule Vigil.OAuth.FlowTest do
   setup do
     Vigil.OAuthCase.setup!()
   end
+
+  # The stated server above, over this test's own persistence: the pair
+  # `authorize_request` and `consent` decide with. `Vigil.OAuth.Endpoint`
+  # builds one per router; a test builds one per call, which is the same pair
+  # either way because both halves are this file's.
+  defp server(persistence), do: Server.new(persistence, @settings)
 
   defp client!(persistence) do
     {:ok, %{client_id: id}} =
@@ -49,7 +55,7 @@ defmodule Vigil.OAuth.FlowTest do
   # second grant for the same client, which is the case the family revocation
   # must not touch.
   defp tokens_for(persistence, client_id) do
-    {:ok, ctx} = Flow.authorize_request(persistence, @settings, authorize_params(client_id))
+    {:ok, ctx} = Flow.authorize_request(server(persistence), authorize_params(client_id))
     code = Code.issue(persistence, ctx)
 
     {:ok, tokens} =
@@ -85,24 +91,24 @@ defmodule Vigil.OAuth.FlowTest do
     end
   end
 
-  describe "authorize_request/3" do
+  describe "authorize_request/4" do
     test "an unknown client is untrusted, never redirected to", %{persistence: persistence} do
       assert {:error, :untrusted} =
-               Flow.authorize_request(persistence, @settings, authorize_params("nope"))
+               Flow.authorize_request(server(persistence), authorize_params("nope"))
     end
 
     test "a redirect_uri the client did not register is untrusted", %{persistence: persistence} do
       params =
         authorize_params(client!(persistence), %{"redirect_uri" => "https://evil.example/cb"})
 
-      assert {:error, :untrusted} = Flow.authorize_request(persistence, @settings, params)
+      assert {:error, :untrusted} = Flow.authorize_request(server(persistence), params)
     end
 
     test "plain PKCE is refused locally rather than redirected", %{persistence: persistence} do
       params = authorize_params(client!(persistence), %{"code_challenge_method" => "plain"})
 
       assert {:error, :bad_code_challenge_method} =
-               Flow.authorize_request(persistence, @settings, params)
+               Flow.authorize_request(server(persistence), params)
     end
 
     test "a missing code_challenge is reported to the client as a redirect", %{
@@ -111,14 +117,14 @@ defmodule Vigil.OAuth.FlowTest do
       params = authorize_params(client!(persistence), %{"code_challenge" => "", "state" => "xyz"})
 
       assert {:error, {:redirect, "https://app.example/cb", "invalid_request", "xyz"}} =
-               Flow.authorize_request(persistence, @settings, params)
+               Flow.authorize_request(server(persistence), params)
     end
 
     test "an unknown scope is reported to the client as a redirect", %{persistence: persistence} do
       params = authorize_params(client!(persistence), %{"scope" => "vault:admin"})
 
       assert {:error, {:redirect, _, "invalid_scope", _}} =
-               Flow.authorize_request(persistence, @settings, params)
+               Flow.authorize_request(server(persistence), params)
     end
 
     test "a resource other than this server is an invalid target", %{persistence: persistence} do
@@ -126,14 +132,13 @@ defmodule Vigil.OAuth.FlowTest do
         authorize_params(client!(persistence), %{"resource" => "https://elsewhere.example/mcp"})
 
       assert {:error, {:redirect, _, "invalid_target", _}} =
-               Flow.authorize_request(persistence, @settings, params)
+               Flow.authorize_request(server(persistence), params)
     end
 
     test "a valid request defaults to the full scope", %{persistence: persistence} do
       assert {:ok, ctx} =
                Flow.authorize_request(
-                 persistence,
-                 @settings,
+                 server(persistence),
                  authorize_params(client!(persistence))
                )
 
@@ -144,14 +149,14 @@ defmodule Vigil.OAuth.FlowTest do
       params = authorize_params(client!(persistence), %{"scope" => "vault:read"})
 
       assert {:ok, %{scope: "vault:read"}} =
-               Flow.authorize_request(persistence, @settings, params)
+               Flow.authorize_request(server(persistence), params)
     end
   end
 
   describe "grant/3 — authorization_code" do
     setup %{persistence: persistence} do
       client_id = client!(persistence)
-      {:ok, ctx} = Flow.authorize_request(persistence, @settings, authorize_params(client_id))
+      {:ok, ctx} = Flow.authorize_request(server(persistence), authorize_params(client_id))
       code = Code.issue(persistence, ctx)
 
       %{client_id: client_id, code: code}
@@ -250,7 +255,7 @@ defmodule Vigil.OAuth.FlowTest do
   describe "grant/3 — refresh_token" do
     setup %{persistence: persistence} do
       client_id = client!(persistence)
-      {:ok, ctx} = Flow.authorize_request(persistence, @settings, authorize_params(client_id))
+      {:ok, ctx} = Flow.authorize_request(server(persistence), authorize_params(client_id))
       code = Code.issue(persistence, ctx)
 
       {:ok, tokens} =
@@ -476,10 +481,10 @@ defmodule Vigil.OAuth.FlowTest do
     end
   end
 
-  describe "consent/6" do
+  describe "consent/5" do
     setup %{persistence: persistence} do
       {:ok, ctx} =
-        Flow.authorize_request(persistence, @settings, authorize_params(client!(persistence)))
+        Flow.authorize_request(server(persistence), authorize_params(client!(persistence)))
 
       %{ctx: ctx}
     end
@@ -487,8 +492,7 @@ defmodule Vigil.OAuth.FlowTest do
     test "the right password yields a usable code", %{persistence: persistence, ctx: ctx} do
       assert {:ok, code} =
                Flow.consent(
-                 persistence,
-                 @settings,
+                 server(persistence),
                  "10.0.0.1",
                  "correct-horse-battery-staple",
                  ctx
@@ -498,8 +502,8 @@ defmodule Vigil.OAuth.FlowTest do
     end
 
     test "a wrong password yields no code", %{persistence: persistence, ctx: ctx} do
-      assert :wrong_password = Flow.consent(persistence, @settings, "10.0.0.2", "wrong", ctx)
-      assert :wrong_password = Flow.consent(persistence, @settings, "10.0.0.2", nil, ctx)
+      assert :wrong_password = Flow.consent(server(persistence), "10.0.0.2", "wrong", ctx)
+      assert :wrong_password = Flow.consent(server(persistence), "10.0.0.2", nil, ctx)
     end
 
     test "the sixth wrong attempt from one address is rate limited", %{
@@ -508,23 +512,20 @@ defmodule Vigil.OAuth.FlowTest do
     } do
       for _ <- 1..5,
           do:
-            assert(
-              :wrong_password = Flow.consent(persistence, @settings, "10.0.0.3", "wrong", ctx)
-            )
+            assert(:wrong_password = Flow.consent(server(persistence), "10.0.0.3", "wrong", ctx))
 
-      assert :rate_limited = Flow.consent(persistence, @settings, "10.0.0.3", "wrong", ctx)
+      assert :rate_limited = Flow.consent(server(persistence), "10.0.0.3", "wrong", ctx)
 
       # The limit is per address.
-      assert :wrong_password = Flow.consent(persistence, @settings, "10.0.0.4", "wrong", ctx)
+      assert :wrong_password = Flow.consent(server(persistence), "10.0.0.4", "wrong", ctx)
     end
 
     test "a success clears the address's failure count", %{persistence: persistence, ctx: ctx} do
-      for _ <- 1..4, do: Flow.consent(persistence, @settings, "10.0.0.5", "wrong", ctx)
+      for _ <- 1..4, do: Flow.consent(server(persistence), "10.0.0.5", "wrong", ctx)
 
       assert {:ok, _} =
                Flow.consent(
-                 persistence,
-                 @settings,
+                 server(persistence),
                  "10.0.0.5",
                  "correct-horse-battery-staple",
                  ctx
@@ -532,13 +533,11 @@ defmodule Vigil.OAuth.FlowTest do
 
       for _ <- 1..5,
           do:
-            assert(
-              :wrong_password = Flow.consent(persistence, @settings, "10.0.0.5", "wrong", ctx)
-            )
+            assert(:wrong_password = Flow.consent(server(persistence), "10.0.0.5", "wrong", ctx))
     end
   end
 
-  describe "authorize_request/5 — CIMD" do
+  describe "authorize_request/4 — CIMD" do
     # A client_id the flow cannot have registered via DCR, so resolving it
     # only succeeds by going out to `net` — the join `Vigil.OAuth.Client`
     # names. A fresh URL per test anyway, so a cache hit is always this
@@ -576,7 +575,7 @@ defmodule Vigil.OAuth.FlowTest do
       params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
 
       assert {:ok, ctx} =
-               Flow.authorize_request(persistence, @settings, params, 1_700_000_000, net)
+               Flow.authorize_request(server(persistence), params, 1_700_000_000, net)
 
       assert ctx.client.client_id == url
       assert ctx.client.redirect_uris == ["https://cimd-client.example/cb"]
@@ -590,7 +589,7 @@ defmodule Vigil.OAuth.FlowTest do
       params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
 
       assert {:ok, ctx} =
-               Flow.authorize_request(persistence, @settings, params, 1_700_000_000, net)
+               Flow.authorize_request(server(persistence), params, 1_700_000_000, net)
 
       # `Vigil.OAuth.Endpoint.render_consent/2` renders exactly `ctx.client.name`.
       assert ctx.client.name == "Claude Code"
@@ -604,7 +603,7 @@ defmodule Vigil.OAuth.FlowTest do
       params = authorize_params(url, %{"redirect_uri" => "https://evil.example/cb"})
 
       assert {:error, :untrusted} =
-               Flow.authorize_request(persistence, @settings, params, 1_700_000_000, net)
+               Flow.authorize_request(server(persistence), params, 1_700_000_000, net)
     end
 
     test "a second request inside the cache's hour does not fetch again", %{
@@ -614,10 +613,10 @@ defmodule Vigil.OAuth.FlowTest do
       net = cimd_net(body: cimd_document(url, %{}))
       params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
 
-      assert {:ok, _} = Flow.authorize_request(persistence, @settings, params, 1_700_000_000, net)
+      assert {:ok, _} = Flow.authorize_request(server(persistence), params, 1_700_000_000, net)
       assert_received {:request, _, _}
 
-      assert {:ok, _} = Flow.authorize_request(persistence, @settings, params, 1_700_003_599, net)
+      assert {:ok, _} = Flow.authorize_request(server(persistence), params, 1_700_003_599, net)
       refute_received {:request, _, _}
     end
 
@@ -626,10 +625,10 @@ defmodule Vigil.OAuth.FlowTest do
       net = cimd_net(body: cimd_document(url, %{}))
       params = authorize_params(url, %{"redirect_uri" => "https://cimd-client.example/cb"})
 
-      assert {:ok, _} = Flow.authorize_request(persistence, @settings, params, 1_700_000_000, net)
+      assert {:ok, _} = Flow.authorize_request(server(persistence), params, 1_700_000_000, net)
       assert_received {:request, _, _}
 
-      assert {:ok, _} = Flow.authorize_request(persistence, @settings, params, 1_700_003_601, net)
+      assert {:ok, _} = Flow.authorize_request(server(persistence), params, 1_700_003_601, net)
       assert_received {:request, _, _}
     end
   end
@@ -637,7 +636,7 @@ defmodule Vigil.OAuth.FlowTest do
   describe "a minted code is one-time use" do
     test "the code is one-time: taking it twice fails", %{persistence: persistence} do
       {:ok, ctx} =
-        Flow.authorize_request(persistence, @settings, authorize_params(client!(persistence)))
+        Flow.authorize_request(server(persistence), authorize_params(client!(persistence)))
 
       code = Code.issue(persistence, ctx)
 

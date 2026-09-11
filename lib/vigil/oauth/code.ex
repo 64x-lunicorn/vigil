@@ -40,7 +40,7 @@ defmodule Vigil.OAuth.Code do
   Mints a one-time authorization code for an approved consent and writes its
   record, returning the code.
 
-  `ctx` is what `Vigil.OAuth.Flow.authorize_request/5` decided: the client,
+  `ctx` is what `Vigil.OAuth.Flow.authorize_request/4` decided: the client,
   the redirect URI it was checked against, the PKCE challenge, the scope, and
   the audience the request was authorized for. The audience comes from there
   rather than from configuration read a second time here, so a code cannot be

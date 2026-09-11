@@ -9,7 +9,7 @@ defmodule Vigil.OAuth.Endpoint do
   use Plug.Router
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow, Store}
+  alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow, Server, Store}
   alias Vigil.RateLimit
   alias Vigil.Settings
 
@@ -31,14 +31,24 @@ defmodule Vigil.OAuth.Endpoint do
   # because production resolves it once for the whole tree; the default here
   # is for a caller that hands in nothing, the same rule the four beside it
   # follow.
+  #
+  # `server` joins two of those into the one value `Vigil.OAuth.Flow` decides
+  # with: where the records are kept, and whose records they are. It is built
+  # here rather than taken as a sixth option, and after the defaults have run,
+  # so it is always the pair this router resolved — `Vigil.MCP.Server` hands
+  # the halves down and reads them back out of these options, and a pair
+  # supplied beside them could disagree with them.
   @impl true
   def init(opts) do
-    opts
-    |> Keyword.put_new_lazy(:client_addr, &ClientAddr.config/0)
-    |> Keyword.put_new_lazy(:limits, &configured_limits/0)
-    |> Keyword.put_new_lazy(:persistence, &Store.over_tables/0)
-    |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
-    |> Keyword.put_new_lazy(:settings, &Settings.from_env/0)
+    opts =
+      opts
+      |> Keyword.put_new_lazy(:client_addr, &ClientAddr.config/0)
+      |> Keyword.put_new_lazy(:limits, &configured_limits/0)
+      |> Keyword.put_new_lazy(:persistence, &Store.over_tables/0)
+      |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
+      |> Keyword.put_new_lazy(:settings, &Settings.from_env/0)
+
+    Keyword.put(opts, :server, Server.new(opts[:persistence], opts[:settings]))
   end
 
   @impl true
@@ -46,9 +56,8 @@ defmodule Vigil.OAuth.Endpoint do
     conn
     |> put_private(:oauth_client_addr, opts[:client_addr])
     |> put_private(:oauth_limits, opts[:limits])
-    |> put_private(:oauth_persistence, opts[:persistence])
+    |> put_private(:oauth_server, opts[:server])
     |> put_private(:oauth_limiter, opts[:limiter])
-    |> put_private(:oauth_settings, opts[:settings])
     |> super(opts)
   end
 
@@ -178,7 +187,7 @@ defmodule Vigil.OAuth.Endpoint do
   ## Authorization
 
   defp with_authorize_request(conn, params, on_ok) do
-    case Flow.authorize_request(persistence(conn), settings(conn), params) do
+    case Flow.authorize_request(server(conn), params) do
       {:ok, ctx} ->
         on_ok.(conn, ctx)
 
@@ -202,13 +211,7 @@ defmodule Vigil.OAuth.Endpoint do
   end
 
   defp process_allow(conn, ctx, params) do
-    case Flow.consent(
-           persistence(conn),
-           settings(conn),
-           client_addr(conn),
-           params["password"],
-           ctx
-         ) do
+    case Flow.consent(server(conn), client_addr(conn), params["password"], ctx) do
       {:ok, code} ->
         redirect_with_query(conn, ctx.redirect_uri, put_state(%{"code" => code}, ctx.state))
 
@@ -290,14 +293,19 @@ defmodule Vigil.OAuth.Endpoint do
   defp put_state(query, ""), do: query
   defp put_state(query, state), do: Map.put(query, "state", state)
 
-  # What every decision on this router is made against: the clients, codes and
-  # tokens it reads and writes. Resolved in `init/1`, the same as the two
-  # above it.
-  defp persistence(conn), do: conn.private.oauth_persistence
+  # The authorization server every decision on this router is made for and
+  # against: what it says it is, and where the clients, codes and tokens it
+  # reads and writes are kept. Built in `init/1`, out of the two halves
+  # resolved there.
+  defp server(conn), do: conn.private.oauth_server
 
-  # What this authorization server says it is and what it protects. Resolved
-  # in `init/1`, the same as the three above it.
-  defp settings(conn), do: conn.private.oauth_settings
+  # The halves, for the paths that need one alone: registration and the token
+  # endpoint ask the settings nothing, and the discovery documents ask
+  # persistence nothing. Read off the pair rather than carried beside it, so
+  # this conn holds one of each.
+  defp persistence(conn), do: server(conn).persistence
+
+  defp settings(conn), do: server(conn).settings
 
   # Which address a limit is counted against. `Vigil.OAuth.ClientAddr` owns the
   # decision; this only says where the configuration was put. Not "ip": the

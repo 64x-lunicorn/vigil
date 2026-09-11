@@ -897,18 +897,16 @@ defmodule Vigil.OAuth.EndpointTest do
 
   ## Janitor sweep (time injected, no sleeping)
 
-  test "an expired code is gone after a sweep", %{
-    endpoint: endpoint,
-    persistence: persistence,
-    settings: settings
-  } do
+  test "an expired code is gone after a sweep", %{endpoint: endpoint, persistence: persistence} do
     {201, client} = register(endpoint, ["https://client.example/cb"])
     {_verifier, challenge} = pkce_pair()
 
+    # The router's own pair, rather than a second one stated here: the code
+    # this sweeps was minted against exactly what the requests above were
+    # served from.
     {:ok, ctx} =
       OAuth.Flow.authorize_request(
-        persistence,
-        settings,
+        endpoint[:server],
         authorize_query(client["client_id"], "https://client.example/cb", challenge)
       )
 

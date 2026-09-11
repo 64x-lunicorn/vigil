@@ -21,7 +21,7 @@ defmodule Vigil.OAuthCase do
   and hands it in, the same way it builds a persistence of its own.
   """
 
-  alias Vigil.OAuth.{Client, Code, Flow, Persistence}
+  alias Vigil.OAuth.{Client, Code, Flow, Persistence, Server}
   alias Vigil.Settings
 
   @redirect_uri "https://client.example.org/cb"
@@ -97,7 +97,7 @@ defmodule Vigil.OAuthCase do
     client = Client.register(persistence, "Client", [@redirect_uri], now)
 
     {:ok, ctx} =
-      Flow.authorize_request(persistence, Settings.from_env(), %{
+      Flow.authorize_request(Server.new(persistence, Settings.from_env()), %{
         "client_id" => client.client_id,
         "redirect_uri" => @redirect_uri,
         "response_type" => "code",
