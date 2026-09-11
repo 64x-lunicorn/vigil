@@ -179,6 +179,18 @@ over HTTP:
 - `reload` reports no `pull_failed`
 - the release shuts down on SIGTERM, which is what `systemctl stop` sends
 
+It also walks the authorization flow a real client walks, which no other check
+does: every other token in the pipeline is seeded out of band through
+`mix vigil.seed_token`, the path `verify()` and first access take. Dynamic
+registration, the consent page, PKCE, the code exchange and refresh rotation
+are well covered by the unit suite and were never run against a built release —
+which is exactly where a value that only exists in `MIX_ENV=prod` goes wrong.
+The flow is driven end to end, including that a wrong consent password mints no
+code, that a code is one-time use, that the redirect carries the RFC 9207 `iss`
+parameter the metadata advertises, and that replaying a spent refresh token
+revokes the whole token family (RFC 9700 §4.14.2) — the defence rotation exists
+for, and one that cannot be observed anywhere but end to end.
+
 **Acceptance.** [`scripts/test/verify_test.sh`](../scripts/test/verify_test.sh)
 covers `verify()`, which is what update.sh's automatic rollback hangs on. It was
 one 210-line block that could only run against a real vault host — systemd,
