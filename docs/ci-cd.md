@@ -198,7 +198,9 @@ and a booted release) and pins:
 - a red `verify()` rolls back automatically, the service comes up on the old
   release, and the operator gets exit 3 rather than a silent failure
 - a rollback that is *also* red says manual intervention is needed (exit 1)
-- `--rollback` returns to the recorded release
+- `--rollback` returns to the recorded release, and refuses — rather than
+  reporting success for a switch it did not make — when an automatic rollback
+  has already left `current` and `.previous_release` naming the same release
 - a red suite and unpushed vault commits never reach the switchover, and leave
   the running service and the code checkout as they were
 - the retention rule keeps the running release, the rollback target and one

@@ -205,6 +205,18 @@ run_update() {
 }
 
 current_release() { basename "$(readlink "${PREFIX}/current")"; }
+
+# The recorded start/stop calls as one line: "stop v0 | start 7a1b2c3". Each
+# entry carries what `current` pointed at when the call was made, so the line
+# shows both that the service was cycled and that the symlink moved while it
+# was down.
+systemctl_calls() {
+  if [ ! -f "${PREFIX}/.systemctl.log" ]; then
+    echo "(none)"
+    return
+  fi
+  sed "s|${PREFIX}/releases/||" "${PREFIX}/.systemctl.log" | paste -sd'|' - | sed 's/|/ | /g'
+}
 service_running() { [ -f "${PREFIX}/.service-active" ] && echo yes || echo no; }
 
 build_fake_mix
@@ -221,6 +233,9 @@ assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
 assert_eq "the service is running" "yes" "$(service_running)"
 assert_eq "the previous release is recorded" "${PREFIX}/releases/v0" \
   "$(cat "${PREFIX}/.previous_release")"
+
+assert_eq "stopped on the old release, started on the new one" \
+  "stop v0 | start ${NEW_SHA}" "$(systemctl_calls)"
 
 if grep -q "^test$" "$FAKE_MIX_LOG"; then
   pass "the suite was run before switching over"
@@ -243,6 +258,8 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 assert_eq "exits 3 — rolled back, service running" "3" "$RC"
 assert_eq "current points back at the previous release" "v0" "$(current_release)"
 assert_eq "the service is running again" "yes" "$(service_running)"
+assert_eq "the service was cycled twice, ending on the old release" \
+  "stop v0 | start ${NEW_SHA} | stop ${NEW_SHA} | start v0" "$(systemctl_calls)"
 
 ## ── 3. When the rollback does not come up either ─────────────────────────
 
@@ -269,16 +286,39 @@ fi
 
 step "4/7  --rollback returns to the recorded release"
 
+# `.previous_release` is produced by a real update rather than written by hand,
+# so the round trip an operator actually performs is the one under test.
 build_host
-make_release v1 >/dev/null
-ln -sfn "${PREFIX}/releases/v1" "${PREFIX}/current"
-echo "${PREFIX}/releases/v0" >"${PREFIX}/.previous_release"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "the update it rolls back exits 0" "0" "$RC"
 
 RC="$(run_update --rollback --non-interactive)"
 
 assert_eq "exits 0" "0" "$RC"
 assert_eq "current points at the recorded previous release" "v0" "$(current_release)"
 assert_eq "the service is running" "yes" "$(service_running)"
+
+step "4b   --rollback after an automatic rollback refuses instead of claiming success"
+
+# After an automatic rollback `current` and `.previous_release` name the same
+# release. Without a guard `--rollback` symlinked current onto itself, restarted
+# and reported success, which is the worst possible answer to an operator
+# reaching for it after a failed deploy.
+build_host
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "exits 2 — nothing to roll back to" "2" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+if grep -q "nothing to roll back to" "${WORK}/out.log"; then
+  pass "says there is nothing to roll back to"
+else
+  fail "says there is nothing to roll back to" "$(tail -3 "${WORK}/out.log")"
+fi
 
 ## ── 5. Refusals leave the running service alone ──────────────────────────
 
@@ -332,6 +372,29 @@ if [ -d "${PREFIX}/releases/v0" ]; then
   pass "the previous release was kept"
 else
   fail "the previous release was kept"
+fi
+
+step "6b   Cleanup prunes a dot-directory left by an interrupted build"
+
+# The retention rule has to select "directories directly under releases/",
+# which a bare glob of non-hidden entries does not give you: a `.tmp-` left by
+# an interrupted build would never be a candidate and would accumulate
+# forever. update.sh also refuses to treat a symlink in releases/ as a
+# candidate, restoring what `find -type d` selected; that half is not asserted
+# here, because no arrangement of this fixture made the assertion go red when
+# the guard was removed, and an assertion that cannot fail pins nothing.
+build_host
+make_release old1 >/dev/null
+mkdir -p "${PREFIX}/releases/.tmp-interrupted"
+touch -t 202401010000 "${PREFIX}/releases/.tmp-interrupted"
+
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if [ -d "${PREFIX}/releases/.tmp-interrupted" ]; then
+  fail "the interrupted build was pruned"
+else
+  pass "the interrupted build was pruned"
 fi
 
 ## ── 7. A prefix reached through a symlink ────────────────────────────────

@@ -111,6 +111,24 @@ fi
 
 ## ── Test seam ────────────────────────────────────────────────────────────
 
+# The path and account overrides above reach this script but not all of
+# scripts/lib.sh, which still hardcodes the production install in `as_vigil`,
+# `vigil_seed_token` and `verify()`. Half an override is worse than none: a run
+# with VIGIL_PREFIX pointing elsewhere would build in one install and then
+# verify the other. Until lib.sh takes them too they are what the test uses and
+# nothing else.
+if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" != "1" ]; then
+  for overridden in VIGIL_PREFIX VIGIL_VAULT_DIR VIGIL_ENV_FILE VIGIL_UNIT_FILE \
+    VIGIL_SERVICE_USER VIGIL_SERVICE_GROUP; do
+    if [ -n "${!overridden:-}" ]; then
+      err "${overridden} is set, but scripts/lib.sh still hardcodes the production paths."
+      err "These overrides exist for scripts/test/update_test.sh and are refused outside it."
+      exit 2
+    fi
+  done
+fi
+
+
 # With VIGIL_UPDATE_TEST_STUBS=1 the four things that need a real vault host —
 # root, the service account, systemd, a booted release — are replaced by
 # stand-ins backed by files under $PREFIX, so scripts/test/update_test.sh can
@@ -123,16 +141,37 @@ fi
 # environment, so it cannot be smuggled into the invocation the release notes
 # document.
 if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
+  # Refused as root rather than merely discouraged. With the stubs live the
+  # script moves the `current` symlink, never stops or starts the real service,
+  # and reports "update.sh finished" — a log indistinguishable from a good
+  # deploy, for a deploy that did not happen. The comment above argues `sudo`
+  # resets the environment, which is true and covers only the sudo path: a root
+  # shell, /etc/environment or a cron wrapper do not.
+  if [ "$(id -u)" -eq 0 ]; then
+    err "VIGIL_UPDATE_TEST_STUBS=1 refused: the test seam must never be live as root."
+    exit 2
+  fi
+  warn "VIGIL_UPDATE_TEST_STUBS=1 — root, the service account, systemd and verify() are stand-ins. This is not a deploy."
+
   require_root() { :; }
   as_vigil() { "$@"; }
   journalctl() { :; }
   vigil_seed_token() { echo "test-token"; }
 
-  # The service is a file: written by start and stop, read by is-active.
+  # The service is a file: written by start and stop, read by is-active. Each
+  # start and stop is also recorded together with what `current` pointed at
+  # when it happened, which is what lets the test assert that the symlink moved
+  # while the service was down rather than under a running BEAM.
   systemctl() {
     case "${1:-}" in
-      start | restart) : >"${PREFIX}/.service-active" ;;
-      stop) rm -f "${PREFIX}/.service-active" ;;
+      start | restart)
+        : >"${PREFIX}/.service-active"
+        echo "start $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+        ;;
+      stop)
+        rm -f "${PREFIX}/.service-active"
+        echo "stop $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+        ;;
       is-active) [ -f "${PREFIX}/.service-active" ] ;;
       *) : ;;
     esac
@@ -183,6 +222,17 @@ if [ "$ROLLBACK" = "1" ]; then
   OLD_RELEASE="$(cat "$PREVIOUS_RELEASE_FILE")"
   if [ ! -d "$OLD_RELEASE" ]; then
     err "Previous release ${OLD_RELEASE} no longer exists."
+    exit 2
+  fi
+
+  # Step 7 writes this file before verify() runs and an automatic rollback does
+  # not rewrite it, so after one the file names the release that is now current
+  # — and without this guard `--rollback` symlinked `current` onto itself,
+  # restarted, and told the operator the rollback had succeeded. It is not
+  # rewritten instead of guarded because after an automatic rollback there is no
+  # known release to go back to, and inventing one would be worse than saying so.
+  if [ "$(readlink -f "$CURRENT")" = "$(readlink -f "$OLD_RELEASE")" ]; then
+    err "Already running ${OLD_RELEASE} — there is nothing to roll back to."
     exit 2
   fi
 
@@ -430,11 +480,17 @@ else
   # loop rather than `mapfile`. Both of those were GNU/bash-4 only, which made
   # this step — the one that deletes things — the one step that could not be
   # run anywhere but the vault host.
+  # dotglob so an interrupted build's `.tmp-xyz` is pruned rather than kept
+  # forever, and `! -L` so a convenience symlink into releases/ is never a
+  # deletion candidate. Together those are what `-mindepth 1 -maxdepth 1
+  # -type d` used to select.
+  shopt -s dotglob
   ALL_RELEASES=()
   while IFS= read -r release; do
-    [ -d "$release" ] || continue
+    { [ -d "$release" ] && [ ! -L "$release" ]; } || continue
     ALL_RELEASES+=("$release")
   done < <(ls -dt "$RELEASES"/* 2>/dev/null || true)
+  shopt -u dotglob
 
   # An empty array is not an empty expansion under `set -u` in bash 3.2; it is
   # an unbound variable and the end of the script.
