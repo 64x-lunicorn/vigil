@@ -5,8 +5,12 @@ defmodule Vigil.VaultCheck do
   Touches neither the vault nor a service that may already be running: no
   `Vigil.Store`, no `git pull`, no write tools — filesystem reads only.
 
-  `run/1` returns the report-only findings plus an inventory overview. The
-  automatic repairs (.gitignore, git config, upstream, minimal `_domains.yml`
+  `run/2` returns the report-only findings plus an inventory overview for the
+  vault it is handed and the domains it is told to leave alone. Both are
+  arguments: `VIGIL_EXCLUDE` is the hard boundary (`docs/design.md`, "not
+  filtered — not read"), and a boundary read from the environment by the one
+  module whose whole job is reporting on the vault is one no test can state.
+  The automatic repairs (.gitignore, git config, upstream, minimal `_domains.yml`
   entries, directory permissions) are plain filesystem operations that need
   no knowledge of vault content and deliberately live in `scripts/init.sh`.
   """
@@ -18,15 +22,14 @@ defmodule Vigil.VaultCheck do
   @max_basisname_laenge 60
   @max_frontmatter_bytes 1024
 
-  def run(vault_path) do
+  def run(vault_path, exclude \\ []) do
     unless File.dir?(vault_path) do
       raise "Not a directory: #{vault_path}"
     end
 
-    # The doctor honours VIGIL_EXCLUDE too: docs/design.md calls it the hard
-    # boundary — "not filtered — not read" — and a report that lists notes the
-    # server deliberately never reads would breach it.
-    exclude = Application.get_env(:vigil, :exclude, [])
+    # The doctor honours the exclusions it is handed: a report that listed
+    # notes the server deliberately never reads would breach the boundary it
+    # is reporting on.
     layout = Layout.over_vault!(vault_path, exclude)
     domain_dirs = layout.domains
     files = Layout.note_paths(layout)

@@ -167,6 +167,14 @@ change its own environment variable, but it can change a file in the vault.
 Anything that must genuinely stay hidden from the assistant belongs in
 `VIGIL_EXCLUDE`, not in a marker inside a file the assistant can read.
 
+The boundary travels with the vault it applies to. `Vigil.Store` is handed
+both at start; so are `Vigil.VaultCheck` and the walk behind
+`mix vigil.slug_diff`, the two other callers that take a vault path as an
+argument. The mix tasks read the setting once and pass it. That is what lets
+the doctor — the one module whose whole job is reporting on the vault — be
+asked in its own suite whether an excluded directory really produces no
+finding of any kind, rather than having the boundary read out from under it.
+
 ### `skills/` — one repository, two systems
 
 `skills/` holds instructions for the assistant. For vigil it is invisible: not

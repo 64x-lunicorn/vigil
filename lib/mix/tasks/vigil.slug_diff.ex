@@ -12,32 +12,30 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
 
   Exit 0 on an empty diff, exit 1 when there are differences, so it can be used
   from a script.
-
-  The vault to check is this task's argument, but the domains excluded from
-  the diff come from the `:vigil, :exclude` application config
-  (`VIGIL_EXCLUDE`) — the environment's exclusions, not necessarily the
-  target vault's. In practice this task always runs against the vault that
-  is (or is about to become) *the* configured vault, with the matching
-  environment, so the two never drift apart.
   """
   use Mix.Task
 
   @impl true
   def run(args) do
     case args do
-      [vault_path] -> diff(Path.expand(vault_path))
-      _ -> Mix.raise("Usage: mix vigil.slug_diff <vault-path>")
+      # The vault is this task's argument and the exclusions are the
+      # environment's, read here once and handed to the walk below.
+      [vault_path] ->
+        diff(Path.expand(vault_path), Application.get_env(:vigil, :exclude, []))
+
+      _ ->
+        Mix.raise("Usage: mix vigil.slug_diff <vault-path>")
     end
   end
 
-  defp diff(vault_path) do
+  defp diff(vault_path, exclude) do
     unless File.dir?(vault_path) do
       Mix.raise("Not a directory: #{vault_path}")
     end
 
     files =
       vault_path
-      |> Vigil.Vault.Layout.over_vault!(Application.get_env(:vigil, :exclude, []))
+      |> Vigil.Vault.Layout.over_vault!(exclude)
       |> Vigil.Vault.Layout.note_paths()
 
     differences = Vigil.Vault.Rules.slug_changes(vault_path, files)
