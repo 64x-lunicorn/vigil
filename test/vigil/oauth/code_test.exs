@@ -13,20 +13,12 @@ defmodule Vigil.OAuth.CodeTest do
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{Code, Flow}
-  alias Vigil.Settings
 
   # The authorization server the code is minted for. `Vigil.OAuth.Code` reads
   # the audience off the context the request was authorized with rather than
-  # from configuration, so this is the only statement of it in the file and
-  # the assertions below check the record carries exactly it.
-  @settings %Settings{
-    tz: "Europe/Berlin",
-    issuer: "https://vault.factory-lab.org",
-    resource: "https://vault.factory-lab.org/mcp",
-    auth_password: "correct-horse-battery-staple",
-    vault_owner: "the vault owner",
-    vault_language: "English"
-  }
+  # from configuration, so the assertions below check the record carries
+  # exactly the resource this stated server names.
+  @settings Vigil.OAuthCase.stated_settings()
 
   @redirect_uri "https://app.example/cb"
   @verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"

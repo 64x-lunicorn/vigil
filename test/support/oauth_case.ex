@@ -51,6 +51,30 @@ defmodule Vigil.OAuthCase do
   end
 
   @doc """
+  An authorization server *stated* rather than read.
+
+  `setup!/0`'s `settings` is the deployment's own, for the files that assert
+  what a deployment serves. This is for the two whose subject is a decision
+  that turns on one of these fields and nothing else —
+  `Vigil.OAuth.FlowTest` checks a request's target and a consent's password
+  against it, `Vigil.OAuth.CodeTest` checks the audience a minted code
+  carries — so the value those assertions name is written down rather than
+  fetched. It is here, once, because two files wanting the same stated server
+  is one statement, not two.
+  """
+  @spec stated_settings() :: Settings.t()
+  def stated_settings do
+    %Settings{
+      tz: "Europe/Berlin",
+      issuer: "https://vault.factory-lab.org",
+      resource: "https://vault.factory-lab.org/mcp",
+      auth_password: "correct-horse-battery-staple",
+      vault_owner: "the vault owner",
+      vault_language: "English"
+    }
+  end
+
+  @doc """
   Mints a real authorization code at `now`, through the modules that own the
   records: a client registered, a request authorized, a code issued.
 

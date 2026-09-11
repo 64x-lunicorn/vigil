@@ -66,8 +66,13 @@ defmodule Vigil.Vault.SectionIdParityTest do
     {"a path in an excluded domain", "work/secret.md#anything", :not_found, :invalid_path},
     # A bare path names a note. It reads, and it is not a section id at all —
     # which the write gate says before it looks at the path, because "this is
-    # not a section id" is true of the id's shape and needs nothing resolved.
+    # not a section id" is true of the id's shape and needs nothing resolved,
+    # and stays true whatever the path turns out to name.
     {"a safe path with no fragment", "bike/via-carolina.md", :resolved, :no_fragment},
+    {"a path with no fragment that normalizes to a note", "Bike/Via Carolina.md", :resolved,
+     :no_fragment},
+    {"a path with no fragment the vault does not have", "bike/nosuch.md", :not_found,
+     :no_fragment},
     {"a reserved path with no fragment", "_domains.yml", :invalid_path, :no_fragment}
   ]
 
@@ -128,8 +133,40 @@ defmodule Vigil.Vault.SectionIdParityTest do
              {"skills/tdd.md#red-green", :invalid_path},
              {"work/secret.md#anything", :invalid_path},
              {"bike/via-carolina.md", :no_fragment},
+             {"Bike/Via Carolina.md", :no_fragment},
+             {"bike/nosuch.md", :no_fragment},
              {"_domains.yml", :no_fragment}
            ]
+  end
+
+  # The table above compares which *kind* of refusal each surface gives. This
+  # compares the strings, because the wording is the part a client reads and
+  # the part this change was most able to move: `find_chunk/2` gained a safety
+  # check it did not have, and a shape that started answering "Not found"
+  # where it used to answer "Invalid path" would have confirmed that a path
+  # the gate will not touch exists.
+  test "the write gate's refusal wording is unchanged for every shape that has one", %{
+    facts: facts
+  } do
+    wording = [
+      {"skills/tdd.md#red-green", "Invalid path"},
+      {"work/secret.md#anything", "Invalid path"},
+      {"_domains.yml#gear", "Invalid path"},
+      {"/bike/via-carolina.md#gear", "Invalid path"},
+      {"nosuch/x.md#gear",
+       "Invalid path. Available domains: bike, garden, home, journal, " <>
+         "projects, training"},
+      {"bike/nosuch.md#gear", "Not found: bike/nosuch.md#gear"},
+      {"bike/via-carolina.md#nosuch", "Not found: bike/via-carolina.md#nosuch"},
+      {"bike/via-carolina.md", "id must contain a fragment: path#heading-slug"}
+    ]
+
+    for {id, message} <- wording do
+      assert Policy.check(:replace_section, %{id: id, content: "body"}, facts) ==
+               {:error, message}
+
+      assert Policy.check(:delete_section, %{id: id}, facts) == {:error, message}
+    end
   end
 
   defp verdict({:ok, _}), do: :resolved

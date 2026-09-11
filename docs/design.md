@@ -339,13 +339,22 @@ Three layers guard every write, in this order.
 
 **1. Security.** No `..`, no absolute paths, no backslashes, no null bytes, and
 no path segment starting with `.` or `_`. Checked before *and* after
-normalization.
+normalization — which is not a fact each caller has to hold.
+`Vigil.Slug.canonical_path/1` is the two steps in that one order, and the
+callers that want a path the vault might store ask it rather than the halves:
+`Vigil.Vault.Policy` for a section id's path part, `Vigil.Index.resolve/2` for
+every read and for the write gate's own lookup. `safe_path/1` stays public for
+the two write operations that want what normalization says about a path no
+filename can be derived from, and they spell the order out.
 
-The rule lives in `Vigil.Slug`, beside the normalization it is applied under,
-and both sides ask it: `Vigil.Vault.Policy` before a write, `Vigil.Index`
-before a read. It is not a permission check — `skills/tdd.md` passes it — which
-is why `read` and `links` can apply it without inheriting the write rules, and
-why a reader may still reach a note in a domain that is no longer writable.
+The order is load-bearing: normalization slugifies every segment, so it turns
+`_domains.yml` into `domains.yml` and `/abs/x.md` into `abs/x.md`. A path
+checked only afterwards is a path whose check the normalization has laundered.
+
+The rule lives in `Vigil.Slug`, beside the normalization it is applied under.
+It is not a permission check — `skills/tdd.md` passes it — which is why `read`
+and `links` can apply it without inheriting the write rules, and why a reader
+may still reach a note in a domain that is no longer writable.
 
 **2. Normalization.** `Vigil.Slug` produces one canonical form: NFC, trim,
 lowercase, explicit transliteration (`ä`→`ae`, `ø`→`oe`, `ß`→`ss`, …), generic

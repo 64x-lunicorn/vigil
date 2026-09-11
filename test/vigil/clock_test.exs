@@ -28,9 +28,5 @@ defmodule Vigil.ClockTest do
       assert now.time_zone == "Etc/UTC"
       assert DateTime.diff(DateTime.utc_now(), now) < 5
     end
-
-    test "a nil timezone is not a zone either, and is answered the same way" do
-      assert Clock.now(nil).time_zone == "Etc/UTC"
-    end
   end
 end

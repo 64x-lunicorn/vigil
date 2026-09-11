@@ -11,6 +11,13 @@ defmodule Vigil.MCP.Server do
   @protocol_version "2025-11-25"
   @default_rpm 60
 
+  # What this router and the authorization server it forwards to must decide
+  # against the same values: where the records are kept, where the windows are
+  # counted, and what this deployment says it is. Named once, so handing one
+  # down and reading it back are the same list rather than two that have to be
+  # kept in step.
+  @shared_with_oauth [:persistence, :limiter, :settings]
+
   plug(:match)
   plug(:dispatch)
 
@@ -39,7 +46,7 @@ defmodule Vigil.MCP.Server do
   def init(opts) do
     oauth =
       Keyword.get_lazy(opts, :oauth, fn ->
-        Vigil.OAuth.Endpoint.init(Keyword.take(opts, [:persistence, :limiter, :settings]))
+        Vigil.OAuth.Endpoint.init(Keyword.take(opts, @shared_with_oauth))
       end)
 
     opts
@@ -49,10 +56,15 @@ defmodule Vigil.MCP.Server do
       RateLimit.budget(:rate_limit_rpm, @default_rpm)
     end)
     |> Keyword.put(:oauth, oauth)
-    |> Keyword.put(:persistence, Keyword.fetch!(oauth, :persistence))
-    |> Keyword.put(:limiter, Keyword.fetch!(oauth, :limiter))
-    |> Keyword.put(:settings, Keyword.fetch!(oauth, :settings))
+    |> Keyword.merge(shared_with_oauth!(oauth))
   end
+
+  # Read back out of the authorization server's options rather than resolved a
+  # second time, and `fetch!` rather than `get` because every one of them is
+  # something `Vigil.OAuth.Endpoint.init/1` always fills in: a missing one is a
+  # seam that has come apart, not a value to default.
+  defp shared_with_oauth!(oauth),
+    do: Enum.map(@shared_with_oauth, &{&1, Keyword.fetch!(oauth, &1)})
 
   @impl true
   def call(conn, opts) do

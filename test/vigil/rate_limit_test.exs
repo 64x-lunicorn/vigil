@@ -191,7 +191,12 @@ defmodule Vigil.RateLimitTest do
       log =
         ExUnit.CaptureLog.capture_log(fn -> assert RateLimit.budget(:test_budget, 60) == 60 end)
 
-      assert log == ""
+      # Not `log == ""`: `capture_log` captures the whole node's Logger output,
+      # not this process's, so in a parallel suite another file's load line can
+      # land inside the block. What the claim is about is this key — an unset
+      # budget is not a misconfiguration and must not be reported as one — and
+      # the test below asserts the exact opposite for a value that is one.
+      refute log =~ "test_budget"
     end
 
     test "a value that is not a budget falls back to the default, loudly" do

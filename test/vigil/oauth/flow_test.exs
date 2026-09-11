@@ -9,21 +9,14 @@ defmodule Vigil.OAuth.FlowTest do
   use ExUnit.Case, async: true
 
   alias Vigil.OAuth.{Code, Flow}
-  alias Vigil.Settings
 
   # The authorization server these decisions are made for, stated rather than
-  # read back out of the deployment. Two of the six fields are what the
+  # read back out of the deployment. Two of its six fields are what the
   # decisions here turn on — the resource a request's target is checked
   # against, and the password a consent is checked against — and both are
-  # visible in the assertions below because they are written down here.
-  @settings %Settings{
-    tz: "Europe/Berlin",
-    issuer: "https://vault.factory-lab.org",
-    resource: "https://vault.factory-lab.org/mcp",
-    auth_password: "correct-horse-battery-staple",
-    vault_owner: "the vault owner",
-    vault_language: "English"
-  }
+  # visible in the assertions below because `Vigil.OAuthCase` writes them
+  # down rather than fetching them.
+  @settings Vigil.OAuthCase.stated_settings()
 
   setup do
     Vigil.OAuthCase.setup!()

@@ -157,7 +157,10 @@ defmodule Vigil.Store do
 
   # The vault's timezone, published beside its path so a caller resolving its
   # own instant reads the deployment the writer was built with rather than the
-  # application environment. Written once at init and never again.
+  # application environment. Written once at init and never again — and kept
+  # only here, not in the state as well: the writer reads it back out of its
+  # own table, so there is one copy of the fact and nothing that could hold a
+  # second one that has drifted.
   defp published_tz(store), do: :ets.lookup_element(store, :tz, 2)
 
   ## GenServer
@@ -194,7 +197,6 @@ defmodule Vigil.Store do
     state = %{
       table: name,
       vault_path: vault_path,
-      tz: settings.tz,
       exclude: exclude,
       git_remote: git_remote,
       git: git,
@@ -403,7 +405,7 @@ defmodule Vigil.Store do
   # request the tool table describes, unchanged. A caller with no envelope
   # to share (a test pinning a moment aside) gets the writer's own clock.
   defp write(op, request, state) do
-    {now, request} = Map.pop(request, :now, Clock.now(state.tz))
+    {now, request} = Map.pop(request, :now, Clock.now(published_tz(state.table)))
 
     with {:ok, resolved} <- Policy.check(op, request, facts(state, now)),
          :ok <- ensure_directories(op, resolved, state),
