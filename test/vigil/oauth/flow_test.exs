@@ -11,7 +11,7 @@ defmodule Vigil.OAuth.FlowTest do
   alias Vigil.OAuth.{Code, Flow, Server}
 
   # The authorization server these decisions are made for, stated rather than
-  # read back out of the deployment. Two of its six fields are what the
+  # read back out of the deployment. Two of its seven fields are what the
   # decisions here turn on — the resource a request's target is checked
   # against, and the password a consent is checked against — and both are
   # visible in the assertions below because `Vigil.OAuthCase` writes them
@@ -494,7 +494,7 @@ defmodule Vigil.OAuth.FlowTest do
                Flow.consent(
                  server(persistence),
                  "10.0.0.1",
-                 "correct-horse-battery-staple",
+                 @settings.auth_password,
                  ctx
                )
 
@@ -527,7 +527,7 @@ defmodule Vigil.OAuth.FlowTest do
                Flow.consent(
                  server(persistence),
                  "10.0.0.5",
-                 "correct-horse-battery-staple",
+                 @settings.auth_password,
                  ctx
                )
 
