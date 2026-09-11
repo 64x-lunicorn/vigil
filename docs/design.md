@@ -817,6 +817,63 @@ what has expired and nothing else" was nobody's claim until it was the seam's.
 
 ---
 
+## The rate limiter is reached through a value
+
+The same shape a third time, for the fixed window three surfaces count in.
+`Vigil.RateLimit` was a module with one named ETS table, named by
+`Vigil.MCP.Server`, `Vigil.OAuth.Endpoint` and `Vigil.OAuth.Janitor` alike —
+so there was nowhere to substitute, and every test that wanted to observe a
+limit started the node's one limiter under its own registration and counted in
+the table everything else counts in.
+
+**The value is both questions, not the limit check alone.** `limited?` counts
+one request against a budget; `sweep_expired` reclaims the windows that have
+elapsed. The sweep is part of this surface rather than a concern beside it:
+what counts as an elapsed window is the same fact `limited?` decides on, and a
+sweep that decided it separately could hand a caller a budget it has not
+waited out. It is a struct of two functions with no defaults, built by
+`struct!/2`, the same rule as `Vigil.Git` and `Vigil.OAuth.Persistence` — and
+here it earns its keep on one answer in particular: a `limited?` nobody wired
+answers `false`, which is not a limiter with a missing part but every caller
+served unlimited.
+
+**The production adapter is `Vigil.RateLimit.over_table/0`**, a function beside
+the ETS implementation it wires, over the one named table the process owns.
+Everything below it is private, both answers included, so the value is the
+only way to reach them. **The second adapter is `Vigil.RateLimit.Counter`**:
+one map behind an `Agent`, no registered name and no table anything else can
+reach, so a test builds one per test and is isolated by construction.
+
+**The window's length belongs to the contract**, for the same reason the
+consent lockout's does: "the window is fixed rather than sliding" is a claim
+the suite runs against both adapters, and a minute each adapter picked for
+itself would make that claim mean two different things. How a window is
+counted and how one is reclaimed stays each adapter's own — a match-spec
+delete against ETS, a map split against the agent — which is what leaves the
+contract suite something to catch. `budget/2` belongs to neither adapter: it
+reads what the deployment configured, once, where a router is initialized, and
+is handed to `limited?` as an argument from there on.
+
+**The missing-table guard is the production adapter's alone.** That table is
+owned by the limiter's process and is gone while that process restarts, so a
+sweep can arrive to no table and must answer "nothing reclaimed" rather than
+take the janitor down with it. An adapter with no table to lose has nothing to
+say about that, so it is not a claim the contract makes. `limited?` gets no
+such guard in either adapter: on the request path a missing table means the
+limiter is not running, and crashing the request is the honest answer where
+answering "not limited" would quietly serve every caller unlimited.
+
+**The routers take it at `init/1`**, beside the persistence they already take,
+defaulting to the production adapter so a deployment hands in nothing — and
+`Vigil.MCP.Server` passes its own down to `Vigil.OAuth.Endpoint` exactly as it
+passes persistence. `Vigil.OAuth.Janitor` keeps its own list of what to sweep,
+which is the point of that list belonging to the janitor; what changed is that
+the limiter stopped being the one entry on it that was a hard-coded module
+reference. Nothing per request, and nothing reaching for a registered name on
+the hot path.
+
+---
+
 ## How a file is written
 
 Vigil is the only writer (principle 2), so the shape of a file on disk is
@@ -953,8 +1010,8 @@ Five layers, each doing one job:
    the first two; the third is a lockout rather than a request limit and
    belongs to OAuth persistence. Every one of them is swept by
    `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
-   persistence for the expiries persistence owns, and names `Vigil.RateLimit`
-   for the one it does not. A budget bounds how fast rows arrive and a sweep
+   persistence for the expiries persistence owns, and the limiter for the
+   windows it does not — each through a value it was handed, neither by name. A budget bounds how fast rows arrive and a sweep
    bounds how many there are, and neither substitutes for the other.
 
 **Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of

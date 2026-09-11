@@ -4,16 +4,18 @@ defmodule Vigil.OAuth.JanitorTest do
   without waiting five minutes for it.
 
   *What a sweep removes* is not asserted here any more. Every expiry OAuth
-  persistence owns belongs to the seam, and
-  `test/vigil/oauth/persistence_test.exs` runs that claim against both
-  adapters. What is left is the janitor's own: that it asks through the value
-  it was handed, that `Vigil.RateLimit`'s table — the one swept table
-  persistence does not own — is on its list, that it reschedules, and that it
-  survives the limiter being gone.
+  persistence owns belongs to that seam and
+  `test/vigil/oauth/persistence_test.exs` runs the claim against both
+  adapters; every window the rate limiter owns belongs to its own seam and
+  `test/vigil/rate_limit_test.exs` does the same. What is left is the
+  janitor's: that both are asked through the values it was handed, that the
+  limiter — the one swept table persistence does not own — is on its list at
+  all, that it reschedules, and that it survives the limiter's table being
+  gone.
 
-  Still serial, and no longer for anything to do with persistence:
-  `Vigil.OAuth.Janitor` and `Vigil.RateLimit` are both registered under their
-  module names, and these tests drive both.
+  Still serial, and no longer for anything either seam holds:
+  `Vigil.OAuth.Janitor` is registered under its module name and these tests
+  drive it.
   """
 
   use ExUnit.Case, async: false
@@ -80,38 +82,44 @@ defmodule Vigil.OAuth.JanitorTest do
 
   ## The limiter that is not the store's
 
-  test "the request limiter's elapsed windows are swept too", %{persistence: persistence} do
-    # `Vigil.RateLimit` is the one swept table OAuth persistence does not own,
-    # and it is keyed entirely on what arrives from outside: a client address
-    # per authorization-server endpoint, and every access token ever presented
-    # at `/mcp`. Refresh rotation mints a new access token about every hour, so
-    # without this the table grows forever on ordinary traffic. The live window
-    # is here to be left alone: a sweep that took it would hand its caller a
-    # budget it has not waited out. `Vigil.RateLimitTest` pins that boundary to
-    # the second.
-    start_supervised!(RateLimit)
-    start_janitor(interval: :timer.minutes(5), now: fn -> @now end, persistence: persistence)
+  test "the rate limiter's elapsed windows are swept through the value too", %{
+    persistence: persistence
+  } do
+    # The limiter is the one swept table OAuth persistence does not own, and it
+    # is keyed entirely on what arrives from outside: a client address per
+    # authorization-server endpoint, and every access token ever presented at
+    # `/mcp`. Refresh rotation mints a new access token about every hour, so
+    # without this the table grows forever on ordinary traffic. *Which* windows
+    # a sweep takes is the limiter's own claim, run against both its adapters
+    # in `Vigil.RateLimitTest`; what is asserted here is that the janitor asks
+    # at all, and asks the limiter it was handed rather than a module it names.
+    test = self()
 
-    refute RateLimit.limited?({:oauth, :authorize, "198.51.100.3"}, 60, @now - 61)
-    refute RateLimit.limited?("access-token-rotated-away", 60, @now - 61)
-    refute RateLimit.limited?("access-token-in-use", 60, @now)
+    recording = %{
+      RateLimit.Counter.new()
+      | sweep_expired: fn now -> send(test, {:limiter_swept, now}) end
+    }
 
-    assert :ets.info(@limiter_windows, :size) == 3
+    start_janitor(
+      interval: :timer.minutes(5),
+      now: fn -> @now end,
+      persistence: persistence,
+      limiter: recording
+    )
 
     sweep_now()
 
-    assert :ets.info(@limiter_windows, :size) == 1
-
-    assert [{"access-token-in-use", _count, _window}] =
-             :ets.lookup(@limiter_windows, "access-token-in-use")
+    assert_received {:limiter_swept, @now}
   end
 
   test "a sweep with the limiter restarting has nothing to reclaim and takes nobody down", %{
     persistence: persistence
   } do
-    # The limiter's table is owned by the limiter's process, so between that
-    # process dying and its supervisor restarting it there is no table. The
-    # janitor is a sibling, not a dependant: it must survive that window.
+    # The production limiter's table is owned by the limiter's process and is
+    # gone while that process is restarting. The janitor is a sibling, not a
+    # dependant: it must survive that window — which it does because the
+    # production adapter answers "nothing reclaimed" rather than raising, a
+    # guard that is that adapter's own and no part of the limiter contract.
     start_janitor(interval: :timer.minutes(5), now: fn -> @now end, persistence: persistence)
 
     assert :ets.whereis(@limiter_windows) == :undefined
@@ -147,12 +155,13 @@ defmodule Vigil.OAuth.JanitorTest do
 
   ## The production defaults
 
-  test "the interval, the instant and the persistence default to the production values" do
+  test "the interval, the instant, the persistence and the limiter default to production" do
     start_janitor()
     state = :sys.get_state(Janitor)
 
     assert state.interval == :timer.minutes(5)
     assert_in_delta state.now.(), System.system_time(:second), 2
     assert state.persistence == Store.over_tables()
+    assert state.limiter == RateLimit.over_table()
   end
 end
