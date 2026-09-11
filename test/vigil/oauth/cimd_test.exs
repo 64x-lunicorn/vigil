@@ -5,7 +5,7 @@ defmodule Vigil.OAuth.CimdTest do
   fake `net`, so the suite exercises the guard rather than the internet.
   """
 
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.OAuth.Cimd
 

@@ -7,7 +7,7 @@ defmodule Vigil.OAuth.ClientTest do
   and a round trip. This is that round trip, asked of the module that owns
   both halves.
   """
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.OAuth.Client
 

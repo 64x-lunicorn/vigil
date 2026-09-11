@@ -1,20 +1,5 @@
 import Config
 
-# vault_path/state_dir touch real data (the Markdown vault, OAuth client/token
-# state) — in :test they must never follow a stray VIGIL_VAULT_PATH/
-# VIGIL_STATE_DIR left over in the shell (e.g. from a sourced /etc/vigil/env),
-# or a green `mix test` could silently mean nothing.
-if config_env() == :test do
-  config :vigil,
-    vault_path: Path.expand("test/fixtures/vault", File.cwd!()),
-    state_dir: Path.expand("tmp/test_oauth_state", File.cwd!())
-else
-  config :vigil,
-    vault_path:
-      System.get_env("VIGIL_VAULT_PATH", Path.expand("test/fixtures/vault", File.cwd!())),
-    state_dir: System.get_env("VIGIL_STATE_DIR", Path.expand("tmp/oauth_state", File.cwd!()))
-end
-
 config :vigil,
   port: String.to_integer(System.get_env("VIGIL_PORT", "4000")),
   git_remote: System.get_env("VIGIL_GIT_REMOTE", "origin"),
@@ -52,3 +37,36 @@ config :vigil,
   # language they are written in. The server's own output is always English.
   vault_owner: System.get_env("VIGIL_VAULT_OWNER", "the vault owner"),
   vault_language: System.get_env("VIGIL_VAULT_LANGUAGE", "English")
+
+# What :test pins for itself, last so that nothing above can be picked up from
+# the shell instead.
+#
+# vault_path/state_dir touch real data (the Markdown vault, OAuth client/token
+# state) — in :test they must never follow a stray VIGIL_VAULT_PATH/
+# VIGIL_STATE_DIR left over in the shell (e.g. from a sourced /etc/vigil/env),
+# or a green `mix test` could silently mean nothing.
+#
+# The authorization server's identity and its consent password are pinned for
+# a second reason: the suite reads them back and asserts against them, and
+# they are set here — once, for the whole run — rather than by each OAuth test
+# around itself. A fixture that mutates global application env cannot be
+# shared by files running in parallel, and after `test/support/oauth_case.ex`
+# stopped needing a state dir this was the only thing left holding the OAuth
+# files serial. Where they are read from is a separate question and is
+# unchanged: `Vigil.OAuth` still asks `Application.fetch_env!/2` for each.
+#
+# `auth_password` doubles as the AP-4 SkillKey HMAC secret (`Vigil.SkillKey`),
+# which is why the suite cannot simply leave it unset.
+if config_env() == :test do
+  config :vigil,
+    vault_path: Path.expand("test/fixtures/vault", File.cwd!()),
+    state_dir: Path.expand("tmp/test_oauth_state", File.cwd!()),
+    issuer: "https://vault.factory-lab.org",
+    resource: "https://vault.factory-lab.org/mcp",
+    auth_password: "correct-horse-battery-staple"
+else
+  config :vigil,
+    vault_path:
+      System.get_env("VIGIL_VAULT_PATH", Path.expand("test/fixtures/vault", File.cwd!())),
+    state_dir: System.get_env("VIGIL_STATE_DIR", Path.expand("tmp/oauth_state", File.cwd!()))
+end

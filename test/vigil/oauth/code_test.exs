@@ -9,10 +9,10 @@ defmodule Vigil.OAuth.CodeTest do
   test can name the one it pins.
   """
 
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Code, Flow, Store}
+  alias Vigil.OAuth.{Code, Flow}
 
   @redirect_uri "https://app.example/cb"
   @verifier "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
@@ -57,7 +57,7 @@ defmodule Vigil.OAuth.CodeTest do
       ctx = ctx!(persistence)
       code = Code.issue(persistence, ctx, @now)
 
-      assert {:ok, record} = Store.take_code(code)
+      assert {:ok, record} = persistence.take_code.(code)
       assert record.client_id == ctx.client.client_id
       assert record.redirect_uri == @redirect_uri
       assert record.code_challenge == @challenge
@@ -69,15 +69,15 @@ defmodule Vigil.OAuth.CodeTest do
     # A code with no grant mints a pair with no family, and a family is what a
     # replay revokes.
     test "every code opens a grant of its own", %{persistence: persistence} do
-      {:ok, first} = Store.take_code(Code.issue(persistence, ctx!(persistence), @now))
-      {:ok, second} = Store.take_code(Code.issue(persistence, ctx!(persistence), @now))
+      {:ok, first} = persistence.take_code.(Code.issue(persistence, ctx!(persistence), @now))
+      {:ok, second} = persistence.take_code.(Code.issue(persistence, ctx!(persistence), @now))
 
       assert is_binary(first.grant_id)
       assert first.grant_id != second.grant_id
     end
 
     test "a code lives one minute", %{persistence: persistence} do
-      {:ok, record} = Store.take_code(Code.issue(persistence, ctx!(persistence), @now))
+      {:ok, record} = persistence.take_code.(Code.issue(persistence, ctx!(persistence), @now))
 
       refute Code.expired?(record, @now + 59)
       assert Code.expired?(record, @now + 60)

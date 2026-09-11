@@ -753,6 +753,68 @@ authorization server minted are kept in the same place by construction.
 Nothing per request, and nothing reaching for application config on the hot
 path.
 
+**The second adapter is five maps behind an `Agent`.**
+`Vigil.OAuth.Persistence.Memory` touches no filesystem, needs no state dir and
+registers no name, so a test builds one per test and is isolated by
+construction. It is not a reimplementation with different storage: what a
+record *is* it asks the same owners the `:dets` adapter asks —
+`Vigil.OAuth.Code` for a code's expiry, `Vigil.OAuth.Token` for a token's
+expiry and its grant.
+
+**The lockout's window and the cache's hour belong to the contract**, not to
+either adapter. They were `Vigil.OAuth.Store`'s private constants, which was
+fine while there was one adapter and wrong the moment there were two: "the
+lockout expires with its window" is a claim the suite runs against both, and a
+window each adapter picked for itself would make that claim mean two different
+things. `Vigil.OAuth.Persistence` states them once and both read them.
+
+The *rules* applied under those numbers stay unshared, and that is the line:
+values both adapters must agree on move to the contract, logic both adapters
+implement stays in each. Sharing the counting too would make the two identical
+by construction, and a contract suite over two identical implementations
+proves nothing.
+
+**One suite runs against both adapters, and it is the only thing that opens a
+`:dets` file.** Everything persistence actually owns is asserted there, at the
+seam rather than through an endpoint: that an authorization code is
+single-use, that rotation marks a refresh token spent rather than deleting it
+— the distinction the RFC 9700 §4.14.2 replay defence rests on — that revoking
+a grant takes down the family minted from it and nothing else, that the
+consent lockout counts per address and expires with its window, that the CIMD
+cache honours its hour, and that a sweep drops exactly what has expired. What
+only the production adapter can be asked is asked there too: that a token
+outlives the process that stored it, and that the files it opens are readable
+by their owner alone.
+
+Eight test files used to `mkdir` a temp directory and open three `:dets` files
+apiece to ask a question about a token, and every one of them was serial for
+it. Six of the eight run in parallel now. Two are still serial, for reasons
+that have nothing to do with persistence: `Vigil.OAuth.EndpointTest` sets the
+rate-limit budgets and the trusted-proxy configuration in global application
+env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor` and
+`Vigil.RateLimit`, both registered under their module names.
+
+**`Vigil.MCP.ServerTest` is parallel on an exception, not on a name it
+supplies.** "One writer per vault, under a name its caller supplies" is what
+lets `Vigil.StoreTest` run in parallel, and this file cannot use it: `/mcp`
+reaches the writer through `Vigil.MCP.Tools`' default, the envelope reads the
+same default, and the rate limiter owns one globally named table — so the file
+starts `Vigil.Store` under its production registration, `Vigil.MCP.Envelope`
+and `Vigil.RateLimit`. It is parallel because it is the *only* async file that
+starts any of them, and everything else that wants them
+(`Vigil.RateLimitTest`, `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`)
+is serial and therefore runs after every async file has finished. A second
+async file starting any of the three breaks it, loudly and immediately —
+`start_supervised!` raises on `{:error, {:already_started, _}}`. Handing the
+MCP router a writer, an envelope and a limiter the way `Vigil.Store` is handed
+a name would remove the exception; that is not this change.
+
+The speed is a consequence and not the argument, and here it is a small one.
+The argument is that 244 lines owning expiry, revocation, spent-token marking
+and the consent lockout had no test of their own — they were exercised
+incidentally, through endpoint tests, which is why "a sweep removes exactly
+what has expired and nothing else" was nobody's claim until it was the seam's.
+
 ---
 
 ## How a file is written

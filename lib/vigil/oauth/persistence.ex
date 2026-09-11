@@ -15,7 +15,10 @@ defmodule Vigil.OAuth.Persistence do
   The **production adapter** is `Vigil.OAuth.Store.over_tables/0`, a function
   beside the `:dets`/`:ets` implementation it wires, rather than closures
   assembled by a caller — six modules ask these questions, and an adapter
-  built at the call site would exist six times.
+  built at the call site would exist six times. The **second adapter** is
+  `Vigil.OAuth.Persistence.Memory`, which the suite runs on;
+  `test/vigil/oauth/persistence_test.exs` holds both to every claim below and
+  is the only test that opens a `:dets` file.
 
   No field has a default, and the struct is built by `struct!/2` — the same
   shape and the same rule as `Vigil.Git` and `Vigil.Vault.Facts`: a question
@@ -75,6 +78,32 @@ defmodule Vigil.OAuth.Persistence do
   defstruct @enforce_keys
 
   @type t :: %__MODULE__{}
+
+  # What the answers above are measured against: two numbers for the consent
+  # lockout, one for the cache's hour. They live with the contract rather than
+  # with either adapter because both have to agree on them — "the lockout
+  # expires with its window" is a claim the suite runs against both, and a
+  # window each adapter picked for itself would make that claim mean two
+  # different things.
+  #
+  # The *rules* applied under them are deliberately not shared: each adapter
+  # decides for itself what a window is made of and when it rolls over, which
+  # is what leaves the contract suite something to catch.
+  @rate_limit_window 900
+  @rate_limit_max_attempts 5
+  @cimd_ttl 3600
+
+  @doc "How long an address's failed-password window lasts, in seconds."
+  @spec rate_limit_window() :: pos_integer()
+  def rate_limit_window, do: @rate_limit_window
+
+  @doc "How many wrong passwords an address may spend inside one window."
+  @spec rate_limit_max_attempts() :: pos_integer()
+  def rate_limit_max_attempts, do: @rate_limit_max_attempts
+
+  @doc "How long a cached CIMD document stays good for, in seconds."
+  @spec cimd_ttl() :: pos_integer()
+  def cimd_ttl, do: @cimd_ttl
 
   @doc """
   Builds a persistence adapter from an answer to every one of the fourteen

@@ -1,8 +1,16 @@
 defmodule Vigil.MCP.ServerTest do
-  # Not async: the whole MCP surface is named singletons — the envelope, the
-  # rate limiter, and the Store under its production registration, which is
-  # the name Vigil.MCP.Tools and Vigil.MCP.Server find the writer by.
-  use ExUnit.Case, async: false
+  # async: true, and what made it possible is the OAuth fixture. This file used
+  # to start `Vigil.OAuth.Store` against a temp state dir just to hold a
+  # token; it asks an in-memory persistence of its own now, handed to the
+  # router at init like any other caller.
+  #
+  # The MCP surface's named singletons — the envelope, the rate limiter and
+  # the writer under its production registration, the name `Vigil.MCP.Server`
+  # finds it by — are still named, so this is the one async file that may
+  # start them. Everything else that wants them (`Vigil.RateLimitTest`,
+  # `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs
+  # after every async file has finished.
+  use ExUnit.Case, async: true
   use Plug.Test
 
   alias Vigil.Store
@@ -40,14 +48,20 @@ defmodule Vigil.MCP.ServerTest do
     )
   end
 
-  defp post(token, body, headers \\ []) do
+  # `/mcp` verifies against whatever the authorization server was initialized
+  # with, so handing the router this test's persistence is all it takes for
+  # the token minted above to be the token verified here.
+  defp opts(persistence, extra \\ []),
+    do: Server.init([oauth: OAuth.Endpoint.init(persistence: persistence)] ++ extra)
+
+  defp post(persistence, token, body, headers \\ []) do
     conn =
       conn(:post, "/mcp", Jason.encode!(body))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer #{token}")
 
     conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
-    Server.call(conn, Server.init([]))
+    Server.call(conn, opts(persistence))
   end
 
   # Verification and minting are the same store by construction, not two
@@ -67,12 +81,14 @@ defmodule Vigil.MCP.ServerTest do
     assert default[:oauth][:persistence] == default[:persistence]
   end
 
-  test "request without a token gets 401 with a WWW-Authenticate challenge" do
+  test "request without a token gets 401 with a WWW-Authenticate challenge", %{
+    persistence: persistence
+  } do
     conn =
       conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
       |> put_req_header("content-type", "application/json")
 
-    conn = Server.call(conn, Server.init([]))
+    conn = Server.call(conn, opts(persistence))
     assert conn.status == 401
     assert conn.resp_body == ""
     [challenge] = get_resp_header(conn, "www-authenticate")
@@ -80,19 +96,22 @@ defmodule Vigil.MCP.ServerTest do
     assert challenge =~ "scope=\"vault\""
   end
 
-  test "request with an unknown token gets 401", %{token: token} do
+  test "request with an unknown token gets 401", %{persistence: persistence, token: token} do
     conn =
       conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
       |> put_req_header("content-type", "application/json")
       |> put_req_header("authorization", "Bearer wrong#{token}")
 
-    conn = Server.call(conn, Server.init([]))
+    conn = Server.call(conn, opts(persistence))
     assert conn.status == 401
   end
 
-  test "initialize returns instructions and a session id header", %{token: token} do
+  test "initialize returns instructions and a session id header", %{
+    persistence: persistence,
+    token: token
+  } do
     conn =
-      post(token, %{
+      post(persistence, token, %{
         jsonrpc: "2.0",
         id: 1,
         method: "initialize",
@@ -108,25 +127,33 @@ defmodule Vigil.MCP.ServerTest do
     assert body["result"]["protocolVersion"] == "2025-11-25"
   end
 
-  test "unknown method returns JSON-RPC -32601", %{token: token} do
+  test "unknown method returns JSON-RPC -32601", %{persistence: persistence, token: token} do
     conn =
-      post(token, %{jsonrpc: "2.0", id: 7, method: "resources/list"}, [{"mcp-session-id", "abc"}])
+      post(persistence, token, %{jsonrpc: "2.0", id: 7, method: "resources/list"}, [
+        {"mcp-session-id", "abc"}
+      ])
 
     body = Jason.decode!(conn.resp_body)
     assert body["error"]["code"] == -32601
   end
 
-  test "tools/list contains exactly seventeen tools", %{token: token} do
+  test "tools/list contains exactly seventeen tools", %{persistence: persistence, token: token} do
     conn =
-      post(token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [{"mcp-session-id", "abc"}])
+      post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
+        {"mcp-session-id", "abc"}
+      ])
 
     body = Jason.decode!(conn.resp_body)
     assert length(body["result"]["tools"]) == 17
   end
 
-  test "tools/call search returns an envelope alongside the result", %{token: token} do
+  test "tools/call search returns an envelope alongside the result", %{
+    persistence: persistence,
+    token: token
+  } do
     conn =
       post(
+        persistence,
         token,
         %{
           jsonrpc: "2.0",
@@ -144,8 +171,12 @@ defmodule Vigil.MCP.ServerTest do
     assert Map.has_key?(payload, "_")
   end
 
-  test "second call in the same session gets the time-only envelope", %{token: token} do
+  test "second call in the same session gets the time-only envelope", %{
+    persistence: persistence,
+    token: token
+  } do
     post(
+      persistence,
       token,
       %{jsonrpc: "2.0", id: 1, method: "tools/call", params: %{name: "reload", arguments: %{}}},
       [
@@ -155,6 +186,7 @@ defmodule Vigil.MCP.ServerTest do
 
     conn =
       post(
+        persistence,
         token,
         %{jsonrpc: "2.0", id: 2, method: "tools/call", params: %{name: "reload", arguments: %{}}},
         [
@@ -168,9 +200,13 @@ defmodule Vigil.MCP.ServerTest do
     assert Map.has_key?(payload, "_t")
   end
 
-  test "current always gets only the time envelope, even as the first call", %{token: token} do
+  test "current always gets only the time envelope, even as the first call", %{
+    persistence: persistence,
+    token: token
+  } do
     conn =
       post(
+        persistence,
         token,
         %{
           jsonrpc: "2.0",
@@ -190,6 +226,7 @@ defmodule Vigil.MCP.ServerTest do
 
     conn2 =
       post(
+        persistence,
         token,
         %{jsonrpc: "2.0", id: 2, method: "tools/call", params: %{name: "reload", arguments: %{}}},
         [
@@ -207,7 +244,10 @@ defmodule Vigil.MCP.ServerTest do
   # instant the envelope was decided at — pinned exactly, so it cannot pass by
   # two clock reads happening to land in the same minute — and the response
   # the router assembles carries both readings of that one instant.
-  test "current's reported time and its envelope come from the same instant", %{token: token} do
+  test "current's reported time and its envelope come from the same instant", %{
+    persistence: persistence,
+    token: token
+  } do
     pinned = ~U[2026-07-09 11:20:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
     assert {:ok, %{now: reported}} = Tools.dispatch("current", %{}, pinned)
@@ -215,6 +255,7 @@ defmodule Vigil.MCP.ServerTest do
 
     conn =
       post(
+        persistence,
         token,
         %{
           jsonrpc: "2.0",
@@ -231,8 +272,11 @@ defmodule Vigil.MCP.ServerTest do
     assert payload["_t"] == Calendar.strftime(DateTime.add(utc, offset, :second), "%H:%M")
   end
 
-  test "tool errors set isError and carry the message alongside an envelope", %{token: token} do
-    conn = failing_create(token, "session-d", 4)
+  test "tool errors set isError and carry the message alongside an envelope", %{
+    persistence: persistence,
+    token: token
+  } do
+    conn = failing_create(persistence, token, "session-d", 4)
 
     body = Jason.decode!(conn.resp_body)
     result = body["result"]
@@ -247,11 +291,15 @@ defmodule Vigil.MCP.ServerTest do
   # An error is a response the session made, so it advances the session's
   # envelope state: without that, a session whose first call failed would get
   # the long first-response form all over again on its next one.
-  test "a failed first call is not repeated as a first call", %{token: token} do
-    failing_create(token, "session-e", 5)
+  test "a failed first call is not repeated as a first call", %{
+    persistence: persistence,
+    token: token
+  } do
+    failing_create(persistence, token, "session-e", 5)
 
     conn =
       post(
+        persistence,
         token,
         %{jsonrpc: "2.0", id: 6, method: "tools/call", params: %{name: "reload", arguments: %{}}},
         [{"mcp-session-id", "session-e"}]
@@ -262,8 +310,9 @@ defmodule Vigil.MCP.ServerTest do
     refute Map.has_key?(payload, "_")
   end
 
-  defp failing_create(token, session_id, id) do
+  defp failing_create(persistence, token, session_id, id) do
     post(
+      persistence,
       token,
       %{
         jsonrpc: "2.0",
@@ -285,11 +334,13 @@ defmodule Vigil.MCP.ServerTest do
 
   describe "SkillKey" do
     test "a write tool without skill_key is rejected before reaching the Store", %{
+      persistence: persistence,
       token: token,
       vault: vault
     } do
       conn =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -310,11 +361,16 @@ defmodule Vigil.MCP.ServerTest do
       refute File.exists?(Path.join(vault, "bike/new.md"))
     end
 
-    test "a write tool with a fresh skill_key succeeds", %{token: token, vault: vault} do
+    test "a write tool with a fresh skill_key succeeds", %{
+      persistence: persistence,
+      token: token,
+      vault: vault
+    } do
       key = Vigil.SkillKey.current(Vigil.SkillKey.config())
 
       conn =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -339,12 +395,13 @@ defmodule Vigil.MCP.ServerTest do
       assert File.exists?(Path.join(vault, "bike/new.md"))
     end
 
-    test "a skill_key from two hours ago is rejected", %{token: token} do
+    test "a skill_key from two hours ago is rejected", %{persistence: persistence, token: token} do
       stale_key =
         Vigil.SkillKey.current(Vigil.SkillKey.config(), System.system_time(:second) - 7200)
 
       conn =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -368,9 +425,13 @@ defmodule Vigil.MCP.ServerTest do
       assert hd(body["result"]["content"])["text"] =~ "SkillKey"
     end
 
-    test "skill_read prepends the current SkillKey to the content", %{token: token} do
+    test "skill_read prepends the current SkillKey to the content", %{
+      persistence: persistence,
+      token: token
+    } do
       conn =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -388,6 +449,7 @@ defmodule Vigil.MCP.ServerTest do
     end
 
     test "delete_note and move_note (AP9a rename) are gated by skill_key, then work", %{
+      persistence: persistence,
       token: token,
       vault: vault
     } do
@@ -395,6 +457,7 @@ defmodule Vigil.MCP.ServerTest do
 
       no_key =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -412,6 +475,7 @@ defmodule Vigil.MCP.ServerTest do
 
       moved =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -435,6 +499,7 @@ defmodule Vigil.MCP.ServerTest do
 
       deleted =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -453,9 +518,10 @@ defmodule Vigil.MCP.ServerTest do
     end
 
     test "skill_write requires a skill_key; the bootstrap key from a failed skill_read works",
-         %{token: token} do
+         %{persistence: persistence, token: token} do
       no_key =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -473,6 +539,7 @@ defmodule Vigil.MCP.ServerTest do
 
       bootstrap_lookup =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -491,6 +558,7 @@ defmodule Vigil.MCP.ServerTest do
 
       written =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -513,11 +581,15 @@ defmodule Vigil.MCP.ServerTest do
   end
 
   describe "links" do
-    test "a vault:read token can call links without a skill_key", %{oauth: oauth} do
+    test "a vault:read token can call links without a skill_key", %{
+      persistence: persistence,
+      oauth: oauth
+    } do
       read_token = seed_token(oauth, OAuth.read_scope())
 
       conn =
         post(
+          persistence,
           read_token,
           %{
             jsonrpc: "2.0",
@@ -537,9 +609,10 @@ defmodule Vigil.MCP.ServerTest do
       assert is_list(payload["result"]["incoming"])
     end
 
-    test "depth 3 is rejected with isError", %{token: token} do
+    test "depth 3 is rejected with isError", %{persistence: persistence, token: token} do
       conn =
         post(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -557,11 +630,15 @@ defmodule Vigil.MCP.ServerTest do
   end
 
   describe "read-only scope" do
-    test "a vault:read token can search/read/current but not create", %{oauth: oauth} do
+    test "a vault:read token can search/read/current but not create", %{
+      persistence: persistence,
+      oauth: oauth
+    } do
       read_token = seed_token(oauth, OAuth.read_scope())
 
       conn =
         post(
+          persistence,
           read_token,
           %{
             jsonrpc: "2.0",
@@ -577,6 +654,7 @@ defmodule Vigil.MCP.ServerTest do
 
       conn2 =
         post(
+          persistence,
           read_token,
           %{
             jsonrpc: "2.0",
@@ -595,11 +673,15 @@ defmodule Vigil.MCP.ServerTest do
       assert hd(body2["result"]["content"])["text"] =~ "Read-only token"
     end
 
-    test "a vault:read token cannot call skill_write either", %{oauth: oauth} do
+    test "a vault:read token cannot call skill_write either", %{
+      persistence: persistence,
+      oauth: oauth
+    } do
       read_token = seed_token(oauth, OAuth.read_scope())
 
       conn =
         post(
+          persistence,
           read_token,
           %{
             jsonrpc: "2.0",
@@ -624,20 +706,24 @@ defmodule Vigil.MCP.ServerTest do
     # integration test of the wiring — Server.init/1 resolving the budget
     # and handle_mcp/1 enforcing it — without needing dozens of requests;
     # Vigil.RateLimitTest covers the limiter's own behavior directly.
-    defp post_with_budget(token, body, budget, headers) do
+    defp post_with_budget(persistence, token, body, budget, headers) do
       conn =
         conn(:post, "/mcp", Jason.encode!(body))
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer #{token}")
 
       conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
-      Server.call(conn, Server.init(rate_limit_budget: budget))
+      Server.call(conn, opts(persistence, rate_limit_budget: budget))
     end
 
-    test "the (budget+1)th tools/call within a minute is rejected with 429", %{token: token} do
+    test "the (budget+1)th tools/call within a minute is rejected with 429", %{
+      persistence: persistence,
+      token: token
+    } do
       for n <- 1..3 do
         conn =
           post_with_budget(
+            persistence,
             token,
             %{
               jsonrpc: "2.0",
@@ -654,6 +740,7 @@ defmodule Vigil.MCP.ServerTest do
 
       conn =
         post_with_budget(
+          persistence,
           token,
           %{
             jsonrpc: "2.0",
@@ -669,43 +756,43 @@ defmodule Vigil.MCP.ServerTest do
     end
   end
 
-  test "an access token with the wrong audience is rejected", %{} do
+  test "an access token with the wrong audience is rejected", %{persistence: persistence} do
     bad_token = OAuth.Token.random()
 
-    OAuth.Store.put_token(bad_token, %{
+    persistence.put_token.(bad_token, %{
       aud: "https://andere.tld/mcp",
       expires_at: System.system_time(:second) + 3600
     })
 
-    conn = post(bad_token, %{jsonrpc: "2.0", id: 1, method: "ping"})
+    conn = post(persistence, bad_token, %{jsonrpc: "2.0", id: 1, method: "ping"})
     assert conn.status == 401
   end
 
-  test "a refresh token presented as an access token is rejected" do
+  test "a refresh token presented as an access token is rejected", %{persistence: persistence} do
     refresh = OAuth.Token.random()
 
-    OAuth.Store.put_token(refresh, %{
+    persistence.put_token.(refresh, %{
       type: :refresh,
       client_id: "abc",
       aud: "https://vault.factory-lab.org/mcp",
       expires_at: System.system_time(:second) + 3600
     })
 
-    conn = post(refresh, %{jsonrpc: "2.0", id: 1, method: "ping"})
+    conn = post(persistence, refresh, %{jsonrpc: "2.0", id: 1, method: "ping"})
     assert conn.status == 401
   end
 
-  test "an expired access token is rejected and removed" do
+  test "an expired access token is rejected and removed", %{persistence: persistence} do
     expired = OAuth.Token.random()
 
-    OAuth.Store.put_token(expired, %{
+    persistence.put_token.(expired, %{
       aud: "https://vault.factory-lab.org/mcp",
       expires_at: System.system_time(:second) - 1
     })
 
-    conn = post(expired, %{jsonrpc: "2.0", id: 1, method: "ping"})
+    conn = post(persistence, expired, %{jsonrpc: "2.0", id: 1, method: "ping"})
     assert conn.status == 401
-    assert OAuth.Store.get_token(expired) == :error
+    assert persistence.get_token.(expired) == :error
   end
 
   # The call `dispatch/2` builds is the one frame nothing else looks at:
@@ -719,7 +806,11 @@ defmodule Vigil.MCP.ServerTest do
   # `@tools` without an entry here fails the suite instead of quietly going
   # unexercised.
   describe "dispatch coverage" do
-    test "every declared tool is dispatched end to end", %{token: token, vault: vault} do
+    test "every declared tool is dispatched end to end", %{
+      persistence: persistence,
+      token: token,
+      vault: vault
+    } do
       key = Vigil.SkillKey.current(Vigil.SkillKey.config())
       calls = dispatch_calls()
 
@@ -731,6 +822,7 @@ defmodule Vigil.MCP.ServerTest do
 
         conn =
           post(
+            persistence,
             token,
             %{
               jsonrpc: "2.0",
