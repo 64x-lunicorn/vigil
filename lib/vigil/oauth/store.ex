@@ -13,10 +13,10 @@ defmodule Vigil.OAuth.Store do
   `over_tables/0` is the adapter, a function here beside the implementation it
   wires rather than closures assembled by a caller. Nothing in `lib/` names
   the functions below: six modules ask through the value they are handed,
-  which is what makes the second adapter — and the tests that want one —
-  possible at all. The suite still reaches for them directly, to assert
-  against the tables a write landed in; moving it onto the seam is its own
-  ticket.
+  which is what makes the second adapter — `Vigil.OAuth.Persistence.Memory` —
+  and the tests that want one possible at all. The suite still reaches for
+  them directly, to assert against the tables a write landed in; moving it
+  onto the seam is its own ticket.
   """
   use GenServer
   require Logger
@@ -29,9 +29,12 @@ defmodule Vigil.OAuth.Store do
   @rate_limits :oauth_rate_limits
   @cimd_cache :oauth_cimd_cache
 
-  @rate_limit_window 900
-  @rate_limit_max_attempts 5
-  @cimd_ttl 3600
+  # The lockout's window and the cache's hour belong to the contract, not to
+  # this adapter: the in-memory one has to measure them the same way for the
+  # claims in `test/vigil/oauth/persistence_test.exs` to mean one thing.
+  @rate_limit_window Persistence.rate_limit_window()
+  @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
+  @cimd_ttl Persistence.cimd_ttl()
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -215,9 +218,14 @@ defmodule Vigil.OAuth.Store do
       _ ->
         :ets.insert(@rate_limits, {ip, 1, now})
     end
+
+    :ok
   end
 
-  def reset_rate_limit(ip), do: :ets.delete(@rate_limits, ip)
+  def reset_rate_limit(ip) do
+    :ets.delete(@rate_limits, ip)
+    :ok
+  end
 
   def sweep_rate_limits(now) do
     sweep_table(@rate_limits, fn {_ip, _count, window_start} ->
@@ -236,6 +244,7 @@ defmodule Vigil.OAuth.Store do
 
   def cimd_cache_put(url, doc, now) do
     :ets.insert(@cimd_cache, {url, doc, now + @cimd_ttl})
+    :ok
   end
 
   @doc """

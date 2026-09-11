@@ -28,9 +28,12 @@ functions with no defaults — and the `:dets`/`:ets` implementation is an
 adapter behind it, `Vigil.OAuth.Store.over_tables/0`. The six modules that
 read and write records ask through the value they are handed rather than
 naming a globally registered module with hard-coded table atoms, and the
-routers resolve the production adapter once, when they are initialized. See
-[design.md](design.md), "OAuth persistence is reached through a value", for
-the reasoning and the shape it follows.
+routers resolve the production adapter once, when they are initialized. There
+is a second adapter, `Vigil.OAuth.Persistence.Memory`, which the suite runs on;
+`test/vigil/oauth/persistence_test.exs` runs every claim above against both and
+is the only test that opens a `:dets` file. See [design.md](design.md), "OAuth
+persistence is reached through a value", for the reasoning and the shape it
+follows.
 
 **The token record has one owner.** `Vigil.OAuth.Token` is the module that
 says what a stored token is. It writes every one that exists — the pair a
@@ -215,10 +218,11 @@ they cover different things:
 |---|---|---|---|
 | `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM`/min | every `/mcp` request, and only once the token has validated |
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
-| `Vigil.OAuth.Store.rate_limited?/2` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+| OAuth persistence's `rate_limited?` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
 
-The first two rows are one table, `Vigil.RateLimit`'s, and the third is
-`Vigil.OAuth.Store`'s. `Vigil.OAuth.Janitor` sweeps both, on the schedule
+The first two rows are one table, `Vigil.RateLimit`'s, and the third is OAuth
+persistence's — the budget and the window are stated once, on the contract in
+`Vigil.OAuth.Persistence`, so both adapters behind it count the same way. `Vigil.OAuth.Janitor` sweeps both, on the schedule
 "Storage and cleanup" below sets out.
 
 The middle row is the one that bounds an unauthenticated caller, and it is

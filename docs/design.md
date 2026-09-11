@@ -753,6 +753,39 @@ authorization server minted are kept in the same place by construction.
 Nothing per request, and nothing reaching for application config on the hot
 path.
 
+**The second adapter is five maps behind an `Agent`.**
+`Vigil.OAuth.Persistence.Memory` touches no filesystem, needs no state dir and
+registers no name, so a test builds one per test and is isolated by
+construction. It is not a reimplementation with different storage: what a
+record *is* it asks the same owners the `:dets` adapter asks —
+`Vigil.OAuth.Code` for a code's expiry, `Vigil.OAuth.Token` for a token's
+expiry and its grant.
+
+**The lockout's window and the cache's hour belong to the contract**, not to
+either adapter. They were `Vigil.OAuth.Store`'s private constants, which was
+fine while there was one adapter and wrong the moment there were two: "the
+lockout expires with its window" is a claim the suite runs against both, and a
+window each adapter picked for itself would make that claim mean two different
+things. `Vigil.OAuth.Persistence` states them once and both read them.
+
+**One suite runs against both adapters, and it is the only thing that opens a
+`:dets` file.** Everything persistence actually owns is asserted there, at the
+seam rather than through an endpoint: that an authorization code is
+single-use, that rotation marks a refresh token spent rather than deleting it
+— the distinction the RFC 9700 §4.14.2 replay defence rests on — that revoking
+a grant takes down the family minted from it and nothing else, that the
+consent lockout counts per address and expires with its window, that the CIMD
+cache honours its hour, and that a sweep drops exactly what has expired. What
+only the production adapter can be asked is asked there too: that a token
+outlives the process that stored it, and that the files it opens are readable
+by their owner alone.
+
+The speed is a consequence and not the argument, and here it is a small one.
+The argument is that 244 lines owning expiry, revocation, spent-token marking
+and the consent lockout had no test of their own — they were exercised
+incidentally, through endpoint tests, which is why "a sweep removes exactly
+what has expired and nothing else" was nobody's claim until it was the seam's.
+
 ---
 
 ## How a file is written
