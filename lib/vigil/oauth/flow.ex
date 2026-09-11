@@ -18,23 +18,33 @@ defmodule Vigil.OAuth.Flow do
   wrong is one `invalid_grant` — and the checks that span both grants.
   Verification is an OAuth 2.1 decision like the ones here and just as free of
   a conn; it only used to live in the router because the record had no owner.
+
+  Where those records are kept is nobody's decision here either. Every
+  function below takes a `Vigil.OAuth.Persistence` and hands it on, so what
+  the decisions are made *against* is the caller's — in production
+  `Vigil.OAuth.Endpoint` resolves it once when the router is initialized.
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Store, Token}
+  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Token}
 
   @doc """
   Dynamic client registration. Returns the registration response, or
   `{:error, "invalid_redirect_uri"}` when no usable redirect URI was offered.
   """
-  def register(json, now \\ System.system_time(:second)) do
+  def register(persistence, json, now \\ System.system_time(:second)) do
     redirect_uris = Map.get(json, "redirect_uris", [])
 
     if redirect_uris == [] or not Enum.all?(redirect_uris, &RedirectUri.valid_candidate?/1) do
       {:error, "invalid_redirect_uri"}
     else
       client =
-        Client.register(Map.get(json, "client_name", "Unbenannter Client"), redirect_uris, now)
+        Client.register(
+          persistence,
+          Map.get(json, "client_name", "Unbenannter Client"),
+          redirect_uris,
+          now
+        )
 
       {:ok,
        %{
@@ -58,18 +68,23 @@ defmodule Vigil.OAuth.Flow do
   `code_challenge_method` is a local error page, and everything else is
   reported back to the client as a redirect.
 
-  `now` and `net` reach `Vigil.OAuth.Client.resolve/3` from here, so a CIMD
+  `now` and `net` reach `Vigil.OAuth.Client.resolve/4` from here, so a CIMD
   client can be driven through the whole authorization request with a test
   adapter and an injected time — the production values are the defaults, so
   `Vigil.OAuth.Endpoint` calling this with neither changes nothing.
   """
-  def authorize_request(params, now \\ System.system_time(:second), net \\ Cimd.net()) do
+  def authorize_request(
+        persistence,
+        params,
+        now \\ System.system_time(:second),
+        net \\ Cimd.net()
+      ) do
     client_id = params["client_id"]
     redirect_uri = params["redirect_uri"]
 
     with true <- is_binary(client_id) and client_id != "",
          true <- is_binary(redirect_uri) and redirect_uri != "",
-         {:ok, client} <- Client.resolve(client_id, now, net),
+         {:ok, client} <- Client.resolve(persistence, client_id, now, net),
          true <- RedirectUri.matches?(client.redirect_uris, redirect_uri) do
       authorize_details(params, client, redirect_uri)
     else
@@ -116,17 +131,17 @@ defmodule Vigil.OAuth.Flow do
   authorization code when the password is right. Recording the attempt is part
   of the decision, so the caller cannot forget to.
   """
-  def consent(ip, password, ctx, now \\ System.system_time(:second)) do
+  def consent(persistence, ip, password, ctx, now \\ System.system_time(:second)) do
     cond do
-      Store.rate_limited?(ip, now) ->
+      persistence.rate_limited?.(ip, now) ->
         :rate_limited
 
       Plug.Crypto.secure_compare(password || "", OAuth.auth_password()) ->
-        Store.reset_rate_limit(ip)
-        {:ok, Code.issue(ctx, now)}
+        persistence.reset_rate_limit.(ip)
+        {:ok, Code.issue(persistence, ctx, now)}
 
       true ->
-        Store.record_failure(ip, now)
+        persistence.record_failure.(ip, now)
         :wrong_password
     end
   end
@@ -138,10 +153,10 @@ defmodule Vigil.OAuth.Flow do
   authorization code can be wrong reports `invalid_grant`, so a caller
   learns nothing from which check rejected it.
   """
-  def grant(params, now \\ System.system_time(:second))
+  def grant(persistence, params, now \\ System.system_time(:second))
 
-  def grant(%{"grant_type" => "authorization_code"} = params, now) do
-    case Code.redeem(params["code"] || "", params, now) do
+  def grant(persistence, %{"grant_type" => "authorization_code"} = params, now) do
+    case Code.redeem(persistence, params["code"] || "", params, now) do
       # Unknown, expired, the wrong client, the wrong redirect URI, a verifier
       # that does not match the challenge — RFC 6749 §5.2 answers all five with
       # one code, so this renders every problem the same way rather than
@@ -150,34 +165,34 @@ defmodule Vigil.OAuth.Flow do
         {:error, 400, "invalid_grant"}
 
       {:ok, record} ->
-        redeemed(record, params, now)
+        redeemed(persistence, record, params, now)
     end
   end
 
-  def grant(%{"grant_type" => "refresh_token"} = params, now) do
+  def grant(persistence, %{"grant_type" => "refresh_token"} = params, now) do
     refresh_token = params["refresh_token"] || ""
 
-    case Token.fetch_refresh(refresh_token) do
+    case Token.fetch_refresh(persistence, refresh_token) do
       # Order matters: a spent token is a replay before it is anything else.
-      {:spent, data} -> replayed(data)
-      {:ok, data} -> refresh(refresh_token, data, params, now)
+      {:spent, data} -> replayed(persistence, data)
+      {:ok, data} -> refresh(persistence, refresh_token, data, params, now)
       :error -> {:error, 400, "invalid_grant"}
     end
   end
 
-  def grant(_params, _now), do: {:error, 400, "unsupported_grant_type"}
+  def grant(_persistence, _params, _now), do: {:error, 400, "unsupported_grant_type"}
 
-  defp redeemed(record, params, now) do
+  defp redeemed(persistence, record, params, now) do
     aud = Code.audience_of(record)
 
     if target_ok?(params, aud) do
-      {:ok, Token.issue_pair(record, now)}
+      {:ok, Token.issue_pair(persistence, record, now)}
     else
       {:error, 400, "invalid_target"}
     end
   end
 
-  defp refresh(refresh_token, data, params, now) do
+  defp refresh(persistence, refresh_token, data, params, now) do
     cond do
       Token.expired?(data, now) ->
         {:error, 400, "invalid_grant"}
@@ -193,8 +208,8 @@ defmodule Vigil.OAuth.Flow do
         # so a replay is refused — and, because it is marked rather than
         # deleted, recognised as a replay rather than mistaken for a token that
         # never existed.
-        Token.spend_refresh(refresh_token, data, now)
-        {:ok, Token.issue_pair(data, now)}
+        Token.spend_refresh(persistence, refresh_token, data, now)
+        {:ok, Token.issue_pair(persistence, data, now)}
     end
   end
 
@@ -213,8 +228,8 @@ defmodule Vigil.OAuth.Flow do
   # No other check runs first. Presenting a spent token *is* the signal, and an
   # attacker who knows the token but not the `client_id` should not be able to
   # keep the family alive by getting the rest of the request wrong.
-  defp replayed(data) do
-    Store.revoke_grant(Token.grant_of(data))
+  defp replayed(persistence, data) do
+    persistence.revoke_grant.(Token.grant_of(data))
     {:error, 400, "invalid_grant"}
   end
 

@@ -16,12 +16,15 @@ defmodule Vigil.Store do
   alias Vigil.Vault.{Decision, Domains, Facts, Layout, Plan, Policy}
 
   # The name a writer registers under, and — the same atom — the name of the
-  # table it publishes through. Production registers under this module and
-  # nothing hands in another: `Vigil.MCP.Tools`, `Vigil.MCP.Envelope` and
-  # `Vigil.MCP.Server` find the writer by that name and name no other. A caller
-  # that supplies one gets a writer of its own, which is what lets the
-  # vault-backed test files run in parallel — one writer per file, rather than
-  # one for the whole suite to queue behind.
+  # table it publishes through. Production registers under it and hands in no
+  # name of its own: every caller that names no writer reaches this one. A
+  # caller that supplies a name gets a writer of its own, which is what lets
+  # the vault-backed test files run in parallel — one writer per file, rather
+  # than one for the whole suite to queue behind.
+  #
+  # The atom is stated here and asked for through `default_name/0` where a
+  # caller needs it as its own default (`Vigil.MCP.Tools`), so the name a
+  # writer is found under is one fact rather than one per caller.
   #
   # What the table is for: readers that must not queue behind the writer. It is
   # written from inside it — at init for the vault path, on every index change
@@ -30,6 +33,13 @@ defmodule Vigil.Store do
   @default_name __MODULE__
 
   ## Public API
+
+  @doc """
+  The name production registers a writer under, for a caller that defaults to
+  it rather than restating it.
+  """
+  @spec default_name() :: atom()
+  def default_name, do: @default_name
 
   def start_link(opts) do
     name = Keyword.get(opts, :name, @default_name)

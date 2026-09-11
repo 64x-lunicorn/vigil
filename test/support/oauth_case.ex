@@ -5,7 +5,14 @@ defmodule Vigil.OAuthCase do
   throwaway state dir. Call `setup!/0` from the test module's own `setup do ... end`.
   """
 
-  @doc "Returns %{state_dir:, issuer:, resource:, auth_password:}. Registers on_exit cleanup."
+  @doc """
+  Returns `%{state_dir:, issuer:, resource:, auth_password:, persistence:}`.
+  Registers `on_exit` cleanup.
+
+  `persistence` is the `:dets`/`:ets` adapter over the store it just started —
+  the value every OAuth module now asks its questions through, and the one
+  production runs on. A test that wants a different one builds it itself.
+  """
   def setup! do
     state_dir =
       Path.join(System.tmp_dir!(), "vigil_oauth_test_#{System.unique_integer([:positive])}")
@@ -26,6 +33,8 @@ defmodule Vigil.OAuthCase do
 
     ExUnit.Callbacks.start_supervised!({Vigil.OAuth.Store, state_dir: state_dir})
 
-    Map.new(env) |> Map.put(:state_dir, state_dir)
+    Map.new(env)
+    |> Map.put(:state_dir, state_dir)
+    |> Map.put(:persistence, Vigil.OAuth.Store.over_tables())
   end
 end

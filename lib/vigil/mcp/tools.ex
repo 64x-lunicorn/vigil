@@ -6,7 +6,7 @@ defmodule Vigil.MCP.Tools do
   flag, the `call` the tool makes, whether that call resolves an instant
   (`now:`), and each parameter's name, type, and whether it is required. Three things are generated from it — `definitions/0`
   (the JSON schema handed to the client on `tools/list`), the argument
-  validation `dispatch/2` runs on `tools/call`, and the `Store.call/2` that
+  validation `dispatch/4` runs on `tools/call`, and the `Store.call/3` that
   follows it. A schema, its validation and the call they describe cannot drift
   out of agreement when they are the same table. Adding a tool is adding a
   row.
@@ -17,9 +17,24 @@ defmodule Vigil.MCP.Tools do
   defaulted at that point — by the time the call is built, validation has run
   and every declared parameter has a value.
 
+  `skill_key` is also the one parameter no row declares. A write takes it
+  because it is a write, and the row already says `write: true` — the gate
+  below reads the requirement off that flag, so the parameter is derived from
+  it as well rather than written out identically in every write row. The
+  `confirm` parameter is not derivable the same way and stays declared per
+  row: only three of the nine writes take one, and `write: true` does not
+  say which.
+
   `Vigil.Store` answers all but two of the operations. `skill_list` and
   `skill_read` are answered against `Vigil.Skills` in the caller's own
-  process — see `answer/2`.
+  process — see `answer/3`.
+
+  Which writer that is, is the caller's to say. `dispatch/4` takes it and
+  defaults to `Vigil.Store.default_name/0`, the registration production runs
+  under and hands in no name for. A caller that supplies one reaches a writer
+  of its own — the same thing `Vigil.Store`'s own interface has always taken,
+  and what lets a test file exercising this layer run beside the others
+  instead of queueing behind one registered atom.
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
@@ -38,10 +53,20 @@ defmodule Vigil.MCP.Tools do
 
   alias Vigil.{Skills, Store}
 
-  # The one declared parameter that is not a parameter of any Store operation:
-  # it authorizes a write and is consumed by the gate below.
+  # The one parameter that is not a parameter of any Store operation: it
+  # authorizes a write and is consumed by the gate below.
   @skill_key :skill_key
   @skill_key_name Atom.to_string(@skill_key)
+
+  # And the one parameter no row declares. It belongs to every write and to no
+  # read, which is what `write:` already says, so the table states it once here
+  # instead of nine times identically.
+  @skill_key_param %{
+    name: @skill_key_name,
+    type: :string,
+    required: true,
+    description: "Current key from skill_read."
+  }
 
   @type_enum ["reference", "decision", "event"]
 
@@ -168,12 +193,6 @@ defmodule Vigil.MCP.Tools do
           type: :boolean,
           default: false,
           description: "Create a missing project directory under projects/."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     },
@@ -195,12 +214,6 @@ defmodule Vigil.MCP.Tools do
           type: :string,
           required: true,
           description: "Markdown text to append."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     },
@@ -217,12 +230,6 @@ defmodule Vigil.MCP.Tools do
           type: :string,
           required: true,
           description: "New body, without headings of its own."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     },
@@ -247,12 +254,6 @@ defmodule Vigil.MCP.Tools do
           default: false,
           description:
             "Only required once the rewrite crosses Policy's shrink threshold (removes more than half of the note's headings, or more than 20); optional otherwise."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     },
@@ -263,13 +264,7 @@ defmodule Vigil.MCP.Tools do
       call: :delete_section,
       now: true,
       params: [
-        %{name: "id", type: :string, required: true, description: "path#heading-slug."},
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
-        }
+        %{name: "id", type: :string, required: true, description: "path#heading-slug."}
       ]
     },
     %{
@@ -288,13 +283,7 @@ defmodule Vigil.MCP.Tools do
           description: "New frontmatter type."
         },
         %{name: "starts", type: :string, description: "ISO timestamp, only for type: event."},
-        %{name: "ends", type: :string, description: "ISO timestamp, only for type: event."},
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
-        }
+        %{name: "ends", type: :string, description: "ISO timestamp, only for type: event."}
       ]
     },
     %{
@@ -310,12 +299,6 @@ defmodule Vigil.MCP.Tools do
           type: :boolean,
           default: false,
           description: "Must be true, otherwise the call is rejected."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     },
@@ -334,12 +317,6 @@ defmodule Vigil.MCP.Tools do
           type: :boolean,
           default: false,
           description: "Must be true, otherwise the call is rejected."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     },
@@ -405,12 +382,6 @@ defmodule Vigil.MCP.Tools do
           type: :string,
           required: true,
           description: "Full file content including frontmatter."
-        },
-        %{
-          name: "skill_key",
-          type: :string,
-          required: true,
-          description: "Current key from skill_read."
         }
       ]
     }
@@ -429,9 +400,20 @@ defmodule Vigil.MCP.Tools do
   @spec definitions() :: [map()]
   def definitions do
     Enum.map(@tools, fn tool ->
-      %{name: tool.name, description: tool.description, inputSchema: input_schema(tool.params)}
+      %{
+        name: tool.name,
+        description: tool.description,
+        inputSchema: input_schema(param_specs(tool))
+      }
     end)
   end
+
+  # A row's parameters, plus the one its `write:` flag implies. Last, where it
+  # was written by hand in every write row — the published schema lists its
+  # required parameters in declaration order, and this is a change to how the
+  # table is written, not to what `tools/list` serves.
+  defp param_specs(%{write: true} = tool), do: tool.params ++ [@skill_key_param]
+  defp param_specs(%{write: false} = tool), do: tool.params
 
   defp input_schema(params) do
     properties = Map.new(params, &{String.to_atom(&1.name), property_schema(&1)})
@@ -478,7 +460,7 @@ defmodule Vigil.MCP.Tools do
   defp find_tool(name), do: Enum.find(@tools, &(&1.name == name))
 
   @doc """
-  Dispatches a `tools/call` to the Store at `now`, the instant the response's
+  Dispatches a `tools/call` to `store` at `now`, the instant the response's
   envelope was decided at.
 
   Validates `args` against the declared tool's parameters first — a
@@ -494,18 +476,23 @@ defmodule Vigil.MCP.Tools do
   to report a time its own envelope could contradict across a minute
   boundary. `now` has no default here: an instant a caller forgot to pass is
   a second clock read, which is the thing being removed.
+
+  `store` is the writer the call is made against, the one thing here that a
+  deployment and a test file legitimately disagree about. It defaults to the
+  registration production runs under, so the MCP surface hands in no name.
   """
-  @spec dispatch(String.t(), map(), DateTime.t()) :: {:ok, term()} | {:error, String.t()}
-  def dispatch(name, args, now) do
+  @spec dispatch(GenServer.server(), String.t(), map(), DateTime.t()) ::
+          {:ok, term()} | {:error, String.t()}
+  def dispatch(store \\ Store.default_name(), name, args, now) do
     case find_tool(name) do
       nil ->
         {:error, "Unknown tool: #{name}"}
 
       tool ->
         with :ok <- maybe_require_skill_key(tool, args),
-             {:ok, params} <- validate_params(tool.params, args) do
+             {:ok, params} <- validate_params(param_specs(tool), args) do
           params = params |> Map.delete(@skill_key) |> maybe_put_now(tool, now)
-          tool.call |> answer(params) |> to_result()
+          tool.call |> answer(params, store) |> to_result()
         end
     end
   end
@@ -518,9 +505,13 @@ defmodule Vigil.MCP.Tools do
   # commit and push in order with note writes. Answering the reads here is
   # what keeps a skill read — the mandatory bootstrap in front of every write
   # (AP-4) — from queueing behind the push at the end of the write before it.
-  defp answer(:skill_list, %{}), do: Skills.list(Store.vault_path())
-  defp answer(:skill_read, %{name: name}), do: Skills.read(name, Store.vault_path())
-  defp answer(op, params), do: Store.call(op, params)
+  #
+  # They still read the path off the writer that was handed in, not off the
+  # default one: a vault is the writer's, and a read answered against another
+  # writer's vault is a read of the wrong vault.
+  defp answer(:skill_list, %{}, store), do: Skills.list(Store.vault_path(store))
+  defp answer(:skill_read, %{name: name}, store), do: Skills.read(name, Store.vault_path(store))
+  defp answer(op, params, store), do: Store.call(store, op, params)
 
   defp maybe_put_now(params, %{now: true}, now), do: Map.put(params, :now, now)
   defp maybe_put_now(params, _tool, _now), do: params

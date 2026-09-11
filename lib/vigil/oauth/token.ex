@@ -6,7 +6,7 @@ defmodule Vigil.OAuth.Token do
   Four places used to construct or destructure the same map and none of them
   owned it. `Vigil.OAuth.Flow` wrote an access record by *leaving out*
   `:type`; `Vigil.MCP.Server` re-derived the same classification the other way
-  round, matching `%{type: :refresh}` to reject; `Vigil.OAuth.Store` read
+  round, matching `%{type: :refresh}` to reject; the `:dets` store read
   `:expires_at` and `:grant_id` off the map while sweeping and revoking; and
   `mix vigil.seed_token` hand-wrote a fifth variant. The two defaults for old
   records were each written twice, in different modules, with nothing making
@@ -19,14 +19,17 @@ defmodule Vigil.OAuth.Token do
   `grant_of/1`, rather than reaching for a field.
 
   Verifying an access token is an OAuth 2.1 decision like any other, which is
-  why `validate_access/3` takes a token and a resource and not a `Plug.Conn`:
+  why `validate_access/4` takes a token and a resource and not a `Plug.Conn`:
   it lived in a private `cond` inside the MCP router, reachable only through a
   full request with a Bearer header, and that is what made audience, expiry
   and refresh-presented-as-access awkward to ask about on their own.
+
+  Where a record is kept is not this module's: every write and every lookup
+  below goes through the `Vigil.OAuth.Persistence` it is handed.
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Code, Store}
+  alias Vigil.OAuth.Code
 
   @access_ttl 3600
   @refresh_ttl 30 * 86_400
@@ -60,20 +63,20 @@ defmodule Vigil.OAuth.Token do
   They expire on different schedules — an hour against thirty days — because
   rotation is what bounds a refresh token, not its lifetime.
   """
-  def issue_pair(record, now) do
+  def issue_pair(persistence, record, now) do
     access_token = random()
     refresh_token = random()
     {aud, scope} = inherited(record)
     grant_id = grant_for_issue(record)
 
-    Store.put_token(access_token, %{
+    persistence.put_token.(access_token, %{
       grant_id: grant_id,
       aud: aud,
       scope: scope,
       expires_at: now + @access_ttl
     })
 
-    Store.put_token(refresh_token, %{
+    persistence.put_token.(refresh_token, %{
       type: :refresh,
       grant_id: grant_id,
       client_id: record.client_id,
@@ -101,10 +104,10 @@ defmodule Vigil.OAuth.Token do
   it indistinguishable from a record written before grants existed, which is
   the one thing revocation must not treat as a family.
   """
-  def issue_out_of_band(aud, scope, ttl_seconds, now) do
+  def issue_out_of_band(persistence, aud, scope, ttl_seconds, now) do
     token = random()
 
-    Store.put_token(token, %{
+    persistence.put_token.(token, %{
       grant_id: Vigil.Uuid.v4(),
       aud: aud,
       scope: scope,
@@ -169,8 +172,8 @@ defmodule Vigil.OAuth.Token do
 
   This is the answer for *revoking*: a record written before grants existed
   carries no family, and "every token whose grant is unknown" is not one —
-  one replay must not take down a stranger. `Vigil.OAuth.Store.revoke_grant/1`
-  therefore treats `nil` as a no-op.
+  one replay must not take down a stranger. `Vigil.OAuth.Persistence`'s
+  `revoke_grant` therefore treats `nil` as a no-op.
 
   For *issuing* the same absent field falls the other way; see
   `grant_for_issue/1`.
@@ -202,19 +205,19 @@ defmodule Vigil.OAuth.Token do
   is refused and left alone: it is a valid token handed to the wrong endpoint,
   and deleting it would let anyone holding it destroy the ability to renew.
   """
-  def validate_access(token, resource, now \\ System.system_time(:second)) do
-    with {:ok, record} <- Store.get_token(token),
+  def validate_access(persistence, token, resource, now \\ System.system_time(:second)) do
+    with {:ok, record} <- persistence.get_token.(token),
          :access <- classify(record) do
-      valid_access(token, record, resource, now)
+      valid_access(persistence, token, record, resource, now)
     else
       _ -> :error
     end
   end
 
-  defp valid_access(token, record, resource, now) do
+  defp valid_access(persistence, token, record, resource, now) do
     cond do
       expired?(record, now) ->
-        Store.delete_token(token)
+        persistence.delete_token.(token)
         :error
 
       not Plug.Crypto.secure_compare(record.aud, resource) ->
@@ -240,8 +243,8 @@ defmodule Vigil.OAuth.Token do
   rotation is the one thing that writes it and this is the only place
   rotation can.
   """
-  def spend_refresh(token, %{type: :refresh} = record, now) do
-    Store.put_token(token, Map.put(record, :spent_at, now))
+  def spend_refresh(persistence, token, %{type: :refresh} = record, now) do
+    persistence.put_token.(token, Map.put(record, :spent_at, now))
   end
 
   @doc """
@@ -253,8 +256,8 @@ defmodule Vigil.OAuth.Token do
   presenting a spent token is the signal, and no other check may run ahead of
   it.
   """
-  def fetch_refresh(token) do
-    with {:ok, record} <- Store.get_token(token) do
+  def fetch_refresh(persistence, token) do
+    with {:ok, record} <- persistence.get_token.(token) do
       case classify(record) do
         :refresh -> {:ok, record}
         :spent_refresh -> {:spent, record}

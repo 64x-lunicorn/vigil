@@ -78,6 +78,27 @@ defmodule Vigil.MCP.ToolsTest do
       assert move_note.inputSchema.properties.confirm.description =~ "rejected"
     end
 
+    # No row declares `skill_key`: a tool takes one because it writes, and the
+    # row already says `write: true`. What the derivation replaces is nine
+    # identical blocks, each free to drift in its description or its
+    # required-ness while the gate went on requiring the same thing.
+    test "every write tool publishes the same skill_key, and no read tool publishes one" do
+      for %{name: name, inputSchema: schema} <- Tools.definitions() do
+        if name in @write_tools do
+          assert schema.properties.skill_key == %{
+                   type: "string",
+                   minLength: 1,
+                   description: "Current key from skill_read."
+                 }
+
+          assert List.last(schema.required) == "skill_key"
+        else
+          refute Map.has_key?(schema.properties, :skill_key)
+          refute "skill_key" in Map.get(schema, :required, [])
+        end
+      end
+    end
+
     test "parameterless tools declare no required key" do
       for name <- ~w(lint current reload skill_list) do
         [tool] = Enum.filter(Tools.definitions(), &(&1.name == name))
@@ -87,7 +108,7 @@ defmodule Vigil.MCP.ToolsTest do
     end
   end
 
-  describe "dispatch/3 validates before the Store is reached" do
+  describe "dispatch/4 validates before the Store is reached" do
     test "an unknown tool is rejected without touching the Store" do
       assert Tools.dispatch("does_not_exist", %{}, @now) ==
                {:error, "Unknown tool: does_not_exist"}

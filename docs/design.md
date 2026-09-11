@@ -413,8 +413,8 @@ one write including a complete index rebuild ~115 ms.
 `Vigil.MCP.Tools` declares each tool once — name, description, the `write`
 flag, the `Store` operation it calls, and its parameters' names, types and
 required-ness — in a single table. Three things are generated from it: the
-JSON schema published on `tools/list`, the argument validation `dispatch/2`
-runs on `tools/call`, and the `Vigil.Store.call/2` that follows. They cannot
+JSON schema published on `tools/list`, the argument validation `dispatch/4`
+runs on `tools/call`, and the `Vigil.Store.call/3` that follows. They cannot
 drift out of agreement the way hand-written twins do, and adding a tool is
 adding a row.
 
@@ -425,7 +425,16 @@ against `Vigil.Skills` in the caller's process, for the reason under
 "`skills/` — one repository, two systems". The one
 exception is `skill_key`, which is a parameter of no operation — it carries the
 SkillKey of the Security model's layer 4, the gate reads it, and it does not
-travel. An enum's internal form is the atom of the same name, derived once from
+travel.
+
+**`skill_key` is also the one parameter no row declares.** A tool takes one
+because it writes, and the row already says `write: true` — the same flag the
+gate reads the requirement off. So the parameter is derived from it too,
+stated once rather than written out identically in nine rows, each free to
+drift in its description or its required-ness while the gate went on requiring
+the same thing. `confirm` is not derivable the same way and stays declared per
+row: only three of the nine writes take one, and `write: true` does not say
+which. An enum's internal form is the atom of the same name, derived once from
 the values the table already declares rather than restated in each tool's
 dispatch; that restatement is what let `search` convert its `type` while
 `create` passed the same enum through as a string. Whether an answer is lifted
@@ -607,13 +616,20 @@ key; an inherited `commit.gpgsign=true` would otherwise fail every single
 write.
 
 **One writer per vault, under a name its caller supplies.** `Vigil.Store`
-registers under its own module name by default, and that registration is the
-whole of how the MCP surface finds it: `Vigil.MCP.Tools`, `Vigil.MCP.Envelope`
-and `Vigil.MCP.Server` name no store. A caller that hands in a name gets a
-writer of its own, publishing through a table of that same name — which is
-what lets the vault-backed test files run in parallel, one writer per file,
-instead of the whole suite queueing behind a single registration. Principle 2
-is about a vault having one writer, not about a node having one.
+registers under its own module name by default, and a caller that hands in a
+name gets a writer of its own, publishing through a table of that same name —
+which is what lets the vault-backed test files run in parallel, one writer per
+file, instead of the whole suite queueing behind a single registration.
+Principle 2 is about a vault having one writer, not about a node having one.
+
+**The tool layer takes the writer too.** `Vigil.MCP.Tools.dispatch/4` is
+handed the store it calls, and the two skill reads resolve the vault path from
+that same store rather than from the default one — a skill read answered
+against another writer's vault is a read of the wrong vault. It defaults to
+`Vigil.Store.default_name/0`, so production hands in no name and reaches its
+own registration, and the atom is stated once, where the writer registers it,
+rather than once per caller. What still names no store is `Vigil.MCP.Envelope`
+and `Vigil.MCP.Server`.
 
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
@@ -696,6 +712,46 @@ The speed is a consequence and not the argument. The argument is that
 the write path with no test that could fail on it, because exercising it meant
 building a repository. An adapter that records its calls can be asked what
 order they came in.
+
+---
+
+## OAuth persistence is reached through a value
+
+The same shape, for what the authorization server remembers. Six modules —
+`Vigil.OAuth.Client`, `Code`, `Token`, `Cimd`, `Flow` and `Janitor` — used to
+reach storage by naming one globally registered module with hard-coded table
+atoms. Nothing varied across it, so there was nowhere to substitute, and the
+244 lines that own expiry, revocation, spent-token marking and the consent
+lockout had no test of their own: they were exercised incidentally, through
+endpoint tests.
+
+**The value is the whole of what those six ask.** Fourteen questions,
+declared in `Vigil.OAuth.Persistence`: a client written and read, a code
+written and taken, a token written, read, deleted and revoked by family, the
+consent attempts counted per address, the CIMD cache read and written — and
+the sweep. The sweep is part of this surface rather than a concern beside it:
+every expiry it drops belongs to one of the tables above, and the janitor asks
+for it through the value it was handed like any other caller.
+
+**It is a struct of functions with no defaults**, built by `struct!/2`, the
+same rule as `Vigil.Git` and `Vigil.Vault.Facts`. Here the rule earns its keep
+twice over: every one of these questions guards something, and every plausible
+answer to a question nobody wired sits on the permissive side of the gate it
+feeds. A `get_token` answering `:error` makes every token unknown; a
+`rate_limited?` answering `false` turns the consent lockout off.
+
+The production adapter is `Vigil.OAuth.Store.over_tables/0`, a function beside
+the `:dets`/`:ets` implementation it wires. That module keeps the files'
+lifecycle — opened under the state dir, `chmod 0600`, closed on terminate —
+and stops being something the other five name.
+
+**The routers resolve it once.** `Vigil.OAuth.Endpoint.init/1` builds the
+production adapter when it is not handed one, exactly as it resolves its proxy
+configuration and its budgets, and `Vigil.MCP.Server.init/1` passes its own
+down to that router — so the token `/mcp` verifies and the token the
+authorization server minted are kept in the same place by construction.
+Nothing per request, and nothing reaching for application config on the hot
+path.
 
 ---
 
@@ -833,10 +889,10 @@ Five layers, each doing one job:
    answering a guess. The consent form counts wrong passwords only, per
    address, over a much longer window. One limiter, `Vigil.RateLimit`, serves
    the first two; the third is a lockout rather than a request limit and
-   belongs to `Vigil.OAuth.Store`. Every one of them is swept by
-   `Vigil.OAuth.Janitor`, whose list of modules to ask is its own: a module
-   belongs on it as soon as it owns a table with an expiry, whatever namespace
-   it lives in. A budget bounds how fast rows arrive and a sweep
+   belongs to OAuth persistence. Every one of them is swept by
+   `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
+   persistence for the expiries persistence owns, and names `Vigil.RateLimit`
+   for the one it does not. A budget bounds how fast rows arrive and a sweep
    bounds how many there are, and neither substitutes for the other.
 
 **Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of

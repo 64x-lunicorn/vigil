@@ -44,7 +44,14 @@ defmodule Mix.Tasks.Vigil.SeedToken do
     # The record is `Vigil.OAuth.Token`'s to write, out of band or not: this
     # task used to hand-write a variant of it, which is how it came to be the
     # one shape carrying no grant.
-    token = Vigil.OAuth.Token.issue_out_of_band(resource, scope, ttl_days * 86_400, now)
+    token =
+      Vigil.OAuth.Token.issue_out_of_band(
+        Vigil.OAuth.Store.over_tables(),
+        resource,
+        scope,
+        ttl_days * 86_400,
+        now
+      )
 
     GenServer.stop(pid)
 
