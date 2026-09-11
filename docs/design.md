@@ -167,6 +167,14 @@ change its own environment variable, but it can change a file in the vault.
 Anything that must genuinely stay hidden from the assistant belongs in
 `VIGIL_EXCLUDE`, not in a marker inside a file the assistant can read.
 
+The boundary travels with the vault it applies to. `Vigil.Store` is handed
+both at start; so are `Vigil.VaultCheck` and the walk behind
+`mix vigil.slug_diff`, the two other callers that take a vault path as an
+argument. The mix tasks read the setting once and pass it. That is what lets
+the doctor — the one module whose whole job is reporting on the vault — be
+asked in its own suite whether an excluded directory really produces no
+finding of any kind, rather than having the boundary read out from under it.
+
 ### `skills/` — one repository, two systems
 
 `skills/` holds instructions for the assistant. For vigil it is invisible: not
@@ -791,29 +799,82 @@ apiece to ask a question about a token, and every one of them was serial for
 it. Six of the eight run in parallel now. Two are still serial, for reasons
 that have nothing to do with persistence: `Vigil.OAuth.EndpointTest` sets the
 rate-limit budgets and the trusted-proxy configuration in global application
-env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor` and
-`Vigil.RateLimit`, both registered under their module names.
+env, and `Vigil.OAuth.JanitorTest` drives `Vigil.OAuth.Janitor`, which is
+registered under its module name.
 
-**`Vigil.MCP.ServerTest` is parallel on an exception, not on a name it
-supplies.** "One writer per vault, under a name its caller supplies" is what
-lets `Vigil.StoreTest` run in parallel, and this file cannot use it: `/mcp`
-reaches the writer through `Vigil.MCP.Tools`' default, the envelope reads the
-same default, and the rate limiter owns one globally named table — so the file
-starts `Vigil.Store` under its production registration, `Vigil.MCP.Envelope`
-and `Vigil.RateLimit`. It is parallel because it is the *only* async file that
-starts any of them, and everything else that wants them
-(`Vigil.RateLimitTest`, `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`)
-is serial and therefore runs after every async file has finished. A second
-async file starting any of the three breaks it, loudly and immediately —
-`start_supervised!` raises on `{:error, {:already_started, _}}`. Handing the
-MCP router a writer, an envelope and a limiter the way `Vigil.Store` is handed
-a name would remove the exception; that is not this change.
+**`Vigil.MCP.ServerTest` supplies its own writer now**, the way
+`Vigil.StoreTest` does: the router takes one at `init/1` and threads it to
+both halves of a response, so the file starts no `Vigil.Store` under the
+production registration. What it still finds by a default is the session table
+and the rate limiter, and it is the one async file that may start those two —
+everything else that wants them (`Vigil.RateLimitTest`,
+`Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs after
+every async file has finished. A second async file starting either breaks it
+loudly and immediately: `start_supervised!` raises on
+`{:error, {:already_started, _}}`.
 
 The speed is a consequence and not the argument, and here it is a small one.
 The argument is that 244 lines owning expiry, revocation, spent-token marking
 and the consent lockout had no test of their own — they were exercised
 incidentally, through endpoint tests, which is why "a sweep removes exactly
 what has expired and nothing else" was nobody's claim until it was the seam's.
+
+---
+
+## The rate limiter is reached through a value
+
+The same shape a third time, for the fixed window three surfaces count in.
+`Vigil.RateLimit` was a module with one named ETS table, named by
+`Vigil.MCP.Server`, `Vigil.OAuth.Endpoint` and `Vigil.OAuth.Janitor` alike —
+so there was nowhere to substitute, and every test that wanted to observe a
+limit started the node's one limiter under its own registration and counted in
+the table everything else counts in.
+
+**The value is both questions, not the limit check alone.** `limited?` counts
+one request against a budget; `sweep_expired` reclaims the windows that have
+elapsed. The sweep is part of this surface rather than a concern beside it:
+what counts as an elapsed window is the same fact `limited?` decides on, and a
+sweep that decided it separately could hand a caller a budget it has not
+waited out. It is a struct of two functions with no defaults, built by
+`struct!/2`, the same rule as `Vigil.Git` and `Vigil.OAuth.Persistence` — and
+here it earns its keep on one answer in particular: a `limited?` nobody wired
+answers `false`, which is not a limiter with a missing part but every caller
+served unlimited.
+
+**The production adapter is `Vigil.RateLimit.over_table/0`**, a function beside
+the ETS implementation it wires, over the one named table the process owns.
+Everything below it is private, both answers included, so the value is the
+only way to reach them. **The second adapter is `Vigil.RateLimit.Counter`**:
+one map behind an `Agent`, no registered name and no table anything else can
+reach, so a test builds one per test and is isolated by construction.
+
+**The window's length belongs to the contract**, for the same reason the
+consent lockout's does: "the window is fixed rather than sliding" is a claim
+the suite runs against both adapters, and a minute each adapter picked for
+itself would make that claim mean two different things. How a window is
+counted and how one is reclaimed stays each adapter's own — a match-spec
+delete against ETS, a map split against the agent — which is what leaves the
+contract suite something to catch. `budget/2` belongs to neither adapter: it
+reads what the deployment configured, once, where a router is initialized, and
+is handed to `limited?` as an argument from there on.
+
+**The missing-table guard is the production adapter's alone.** That table is
+owned by the limiter's process and is gone while that process restarts, so a
+sweep can arrive to no table and must answer "nothing reclaimed" rather than
+take the janitor down with it. An adapter with no table to lose has nothing to
+say about that, so it is not a claim the contract makes. `limited?` gets no
+such guard in either adapter: on the request path a missing table means the
+limiter is not running, and crashing the request is the honest answer where
+answering "not limited" would quietly serve every caller unlimited.
+
+**The routers take it at `init/1`**, beside the persistence they already take,
+defaulting to the production adapter so a deployment hands in nothing — and
+`Vigil.MCP.Server` passes its own down to `Vigil.OAuth.Endpoint` exactly as it
+passes persistence. `Vigil.OAuth.Janitor` keeps its own list of what to sweep,
+which is the point of that list belonging to the janitor; what changed is that
+the limiter stopped being the one entry on it that was a hard-coded module
+reference. Nothing per request, and nothing reaching for a registered name on
+the hot path.
 
 ---
 
@@ -925,6 +986,18 @@ has still made a first call. The field is attached around both outcomes of a
 tool call rather than inside the success branch, so the rule is structurally
 true rather than true in one of two branches.
 
+**The router names the writer, and the envelope with it.** Both halves of a
+response — the tool call and the envelope that wraps it — are decided against
+one vault, and `Vigil.MCP.Server` is the only thing that knows they are the
+same one. So it resolves both at `init/1` — the writer, defaulting to
+`Vigil.Store.default_name/0`, and the session table, defaulting to
+`Vigil.MCP.Envelope.default_name/0` — and hands the writer to
+`Vigil.MCP.Tools.dispatch` and to `Vigil.MCP.Envelope.for_tool` alike.
+Defaulting inside each half instead is how one of them came to be handed a
+writer and the other left to find one by name, so neither takes a default of
+its own: `for_tool/4` is asked which session table and which writer, every
+time. Session state is per router rather than one table for the node.
+
 This is the reason the assistant never has to guess what time it is.
 
 ---
@@ -953,9 +1026,10 @@ Five layers, each doing one job:
    the first two; the third is a lockout rather than a request limit and
    belongs to OAuth persistence. Every one of them is swept by
    `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
-   persistence for the expiries persistence owns, and names `Vigil.RateLimit`
-   for the one it does not. A budget bounds how fast rows arrive and a sweep
-   bounds how many there are, and neither substitutes for the other.
+   persistence for the expiries persistence owns, and the limiter for the
+   windows it does not — each through a value it was handed, neither by name.
+   A budget bounds how fast rows arrive and a sweep bounds how many there are,
+   and neither substitutes for the other.
 
 **Client address** is a decision, not a lookup. `conn.remote_ip` is the peer of
 the TCP connection, which behind layer 1 is the proxy — so a per-address limit

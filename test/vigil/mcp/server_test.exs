@@ -4,12 +4,11 @@ defmodule Vigil.MCP.ServerTest do
   # token; it asks an in-memory persistence of its own now, handed to the
   # router at init like any other caller.
   #
-  # The MCP surface's named singletons — the envelope, the rate limiter and
-  # the writer under its production registration, the name `Vigil.MCP.Server`
-  # finds it by — are still named, so this is the one async file that may
-  # start them. Everything else that wants them (`Vigil.RateLimitTest`,
-  # `Vigil.OAuth.JanitorTest`, `Vigil.OAuth.EndpointTest`) is serial and runs
-  # after every async file has finished.
+  # The writer is this file's own now, under a name it supplies and hands to
+  # the router — which threads it to both halves of a response, the tool call
+  # and the envelope that wraps it. What is still found by a default is the
+  # session table and the rate limiter, so this is the one async file that may
+  # start those two.
   use ExUnit.Case, async: true
   import Plug.Conn
   import Plug.Test
@@ -19,16 +18,25 @@ defmodule Vigil.MCP.ServerTest do
   alias Vigil.MCP.Tools
   alias Vigil.OAuth
 
+  # One writer and one session table for this file, under names of their own
+  # rather than the registrations production uses.
+  @store __MODULE__.Writer
+  @sessions __MODULE__.Sessions
+
   setup do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
     start_supervised!(
       {Store,
-       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
+       vault_path: vault,
+       exclude: [],
+       git_remote: "origin",
+       git: Vigil.Git.CommitLog.new(vault),
+       name: @store}
     )
 
-    start_supervised!(Vigil.MCP.Envelope)
+    start_supervised!({Vigil.MCP.Envelope, name: @sessions})
     start_supervised!(Vigil.RateLimit)
 
     oauth = Vigil.OAuthCase.setup!()
@@ -52,8 +60,15 @@ defmodule Vigil.MCP.ServerTest do
   # `/mcp` verifies against whatever the authorization server was initialized
   # with, so handing the router this test's persistence is all it takes for
   # the token minted above to be the token verified here.
-  defp opts(persistence, extra \\ []),
-    do: Server.init([oauth: OAuth.Endpoint.init(persistence: persistence)] ++ extra)
+  defp opts(persistence, extra \\ []) do
+    Server.init(
+      [
+        store: @store,
+        sessions: @sessions,
+        oauth: OAuth.Endpoint.init(persistence: persistence)
+      ] ++ extra
+    )
+  end
 
   defp post(persistence, token, body, headers \\ []) do
     conn =
@@ -68,18 +83,38 @@ defmodule Vigil.MCP.ServerTest do
   # Verification and minting are the same store by construction, not two
   # resolutions that happen to agree: the router reads persistence back out of
   # the authorization server's own options, including when those are handed in
-  # ready-made.
-  test "the router's persistence is the authorization server's", %{persistence: persistence} do
-    handed_in = Server.init(oauth: OAuth.Endpoint.init(persistence: persistence))
+  # ready-made. The limiter is read back the same way, so `/mcp` and the
+  # authorization server count in the same windows.
+  test "the router's persistence and limiter are the authorization server's", %{
+    persistence: persistence
+  } do
+    limiter = Vigil.RateLimit.Counter.new()
+
+    handed_in =
+      Server.init(oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter))
 
     assert handed_in[:persistence] == persistence
     assert handed_in[:oauth][:persistence] == persistence
+    assert handed_in[:limiter] == limiter
+    assert handed_in[:oauth][:limiter] == limiter
 
-    # And with nothing handed in, both halves reach production's adapter.
+    # And with nothing handed in, both halves reach production's adapters.
     default = Server.init([])
 
     assert default[:persistence] == OAuth.Store.over_tables()
     assert default[:oauth][:persistence] == default[:persistence]
+    assert default[:limiter] == Vigil.RateLimit.over_table()
+    assert default[:oauth][:limiter] == default[:limiter]
+  end
+
+  # The writer and the session table are the router's too: both halves of a
+  # response are decided against the ones it was handed, and neither half
+  # keeps a default of its own to fall back to.
+  test "the router names the writer and the session table" do
+    default = Server.init([])
+
+    assert default[:store] == Store.default_name()
+    assert default[:sessions] == Vigil.MCP.Envelope.default_name()
   end
 
   test "request without a token gets 401 with a WWW-Authenticate challenge", %{
@@ -251,7 +286,7 @@ defmodule Vigil.MCP.ServerTest do
   } do
     pinned = ~U[2026-07-09 11:20:00Z] |> DateTime.shift_zone!("Europe/Berlin")
 
-    assert {:ok, %{now: reported}} = Tools.dispatch("current", %{}, pinned)
+    assert {:ok, %{now: reported}} = Tools.dispatch(@store, "current", %{}, pinned)
     assert reported == DateTime.to_iso8601(pinned)
 
     conn =

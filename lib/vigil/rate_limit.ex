@@ -1,6 +1,15 @@
 defmodule Vigil.RateLimit do
   @moduledoc """
-  One fixed-window rate limit, for every surface that needs one.
+  One fixed-window rate limit, as a value its callers hold rather than a
+  module they name (`docs/design.md`, "The rate limiter is reached through a
+  value").
+
+  Two things live here. The **contract** is a struct of two functions — the
+  whole of what a surface asks of a limiter. `limited?` counts one request
+  against a budget, and `sweep_expired` reclaims the windows that have
+  elapsed. The sweep is part of this surface rather than a concern beside it:
+  what counts as an elapsed window is the same fact `limited?` decides on, and
+  only one place should hold it.
 
   The key is whatever the caller counts by and the budget is the caller's to
   choose, so the same window serves `/mcp` keyed by access token (AP-6.3) and
@@ -9,9 +18,42 @@ defmodule Vigil.RateLimit do
 
   `now` is an argument because a test that cannot name the instant can only
   observe the window by waiting a minute for it.
+
+  The **production adapter** is the rest of this module: `over_table/0` wires
+  both questions to the one named ETS table this process owns. It is a
+  function here, beside the contract it implements, rather than closures
+  assembled by a caller — there are three callers, and an adapter assembled at
+  the call site would exist three times. Everything below `over_table/0` is
+  private, both answers included: they are captured from inside this module,
+  so the value is the only way to reach them.
+
+  The **second adapter** is `Vigil.RateLimit.Counter`, which counts in a
+  process instead of in a table the node shares; it lives with the tests
+  because only they have a use for it, and `test/vigil/rate_limit_test.exs`
+  holds both to every claim the contract makes.
+
+  The window's length belongs to the contract rather than to either adapter:
+  "the window is fixed rather than sliding" is a claim the suite runs against
+  both, and a window each adapter picked for itself would make that claim mean
+  two different things. `budget/2` belongs to neither too — it is read once,
+  where a router is initialized, and handed to `limited?` from there on.
   """
   use GenServer
   require Logger
+
+  @enforce_keys [
+    # Whether `key` has spent `budget` requests inside the window containing
+    # `now`; otherwise counts this request against it.
+    # (key, budget, now) -> boolean.
+    :limited?,
+    # Drop the windows that have elapsed at `now` and answer how many were
+    # reclaimed. (now) -> non_neg_integer.
+    :sweep_expired
+  ]
+
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{}
 
   @table :vigil_rate_limits
   @window_seconds 60
@@ -26,6 +68,26 @@ defmodule Vigil.RateLimit do
 
     {:ok, %{}}
   end
+
+  @doc """
+  Builds a limiter from an answer to both questions.
+
+  Raises `ArgumentError` when a field is missing or unknown, which is the
+  point: an unwired question must fail where the adapter is built, not answer
+  something plausible at the moment a request is checked against it. Here the
+  rule earns its keep on one answer in particular — a `limited?` nobody wired
+  answers `false`, which is not a limiter with a missing part but every caller
+  served unlimited.
+  """
+  @spec new(Enumerable.t()) :: t
+  def new(fields), do: struct!(__MODULE__, fields)
+
+  @doc """
+  The production adapter: both questions answered over the named table this
+  module's process owns.
+  """
+  @spec over_table() :: t
+  def over_table, do: new(limited?: &limited?/3, sweep_expired: &sweep_expired/1)
 
   @doc "The window's length in seconds — what a refused caller has to wait out."
   def window_seconds, do: @window_seconds
@@ -51,11 +113,9 @@ defmodule Vigil.RateLimit do
     end
   end
 
-  @doc """
-  True if `key` has exceeded `budget` requests for the fixed window
-  containing `now`; otherwise records the request and returns false.
-  """
-  def limited?(key, budget, now) do
+  # True if `key` has exceeded `budget` requests for the fixed window
+  # containing `now`; otherwise records the request and returns false.
+  defp limited?(key, budget, now) do
     cutoff = cutoff(now)
 
     case :ets.lookup(@table, key) do
@@ -73,33 +133,32 @@ defmodule Vigil.RateLimit do
     end
   end
 
-  @doc """
-  Drops the windows that have elapsed at `now` and returns how many were
-  reclaimed.
-
-  The table is keyed on what arrives from outside — one row per client address
-  per authorization-server endpoint, and one per access token ever presented at
-  `/mcp`. Refresh rotation mints a new access token about every hour, so even
-  normal single-user traffic adds keys for tokens that no longer exist. The
-  budget bounds how fast rows arrive and this sweep bounds how many there are;
-  neither substitutes for the other.
-
-  Reclaiming is part of the limiter's interface rather than a caller's duty:
-  what counts as an elapsed window is the same fact `limited?/3` decides on,
-  and only one module should hold it. Only a window `limited?/3` would already
-  ignore is dropped, so a sweep can never let a caller past a limit it is still
-  subject to — reclaiming an elapsed row and starting a fresh window on the
-  next request are the same decision.
-
-  The table belongs to this module's process and is gone while that process is
-  restarting, so a sweep can arrive to no table at all. That is not an error to
-  report: the restart already dropped every window, so there is nothing left to
-  reclaim, and the janitor that asked must not go down over it. `limited?/3`
-  deliberately does not do the same: on the request path a missing table means
-  the limiter is not running, and crashing the request is the honest answer
-  where answering "not limited" would quietly serve every caller unlimited.
-  """
-  def sweep_expired(now) do
+  # Drops the windows that have elapsed at `now` and returns how many were
+  # reclaimed.
+  #
+  # The table is keyed on what arrives from outside — one row per client
+  # address per authorization-server endpoint, and one per access token ever
+  # presented at `/mcp`. Refresh rotation mints a new access token about every
+  # hour, so even normal single-user traffic adds keys for tokens that no
+  # longer exist. The budget bounds how fast rows arrive and this sweep bounds
+  # how many there are; neither substitutes for the other.
+  #
+  # Only a window `limited?/3` would already ignore is dropped, so a sweep can
+  # never let a caller past a limit it is still subject to — reclaiming an
+  # elapsed row and starting a fresh window on the next request are the same
+  # decision.
+  #
+  # The table belongs to this module's process and is gone while that process
+  # is restarting, so a sweep can arrive to no table at all. That is not an
+  # error to report: the restart already dropped every window, so there is
+  # nothing left to reclaim, and the janitor that asked must not go down over
+  # it. This guard is this adapter's own and not part of the contract — an
+  # adapter with no table to lose has nothing to say about it. `limited?/3`
+  # deliberately does not do the same: on the request path a missing table
+  # means the limiter is not running, and crashing the request is the honest
+  # answer where answering "not limited" would quietly serve every caller
+  # unlimited.
+  defp sweep_expired(now) do
     case :ets.whereis(@table) do
       :undefined ->
         0

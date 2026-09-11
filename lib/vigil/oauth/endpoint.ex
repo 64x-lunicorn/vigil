@@ -20,16 +20,18 @@ defmodule Vigil.OAuth.Endpoint do
 
   # Resolves what the deployment says about its proxy and its budgets once,
   # when the router is initialized, rather than re-parsing a CIDR list and
-  # re-reading application config on every request. Persistence is resolved
-  # here for the same reason and one more: it is the one thing every decision
-  # below is made *against*, and a caller that substitutes it — the MCP router
-  # passes its own down — must do so for the whole router, not per request.
+  # re-reading application config on every request. Persistence and the rate
+  # limiter are resolved here for the same reason and one more: they are what
+  # every decision below is made *against*, and a caller that substitutes one —
+  # the MCP router passes its own down — must do so for the whole router, not
+  # per request.
   @impl true
   def init(opts) do
     opts
     |> Keyword.put_new_lazy(:client_addr, &ClientAddr.config/0)
     |> Keyword.put_new_lazy(:limits, &configured_limits/0)
     |> Keyword.put_new_lazy(:persistence, &Store.over_tables/0)
+    |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
   end
 
   @impl true
@@ -38,6 +40,7 @@ defmodule Vigil.OAuth.Endpoint do
     |> put_private(:oauth_client_addr, opts[:client_addr])
     |> put_private(:oauth_limits, opts[:limits])
     |> put_private(:oauth_persistence, opts[:persistence])
+    |> put_private(:oauth_limiter, opts[:limiter])
     |> super(opts)
   end
 
@@ -114,12 +117,16 @@ defmodule Vigil.OAuth.Endpoint do
     budget = Map.fetch!(conn.private.oauth_limits, endpoint)
     key = {:oauth, endpoint, client_addr(conn)}
 
-    if RateLimit.limited?(key, budget, System.system_time(:second)) do
+    if limiter(conn).limited?.(key, budget, System.system_time(:second)) do
       refuse(conn, endpoint)
     else
       handler.(conn)
     end
   end
+
+  # Where the windows this request is counted in are kept. Resolved in
+  # `init/1`, like the persistence every decision below is made against.
+  defp limiter(conn), do: conn.private.oauth_limiter
 
   defp refuse(conn, :authorize) do
     conn

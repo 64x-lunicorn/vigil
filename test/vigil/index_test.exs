@@ -433,6 +433,17 @@ defmodule Vigil.IndexTest do
 
       assert result.id == "bike/via-carolina.md"
     end
+
+    # Both readers resolve an id the same way, so both refuse the same way:
+    # a path that fails the safety check is not quoted back at the caller, a
+    # miss is.
+    test "invalid and missing ids answer as read/2 does", %{index: index} do
+      assert Index.links(index, %{id: "../etc/passwd", direction: :out, depth: 1}) ==
+               {:error, "Invalid path"}
+
+      assert Index.links(index, %{id: "bike/nope.md", direction: :out, depth: 1}) ==
+               {:error, "Not found: bike/nope.md"}
+    end
   end
 
   describe "lint/2" do

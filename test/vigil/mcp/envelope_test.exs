@@ -1,12 +1,18 @@
 defmodule Vigil.MCP.EnvelopeTest do
-  # Vigil.MCP.Envelope is a named singleton also started by ServerTest, so
-  # this stays async: false to avoid a name collision with it — and the Store
-  # it starts is the production registration, which is what
-  # Vigil.MCP.Envelope's snapshot reaches without being told where to look.
-  use ExUnit.Case, async: false
+  # async: true, and what makes it possible is that neither name here is
+  # production's: the session table carries the name this file supplies, the
+  # way the writer's registration already did, and the writer the snapshot
+  # comes from is handed in rather than found by default.
+  use ExUnit.Case, async: true
 
   alias Vigil.MCP.Envelope
   alias Vigil.Store
+
+  # One writer and one session table for this file. Tests inside a module run
+  # one after another, so a name per file is all the isolation an async suite
+  # needs.
+  @store __MODULE__.Writer
+  @sessions __MODULE__.Sessions
 
   # What the envelope *says* is Vigil.MCP.Envelope.Decision's, and
   # DecisionTest pins every form it can take against a hand-built snapshot.
@@ -18,18 +24,29 @@ defmodule Vigil.MCP.EnvelopeTest do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
-    start_supervised!(
-      {Store,
-       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
-    )
-
-    start_supervised!(Envelope)
+    start_store(vault)
+    start_supervised!({Envelope, name: @sessions})
     %{vault: vault}
   end
 
+  defp start_store(vault) do
+    start_supervised!(
+      {Store,
+       vault_path: vault,
+       exclude: [],
+       git_remote: "origin",
+       git: Vigil.Git.CommitLog.new(vault),
+       name: @store}
+    )
+  end
+
+  # The envelope for one response in this file's session table, decided against
+  # this file's vault.
+  defp for_tool(session_id, tool), do: Envelope.for_tool(@sessions, session_id, tool, @store)
+
   defp create_event!(path, title, starts, ends) do
     {:ok, _} =
-      Store.call(:create, %{
+      Store.call(@store, :create, %{
         path: path,
         type: :event,
         content: "# #{title}\n\nBody.\n",
@@ -41,22 +58,22 @@ defmodule Vigil.MCP.EnvelopeTest do
   end
 
   test "the session's state is carried from one response to the next" do
-    assert {%{"_" => _}, _now} = Envelope.for_tool("session-1", "search")
-    assert {%{"_t" => _}, _now} = Envelope.for_tool("session-1", "search")
+    assert {%{"_" => _}, _now} = for_tool("session-1", "search")
+    assert {%{"_t" => _}, _now} = for_tool("session-1", "search")
   end
 
   test "two parallel sessions have independent envelope state" do
-    assert {%{"_" => _}, _} = Envelope.for_tool("session-a", "search")
-    assert {%{"_" => _}, _} = Envelope.for_tool("session-b", "search")
-    assert {%{"_t" => _}, _} = Envelope.for_tool("session-a", "search")
-    assert {%{"_t" => _}, _} = Envelope.for_tool("session-b", "search")
+    assert {%{"_" => _}, _} = for_tool("session-a", "search")
+    assert {%{"_" => _}, _} = for_tool("session-b", "search")
+    assert {%{"_t" => _}, _} = for_tool("session-a", "search")
+    assert {%{"_t" => _}, _} = for_tool("session-b", "search")
   end
 
   test "the instant it returns is the one it decided the envelope at" do
-    {%{"_t" => _}, now} = Envelope.for_tool("session-2", "current")
+    {%{"_t" => _}, now} = for_tool("session-2", "current")
 
     assert %DateTime{} = now
-    assert {%{"_t" => time}, later} = Envelope.for_tool("session-2", "current")
+    assert {%{"_t" => time}, later} = for_tool("session-2", "current")
     assert time == Calendar.strftime(later, "%H:%M")
     assert DateTime.compare(later, now) != :lt
   end
@@ -66,7 +83,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   # notice on its own — including the note's title, which only the vault
   # knows.
   test "it decides against the vault's events as they are at that moment" do
-    assert {%{"_" => _}, now} = Envelope.for_tool("session-3", "search")
+    assert {%{"_" => _}, now} = for_tool("session-3", "search")
 
     create_event!(
       "bike/phasentest.md",
@@ -75,8 +92,8 @@ defmodule Vigil.MCP.EnvelopeTest do
       DateTime.add(now, 3600)
     )
 
-    assert {%{"_!" => "Phasentest now active"}, _} = Envelope.for_tool("session-3", "search")
-    assert {%{"_t" => _}, _} = Envelope.for_tool("session-3", "search")
+    assert {%{"_!" => "Phasentest now active"}, _} = for_tool("session-3", "search")
+    assert {%{"_t" => _}, _} = for_tool("session-3", "search")
   end
 
   # An empty snapshot is not an answer, it is a different vault: whatever the
@@ -87,7 +104,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   test "with the writer down a response fails rather than recording an empty vault", %{
     vault: vault
   } do
-    {_envelope, now} = Envelope.for_tool("session-4", "search")
+    {_envelope, now} = for_tool("session-4", "search")
 
     create_event!(
       "bike/laufend.md",
@@ -96,22 +113,19 @@ defmodule Vigil.MCP.EnvelopeTest do
       DateTime.add(now, 3600)
     )
 
-    assert {%{"_!" => "Laufend now active"}, _} = Envelope.for_tool("session-4", "search")
+    assert {%{"_!" => "Laufend now active"}, _} = for_tool("session-4", "search")
 
-    stop_supervised!(Vigil.Store)
-    assert_raise ArgumentError, fn -> Envelope.for_tool("session-4", "search") end
+    stop_supervised!(Store)
+    assert_raise ArgumentError, fn -> for_tool("session-4", "search") end
 
-    start_supervised!(
-      {Store,
-       vault_path: vault, exclude: [], git_remote: "origin", git: Vigil.Git.CommitLog.new(vault)}
-    )
+    start_store(vault)
 
-    assert {%{"_t" => _}, _} = Envelope.for_tool("session-4", "search")
+    assert {%{"_t" => _}, _} = for_tool("session-4", "search")
   end
 
   test "the table is public, so no response pays a call into the owning process" do
-    assert :ets.info(:vigil_sessions, :protection) == :public
-    assert :ets.info(:vigil_sessions, :owner) == Process.whereis(Envelope)
+    assert :ets.info(@sessions, :protection) == :public
+    assert :ets.info(@sessions, :owner) == Process.whereis(@sessions)
   end
 
   # The other half of the same claim: the snapshot the envelope is decided
@@ -120,7 +134,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   # The table carries the writer's own name, so a Store started under one of
   # its own publishes through a table of its own.
   test "the events the snapshot is built from are published, not asked for" do
-    assert :ets.info(Store, :protection) == :public
-    assert :ets.info(Store, :owner) == Process.whereis(Store)
+    assert :ets.info(@store, :protection) == :public
+    assert :ets.info(@store, :owner) == Process.whereis(@store)
   end
 end

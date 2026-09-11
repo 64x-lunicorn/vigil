@@ -485,4 +485,86 @@ defmodule Vigil.VaultCheckTest do
              "domaina/one-section-no-separator.md"
            ]
   end
+
+  # `VIGIL_EXCLUDE` is the hard boundary — "not filtered — not read"
+  # (docs/design.md). The doctor is the one module whose whole job is
+  # reporting on the vault, so it is where that boundary either holds or
+  # leaks; it became a claim this file could make when the exclusion list
+  # became an argument beside the vault path.
+  describe "an excluded directory" do
+    setup do
+      tmp =
+        Path.join(
+          System.tmp_dir!(),
+          "vigil_vault_check_excl_#{System.unique_integer([:positive])}"
+        )
+
+      File.mkdir_p!(Path.join(tmp, "domaina"))
+      File.mkdir_p!(Path.join(tmp, "geheim"))
+      File.write!(Path.join(tmp, "_domains.yml"), "domaina: \"Test domain A\"\n")
+
+      File.write!(Path.join(tmp, "domaina/clean.md"), """
+      ---
+      type: reference
+      ---
+      # Clean
+
+      ## Section
+      Text.
+      """)
+
+      # One note that trips every check the doctor has: no frontmatter (B1), a
+      # filename that is neither canonical nor slugged the same by both slug
+      # versions (B2, B3), a heading with no blank line above it (B5), and a
+      # heading repeated (B6). Its domain has no entry in _domains.yml (B4).
+      File.write!(Path.join(tmp, "geheim/Geheime Datei café.md"), """
+      # Geheime Datei
+
+      ## Abschnitt
+      Text.
+      ## Abschnitt
+      Mehr.
+      """)
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+
+      %{vault: tmp}
+    end
+
+    test "produces no finding in any section of the report", %{vault: vault} do
+      report = VaultCheck.run(vault, ["geheim"])
+
+      # Not counted, because it was not read: the inventory is the vault the
+      # server actually sees.
+      assert report.overview.domains == 1
+      assert report.overview.domain_names == ["domaina"]
+      assert report.overview.notes == 1
+      assert report.b3_chunk_diff.checked == 1
+
+      # And nothing else in the report knows the directory exists — not a
+      # path, not a heading, not a drift message. "Not filtered — not read"
+      # is a claim about the whole report, so it is asserted about the whole
+      # report rather than section by section.
+      refute inspect(report, limit: :infinity, printable_limit: :infinity) =~ "geheim"
+      refute inspect(report, limit: :infinity, printable_limit: :infinity) =~ "Geheime"
+    end
+
+    # The other half: the silence above is the exclusion's doing, not a
+    # fixture with nothing to say. The same vault read with no exclusion
+    # reports that note in every section.
+    test "is reported in every section when it is not excluded", %{vault: vault} do
+      report = VaultCheck.run(vault)
+      note = "geheim/Geheime Datei café.md"
+
+      assert report.overview.domains == 2
+      assert report.overview.notes == 2
+
+      assert Enum.any?(report.b1_frontmatter, &(&1.path == note))
+      assert Enum.any?(report.b2_filenames, &(Map.get(&1, :path) == note))
+      assert Enum.any?(report.b3_chunk_diff.changes, &(&1.path == note))
+      assert Enum.any?(report.b4_domain_drift, &(&1.message =~ "geheim"))
+      assert Enum.any?(report.b5_separators, &(&1.path == note))
+      assert Enum.any?(report.b6_consolidation, &(&1.path == note))
+    end
+  end
 end
