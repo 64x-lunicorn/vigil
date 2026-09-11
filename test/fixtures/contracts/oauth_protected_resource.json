@@ -1,0 +1,13 @@
+{
+  "authorization_servers": [
+    "https://vault.factory-lab.org"
+  ],
+  "bearer_methods_supported": [
+    "header"
+  ],
+  "resource": "https://vault.factory-lab.org/mcp",
+  "scopes_supported": [
+    "vault",
+    "vault:read"
+  ]
+}
