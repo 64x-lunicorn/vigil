@@ -417,66 +417,90 @@ defmodule Vigil.Store do
 
   # Where a plan becomes an effect. Every effect is Vigil.Commit's — the write,
   # the delete, the move and the push — and the order they run in is this
-  # module's, stated once for all three actions (docs/design.md, "The write
-  # path"): perform it, commit, reparse into the index, then push. What differs
-  # is what the object is — which is why each clause names its own
-  # push-failure message — and the plan's own report, merged into the success
-  # map.
-  defp execute(%Plan{action: {:write, path, content}} = plan, state) do
-    case Commit.write(state.git, state.vault_path, path, content, plan.message) do
+  # module's, stated here once for all three actions (docs/design.md, "The
+  # write path"): perform the action, commit, reparse into the index, then
+  # push.
+  #
+  # The order is all three actions'; what differs is answered per action, one
+  # small function per question: which effect to ask Vigil.Commit for, what the
+  # index does with what comes back, what the report says, and what object a
+  # push failure names. Including the part of a report that can only be
+  # *observed across* the effect — the question is taken before it and answered
+  # against the index it left behind, so that no action has to be a special
+  # case of the sequence.
+  defp execute(%Plan{action: action} = plan, state) do
+    report_after = observe(action, state)
+
+    case perform(action, plan.message, state) do
       {:ok, commit_meta} ->
-        state = put_reparsed(state, path, commit_meta, "write")
+        state = reindex(state, action, commit_meta)
+        report = Map.merge(reported(action), report_after.(state))
 
-        push(
-          state,
-          Map.merge(%{path: path, pushed: true}, plan.report),
-          "Change saved and committed locally, but push failed"
-        )
+        push(state, Map.merge(report, plan.report), push_failure(action))
 
       {:error, msg} ->
         {{:error, msg}, state}
     end
   end
 
-  defp execute(%Plan{action: {:delete, path}} = plan, state) do
-    case Commit.delete(state.git, state.vault_path, path, plan.message) do
-      :ok ->
-        state = put_index(state, Index.remove(state.index, path))
+  # The action, performed and committed — one call each, because that is the
+  # shape of Vigil.Commit: the file is written and added, or removed, or
+  # renamed, under the plan's message. The write and the move come back with
+  # the commit's metadata, which the reparse needs; a delete has no note left
+  # to put metadata on.
+  defp perform({:write, path, content}, message, state),
+    do: Commit.write(state.git, state.vault_path, path, content, message)
 
-        push(
-          state,
-          Map.merge(%{path: path, deleted: true, pushed: true}, plan.report),
-          "Deletion committed locally, but push failed"
-        )
+  defp perform({:delete, path}, message, state) do
+    with :ok <- Commit.delete(state.git, state.vault_path, path, message), do: {:ok, nil}
+  end
 
-      {:error, msg} ->
-        {{:error, msg}, state}
+  defp perform({:move, from, to}, message, state),
+    do: Commit.move(state.git, state.vault_path, from, to, message)
+
+  # The index after the effect: the note as it now stands on disk, at the path
+  # it now has — or gone.
+  defp reindex(state, {:write, path, _content}, commit_meta),
+    do: put_reparsed(state, path, commit_meta, "write")
+
+  defp reindex(state, {:delete, path}, _commit_meta),
+    do: put_index(state, Index.remove(state.index, path))
+
+  defp reindex(state, {:move, from, to}, commit_meta),
+    do: move_reparsed(state, from, to, commit_meta)
+
+  # What the action itself puts in the success map. The plan's own report — what
+  # only the *operation* knows about its result — is merged on top of it.
+  defp reported({:write, path, _content}), do: %{path: path, pushed: true}
+  defp reported({:delete, path}), do: %{path: path, deleted: true, pushed: true}
+  defp reported({:move, from, to}), do: %{from: from, to: to, pushed: true}
+
+  # The part of a report that is a diff across the effect rather than a fact
+  # either side of it could answer alone. The reading is taken here, before,
+  # and what comes back finishes the report against the state the effect left
+  # behind — two different states, so they are not given one name.
+  #
+  # A move is the one action with such a report — which references it broke. A
+  # source chunk that resolved to the note before and does not show up in the
+  # (rebuilt) incoming references of the target afterwards now points nowhere,
+  # for example because it named an explicit path instead of a basename.
+  defp observe({:move, from, to}, state) do
+    resolved_before = Index.backlinks(state.index, from)
+
+    fn after_effect ->
+      %{broken_backlinks: resolved_before -- Index.backlinks(after_effect.index, to)}
     end
   end
 
-  defp execute(%Plan{action: {:move, from, to}} = plan, state) do
-    # Backlink report — a diff of incoming references before and after the
-    # move rather than an ad-hoc scan. A source chunk that resolved before and
-    # no longer shows up in the (rebuilt) incoming references of the target now
-    # points nowhere — for example because it referenced an explicit path
-    # instead of a basename.
-    backlinks_before = Index.backlinks(state.index, from)
+  defp observe(_action, _state), do: fn _after_effect -> %{} end
 
-    case Commit.move(state.git, state.vault_path, from, to, plan.message) do
-      {:ok, commit_meta} ->
-        state = move_reparsed(state, from, to, commit_meta)
-        broken = backlinks_before -- Index.backlinks(state.index, to)
+  # What a push failure names as committed locally but not pushed: a change, a
+  # deletion, a move. The sentence git wrote comes after it (Vigil.Commit).
+  defp push_failure({:write, _path, _content}),
+    do: "Change saved and committed locally, but push failed"
 
-        push(
-          state,
-          Map.merge(%{from: from, to: to, pushed: true, broken_backlinks: broken}, plan.report),
-          "Move committed locally, but push failed"
-        )
-
-      {:error, msg} ->
-        {{:error, msg}, state}
-    end
-  end
+  defp push_failure({:delete, _path}), do: "Deletion committed locally, but push failed"
+  defp push_failure({:move, _from, _to}), do: "Move committed locally, but push failed"
 
   defp push(state, success, failure_prefix) do
     case Commit.push(state.git, state.vault_path, state.git_remote) do

@@ -9,9 +9,11 @@ defmodule Vigil.Vault.Edit do
   into lines and the join. How a file ends is `Vigil.Markdown`'s rule, stated
   once for every write path (docs/design.md, "How a file is written").
 
-  The target of a splice is an `%Vigil.Index.Chunk{}` — the value `Store`
-  already holds from the index. `Edit` depends on `Vigil.Index` for the
-  struct; `Index` does not depend back.
+  The target of a splice is a `%Vigil.Parser.Chunk{}` — the value `Store`
+  already holds from the index, produced by the parser and unchanged since.
+  `Edit` depends on `Vigil.Parser` for the struct and for the line-index
+  helpers it splices by; the line numbers are the parser's, so the module
+  that states what they mean is the module the splice asks.
 
   `Vigil.Vault.Policy` already guarantees a non-nil chunk
   with a non-nil heading before a splice is reached, but that guarantee lives
@@ -19,13 +21,13 @@ defmodule Vigil.Vault.Edit do
   down, so the precondition is checked here too — an error tuple, not a raise.
   """
 
-  alias Vigil.{Index, Markdown}
+  alias Vigil.Markdown
   alias Vigil.Parser.Chunk
 
-  @type target :: {:section, Index.Chunk.t()} | {:new_section, String.t()} | :end
+  @type target :: {:section, Chunk.t()} | {:new_section, String.t()} | :end
 
   @doc "The heading line stays; the body under it becomes `new_body`."
-  @spec replace_body(String.t(), Index.Chunk.t() | nil, String.t()) ::
+  @spec replace_body(String.t(), Chunk.t() | nil, String.t()) ::
           {:ok, String.t()} | {:error, String.t()}
   def replace_body(content, chunk, new_body) do
     with :ok <- validate_chunk(chunk) do
@@ -47,7 +49,7 @@ defmodule Vigil.Vault.Edit do
   (docs/design.md, "How a file is written"). Only one: a wider gap someone
   set on purpose survives, one line narrower.
   """
-  @spec delete_section(String.t(), Index.Chunk.t() | nil) ::
+  @spec delete_section(String.t(), Chunk.t() | nil) ::
           {:ok, String.t()} | {:error, String.t()}
   def delete_section(content, chunk) do
     with :ok <- validate_chunk(chunk) do
@@ -122,8 +124,8 @@ defmodule Vigil.Vault.Edit do
 
   defp validate_chunk(nil), do: {:error, "no such section"}
 
-  defp validate_chunk(%{heading: nil}),
+  defp validate_chunk(%Chunk{heading: nil}),
     do: {:error, "a section without a heading cannot be edited"}
 
-  defp validate_chunk(_chunk), do: :ok
+  defp validate_chunk(%Chunk{}), do: :ok
 end

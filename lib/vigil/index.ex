@@ -13,6 +13,11 @@ defmodule Vigil.Index do
   index (`Vigil.LinkIndex`) is rebuilt in full on every call, as it was in
   `Vigil.Store`'s ETS tables (`docs/design.md`, "The link index").
 
+  The chunks it holds are the parser's own `Vigil.Parser.Chunk` values, with
+  `domain` and `file_title` denormalised onto each one as it is indexed.
+  There is no index-side chunk struct: one chunk, one owner, so a field added
+  to it is added once.
+
   `search/2` decides filtering, matching, scoring, previews and `hub` in one
   place — a search result's shape is decided once, here, rather than split
   with the ranking half of the decision behind a seam of its own. `strength/1`
@@ -47,38 +52,6 @@ defmodule Vigil.Index do
       :updated_at,
       :chunk_ids
     ]
-  end
-
-  defmodule Chunk do
-    @moduledoc """
-    One chunk (a heading and its body, or a file's pre-heading text), plus
-    `domain` and `file_title` denormalised onto it for search filtering and
-    result titles.
-
-    `heading_line` and `body_end_line` follow the same 1-based, inclusive
-    convention documented on `Vigil.Parser.Chunk` — see there for what they
-    mean and for the 0-based index helpers.
-    """
-    defstruct [
-      :id,
-      :path,
-      :domain,
-      :heading,
-      :heading_path,
-      :heading_line,
-      :body_end_line,
-      :file_title,
-      :type,
-      :starts,
-      :ends,
-      :body,
-      :body_downcased,
-      :links,
-      :created_at,
-      :updated_at
-    ]
-
-    @type t :: %__MODULE__{}
   end
 
   defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}
@@ -818,27 +791,13 @@ defmodule Vigil.Index do
       chunk_ids: chunk_ids
     }
 
+    # The chunk the parser produced, with the note's domain and title
+    # denormalised onto it (`Vigil.Parser.Chunk`): search filters and titles
+    # per chunk, and a note lookup per chunk is what this pays to avoid
+    # (docs/design.md, "Chunking").
     chunks =
       Map.new(file.chunks, fn chunk ->
-        {chunk.id,
-         %Chunk{
-           id: chunk.id,
-           path: chunk.path,
-           domain: domain,
-           heading: chunk.heading,
-           heading_path: chunk.heading_path,
-           heading_line: chunk.heading_line,
-           body_end_line: chunk.body_end_line,
-           file_title: file.title,
-           type: chunk.type,
-           starts: chunk.starts,
-           ends: chunk.ends,
-           body: chunk.body,
-           body_downcased: chunk.body_downcased,
-           links: chunk.links,
-           created_at: chunk.created_at,
-           updated_at: chunk.updated_at
-         }}
+        {chunk.id, %{chunk | domain: domain, file_title: file.title}}
       end)
 
     {note, chunks}

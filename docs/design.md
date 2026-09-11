@@ -290,6 +290,15 @@ Collisions inside one file get a `-2`, `-3` suffix.
 (`File title › Fueling › Second Half`); the chunk id uses only the slug of the
 heading itself.
 
+**One chunk, one owner.** A chunk is a `Vigil.Parser.Chunk`, and there is no
+second struct restating its fields: the parser produces it, `Vigil.Index`
+holds it, `Vigil.Vault.Edit` splices a note's lines by it. A field added to a
+chunk is added in one place, and what the line numbers it carries mean is
+documented on that struct and nowhere else — this document included. What the index adds as it indexes a chunk is the note's `domain`
+and title, denormalised onto it: search filters by domain and titles every hit
+per chunk, and asking the note per chunk would put a lookup back onto the path
+this whole section exists to keep cheap.
+
 This is what keeps retrieval cheap: the assistant fetches one section, not a
 3000-word file.
 
@@ -571,9 +580,16 @@ a running GenServer. `Vigil.Store` is left with the sequence — ask the policy,
 read the note, build the plan, execute it — and the effect.
 
 Order matters: perform the action, commit, reparse into the index, then push.
-It is stated once, where a plan is executed. If the push fails the local commit
-stays and the tool returns an error naming what is committed locally but not
-pushed — the change, the deletion, or the move. Nothing is rolled back.
+It is stated once, where a plan is executed — one clause for all three actions,
+with what differs between them answered per action, one small function per
+question: which effect to ask `Vigil.Commit` for, what the index does with what
+comes back, what the success report says, and what object a push failure names. A report that can only be
+*observed across* the effect — the references a move broke, a diff of incoming
+links before against the rebuilt index after — is asked before the effect and
+answered against the index it left behind, so that no action has to be a
+special case of the sequence. If the push fails the local commit stays and the
+tool returns an error naming what is committed locally but not pushed — the
+change, the deletion, or the move. Nothing is rolled back.
 
 **Confirm is the last gate, not the first.** `delete_note` and `move_note`
 resolve their paths before asking for confirmation, so a path naming `skills/`,

@@ -10,19 +10,26 @@ defmodule Vigil.Parser do
     @moduledoc """
     One chunk: a heading and its body, or a file's pre-heading text.
 
+    The vault's one chunk value, and there is no second one: produced here,
+    held by `Vigil.Index`, spliced by `Vigil.Vault.Edit`. A field added to it
+    is added once.
+
     `heading_line` and `body_end_line` are 1-based, inclusive line numbers
     into the file's full line list (frontmatter included, so they are offset
-    by however many lines the frontmatter block took). `heading_line` is
-    `nil` for the file's pre-heading chunk, which has no heading of its own.
+    by however many lines the frontmatter block took) — the convention is
+    stated here and nowhere else. `heading_line` is `nil` for the file's
+    pre-heading chunk, which has no heading of its own. Callers that need a
+    0-based index into a line list (to slice or splice it) reach for
+    `heading_index/1`, `body_start_index/1` and `body_end_index/1` below
+    rather than re-deriving the offset themselves.
 
-    `Vigil.Index.Chunk` denormalises `domain` and `file_title` onto the same
-    two fields, under the same convention — it is not a second convention to
-    track.
-
-    Callers that need a 0-based index into a line list (to slice or splice
-    it) should reach for `heading_index/1`, `body_start_index/1` and
-    `body_end_index/1` below rather than re-deriving the offset themselves;
-    they accept any chunk-shaped map, `Vigil.Index.Chunk` included.
+    `domain` and `file_title` are the note's, not the chunk's, and
+    `Vigil.Index` denormalises them onto every chunk it indexes: search
+    filters by domain and titles each hit (docs/design.md, "Search"), and
+    asking the note per chunk would put a lookup on the path that exists to
+    be cheap (docs/design.md, "Chunking"). A chunk fresh out of the parser
+    carries `nil` in both — nothing in a parse knows them, and nothing in a
+    parse reads them.
     """
     defstruct [
       :id,
@@ -38,17 +45,36 @@ defmodule Vigil.Parser do
       :starts,
       :ends,
       :created_at,
-      :updated_at
+      :updated_at,
+      # The note's, denormalised onto the chunk by Vigil.Index — see above.
+      :domain,
+      :file_title
     ]
 
-    @doc "0-based index of the chunk's own heading line."
-    def heading_index(%{heading_line: line}) when is_integer(line), do: line - 1
+    @type t :: %__MODULE__{}
 
-    @doc "0-based index of the first line of the chunk's body — one past the heading."
-    def body_start_index(%{heading_line: line}) when is_integer(line), do: line
+    @doc """
+    0-based index of the chunk's own heading line.
+
+    For a chunk that has a heading: the file's pre-heading chunk has no
+    heading line and no heading index either, and raises rather than
+    answering with a number that would splice the wrong lines.
+    """
+    @spec heading_index(t()) :: non_neg_integer()
+    def heading_index(%__MODULE__{heading_line: line}) when is_integer(line), do: line - 1
+
+    @doc """
+    0-based index of the first line of the chunk's body — one past the heading.
+
+    Raises for the pre-heading chunk, for the same reason `heading_index/1`
+    does: there is no heading to be one past.
+    """
+    @spec body_start_index(t()) :: non_neg_integer()
+    def body_start_index(%__MODULE__{heading_line: line}) when is_integer(line), do: line
 
     @doc "0-based index of the line right after the chunk's body ends."
-    def body_end_index(%{body_end_line: line}) when is_integer(line), do: line
+    @spec body_end_index(t()) :: non_neg_integer()
+    def body_end_index(%__MODULE__{body_end_line: line}) when is_integer(line), do: line
   end
 
   defmodule File_ do

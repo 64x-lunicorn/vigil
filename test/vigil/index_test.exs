@@ -22,7 +22,7 @@ defmodule Vigil.IndexTest do
   # `Vigil.Search.run/3`.
   defp ranking_chunk(overrides) do
     Map.merge(
-      %Index.Chunk{
+      %Parser.Chunk{
         id: "x/a.md",
         path: "x/a.md",
         domain: "x",
@@ -557,14 +557,14 @@ defmodule Vigil.IndexTest do
 
   describe "find_chunk/2" do
     test "returns the Chunk struct at an id, or nil", %{index: index} do
-      assert %Index.Chunk{heading: "Fueling"} =
+      assert %Parser.Chunk{heading: "Fueling"} =
                Index.find_chunk(index, "bike/via-carolina.md#fueling")
 
       assert Index.find_chunk(index, "bike/via-carolina.md#nope") == nil
     end
 
     test "resolves leniently, as read/2 does, and carries the canonical path", %{index: index} do
-      assert %Index.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
+      assert %Parser.Chunk{id: "bike/via-carolina.md#fueling", path: "bike/via-carolina.md"} =
                Index.find_chunk(index, "bike/Via Carolina!!.md#fueling")
     end
 
@@ -656,10 +656,10 @@ defmodule Vigil.IndexTest do
 
   describe "find_section/3" do
     test "finds the chunk whose heading slugifies to the same slug", %{index: index} do
-      assert %Index.Chunk{heading: "Gear"} =
+      assert %Parser.Chunk{heading: "Gear"} =
                Index.find_section(index, "bike/via-carolina.md", "Gear")
 
-      assert %Index.Chunk{heading: "Gear"} =
+      assert %Parser.Chunk{heading: "Gear"} =
                Index.find_section(index, "bike/via-carolina.md", "gear!")
     end
 
@@ -693,6 +693,22 @@ defmodule Vigil.IndexTest do
                notes: length(files),
                chunks: files |> Enum.flat_map(& &1.chunks) |> length()
              }
+    end
+  end
+
+  # One chunk, one owner (docs/design.md, "Chunking"): what the index holds is
+  # the value the parser produced, with the two fields search needs on it.
+  # Nothing copies it field by field, which is what this asserts by comparing
+  # the whole struct — a field added to the parser's chunk arrives here with
+  # no second edit, and a copy that forgot one would fail.
+  describe "the chunk the index holds" do
+    test "is the parser's own chunk, plus the note's domain and title", %{index: index} do
+      parsed =
+        parse("bike/via-carolina.md").chunks
+        |> Enum.find(&(&1.heading == "Fueling"))
+
+      assert Index.find_chunk(index, parsed.id) ==
+               %{parsed | domain: "bike", file_title: "Via Carolina"}
     end
   end
 end

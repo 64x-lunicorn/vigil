@@ -2,6 +2,7 @@ defmodule Vigil.ParserTest do
   use ExUnit.Case, async: true
 
   alias Vigil.Parser
+  alias Vigil.Parser.Chunk
 
   @fixtures Path.expand("../fixtures/vault", __DIR__)
 
@@ -10,6 +11,14 @@ defmodule Vigil.ParserTest do
     {:ok, file} = Parser.parse(rel_path, content, %{})
     file
   end
+
+  # A chunk-shaped map: the same field names, and not a chunk. Built behind a
+  # function so the type checker does not read the deliberate mismatch below
+  # as unreachable code.
+  defp chunk_shaped_map, do: Map.new(heading_line: 6, body_end_line: 7)
+
+  # The note's pre-heading chunk: a body, and no heading line of its own.
+  defp pre_chunk, do: struct(Chunk, body_end_line: 3)
 
   test "slug/1 transliterates umlauts and sharp s" do
     assert Parser.slug("Heat Pump Größe") == "heat-pump-groesse"
@@ -396,6 +405,36 @@ defmodule Vigil.ParserTest do
     test "duplicate raw links (same target and fragment) are deduplicated" do
       body = "[[painpoints]] and again [[painpoints]] and [text](painpoints.md)"
       assert Parser.extract_links(body) == [%{raw: "painpoints", fragment: nil}]
+    end
+  end
+
+  # The line numbers a chunk carries are 1-based and inclusive; a caller that
+  # slices or splices a line list needs them 0-based. The helpers own that
+  # offset, and they own it for *this* struct: a chunk of another shape is a
+  # mistake the compiler cannot catch on field names alone, so it fails here
+  # rather than working by coincidence.
+  describe "Chunk line indices" do
+    test "0-based indices for the heading, the body's first line and the line after it" do
+      [chunk] = parse("bike/terra-speed.md").chunks |> Enum.take(1)
+
+      assert Chunk.heading_index(chunk) == chunk.heading_line - 1
+      assert Chunk.body_start_index(chunk) == chunk.heading_line
+      assert Chunk.body_end_index(chunk) == chunk.body_end_line
+    end
+
+    test "a chunk-shaped map is refused, however its fields are named" do
+      shaped = chunk_shaped_map()
+
+      assert_raise FunctionClauseError, fn -> Chunk.heading_index(shaped) end
+      assert_raise FunctionClauseError, fn -> Chunk.body_start_index(shaped) end
+      assert_raise FunctionClauseError, fn -> Chunk.body_end_index(shaped) end
+    end
+
+    test "a chunk with no heading line of its own has no heading index" do
+      pre = pre_chunk()
+
+      assert_raise FunctionClauseError, fn -> Chunk.heading_index(pre) end
+      assert Chunk.body_end_index(pre) == 3
     end
   end
 end
