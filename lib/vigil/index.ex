@@ -408,30 +408,48 @@ defmodule Vigil.Index do
   @doc """
   A fragment id returns the chunk (with backlinks when asked). A bare path
   returns the note's table of contents, its `links` out/in/broken counters
-  and, when asked, its backlinks. An id that misses exactly is retried once
-  through path normalization (the lenient lookup). A path that fails the
-  safety check answers "Invalid path"; anything else "Not found".
+  and, when asked, its backlinks. Which of the two an id names, and whether it
+  names anything at all, is `resolve/2`'s answer; what is left here is the
+  rendering of it — a path that fails the safety check answers "Invalid path",
+  anything else "Not found".
 
   `params` is the `read` tool's own parameter map: `:id` and `:backlinks`,
   under the names `Vigil.MCP.Tools`' table gives them.
   """
   def read(index, %{id: id, backlinks: backlinks?}) do
+    case resolve(index, id) do
+      {:ok, :chunk, chunk} -> {:ok, chunk_result(index, chunk, backlinks?)}
+      {:ok, :note, note} -> {:ok, note_result(index, note, backlinks?)}
+      :not_found -> {:error, "Not found: #{id}"}
+      :unsafe_path -> {:error, "Invalid path"}
+    end
+  end
+
+  # What an id resolves to, asked once for every reader that has to turn one
+  # into a record: an id with a fragment is a chunk, a bare path is a note, and
+  # both are answered leniently — an exact miss is retried once through path
+  # normalization, and the record that comes back carries the canonical stored
+  # id, which is what makes the leniency safe.
+  #
+  # Four verdicts, and the two failures are kept apart rather than collapsed
+  # into one: `:unsafe_path` is a path that must not be quoted back at the
+  # caller, `:not_found` is a miss that must. What a reader builds on a verdict
+  # stays its own — `read` renders the record, `links` walks out from it — but
+  # the walk that reaches the verdict is stated here alone. It was stated
+  # twice, identically, apart from what each built on success.
+  defp resolve(index, id) do
     path_part = id |> String.split("#", parts: 2) |> hd()
 
-    with :ok <- Slug.safe_path(path_part) do
-      if String.contains?(id, "#") do
-        case lookup_chunk(index, id, path_part) do
-          {:ok, chunk} -> {:ok, chunk_result(index, chunk, backlinks?)}
-          :not_found -> {:error, "Not found: #{id}"}
+    case Slug.safe_path(path_part) do
+      {:error, _} ->
+        :unsafe_path
+
+      :ok ->
+        if String.contains?(id, "#") do
+          with {:ok, chunk} <- lookup_chunk(index, id, path_part), do: {:ok, :chunk, chunk}
+        else
+          with {:ok, note} <- lookup_note(index, id), do: {:ok, :note, note}
         end
-      else
-        case lookup_note(index, id) do
-          {:ok, note} -> {:ok, note_result(index, note, backlinks?)}
-          :not_found -> {:error, "Not found: #{id}"}
-        end
-      end
-    else
-      {:error, _} -> {:error, "Invalid path"}
     end
   end
 
@@ -551,23 +569,18 @@ defmodule Vigil.Index do
   the place a deeper value is caught.
   """
   def links(index, %{id: id, direction: direction, depth: depth}) do
-    path_part = id |> String.split("#", parts: 2) |> hd()
+    case resolve(index, id) do
+      {:ok, :chunk, chunk} ->
+        {:ok, build_links_result(index, chunk.id, [chunk.id], direction, depth)}
 
-    with :ok <- Slug.safe_path(path_part) do
-      if String.contains?(id, "#") do
-        case lookup_chunk(index, id, path_part) do
-          {:ok, chunk} -> {:ok, build_links_result(index, chunk.id, [chunk.id], direction, depth)}
-          :not_found -> {:error, "Not found: #{id}"}
-        end
-      else
-        case lookup_note(index, id) do
-          {:ok, note} ->
-            {:ok, build_links_result(index, note.path, note.chunk_ids, direction, depth)}
+      {:ok, :note, note} ->
+        {:ok, build_links_result(index, note.path, note.chunk_ids, direction, depth)}
 
-          :not_found ->
-            {:error, "Not found: #{id}"}
-        end
-      end
+      :not_found ->
+        {:error, "Not found: #{id}"}
+
+      :unsafe_path ->
+        {:error, "Invalid path"}
     end
   end
 
