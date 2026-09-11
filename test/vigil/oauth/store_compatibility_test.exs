@@ -28,6 +28,11 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
   alias Vigil.OAuth.{Store, Token}
 
   @fixture Path.expand("../../fixtures/oauth_store_pre_seam", __DIR__)
+
+  # The audience the fixture's tokens were minted with, fixed the way the
+  # instant below is: what the `.dets` files on disk already say, not what
+  # this deployment configures. Reading the deployment's here would check a
+  # recording against something that was never used to make it.
   @resource "https://vault.factory-lab.org/mcp"
 
   # The instant the fixture was minted at, plus a day: inside the ten-year

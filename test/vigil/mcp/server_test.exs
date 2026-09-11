@@ -825,13 +825,16 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 401
   end
 
-  test "a refresh token presented as an access token is rejected", %{persistence: persistence} do
+  test "a refresh token presented as an access token is rejected", %{
+    persistence: persistence,
+    oauth: oauth
+  } do
     refresh = OAuth.Token.random()
 
     persistence.put_token.(refresh, %{
       type: :refresh,
       client_id: "abc",
-      aud: "https://vault.factory-lab.org/mcp",
+      aud: oauth.resource,
       expires_at: System.system_time(:second) + 3600
     })
 
@@ -839,11 +842,14 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 401
   end
 
-  test "an expired access token is rejected and removed", %{persistence: persistence} do
+  test "an expired access token is rejected and removed", %{
+    persistence: persistence,
+    oauth: oauth
+  } do
     expired = OAuth.Token.random()
 
     persistence.put_token.(expired, %{
-      aud: "https://vault.factory-lab.org/mcp",
+      aud: oauth.resource,
       expires_at: System.system_time(:second) - 1
     })
 

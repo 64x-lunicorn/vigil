@@ -6,7 +6,7 @@ defmodule Vigil.MCP.Tools do
   flag, the `call` the tool makes, whether that call resolves an instant
   (`now:`), and each parameter's name, type, and whether it is required. Three things are generated from it — `definitions/0`
   (the JSON schema handed to the client on `tools/list`), the argument
-  validation `dispatch/4` runs on `tools/call`, and the `Store.call/3` that
+  validation `dispatch/5` runs on `tools/call`, and the `Store.call/3` that
   follows it. A schema, its validation and the call they describe cannot drift
   out of agreement when they are the same table. Adding a tool is adding a
   row.
@@ -27,9 +27,9 @@ defmodule Vigil.MCP.Tools do
 
   `Vigil.Store` answers all but two of the operations. `skill_list` and
   `skill_read` are answered against `Vigil.Skills` in the caller's own
-  process — see `answer/3`.
+  process — see `answer/4`.
 
-  Which writer that is, is the caller's to say. `dispatch/4` takes it and
+  Which writer that is, is the caller's to say. `dispatch/5` takes it and
   defaults to `Vigil.Store.default_name/0`, the registration production runs
   under and hands in no name for. A caller that supplies one reaches a writer
   of its own — the same thing `Vigil.Store`'s own interface has always taken,

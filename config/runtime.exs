@@ -61,7 +61,7 @@ config :vigil,
 # decision when its subject is what that server was told rather than where it
 # read it from. Single fields are still written down elsewhere in the suite,
 # in the files whose subject makes the string opaque: an audience persistence
-# only stores and gives back, a password a flow only compares.
+# only stores and gives back, and the one a pre-seam fixture was minted with.
 #
 # `auth_password` doubles as the AP-4 SkillKey HMAC secret (`Vigil.SkillKey`),
 # which is why the suite cannot simply leave it unset.

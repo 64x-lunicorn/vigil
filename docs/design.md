@@ -436,7 +436,7 @@ one write including a complete index rebuild ~115 ms.
 `Vigil.MCP.Tools` declares each tool once — name, description, the `write`
 flag, the `Store` operation it calls, and its parameters' names, types and
 required-ness — in a single table. Three things are generated from it: the
-JSON schema published on `tools/list`, the argument validation `dispatch/4`
+JSON schema published on `tools/list`, the argument validation `dispatch/5`
 runs on `tools/call`, and the `Vigil.Store.call/3` that follows. They cannot
 drift out of agreement the way hand-written twins do, and adding a tool is
 adding a row.
@@ -664,7 +664,7 @@ which is what lets the vault-backed test files run in parallel, one writer per
 file, instead of the whole suite queueing behind a single registration.
 Principle 2 is about a vault having one writer, not about a node having one.
 
-**The tool layer takes the writer too.** `Vigil.MCP.Tools.dispatch/4` is
+**The tool layer takes the writer too.** `Vigil.MCP.Tools.dispatch/5` is
 handed the store it calls, and the two skill reads resolve the vault path from
 that same store rather than from the default one — a skill read answered
 against another writer's vault is a read of the wrong vault. It defaults to
