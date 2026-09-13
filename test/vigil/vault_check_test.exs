@@ -98,9 +98,9 @@ defmodule Vigil.VaultCheckTest do
     text
     """)
 
-    long_basis = String.duplicate("a", 65)
+    long_basename = String.duplicate("a", 65)
 
-    write.("domaina/#{long_basis}.md", """
+    write.("domaina/#{long_basename}.md", """
     ---
     type: reference
     ---
@@ -284,7 +284,7 @@ defmodule Vigil.VaultCheckTest do
              messages_for.("domaina/non-event-with-starts.md")
 
     assert ["ends is before starts"] = messages_for.("domaina/ends-before-starts.md")
-    assert ["frontmatter exceeds 1 KB"] = messages_for.("domaina/large-frontmatter.md")
+    assert ["frontmatter exceeds 1024 bytes"] = messages_for.("domaina/large-frontmatter.md")
   end
 
   test "B2: non-canonical filenames, long basenames, collision suspects", %{vault: vault} do
@@ -293,11 +293,12 @@ defmodule Vigil.VaultCheckTest do
     non_canonical = Enum.find(findings, &(&1[:path] == "domaina/File With Spaces.md"))
     assert non_canonical.normalized == "domaina/file-with-spaces.md"
 
-    long_basis_path = "domaina/#{String.duplicate("a", 65)}.md"
+    long_basename_path = "domaina/#{String.duplicate("a", 65)}.md"
 
     assert Enum.any?(
              findings,
-             &(Map.get(&1, :path) == long_basis_path and &1.message =~ "60 characters")
+             &(Map.get(&1, :path) == long_basename_path and
+                 &1.message == "basename longer than 60 characters")
            )
 
     collision =

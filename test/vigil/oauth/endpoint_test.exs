@@ -181,6 +181,21 @@ defmodule Vigil.OAuth.EndpointTest do
     assert status == 201
   end
 
+  test "the consent page names a client registered without a name in English", %{
+    endpoint: endpoint
+  } do
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+    conn = post_json(endpoint, "/oauth/register", %{redirect_uris: [redirect_uri]})
+    %{"client_id" => client_id} = Jason.decode!(conn.resp_body)
+    {_verifier, challenge} = pkce_pair()
+
+    page =
+      get_query(endpoint, "/oauth/authorize", authorize_query(client_id, redirect_uri, challenge))
+
+    assert page.status == 200
+    assert page.resp_body =~ "Unnamed client"
+  end
+
   ## Redirect-URI matching
 
   test "loopback redirect matching ignores the port but not the path", %{endpoint: endpoint} do

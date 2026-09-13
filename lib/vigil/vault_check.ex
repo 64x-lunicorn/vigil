@@ -19,7 +19,7 @@ defmodule Vigil.VaultCheck do
   alias Vigil.Parser.Chunk
   alias Vigil.Vault.{Domains, Frontmatter, Layout, Rules}
 
-  @max_basisname_laenge 60
+  @max_basename_length 60
   @max_frontmatter_bytes 1024
 
   def run(vault_path, exclude \\ []) do
@@ -100,7 +100,7 @@ defmodule Vigil.VaultCheck do
       {:ok, yaml_text} ->
         size_finding =
           if byte_size(yaml_text) > @max_frontmatter_bytes do
-            [%{path: path, message: "frontmatter exceeds 1 KB"}]
+            [%{path: path, message: "frontmatter exceeds #{@max_frontmatter_bytes} bytes"}]
           else
             []
           end
@@ -181,9 +181,11 @@ defmodule Vigil.VaultCheck do
     long_basenames =
       files
       |> Enum.filter(fn path ->
-        String.length(Path.basename(path, ".md")) > @max_basisname_laenge
+        String.length(Path.basename(path, ".md")) > @max_basename_length
       end)
-      |> Enum.map(fn path -> %{path: path, message: "basename longer than 60 characters"} end)
+      |> Enum.map(fn path ->
+        %{path: path, message: "basename longer than #{@max_basename_length} characters"}
+      end)
 
     collisions =
       normalized_list
