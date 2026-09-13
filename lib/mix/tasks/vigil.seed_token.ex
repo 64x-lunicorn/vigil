@@ -33,8 +33,12 @@ defmodule Mix.Tasks.Vigil.SeedToken do
     scope = Keyword.get(opts, :scope, "vault")
     ttl_days = Keyword.get(opts, :ttl_days, 3650)
 
-    unless scope in ["vault", "vault:read"] do
-      Mix.raise("Invalid --scope: #{scope} (allowed: vault, vault:read)")
+    # The scopes are `Vigil.OAuth`'s, the same list its metadata publishes: a
+    # scope the flow issues is one this task can seed, and no other.
+    allowed = Vigil.OAuth.scopes()
+
+    unless scope in allowed do
+      Mix.raise("Invalid --scope: #{scope} (allowed: #{Enum.join(allowed, ", ")})")
     end
 
     {:ok, pid} = Vigil.OAuth.Store.start_link(state_dir: state_dir)

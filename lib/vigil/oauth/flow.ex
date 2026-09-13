@@ -46,7 +46,7 @@ defmodule Vigil.OAuth.Flow do
       client =
         Client.register(
           persistence,
-          Map.get(json, "client_name", "Unbenannter Client"),
+          Map.get(json, "client_name", "Unnamed client"),
           redirect_uris,
           now
         )

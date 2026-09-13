@@ -86,6 +86,16 @@ defmodule Vigil.OAuth.FlowTest do
                Flow.register(persistence, %{"redirect_uris" => ["http://evil.example/cb"]})
     end
 
+    # The name reaches the consent page as the thing asking for vault access,
+    # and the server's own output is English whatever language the notes are.
+    test "a registration without a client_name is named in English", %{persistence: persistence} do
+      assert {:ok, %{client_id: id, client_name: "Unnamed client"}} =
+               Flow.register(persistence, %{"redirect_uris" => ["https://app.example/cb"]})
+
+      assert {:ok, %{client: %{name: "Unnamed client"}}} =
+               Flow.authorize_request(server(persistence), authorize_params(id))
+    end
+
     test "no redirect_uri at all is refused", %{persistence: persistence} do
       assert {:error, "invalid_redirect_uri"} = Flow.register(persistence, %{})
     end
