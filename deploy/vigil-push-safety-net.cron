@@ -1,7 +1,7 @@
 # Safety net. vigil already pushes on every write (Vigil.Store pushes after the
-# commit and reports an error to the client when the push fails). This cron job only covers the
-# window where a push failed at write time — say GitHub was briefly
-# unreachable — and the commit has been sitting locally ever since.
+# commit and reports an error to the client when the push fails). This cron
+# job only covers the window where a push failed at write time — say GitHub
+# was briefly unreachable — and the commit has been sitting locally ever since.
 #
 # Install into the vigil user's crontab (crontab -u vigil -e), or as a file at
 # /etc/cron.d/vigil-push-safety-net (then with a user field:

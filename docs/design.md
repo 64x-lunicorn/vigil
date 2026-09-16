@@ -160,7 +160,9 @@ Optionally a domain carries naming rules — see [naming](#path-normalization-an
 
 A comma-separated list of directory names that are **not parsed**. Not
 filtered — not read. No note in the index, no chunk, no backlink, nothing a
-bug could accidentally return.
+bug could accidentally return. An excluded domain is not walked at all. An
+excluded directory below a domain is walked once for its file names, which
+`Vigil.Vault.Layout` drops before any file is opened.
 
 **A name is excluded at any depth.** A path is excluded when any of its
 segments is, so `VIGIL_EXCLUDE=secret` hides `projects/secret/` exactly as it
