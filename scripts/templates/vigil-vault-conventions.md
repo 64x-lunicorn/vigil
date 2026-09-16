@@ -1,5 +1,5 @@
 ---
-name: vault-conventions
+name: vigil-vault-conventions
 description: Required reading before any vigil write operation. Supplies the SkillKey and defines naming, frontmatter, and consolidation rules.
 ---
 
@@ -11,7 +11,7 @@ The key at the top of this content is required as the `skill_key` parameter by:
 
 `create`, `append`, `replace_section`, `rewrite_note`, `delete_section`, `delete_note`, `move_note`, `update_frontmatter`, `skill_write`
 
-It rotates hourly and stays valid for the current and previous slot. **Do not track elapsed time** — if a write fails with a SkillKey error, call `skill_read` on `vault-conventions` again and retry the write with the new key.
+It rotates once per window, and the line with the key says how long this deployment's window is. The key from the previous window is still accepted, so a key stays usable for at least one full window after you read it. **Do not track elapsed time** — if a write fails with a SkillKey error, call `skill_read` on `vigil-vault-conventions` again and retry the write with the new key.
 
 ## Paths and names
 

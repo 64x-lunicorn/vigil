@@ -1258,6 +1258,12 @@ The SkillKey creates a bootstrap problem: `skill_write` needs a key, but a
 fresh vault has no conventions skill to read one from. Resolved by having
 `skill_read` return the current key in its *error* response too — the key is a
 pure HMAC over secret and time and does not depend on any skill existing.
+That is a bootstrap affordance, not the way back in after a rotation: the
+conventions skill names itself `vigil-vault-conventions`, the name `init.sh`
+installs it under, so the retry it instructs reads a skill that exists. Both
+responses say how long the key lives from the key bundle they were handed —
+the deployment's window, and that the previous window's key is still accepted
+— rather than a fixed hour, which is true only of the default.
 
 `VIGIL_AUTH_PASSWORD` doubles as both the password the resource owner types on
 the OAuth consent page (layer 2) and the HMAC secret behind the SkillKey

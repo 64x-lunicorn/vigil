@@ -64,7 +64,7 @@ defmodule Vigil.Skills do
       case File.read(abs_path) do
         {:ok, content} ->
           token = SkillKey.current(key)
-          prefixed = "SkillKey: #{token} (valid until the next full hour)\n\n" <> content
+          prefixed = "SkillKey: #{token} #{validity(key)}\n\n" <> content
           {:ok, %{name: normalized, content: prefixed}}
 
         {:error, _} ->
@@ -77,11 +77,18 @@ defmodule Vigil.Skills do
           token = SkillKey.current(key)
 
           {:error,
-           "Skill not found: #{normalized}. Available: #{names}. SkillKey: #{token} (valid until the next full hour)."}
+           "Skill not found: #{normalized}. Available: #{names}. SkillKey: #{token} #{validity(key)}."}
       end
     else
       {:error, "Invalid path"}
     end
+  end
+
+  # What the gate will accept, said from the key it checks against: the window
+  # is the deployment's, and `Vigil.SkillKey.valid?/3` takes the previous
+  # window's token too, so no fixed hour is true of every deployment.
+  defp validity(key) do
+    "(rotates every #{key.window} seconds; the previous window's key is still accepted)"
   end
 
   defp normalize_skill_name(name) do
