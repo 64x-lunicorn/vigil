@@ -271,7 +271,7 @@
     "name": "delete_section"
   },
   {
-    "description": "Sets type/starts/ends in the frontmatter of an existing note; the body is untouched.",
+    "description": "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
     "inputSchema": {
       "properties": {
         "ends": {

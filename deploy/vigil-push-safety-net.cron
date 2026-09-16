@@ -1,14 +1,15 @@
-# Safety net. vigil already pushes on every write (write_and_commit reports an
-# error to the client when the push fails). This cron job only covers the
-# window where a push failed at write time — say GitHub was briefly
-# unreachable — and the commit has been sitting locally ever since.
+# Safety net. vigil already pushes on every write (Vigil.Store pushes after the
+# commit and reports an error to the client when the push fails). This cron
+# job only covers the window where a push failed at write time — say GitHub
+# was briefly unreachable — and the commit has been sitting locally ever since.
 #
 # Install into the vigil user's crontab (crontab -u vigil -e), or as a file at
 # /etc/cron.d/vigil-push-safety-net (then with a user field:
 # "*/15 * * * * vigil cd ...").
 #
-# Pushes only when commits are actually pending, takes a lock against a
-# concurrent write_and_commit, and sends errors to syslog rather than nowhere.
+# Pushes only when commits are actually pending, takes a lock so two runs of
+# this job never overlap, and sends errors to syslog rather than nowhere. The
+# lock is this job's alone: vigil's own push does not take it.
 
 */15 * * * * cd /var/lib/vigil/vault && \
   git rev-list --count github/main..main | grep -qv '^0$' && \

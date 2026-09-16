@@ -32,6 +32,12 @@ defmodule Vigil.Vault.LayoutTest do
       assert Layout.over_vault(root).project_dirs == ["vigil"]
     end
 
+    test "excluded project directories are dropped", %{root: root} do
+      File.mkdir_p!(Path.join([root, "projects", "geheim"]))
+
+      assert Layout.over_vault(root, ["geheim"]).project_dirs == ["vigil"]
+    end
+
     test "a root with no directories has no domains" do
       root =
         Path.join(System.tmp_dir!(), "vigil_layout_empty_#{System.unique_integer([:positive])}")
@@ -63,6 +69,17 @@ defmodule Vigil.Vault.LayoutTest do
       paths = root |> Layout.over_vault(["work"]) |> Layout.note_paths()
       refute "work/secret.md" in paths
     end
+
+    # VIGIL_EXCLUDE names directories, not domains: a project directory
+    # carrying an excluded name is as absent as a domain carrying one.
+    test "an excluded project directory contributes no files", %{root: root} do
+      File.mkdir_p!(Path.join([root, "projects", "geheim"]))
+      File.write!(Path.join([root, "projects", "geheim", "plan.md"]), "# P")
+
+      paths = root |> Layout.over_vault(["geheim"]) |> Layout.note_paths()
+
+      assert paths == ["bike/terra.md", "projects/vigil/vigil.md", "work/secret.md"]
+    end
   end
 
   # The point of the value: one statement, two readers. What the write gate
@@ -79,6 +96,8 @@ defmodule Vigil.Vault.LayoutTest do
     {"projects/loose.md", :not_a_note, "and a note directly in projects/ is not one", true},
     {"bike/deep/terra.md", :not_a_note, "no other domain nests", true},
     {"work/secret.md", :excluded, "VIGIL_EXCLUDE is the hard boundary", true},
+    {"projects/geheim/plan.md", :excluded, "at any depth, not just at the top", true},
+    {"projects/verborgen/x.md", :excluded, "whether or not the directory is there", false},
     {"skills/tdd.md", :skill, "skills are never notes", true},
     {"_internal/notes.md", :not_a_note, "underscore directories are not domains", true},
     {".obsidian/notes.md", :not_a_note, "and neither are dot directories", true},
@@ -94,7 +113,7 @@ defmodule Vigil.Vault.LayoutTest do
       File.write!(abs, "---\ntype: reference\n---\n# T\n\nbody\n")
     end
 
-    layout = Layout.over_vault(root, ["work"])
+    layout = Layout.over_vault(root, ["work", "geheim", "verborgen"])
     discovered = Layout.note_paths(layout)
 
     for {path, classification, why, created?} <- @table do

@@ -54,6 +54,20 @@ defmodule Vigil.Vault.PolicyTest do
       assert {:error, "Invalid path"} = create("work/x.md")
     end
 
+    # VIGIL_EXCLUDE names directories at any depth. A missing project directory
+    # is otherwise named back, or created — either would say whether an
+    # excluded one is there.
+    test "an excluded project directory is not writable, whether or not it is there" do
+      f = [layout: AbsentFacts.layout(domains: ["projects"], exclude: ["geheim"])]
+
+      for project_dirs <- [["geheim"], []], create_dirs <- [false, true] do
+        facts = [layout: %{f[:layout] | project_dirs: project_dirs}]
+
+        assert {:error, "Invalid path"} =
+                 create("projects/geheim/x.md", create_dirs: create_dirs, facts: facts)
+      end
+    end
+
     test "an unknown domain names the ones that exist" do
       assert {:error, msg} = create("nosuch/x.md")
       assert msg =~ "Available domains: bike, journal, projects, training"

@@ -160,7 +160,20 @@ Optionally a domain carries naming rules — see [naming](#path-normalization-an
 
 A comma-separated list of directory names that are **not parsed**. Not
 filtered — not read. No note in the index, no chunk, no backlink, nothing a
-bug could accidentally return.
+bug could accidentally return. An excluded domain is not walked at all. An
+excluded directory below a domain is walked once for its file names, which
+`Vigil.Vault.Layout` drops before any file is opened.
+
+**A name is excluded at any depth.** A path is excluded when any of its
+segments is, so `VIGIL_EXCLUDE=secret` hides `projects/secret/` exactly as it
+hides `secret/`. It used to compare a path's first segment only, which covered
+the domains and missed the one level below them: a project directory carrying
+an excluded name was parsed, indexed, searchable and writable, and nothing told
+whoever had set the variable. The rule is stated once, in `Vigil.Vault.Layout`,
+so the load and the write gate cannot disagree about it. It is answered before
+the path's shape and before whether the directory exists, so every write path
+refuses an excluded path as "Invalid path" — the words an excluded domain gets —
+whether or not it is there, and `create_dirs` does not create one.
 
 The difference from a flag inside `_domains.yml` is essential: a process cannot
 change its own environment variable, but it can change a file in the vault.
@@ -253,6 +266,19 @@ report until a human fixes the file. Vigil never writes such a note: the write
 gate refuses it on the same verdict, so it can only arrive hand-written, and
 the doctor names it.
 
+**A note without frontmatter is given one when asked.** It is an expected
+finding of adopting an existing vault, and `update_frontmatter` writes the
+block such a note lacks in front of it, leaving every byte of what was there
+as the body — the one exception being how the file ends, which
+`Vigil.Markdown` decides for every write ("How a file is written"). That is
+not the server repairing on its own initiative (principle 5): the line runs
+between what vigil does unprompted, which is report, and what a tool call
+explicitly asks for, which it does. `rewrite_note` still refuses such a note,
+because it preserves the block it finds and has no type of its own to write,
+and its refusal names `update_frontmatter`. A block that opens and never closes
+is refused by both: where it ends, and so where the body starts, is not
+something the file says, and neither write guesses.
+
 ### Derived metadata
 
 | Metadatum | Source |
@@ -292,7 +318,14 @@ and the first `##` (or text in a file with no headings at all) becomes a chunk
 whose id is the path with no fragment.
 
 Chunk id: `path#heading-slug`, for example `bike/via-carolina.md#fueling`.
-Collisions inside one file get a `-2`, `-3` suffix.
+
+**A chunk id is unique within its note.** A heading takes its slug, unless a
+heading above it in the same note already took that id; then it takes the
+first of `slug-2`, `slug-3`, … that no heading above it took. Document order
+decides, so the heading that arrives at an id first keeps it: `## Setup`,
+`## Setup`, `## Setup 2` are `setup`, `setup-2` and `setup-2-2`. The index
+holds chunks by id, and two chunks under one id are one chunk to every reader —
+the other is on disk and in no search, no `read` and no link.
 
 `heading_path` carries the chain of heading texts for display
 (`File title › Fueling › Second Half`); the chunk id uses only the slug of the
@@ -317,12 +350,13 @@ This is what keeps retrieval cheap: the assistant fetches one section, not a
 All of the following is decided in `Vigil.Index.search/2` — one module, one
 result shape.
 
-- Literal matching over chunk bodies and headings via `:binary.match/2`
-  (Boyer-Moore). No regex.
+- Literal matching, no regex: `String.contains?/2` over the note title and
+  each heading, `:binary.matches/2` counting occurrences in the chunk body.
 - **The query is a phrase**, exactly as entered. No token split, no AND/OR.
   `"terra speed"` matches only contiguous `terra speed`.
-- Case-insensitive: every chunk carries a downcased copy alongside the
-  original. Matching runs against the copy, previews come from the original.
+- Case-insensitive: the query is downcased, every chunk carries a downcased
+  copy of its body alongside the original, and the title and headings are
+  downcased as they are compared. Previews come from the original.
 - Filters apply *before* matching: `domain`, `type`.
 - Ranking is a simple additive score, deliberately not BM25 and deliberately
   not machine-learned: title hit +10, heading hit +5, body occurrences +1 each
@@ -473,8 +507,9 @@ it, so the last step of adding a tool is exercising it there.
 
 Every declared parameter is validated against the schema the server itself
 publishes. A violation — a wrong type, an off-enum value, an out-of-range
-integer, a missing or empty required parameter — is a tool error naming what
-was expected, not a substituted default. A caller who claims `type: "bogus"`
+integer, a missing or empty required parameter, `arguments` that are not an
+object at all — is a tool error naming what was expected, not a substituted
+default. A caller who claims `type: "bogus"`
 gets told so, rather than receiving unfiltered results it believes were
 filtered. Undeclared
 parameters are ignored: the schemas do not set `additionalProperties: false`,
@@ -1098,11 +1133,16 @@ facts underneath do not — they were restated in both and drifted, and they liv
 in `Vigil.Vault.Rules` now.
 
 **A duplicate heading is a duplicate *slug*.** Two headings collide when the
-slug of their heading text collides *within one note*, because that is what
-`Vigil.Parser`'s uniquifier keys its collision counter on: `## A / ### B` and
-`## C / ### B` really do produce `b` and `b-2`. Grouping by the heading chain
-instead under-reports exactly the notes whose chunk ids are unstable, which is
-the breaking change this project fears most (see "Known trade-offs").
+slug of their heading text collides *within one note*, because that is where
+`Vigil.Parser` starts a heading's chunk id: `## A / ### B` and `## C / ### B`
+really do produce `b` and `b-2`. Grouping by the heading chain instead
+under-reports exactly the notes whose chunk ids are unstable, which is the
+breaking change this project fears most (see "Known trade-offs"). A heading
+whose own slug collides with nothing can still be pushed onto a suffix —
+`## Setup 2` below two `## Setup`s — and its note is reported for the pair
+that pushed it. Both readers see that pair because a chunk id is unique within
+its note (see "Chunking"): every heading a parse finds is a chunk the index
+holds.
 
 **An overlong note is 30 headings or 2000 words.** Two axes rather than a chunk
 count, because the pair says *why* the note is too long — many sections, or
@@ -1221,6 +1261,12 @@ The SkillKey creates a bootstrap problem: `skill_write` needs a key, but a
 fresh vault has no conventions skill to read one from. Resolved by having
 `skill_read` return the current key in its *error* response too — the key is a
 pure HMAC over secret and time and does not depend on any skill existing.
+That is a bootstrap affordance, not the way back in after a rotation: the
+conventions skill names itself `vigil-vault-conventions`, the name `init.sh`
+installs it under, so the retry it instructs reads a skill that exists. Both
+responses say how long the key lives from the key bundle they were handed —
+the deployment's window, and that the previous window's key is still accepted
+— rather than a fixed hour, which is true only of the default.
 
 `VIGIL_AUTH_PASSWORD` doubles as both the password the resource owner types on
 the OAuth consent page (layer 2) and the HMAC secret behind the SkillKey

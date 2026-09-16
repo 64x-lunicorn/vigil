@@ -713,6 +713,38 @@ defmodule Vigil.OAuth.EndpointTest do
     assert register_as(endpoint, body, {203, 0, 113, 7}, "198.51.100.20").status == 201
   end
 
+  ## A body longer than one read
+
+  # One byte past what `Plug.Conn.read_body/1` reads in one go, so the body
+  # arrives as `{:more, partial, conn}` rather than whole. Each endpoint refuses
+  # it in the shape of its surface, the way it refuses every other bad request.
+  defp over_length_form(endpoint, path) do
+    conn(:post, path, String.duplicate("a", 8_000_001))
+    |> put_req_header("content-type", "application/x-www-form-urlencoded")
+    |> call(endpoint)
+  end
+
+  test "the token endpoint answers an over-length body with invalid_request", %{
+    endpoint: endpoint
+  } do
+    conn = over_length_form(endpoint, "/oauth/token")
+
+    assert conn.status == 400
+    assert Jason.decode!(conn.resp_body) == %{"error" => "invalid_request"}
+    assert get_resp_header(conn, "cache-control") == ["no-store"]
+  end
+
+  test "the consent form answers an over-length body with the HTML error page", %{
+    endpoint: endpoint
+  } do
+    conn = over_length_form(endpoint, "/oauth/authorize")
+
+    assert conn.status == 400
+    assert get_resp_header(conn, "content-type") == ["text/html; charset=utf-8"]
+    assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+    assert conn.resp_body =~ "Invalid request."
+  end
+
   defp register_as(endpoint, body, peer, forwarded) do
     conn(:post, "/oauth/register", Jason.encode!(body))
     |> put_req_header("content-type", "application/json")

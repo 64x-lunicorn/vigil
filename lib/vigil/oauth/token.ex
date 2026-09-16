@@ -15,7 +15,7 @@ defmodule Vigil.OAuth.Token do
   So: everything that writes a record does it here — minting the pair a
   redemption produces, seeding one out of band, marking one spent — and
   everything that asks what a record *is* does that here too: `classify/1`,
-  `validate_access/3`, `fetch_refresh/1`, `expired?/2`, `scope_of/1`,
+  `validate_access/4`, `fetch_refresh/2`, `expired?/2`, `scope_of/1`,
   `grant_of/1`, rather than reaching for a field.
 
   Verifying an access token is an OAuth 2.1 decision like any other, which is

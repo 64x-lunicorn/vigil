@@ -169,7 +169,10 @@ defmodule Vigil.OAuth.CimdTest do
           {"172.16.0.0/12 (private)", {172, 16, 0, 1}},
           {"192.168.0.0/16 (private)", {192, 168, 1, 1}},
           {"198.18.0.0/15 (benchmarking)", {198, 18, 0, 1}},
-          {"198.18.0.0/15 upper half", {198, 19, 255, 254}}
+          {"198.18.0.0/15 upper half", {198, 19, 255, 254}},
+          {"224.0.0.0/4 (multicast)", {224, 0, 0, 1}},
+          {"224.0.0.0/4 upper edge", {239, 255, 255, 254}},
+          {"255.255.255.255 (broadcast)", {255, 255, 255, 255}}
         ] do
       assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
     end
@@ -181,7 +184,8 @@ defmodule Vigil.OAuth.CimdTest do
           {"100.63.x is below the CGNAT range", {100, 63, 255, 254}},
           {"100.128.x is above the CGNAT range", {100, 128, 0, 1}},
           {"198.17.x is below the benchmarking range", {198, 17, 255, 254}},
-          {"198.20.x is above the benchmarking range", {198, 20, 0, 1}}
+          {"198.20.x is above the benchmarking range", {198, 20, 0, 1}},
+          {"223.x is below the multicast range", {223, 255, 255, 254}}
         ] do
       assert {:ok, _doc} = fetch_resolving_to(persistence, ip), "#{label} was refused"
     end
@@ -215,7 +219,9 @@ defmodule Vigil.OAuth.CimdTest do
           {"::ffff:172.16.0.1", {0, 0, 0, 0, 0, 0xFFFF, 0xAC10, 0x0001}},
           {"::ffff:100.64.0.1", {0, 0, 0, 0, 0, 0xFFFF, 0x6440, 0x0001}},
           {"::ffff:0.0.0.0", {0, 0, 0, 0, 0, 0xFFFF, 0x0000, 0x0000}},
-          {"::ffff:198.18.0.1", {0, 0, 0, 0, 0, 0xFFFF, 0xC612, 0x0001}}
+          {"::ffff:198.18.0.1", {0, 0, 0, 0, 0, 0xFFFF, 0xC612, 0x0001}},
+          {"::ffff:224.0.0.1", {0, 0, 0, 0, 0, 0xFFFF, 0xE000, 0x0001}},
+          {"::ffff:255.255.255.255", {0, 0, 0, 0, 0, 0xFFFF, 0xFFFF, 0xFFFF}}
         ] do
       assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
     end
@@ -224,6 +230,31 @@ defmodule Vigil.OAuth.CimdTest do
   test "an IPv4-mapped public address stays reachable", %{persistence: persistence} do
     # 93.184.216.34 mapped: the unfolding must not refuse everything it touches.
     assert {:ok, _doc} = fetch_resolving_to(persistence, {0, 0, 0, 0, 0, 0xFFFF, 0x5DB8, 0xD822})
+  end
+
+  test "an IPv4-compatible IPv6 address is unfolded before the ranges are checked", %{
+    persistence: persistence
+  } do
+    # ::127.0.0.1 is the deprecated IPv4-compatible form: no 0xffff in the sixth
+    # group, so the mapped clause does not catch it, and it is neither :: nor ::1.
+    for {label, ip} <- [
+          {"::127.0.0.1", {0, 0, 0, 0, 0, 0, 0x7F00, 0x0001}},
+          {"::10.0.0.1", {0, 0, 0, 0, 0, 0, 0x0A00, 0x0001}},
+          {"::169.254.169.254", {0, 0, 0, 0, 0, 0, 0xA9FE, 0xA9FE}},
+          {"::192.168.1.1", {0, 0, 0, 0, 0, 0, 0xC0A8, 0x0101}},
+          {"::172.16.0.1", {0, 0, 0, 0, 0, 0, 0xAC10, 0x0001}},
+          {"::100.64.0.1", {0, 0, 0, 0, 0, 0, 0x6440, 0x0001}},
+          {"::198.18.0.1", {0, 0, 0, 0, 0, 0, 0xC612, 0x0001}},
+          {"::224.0.0.1", {0, 0, 0, 0, 0, 0, 0xE000, 0x0001}},
+          {"::255.255.255.255", {0, 0, 0, 0, 0, 0, 0xFFFF, 0xFFFF}}
+        ] do
+      assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
+    end
+  end
+
+  test "an IPv4-compatible public address stays reachable", %{persistence: persistence} do
+    # 93.184.216.34 in the compatible form, for the same reason as the mapped one.
+    assert {:ok, _doc} = fetch_resolving_to(persistence, {0, 0, 0, 0, 0, 0, 0x5DB8, 0xD822})
   end
 
   ## The response

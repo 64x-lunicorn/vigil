@@ -170,6 +170,11 @@ defmodule Vigil.MCP.Server do
           error: %{code: -32700, message: "Parse error"}
         })
 
+      # A body longer than one read is refused as a body that could not be read
+      # is: nothing short of all of it is a JSON-RPC message to parse.
+      {:more, _partial, conn} ->
+        send_resp(conn, 400, "")
+
       {:error, _} ->
         send_resp(conn, 400, "")
     end

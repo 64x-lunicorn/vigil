@@ -258,6 +258,12 @@ is a tool error naming the range, not a silently clamped result: a caller told
 it got 25 hits of the 100 it asked for could not tell that from having asked
 for 25.
 
+`update_frontmatter` also gives a note without frontmatter the block it lacks,
+leaving everything already in the file as its body. `rewrite_note` preserves
+the block it finds, so it refuses a note that has none and points at
+`update_frontmatter`. Both refuse a block that opens and never closes; that one
+needs a human.
+
 ### Paths are normalized, not rejected
 
 `create` and `move_note` canonicalize the path before anything else: lowercase,
@@ -407,7 +413,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_PORT` | `4000` | HTTP port |
 | `VIGIL_GIT_REMOTE` | `origin` | remote used for pull **and** push; must match `git branch -vv` |
 | `VIGIL_TZ` | `Europe/Berlin` | timezone for `current`, envelopes, relative times |
-| `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed |
+| `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
 | `VIGIL_ISSUER` | `http://localhost:4000` | OAuth issuer |
 | `VIGIL_RESOURCE` | `http://localhost:4000/mcp` | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |
@@ -507,10 +513,11 @@ and `commit.gpgsign false`, upstream `main` → `github/main`, missing
 directory permissions.
 
 **Reported only** (never repaired automatically, never blocking): frontmatter
-problems, non-canonical filenames with a suggested `move_note`, the chunk-id
-migration risk, domains that exist only in the config, unpushed commits,
-headings that have lost the blank line above them, notes past the
-consolidation threshold, an extra remote with unclear purpose.
+problems (a note without any can be given a block by `update_frontmatter`),
+non-canonical filenames with a suggested `move_note`, the chunk-id migration
+risk, domains that exist only in the config, unpushed commits, headings that
+have lost the blank line above them, notes past the consolidation threshold, an
+extra remote with unclear purpose.
 
 The same check runs standalone and strictly read-only:
 
@@ -562,13 +569,13 @@ against a throwaway fixture vault without needing root or a real
 ```
 lib/vigil/
 ├── application.ex       # supervisor
+├── settings.ex          # what the deployment says about itself, resolved once
 ├── store.ex             # GenServer — loading, the write sequence, the mailbox
-├── index.ex             # notes, chunks and links as one plain value
+├── index.ex             # notes, chunks and links as one plain value, and the search over it
 ├── parser.ex            # file → frontmatter + chunks + raw links
 ├── link_index.ex        # resolves [[…]] and path links into an out/in index
 ├── markdown.ex          # the one reading of a note: headings, frontmatter, how a file ends
 ├── slug.ex              # the single canonical slug implementation, and path safety
-├── search.ex            # pure ranking functions
 ├── events.ex            # the event windows behind current and snapshot
 ├── clock.ex             # the vault's one notion of "now"
 ├── time_fmt.ex          # duration wording for the time envelope
@@ -581,12 +588,15 @@ lib/vigil/
 ├── vault_check.ex       # read-only vault doctor
 ├── vault/               # the vault's own rules, all of them pure
 │   ├── policy.ex        # whether a write is allowed — one gate, check/3
+│   ├── decision.ex      # what the gate answers with, one struct per write shape
 │   ├── plan.ex          # what a write becomes: an action and a commit message
 │   ├── edit.ex          # what a chunk-shaped edit turns content into
 │   ├── facts.ex         # the questions the policy asks the vault
+│   ├── frontmatter.ex   # what frontmatter the vault allows — one rule, three callers
 │   ├── layout.ex        # which paths are notes — the write gate and the load ask
 │   ├── domains.ex       # _domains.yml, as a value
 │   └── rules.ex         # the hygiene rules lint and the doctor share
+├── oauth.ex             # the two scopes and the two metadata documents
 ├── oauth/               # authorization server: dets store, DCR, CIMD, PKCE
 └── mcp/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints

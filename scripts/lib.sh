@@ -312,12 +312,15 @@ wait_until_healthy() {
 #
 # Both paths mint through `Vigil.OAuth.Token`, which owns the token record —
 # an rpc expression that writes the map itself is how this one came to be a
-# variant that carried no grant_id.
+# variant that carried no grant_id. The rpc expression is Elixir no compiler
+# reads, so it also names the production persistence itself, the way
+# `mix vigil.seed_token` does — and `Vigil.ScriptCallsTest` holds its arity to
+# the one `Vigil.OAuth.Token` exports, which is how it fell behind once already.
 vigil_seed_token() {
   local resource="$1" scope="$2"
   if systemctl is-active --quiet "$SERVICE"; then
     local ausdruck
-    ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(\"${resource}\", \"${scope}\", 3650 * 86400, System.system_time(:second)))"
+    ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(Vigil.OAuth.Store.over_tables(), \"${resource}\", \"${scope}\", 3650 * 86400, System.system_time(:second)))"
     as_vigil "${CURRENT}/bin/vigil" rpc "$ausdruck" | tail -1
   else
     # shellcheck disable=SC2016 # $1..$3 are expanded by the inner bash -c, not here
@@ -512,7 +515,7 @@ verify_chunk_count() {
   return 0
 }
 
-# 7. Write a test note → success (implies push, see write_and_commit), then delete it
+# 7. Write a test note → success (implies push, see Vigil.Store), then delete it
 #
 # The domain is deliberately NOT hardcoded: init.sh asks for the domain
 # list interactively, so a fixed "admin/" (or "journal/") would make

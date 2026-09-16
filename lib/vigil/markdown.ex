@@ -212,8 +212,10 @@ defmodule Vigil.Markdown do
 
   @doc """
   Splits `content` into its frontmatter block and its body, both terminated by
-  a newline. The two failure modes are reported distinctly because they mean
-  different things to a writer: no block at all, versus a block left open.
+  a newline: `{:ok, block, body}`, or `:none` and `:unterminated` as
+  `frontmatter/1` reports them. The two are kept apart because they mean
+  different things to a writer: a note with no block has a body that is the
+  whole file, and one with a block left open has no body anyone can locate.
 
   Works on the block's lines rather than its joined text, so a frontmatter
   block whose only line is blank round-trips unchanged.
@@ -224,11 +226,8 @@ defmodule Vigil.Markdown do
         block = Enum.join([@frontmatter_marker | yaml_lines] ++ [@frontmatter_marker], "\n")
         {:ok, block <> "\n", Enum.join(body_lines, "\n") <> "\n"}
 
-      :unterminated ->
-        {:error, "Unterminated frontmatter"}
-
-      :none ->
-        {:error, "No frontmatter found"}
+      other ->
+        other
     end
   end
 

@@ -201,7 +201,7 @@ defmodule Vigil.Parser do
     state = %{
       title: nil,
       stack: [],
-      slug_counts: %{},
+      slugs_taken: MapSet.new(),
       current: nil,
       chunks: [],
       pre: nil
@@ -277,8 +277,7 @@ defmodule Vigil.Parser do
     {body, end_line} = close_body(rev_lines)
     end_line = end_line || heading_line
 
-    base_slug = slug(heading)
-    {final_slug, slug_counts} = uniquify(base_slug, acc.slug_counts)
+    final_slug = uniquify(slug(heading), acc.slugs_taken)
     id = "#{path}##{final_slug}"
 
     chunk = %Chunk{
@@ -298,7 +297,12 @@ defmodule Vigil.Parser do
       updated_at: updated_at
     }
 
-    %{acc | current: nil, slug_counts: slug_counts, chunks: [chunk | acc.chunks]}
+    %{
+      acc
+      | current: nil,
+        slugs_taken: MapSet.put(acc.slugs_taken, final_slug),
+        chunks: [chunk | acc.chunks]
+    }
   end
 
   # A chunk's body and the line it ends on, from the body's lines in reverse
@@ -420,14 +424,30 @@ defmodule Vigil.Parser do
     Regex.replace(regex, text, fn match -> String.replace(match, ~r/[^\n]/, " ") end)
   end
 
-  defp uniquify(base_slug, counts) do
-    case Map.get(counts, base_slug) do
-      nil ->
-        {base_slug, Map.put(counts, base_slug, 1)}
+  # A chunk id is unique within its note (docs/design.md, "Chunking"): a
+  # heading takes the first of its slug, `slug-2`, `slug-3`, … that no heading
+  # above it in the note already took. Taken slugs are looked up rather than
+  # counted per slug, because a heading can carry a suffix outright — the count
+  # gave `## Setup`, `## Setup`, `## Setup 2` the id `setup-2` twice, and
+  # Vigil.Index, holding chunks by id, kept only one of the two.
+  #
+  # In a note the count gave unique ids, this gives the same ids: every suffix
+  # below the one the count handed out is already taken, and that one is free.
+  defp uniquify(base_slug, slugs_taken) do
+    if MapSet.member?(slugs_taken, base_slug) do
+      uniquify(base_slug, slugs_taken, 2)
+    else
+      base_slug
+    end
+  end
 
-      n ->
-        candidate = "#{base_slug}-#{n + 1}"
-        {candidate, Map.put(counts, base_slug, n + 1)}
+  defp uniquify(base_slug, slugs_taken, n) do
+    candidate = "#{base_slug}-#{n}"
+
+    if MapSet.member?(slugs_taken, candidate) do
+      uniquify(base_slug, slugs_taken, n + 1)
+    else
+      candidate
     end
   end
 

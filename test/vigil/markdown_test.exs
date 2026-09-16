@@ -125,8 +125,8 @@ defmodule Vigil.MarkdownTest do
     end
 
     test "reports the two failure modes distinctly" do
-      assert Markdown.split_frontmatter("# Title\n") == {:error, "No frontmatter found"}
-      assert Markdown.split_frontmatter("---\na: 1\n") == {:error, "Unterminated frontmatter"}
+      assert Markdown.split_frontmatter("# Title\n") == :none
+      assert Markdown.split_frontmatter("---\na: 1\n") == :unterminated
     end
   end
 

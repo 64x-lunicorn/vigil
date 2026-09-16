@@ -65,8 +65,8 @@ defmodule Vigil.Vault.Rules do
   The headings within one note that collide in its chunk-id space.
 
   Takes the note's chunks — anything carrying a `:heading` — and groups them
-  by the slug of the heading **text alone**, which is what
-  `Vigil.Parser`'s uniquifier keys its collision counter on: two `### B`
+  by the slug of the heading **text alone**, which is where `Vigil.Parser`
+  starts a heading's chunk id: two `### B`
   headings under different H2s really do produce `b` and `b-2`, however
   different their heading chains are. Grouping by the chain instead would
   under-report exactly the notes whose chunk ids are unstable — and a chunk id

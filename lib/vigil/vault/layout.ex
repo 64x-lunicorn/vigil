@@ -29,9 +29,11 @@ defmodule Vigil.Vault.Layout do
     # Its domain directories, sorted. `skills/`, dotfiles, `_`-prefixed
     # directories and anything excluded are never among them.
     :domains,
-    # VIGIL_EXCLUDE — the hard boundary (docs/design.md).
+    # VIGIL_EXCLUDE — the hard boundary (docs/design.md). Directory names,
+    # excluded at any depth: see `excluded?/2`.
     :exclude,
-    # The directories that exist inside the nesting domain.
+    # The directories that exist inside the nesting domain, excluded ones
+    # never among them.
     :project_dirs
   ]
 
@@ -43,8 +45,8 @@ defmodule Vigil.Vault.Layout do
   What a path is. `{:note, domain}` is the only answer a write may proceed on
   and the only one discovery keeps; the rest are distinct because the write
   gate answers them in different words — a path under `skills/` or an excluded
-  domain is refused without naming anything, while a domain that simply is not
-  there gets the list of the ones that are.
+  directory is refused without naming anything, while a domain that simply is
+  not there gets the list of the ones that are.
   """
   @type classification ::
           {:note, String.t()}
@@ -137,16 +139,19 @@ defmodule Vigil.Vault.Layout do
       vault_path: vault_path,
       domains: domains,
       exclude: exclude,
-      project_dirs: project_dirs(vault_path)
+      project_dirs: project_dirs(vault_path, exclude)
     )
   end
 
-  defp project_dirs(vault_path) do
+  defp project_dirs(vault_path, exclude) do
     nesting = Path.join(vault_path, @nesting_domain)
 
     case File.ls(nesting) do
-      {:ok, entries} -> Enum.filter(entries, &File.dir?(Path.join(nesting, &1)))
-      {:error, _} -> []
+      {:ok, entries} ->
+        Enum.filter(entries, &(File.dir?(Path.join(nesting, &1)) and &1 not in exclude))
+
+      {:error, _} ->
+        []
     end
   end
 
@@ -163,7 +168,7 @@ defmodule Vigil.Vault.Layout do
     cond do
       not String.ends_with?(List.last(parts), ".md") -> :not_a_note
       domain == "skills" -> :skill
-      domain in layout.exclude -> :excluded
+      excluded?(layout, parts) -> :excluded
       Slug.reserved_segment?(domain) -> :not_a_note
       length(parts) != segment_count(domain) -> :not_a_note
       domain not in layout.domains -> {:unknown_domain, domain}
@@ -171,6 +176,19 @@ defmodule Vigil.Vault.Layout do
       true -> {:note, domain}
     end
   end
+
+  # A path is excluded when any of its segments is. `VIGIL_EXCLUDE` names
+  # directories, not domains, and the only directories below a domain that
+  # hold notes are project directories — so this is what keeps
+  # `projects/<excluded>/` as hidden as `<excluded>/`. It used to compare the
+  # first segment only, which left a project directory carrying an excluded
+  # name parsed, indexed, searchable and writable, with nothing to tell
+  # whoever set the variable.
+  #
+  # It answers before the segment count and before whether the directory
+  # exists, so an excluded path is refused in the same words whatever shape
+  # it has and whether or not it is there.
+  defp excluded?(layout, parts), do: Enum.any?(parts, &(&1 in layout.exclude))
 
   defp project(layout, domain, project) do
     if project in layout.project_dirs do

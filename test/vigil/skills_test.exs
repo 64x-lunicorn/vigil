@@ -76,6 +76,24 @@ defmodule Vigil.SkillsTest do
       [_, token] = Regex.run(~r/SkillKey: ([0-9a-f]+)/, msg)
       assert token == SkillKey.current(@key)
     end
+
+    # The window is the deployment's (`VIGIL_SKILLKEY_TTL`), not an hour, and
+    # the gate still accepts the previous window's key. A window other than the
+    # default is what tells a sentence derived from the key apart from one that
+    # happens to be true at 3600.
+    test "both responses state the key's own rotation window and its grace", %{vault: vault} do
+      key = %{@key | window: 900}
+
+      {:ok, %{content: content}} = Skills.read("tdd", vault, key)
+      {:error, msg} = Skills.read("does-not-exist", vault, key)
+
+      for text <- [content, msg] do
+        assert text =~
+                 "SkillKey: #{SkillKey.current(key)} (rotates every 900 seconds; the previous window's key is still accepted)"
+
+        refute text =~ "hour"
+      end
+    end
   end
 
   describe "write/3 (FixtureVault-backed)" do

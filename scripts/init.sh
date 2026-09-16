@@ -746,7 +746,7 @@ else
   # skill_write requires a SkillKey like every other write tool. That creates
   # a chicken-and-egg problem on a fresh vault: the vigil-vault-conventions
   # skill does not exist yet, so there is no skill_read response to take the
-  # key from. do_skill_read/2 therefore returns the current SkillKey in the
+  # key from. Vigil.Skills.read/3 therefore returns the current SkillKey in the
   # error case as well (it is a pure HMAC over secret + time, independent of
   # any skill existing) — parsed here out of the failing skill_read
   # response.

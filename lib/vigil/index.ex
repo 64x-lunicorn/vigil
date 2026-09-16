@@ -685,8 +685,11 @@ defmodule Vigil.Index do
   Answers the `lint` tool's five findings: duplicate headings, sentence-like
   headings, orphaned links (broken outgoing links, labelled with their
   fragment where present), overlong notes and decision notes stale relative to
-  `now`. All four vault-hygiene definitions come from `Vigil.Vault.Rules`, so
-  `mix vigil.vault_check` reports the same notes for the same reasons.
+  `now`. The three note-hygiene definitions — duplicate headings,
+  sentence-like headings, overlong notes — come from `Vigil.Vault.Rules`, so
+  `mix vigil.vault_check` reports the same notes for the same reasons. The
+  other two are this module's own: a broken link is the link index's verdict,
+  and the stale-decision horizon is a constant here.
 
   `params` carries `:now` — the instant the response's envelope was decided
   at. This module is a pure value and reads no clock of its own; a caller with

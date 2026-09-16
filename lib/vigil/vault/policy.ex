@@ -195,10 +195,11 @@ defmodule Vigil.Vault.Policy do
       {:unknown_domain, _domain} ->
         {:error, "Invalid path. Available domains: #{Enum.join(facts.layout.domains, ", ")}"}
 
-      # A path under `skills/`, in an excluded domain, or shaped like nothing
-      # this vault holds. All three are refused without naming anything: an
-      # excluded domain must not be confirmed to exist by the wording of a
-      # refusal (docs/design.md, "`VIGIL_EXCLUDE` is the hard boundary").
+      # A path under `skills/`, in an excluded directory at any depth, or
+      # shaped like nothing this vault holds. All three are refused without
+      # naming anything: an excluded directory must not be confirmed to exist
+      # by the wording of a refusal (docs/design.md, "`VIGIL_EXCLUDE` is the
+      # hard boundary").
       _ ->
         @invalid_path
     end

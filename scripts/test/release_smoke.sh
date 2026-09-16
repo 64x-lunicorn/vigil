@@ -281,7 +281,7 @@ fi
 
 section "5/6  Write path"
 
-# do_skill_read returns the current SkillKey even when the skill does not
+# skill_read returns the current SkillKey even when the skill does not
 # exist, which is what makes bootstrapping a fresh vault possible at all.
 skill_key="$(mcp_call "$RW_TOKEN" skill_read '{"name":"vigil-vault-conventions"}' \
   | grep -o 'SkillKey: [0-9a-f]*' | head -1 | cut -d' ' -f2)"

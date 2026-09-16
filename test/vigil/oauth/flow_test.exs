@@ -601,7 +601,7 @@ defmodule Vigil.OAuth.FlowTest do
       assert {:ok, ctx} =
                Flow.authorize_request(server(persistence), params, 1_700_000_000, net)
 
-      # `Vigil.OAuth.Endpoint.render_consent/2` renders exactly `ctx.client.name`.
+      # `Vigil.OAuth.Endpoint.render_consent/3` renders exactly `ctx.client.name`.
       assert ctx.client.name == "Claude Code"
     end
 

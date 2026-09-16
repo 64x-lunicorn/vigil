@@ -267,5 +267,16 @@ defmodule Vigil.MCP.ToolsTest do
       assert {:error, message} = Tools.dispatch("search", %{}, @now, @key)
       refute message =~ "SkillKey"
     end
+
+    # Every parameter is looked up in `arguments`, so a container that is not a
+    # JSON object is a violation of all of them at once. It is refused as one,
+    # in the shape a single bad parameter is, rather than raising on the first
+    # lookup — which for a write tool is the SkillKey gate's.
+    test "arguments that are not an object are a tool error, for a read and a write alike" do
+      for tool <- ["search", "create"], arguments <- [[], ["query"], "tires", 42] do
+        assert Tools.dispatch(tool, arguments, @now, @key) ==
+                 {:error, "Invalid arguments: expected an object"}
+      end
+    end
   end
 end
