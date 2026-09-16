@@ -361,6 +361,57 @@ defmodule Vigil.MCP.ServerTest do
     refute Map.has_key?(payload, "_")
   end
 
+  # A JSON-RPC message whose `arguments` is the wrong container is still a
+  # tools/call the session made: it is told what was expected, in a tool error
+  # carrying the envelope like every other, for a read and for a write — whose
+  # SkillKey gate is the first thing to look inside the arguments.
+  test "arguments that are not an object are a tool error with an envelope", %{
+    persistence: persistence,
+    token: token
+  } do
+    calls = [{"search", []}, {"search", "tires"}, {"create", 42}]
+
+    for {{name, arguments}, n} <- Enum.with_index(calls) do
+      conn =
+        post(
+          persistence,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: n,
+            method: "tools/call",
+            params: %{name: name, arguments: arguments}
+          },
+          [{"mcp-session-id", "session-arguments-#{n}"}]
+        )
+
+      assert conn.status == 200
+      result = Jason.decode!(conn.resp_body)["result"]
+      assert result["isError"] == true
+
+      payload = Jason.decode!(hd(result["content"])["text"])
+      assert payload["error"] == "Invalid arguments: expected an object"
+      assert Map.has_key?(payload, "_")
+    end
+  end
+
+  # One byte past what `Plug.Conn.read_body/1` reads in one go, so the body
+  # arrives as `{:more, partial, conn}`. It is refused the way a body that
+  # could not be read is, rather than raising out of the router.
+  test "a body longer than one read is a 400, not a crash", %{
+    persistence: persistence,
+    token: token
+  } do
+    conn =
+      conn(:post, "/mcp", String.duplicate(" ", 8_000_001))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> Server.call(opts(persistence))
+
+    assert conn.status == 400
+    assert conn.resp_body == ""
+  end
+
   defp failing_create(persistence, token, session_id, id) do
     post(
       persistence,

@@ -100,10 +100,13 @@ defmodule Vigil.OAuth.Endpoint do
 
   post "/oauth/authorize" do
     under_limit(conn, :authorize, fn conn ->
-      {:ok, body, conn} = Plug.Conn.read_body(conn)
-      params = URI.decode_query(body)
+      case read_form(conn) do
+        {:ok, params, conn} ->
+          with_authorize_request(conn, params, &process_consent_decision(&1, &2, params))
 
-      with_authorize_request(conn, params, &process_consent_decision(&1, &2, params))
+        {:error, conn} ->
+          send_html(conn, 400, error_html("Invalid request."))
+      end
     end)
   end
 
@@ -252,17 +255,34 @@ defmodule Vigil.OAuth.Endpoint do
   ## Token
 
   defp handle_token(conn) do
-    {:ok, body, conn} = Plug.Conn.read_body(conn)
-    params = URI.decode_query(body)
     conn = put_resp_header(conn, "cache-control", "no-store")
 
-    case Flow.grant(persistence(conn), params) do
-      {:ok, tokens} -> send_json(conn, 200, tokens)
-      {:error, status, error} -> send_json(conn, status, %{error: error})
+    case read_form(conn) do
+      {:ok, params, conn} ->
+        case Flow.grant(persistence(conn), params) do
+          {:ok, tokens} -> send_json(conn, 200, tokens)
+          {:error, status, error} -> send_json(conn, status, %{error: error})
+        end
+
+      {:error, conn} ->
+        send_json(conn, 400, %{error: "invalid_request"})
     end
   end
 
   ## Conn plumbing
+
+  # A form is the whole body or no form at all. One longer than
+  # `Plug.Conn.read_body/1` reads in one go answers `{:more, partial, conn}`,
+  # and decoding the part that arrived would decide on fields the caller did
+  # not finish sending; one that could not be read answers no body at all.
+  # Both are refused, each in the shape of the surface that asked.
+  defp read_form(conn) do
+    case Plug.Conn.read_body(conn) do
+      {:ok, body, conn} -> {:ok, URI.decode_query(body), conn}
+      {:more, _partial, conn} -> {:error, conn}
+      {:error, _reason} -> {:error, conn}
+    end
+  end
 
   defp redirect_with_error(conn, redirect_uri, error_code, state) do
     redirect_with_query(conn, redirect_uri, put_state(%{"error" => error_code}, state))

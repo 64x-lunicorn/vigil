@@ -484,8 +484,9 @@ it, so the last step of adding a tool is exercising it there.
 
 Every declared parameter is validated against the schema the server itself
 publishes. A violation — a wrong type, an off-enum value, an out-of-range
-integer, a missing or empty required parameter — is a tool error naming what
-was expected, not a substituted default. A caller who claims `type: "bogus"`
+integer, a missing or empty required parameter, `arguments` that are not an
+object at all — is a tool error naming what was expected, not a substituted
+default. A caller who claims `type: "bogus"`
 gets told so, rather than receiving unfiltered results it believes were
 filtered. Undeclared
 parameters are ignored: the schemas do not set `additionalProperties: false`,

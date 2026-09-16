@@ -470,6 +470,11 @@ defmodule Vigil.MCP.Tools do
   parameters are ignored. What is left is the call the row declares.
   Returns `{:ok, result}` or `{:error, message}`.
 
+  `args` is whatever the client sent as `arguments`, and a JSON object is the
+  only container a parameter can be looked up in. Anything else is refused
+  the same way, as a tool error saying an object was expected, before the
+  SkillKey gate looks inside it.
+
   A row's `now:` marks an operation that resolves an instant. It is handed
   the response's, under the `:now` key the Store already reads, rather than
   reading a clock of its own inside the writer — which is how `current` came
@@ -486,7 +491,7 @@ defmodule Vigil.MCP.Tools do
   `now` is: it has no default here, because a gate that resolves its own
   secret is a gate a test cannot hand another deployment.
   """
-  @spec dispatch(GenServer.server(), String.t(), map(), DateTime.t(), SkillKey.t()) ::
+  @spec dispatch(GenServer.server(), String.t(), term(), DateTime.t(), SkillKey.t()) ::
           {:ok, term()} | {:error, String.t()}
   def dispatch(store \\ Store.default_name(), name, args, now, key) do
     case find_tool(name) do
@@ -494,7 +499,8 @@ defmodule Vigil.MCP.Tools do
         {:error, "Unknown tool: #{name}"}
 
       tool ->
-        with :ok <- maybe_require_skill_key(tool, args, key),
+        with :ok <- require_object(args),
+             :ok <- maybe_require_skill_key(tool, args, key),
              {:ok, params} <- validate_params(param_specs(tool), args) do
           params = params |> Map.delete(@skill_key) |> maybe_put_now(tool, now)
           tool.call |> answer(params, store, key) |> to_result()
@@ -547,6 +553,13 @@ defmodule Vigil.MCP.Tools do
   end
 
   ## Argument validation — the table's second product.
+
+  # Every parameter below is a lookup in `args`, so a list, a string or a
+  # number is a violation of all of them at once. It is reported as one, in
+  # the words a single bad parameter is, rather than as the first lookup's
+  # raise.
+  defp require_object(args) when is_map(args), do: :ok
+  defp require_object(_args), do: {:error, "Invalid arguments: expected an object"}
 
   defp validate_params(param_specs, args) do
     {values, errors} =
