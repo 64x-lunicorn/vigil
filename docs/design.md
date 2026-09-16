@@ -1218,7 +1218,11 @@ Five layers, each doing one job:
    unless the public endpoint answers 403.
 2. **OAuth 2.1 + PKCE** — vigil is its own authorization server. See
    [oauth.md](oauth.md).
-3. **Scope** — `vault` (full) or `vault:read` (read-only tools).
+3. **Scope** — `vault` (full) or `vault:read` (read-only tools). A
+   `vault:read` token cannot change what a note says. It can make the server
+   catch up with the remote: `reload` takes no content from the caller and
+   adopts, `--ff-only`, commits already pushed there — so a pull can move the
+   vault under a reader, whoever calls it.
 4. **SkillKey** — a rotating HMAC required by every write tool. Not access
    control (the token already did that): it is proof that the assistant has
    *read the writing conventions* in this session. It can only be obtained by
