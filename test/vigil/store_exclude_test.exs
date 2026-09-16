@@ -14,10 +14,27 @@ defmodule Vigil.StoreExcludeTest do
     vault = Vigil.FixtureVault.build()
     on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
 
+    # A project directory carrying an excluded name, one level below the
+    # domains VIGIL_EXCLUDE was first written against. Its note links to a
+    # note that is not excluded, so a backlink is something it could leave.
+    # `verborgen` is excluded too and is not there at all.
+    File.mkdir_p!(Path.join(vault, "projects/geheim"))
+
+    File.write!(Path.join(vault, "projects/geheim/plan.md"), """
+    ---
+    type: reference
+    ---
+    # Plan
+
+    ## Detail
+
+    Contains the unique search word nestedsearchword. See [[vigil]].
+    """)
+
     start_supervised!(
       {Store,
        vault_path: vault,
-       exclude: ["work"],
+       exclude: ["work", "geheim", "verborgen"],
        git_remote: "origin",
        git: Vigil.Git.CommitLog.new(vault),
        name: @store}
@@ -101,6 +118,83 @@ defmodule Vigil.StoreExcludeTest do
       Store.call(@store, :append, %{path: "work/secret.md", content: "INJECTEDWORD"})
       assert search(%{query: "INJECTEDWORD"}) == []
       assert search(%{query: "INJECTEDWORD", domain: "work"}) == []
+    end
+  end
+
+  # VIGIL_EXCLUDE names directories, and `projects/` holds directories one
+  # level below the domains. The boundary used to compare a path's first
+  # segment only, so a project directory carrying an excluded name was
+  # parsed, indexed, searchable and writable.
+  describe "an excluded project directory" do
+    @nested "projects/geheim/plan.md"
+
+    test "is not in the index: no note, no chunk, no backlink", %{vault: vault} do
+      assert File.exists?(Path.join(vault, @nested))
+
+      assert search(%{query: "nestedsearchword"}) == []
+      assert search(%{query: "nestedsearchword", domain: "projects"}) == []
+
+      for id <- [@nested, @nested <> "#detail"] do
+        assert Store.call(@store, :read, %{id: id, backlinks: false}) ==
+                 {:error, "Not found: #{id}"}
+
+        assert Store.call(@store, :links, %{id: id, direction: :both, depth: 1}) ==
+                 {:error, "Not found: #{id}"}
+      end
+
+      {:ok, links} =
+        Store.call(@store, :links, %{id: "projects/vigil/vigil.md", direction: :in, depth: 1})
+
+      refute inspect(links) =~ "geheim"
+
+      {:ok, note} = Store.call(@store, :read, %{id: "projects/vigil/vigil.md", backlinks: true})
+      refute inspect(note) =~ "geheim"
+    end
+
+    # The wording an excluded domain earns, whichever write it is and whether
+    # the note — or the directory — is there at all.
+    test "every write path refuses it as a path", %{vault: vault} do
+      before = File.read!(Path.join(vault, @nested))
+
+      writes = [
+        {:create, %{path: "projects/geheim/new.md", type: "reference", content: "# N\nx"}},
+        {:create,
+         %{
+           path: "projects/geheim/new.md",
+           type: "reference",
+           content: "# N\nx",
+           create_dirs: true
+         }},
+        {:create,
+         %{
+           path: "projects/geheim/plan.md",
+           type: "reference",
+           content: "# N\nx",
+           create_dirs: true
+         }},
+        {:append, %{path: @nested, content: "INJECTED"}},
+        {:rewrite_note, %{path: @nested, content: "# Pwned\n\nbody\n"}},
+        {:update_frontmatter, %{path: @nested, type: "decision"}},
+        {:delete_note, %{path: @nested, confirm: true}},
+        {:replace_section, %{id: @nested <> "#detail", content: "INJECTED"}},
+        {:delete_section, %{id: @nested <> "#detail"}},
+        {:move_note, %{from: @nested, to: "projects/vigil/plan.md", confirm: true}},
+        {:move_note,
+         %{from: "projects/vigil/vigil.md", to: "projects/geheim/vigil.md", confirm: true}},
+        # A directory that is not there is refused in the same words as one
+        # that is, and is not created.
+        {:create,
+         %{path: "projects/verborgen/x.md", type: "reference", content: "# X", create_dirs: true}},
+        {:append, %{path: "projects/verborgen/x.md", content: "x"}}
+      ]
+
+      for {op, params} <- writes do
+        assert Store.call(@store, op, params) == {:error, "Invalid path"}, inspect({op, params})
+      end
+
+      refute File.exists?(Path.join(vault, "projects/verborgen"))
+      assert File.read!(Path.join(vault, @nested)) == before
+      assert File.exists?(Path.join(vault, "projects/vigil/vigil.md"))
     end
   end
 end

@@ -407,7 +407,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_PORT` | `4000` | HTTP port |
 | `VIGIL_GIT_REMOTE` | `origin` | remote used for pull **and** push; must match `git branch -vv` |
 | `VIGIL_TZ` | `Europe/Berlin` | timezone for `current`, envelopes, relative times |
-| `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed |
+| `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
 | `VIGIL_ISSUER` | `http://localhost:4000` | OAuth issuer |
 | `VIGIL_RESOURCE` | `http://localhost:4000/mcp` | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |

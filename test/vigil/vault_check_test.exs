@@ -550,6 +550,22 @@ defmodule Vigil.VaultCheckTest do
       refute inspect(report, limit: :infinity, printable_limit: :infinity) =~ "Geheime"
     end
 
+    # The boundary names directories, not domains. The same note one level
+    # down, in a project directory carrying the excluded name, is as silent.
+    test "produces no finding when it is a project directory", %{vault: vault} do
+      File.mkdir_p!(Path.join(vault, "projects"))
+      File.rename!(Path.join(vault, "geheim"), Path.join(vault, "projects/geheim"))
+
+      report = VaultCheck.run(vault, ["geheim"])
+
+      assert report.overview.domain_names == ["domaina", "projects"]
+      assert report.overview.notes == 1
+      assert report.b3_chunk_diff.checked == 1
+
+      refute inspect(report, limit: :infinity, printable_limit: :infinity) =~ "geheim"
+      refute inspect(report, limit: :infinity, printable_limit: :infinity) =~ "Geheime"
+    end
+
     # The other half: the silence above is the exclusion's doing, not a
     # fixture with nothing to say. The same vault read with no exclusion
     # reports that note in every section.
