@@ -400,9 +400,10 @@ The address must not fall into any of:
 
 | Family | Refused |
 |---|---|
-| IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.18.0.0/15` (benchmarking) |
+| IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.18.0.0/15` (benchmarking), `224.0.0.0/4` (multicast), `255.255.255.255` (broadcast) |
 | IPv6 | `::`, `::1`, `fc00::/7` (unique local), `fe80::/10` (link-local) |
 | IPv4-mapped IPv6 | `::ffff:a.b.c.d` is unfolded to `a.b.c.d` first, so every IPv4 row above covers its mapped form |
+| IPv4-compatible IPv6 | `::a.b.c.d` (deprecated) is unfolded to `a.b.c.d` first, so every IPv4 row above covers its compatible form |
 
 ---
 

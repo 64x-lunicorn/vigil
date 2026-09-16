@@ -90,14 +90,21 @@ defmodule Vigil.OAuth.Cimd do
 
   defp if_public(ip), do: if(private_ip?(ip), do: :error, else: {:ok, ip})
 
+  # `::` and `::1` share their shape with the IPv4-compatible form below, which
+  # would unfold them into 0.0.0.0/8 and refuse them anyway. They are named here,
+  # ahead of it, so the IPv6 unspecified and loopback addresses are refused as
+  # themselves rather than by coincidence.
+  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
+  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+
   # An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is an IPv4 address wearing an
   # eight-element tuple: it matches neither the IPv6 loopback clause nor
   # fc00::/7, so without this it fell through to "public" and `::ffff:127.0.0.1`
-  # reached the loopback interface. Unfolded first, so every IPv4 range below
-  # covers its mapped form too.
-  defp private_ip?({0, 0, 0, 0, 0, 0xFFFF, ab, cd}) do
-    private_ip?({div(ab, 256), rem(ab, 256), div(cd, 256), rem(cd, 256)})
-  end
+  # reached the loopback interface. The deprecated IPv4-compatible form
+  # (::a.b.c.d) is the same address without the 0xffff, and fell through the
+  # same way. Both are unfolded first, so every IPv4 range below covers them too.
+  defp private_ip?({0, 0, 0, 0, 0, 0xFFFF, ab, cd}), do: private_ip?(unfold(ab, cd))
+  defp private_ip?({0, 0, 0, 0, 0, 0, ab, cd}), do: private_ip?(unfold(ab, cd))
 
   defp private_ip?({0, _, _, _}), do: true
   defp private_ip?({10, _, _, _}), do: true
@@ -107,11 +114,13 @@ defmodule Vigil.OAuth.Cimd do
   defp private_ip?({172, b, _, _}) when b >= 16 and b <= 31, do: true
   defp private_ip?({192, 168, _, _}), do: true
   defp private_ip?({198, b, _, _}) when b >= 18 and b <= 19, do: true
-  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
-  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  defp private_ip?({a, _, _, _}) when a >= 224 and a <= 239, do: true
+  defp private_ip?({255, 255, 255, 255}), do: true
   defp private_ip?({a, _, _, _, _, _, _, _}) when a >= 0xFC00 and a <= 0xFDFF, do: true
   defp private_ip?({a, _, _, _, _, _, _, _}) when a >= 0xFE80 and a <= 0xFEBF, do: true
   defp private_ip?(_), do: false
+
+  defp unfold(ab, cd), do: {div(ab, 256), rem(ab, 256), div(cd, 256), rem(cd, 256)}
 
   ## The request
 
