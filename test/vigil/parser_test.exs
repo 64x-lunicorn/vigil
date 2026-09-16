@@ -114,6 +114,62 @@ defmodule Vigil.ParserTest do
            ]
   end
 
+  # Counting on the heading's own slug alone handed the third heading here the
+  # id the second already had, and Vigil.Index, holding chunks by id, kept one.
+  test "a suffix a heading already carries outright is not handed out again" do
+    content = """
+    ---
+    type: reference
+    ---
+    # Setup
+
+    ## Setup
+    first
+
+    ## Setup
+    second
+
+    ## Setup 2
+    third
+    """
+
+    {:ok, file} = Parser.parse("gear/n.md", content, %{})
+
+    assert Enum.map(file.chunks, &{&1.heading, &1.id}) == [
+             {"Setup", "gear/n.md#setup"},
+             {"Setup", "gear/n.md#setup-2"},
+             {"Setup 2", "gear/n.md#setup-2-2"}
+           ]
+  end
+
+  # Document order decides, whichever heading carries the suffix outright: the
+  # one that arrives first keeps its id.
+  test "an id taken earlier in the note is skipped by a later duplicate" do
+    content = """
+    ---
+    type: reference
+    ---
+    # Setup
+
+    ## Setup 2
+    first
+
+    ## Setup
+    second
+
+    ## Setup
+    third
+    """
+
+    {:ok, file} = Parser.parse("gear/n.md", content, %{})
+
+    assert Enum.map(file.chunks, & &1.id) == [
+             "gear/n.md#setup-2",
+             "gear/n.md#setup",
+             "gear/n.md#setup-3"
+           ]
+  end
+
   test "defensive parsing: missing frontmatter, unparsable YAML, invalid type never crash" do
     assert {:ok, %{type: :reference}} = Parser.parse("x/no-fm.md", "no frontmatter here", %{})
 

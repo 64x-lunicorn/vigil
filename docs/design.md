@@ -303,7 +303,14 @@ and the first `##` (or text in a file with no headings at all) becomes a chunk
 whose id is the path with no fragment.
 
 Chunk id: `path#heading-slug`, for example `bike/via-carolina.md#fueling`.
-Collisions inside one file get a `-2`, `-3` suffix.
+
+**A chunk id is unique within its note.** A heading takes its slug, unless a
+heading above it in the same note already took that id; then it takes the
+first of `slug-2`, `slug-3`, … that no heading above it took. Document order
+decides, so the heading that arrives at an id first keeps it: `## Setup`,
+`## Setup`, `## Setup 2` are `setup`, `setup-2` and `setup-2-2`. The index
+holds chunks by id, and two chunks under one id are one chunk to every reader —
+the other is on disk and in no search, no `read` and no link.
 
 `heading_path` carries the chain of heading texts for display
 (`File title › Fueling › Second Half`); the chunk id uses only the slug of the
@@ -1110,11 +1117,16 @@ facts underneath do not — they were restated in both and drifted, and they liv
 in `Vigil.Vault.Rules` now.
 
 **A duplicate heading is a duplicate *slug*.** Two headings collide when the
-slug of their heading text collides *within one note*, because that is what
-`Vigil.Parser`'s uniquifier keys its collision counter on: `## A / ### B` and
-`## C / ### B` really do produce `b` and `b-2`. Grouping by the heading chain
-instead under-reports exactly the notes whose chunk ids are unstable, which is
-the breaking change this project fears most (see "Known trade-offs").
+slug of their heading text collides *within one note*, because that is where
+`Vigil.Parser` starts a heading's chunk id: `## A / ### B` and `## C / ### B`
+really do produce `b` and `b-2`. Grouping by the heading chain instead
+under-reports exactly the notes whose chunk ids are unstable, which is the
+breaking change this project fears most (see "Known trade-offs"). A heading
+whose own slug collides with nothing can still be pushed onto a suffix —
+`## Setup 2` below two `## Setup`s — and its note is reported for the pair
+that pushed it. Both readers see that pair because a chunk id is unique within
+its note (see "Chunking"): every heading a parse finds is a chunk the index
+holds.
 
 **An overlong note is 30 headings or 2000 words.** Two axes rather than a chunk
 count, because the pair says *why* the note is too long — many sections, or
