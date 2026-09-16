@@ -801,6 +801,32 @@ defmodule Vigil.MCP.ServerTest do
       assert body["result"]["isError"] == true
       assert hd(body["result"]["content"])["text"] =~ "Read-only token"
     end
+
+    test "a vault:read token can call reload without a skill_key", %{
+      persistence: persistence,
+      oauth: oauth
+    } do
+      read_token = seed_token(oauth, OAuth.read_scope())
+
+      conn =
+        post(
+          persistence,
+          read_token,
+          %{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: %{name: "reload", arguments: %{}}
+          },
+          [{"mcp-session-id", "session-r4"}]
+        )
+
+      body = Jason.decode!(conn.resp_body)
+      refute Map.get(body["result"], "isError")
+      text = hd(body["result"]["content"])["text"]
+      payload = Jason.decode!(text)
+      assert payload["result"]["reloaded"] == true
+    end
   end
 
   describe "rate limiting (AP-6.3)" do
