@@ -37,7 +37,7 @@ state.
 Run the smallest tests that cover your change while developing:
 
 ```bash
-mix test test/vigil/parser_test.exs test/vigil/search_test.exs
+mix test test/vigil/parser_test.exs test/vigil/index_test.exs
 ```
 
 Before submitting an Elixir change, format the files you touched and run the

@@ -515,7 +515,7 @@ verify_chunk_count() {
   return 0
 }
 
-# 7. Write a test note → success (implies push, see write_and_commit), then delete it
+# 7. Write a test note → success (implies push, see Vigil.Store), then delete it
 #
 # The domain is deliberately NOT hardcoded: init.sh asks for the domain
 # list interactively, so a fixed "admin/" (or "journal/") would make

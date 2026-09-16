@@ -569,13 +569,13 @@ against a throwaway fixture vault without needing root or a real
 ```
 lib/vigil/
 ├── application.ex       # supervisor
+├── settings.ex          # what the deployment says about itself, resolved once
 ├── store.ex             # GenServer — loading, the write sequence, the mailbox
-├── index.ex             # notes, chunks and links as one plain value
+├── index.ex             # notes, chunks and links as one plain value, and the search over it
 ├── parser.ex            # file → frontmatter + chunks + raw links
 ├── link_index.ex        # resolves [[…]] and path links into an out/in index
 ├── markdown.ex          # the one reading of a note: headings, frontmatter, how a file ends
 ├── slug.ex              # the single canonical slug implementation, and path safety
-├── search.ex            # pure ranking functions
 ├── events.ex            # the event windows behind current and snapshot
 ├── clock.ex             # the vault's one notion of "now"
 ├── time_fmt.ex          # duration wording for the time envelope
@@ -588,12 +588,15 @@ lib/vigil/
 ├── vault_check.ex       # read-only vault doctor
 ├── vault/               # the vault's own rules, all of them pure
 │   ├── policy.ex        # whether a write is allowed — one gate, check/3
+│   ├── decision.ex      # what the gate answers with, one struct per write shape
 │   ├── plan.ex          # what a write becomes: an action and a commit message
 │   ├── edit.ex          # what a chunk-shaped edit turns content into
 │   ├── facts.ex         # the questions the policy asks the vault
+│   ├── frontmatter.ex   # what frontmatter the vault allows — one rule, three callers
 │   ├── layout.ex        # which paths are notes — the write gate and the load ask
 │   ├── domains.ex       # _domains.yml, as a value
 │   └── rules.ex         # the hygiene rules lint and the doctor share
+├── oauth.ex             # the two scopes and the two metadata documents
 ├── oauth/               # authorization server: dets store, DCR, CIMD, PKCE
 └── mcp/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints

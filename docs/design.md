@@ -348,12 +348,13 @@ This is what keeps retrieval cheap: the assistant fetches one section, not a
 All of the following is decided in `Vigil.Index.search/2` — one module, one
 result shape.
 
-- Literal matching over chunk bodies and headings via `:binary.match/2`
-  (Boyer-Moore). No regex.
+- Literal matching, no regex: `String.contains?/2` over the note title and
+  each heading, `:binary.matches/2` counting occurrences in the chunk body.
 - **The query is a phrase**, exactly as entered. No token split, no AND/OR.
   `"terra speed"` matches only contiguous `terra speed`.
-- Case-insensitive: every chunk carries a downcased copy alongside the
-  original. Matching runs against the copy, previews come from the original.
+- Case-insensitive: the query is downcased, every chunk carries a downcased
+  copy of its body alongside the original, and the title and headings are
+  downcased as they are compared. Previews come from the original.
 - Filters apply *before* matching: `domain`, `type`.
 - Ranking is a simple additive score, deliberately not BM25 and deliberately
   not machine-learned: title hit +10, heading hit +5, body occurrences +1 each

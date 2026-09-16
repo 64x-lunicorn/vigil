@@ -909,7 +909,7 @@ defmodule Vigil.MCP.ServerTest do
     assert persistence.get_token.(expired) == :error
   end
 
-  # The call `dispatch/2` builds is the one frame nothing else looks at:
+  # The call `dispatch/5` builds is the one frame nothing else looks at:
   # validation runs before it, and the write path's own defenses (Facts,
   # Decision, Plan) all sit after it. Now that it comes from `@tools` rather
   # than from a clause per tool, driving every declared tool once through the

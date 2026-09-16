@@ -74,9 +74,9 @@ one `invalid_grant`, said once. The audience *check* stays there too, because
 it is the one check the two grants share and RFC 8707 answers it differently
 (`invalid_target`).
 
-**A pair is issued from a record alone.** `Vigil.OAuth.Token.issue_pair/2`
-takes what the pair descends from and the instant, and reads the client, the
-audience, the scope and the grant off it. The audience used to arrive as a
+**A pair is issued from a record alone.** `Vigil.OAuth.Token.issue_pair/3`
+takes the persistence, what the pair descends from and the instant, and reads
+the client, the audience, the scope and the grant off it. The audience used to arrive as a
 separate parameter, because the two records name it differently — `:aud` on a
 refresh token, `:resource` on an authorization code — and reading both names
 in the token module would have put the shape of a record it does not own into
@@ -117,7 +117,7 @@ for OAuth 2.0 Security*. This section is the result, so the next reviewer does
 not re-derive it. Each answer is the behaviour of the code, not an intention.
 
 **Is `code_challenge` required, and is `plain` refused?** Yes and yes.
-`Vigil.OAuth.Flow.authorize_details/1` rejects a missing or empty
+`Vigil.OAuth.Flow.authorize_request/4` rejects a missing or empty
 `code_challenge` with `invalid_request`, and requires
 `code_challenge_method` to be exactly `S256` — so `plain` is refused, and so is
 an *absent* method, which RFC 7636 would otherwise default to `plain`. The
@@ -129,11 +129,12 @@ only if a `code_challenge` parameter was present in the authorization request"
 — here there is no request without one. (§2.1.1, §4.8)
 
 **Can a code be redeemed by another client, and is `redirect_uri` re-checked
-at the token endpoint?** No, and yes. `grant/2` compares both the stored
-`client_id` and the stored `redirect_uri` against the token request and answers
-`invalid_grant` on either mismatch. The code is deleted on lookup — `take_code/1`
-— so it is one-time even on the failing paths. What that binding does *not* do
-is authenticate: every client here is public (see below), so `client_id` is
+at the token endpoint?** No, and yes. `Vigil.OAuth.Code.redeem/4` compares
+both the stored `client_id` and the stored `redirect_uri` against the token
+request, and `Vigil.OAuth.Flow.grant/3` answers `invalid_grant` on either
+mismatch. The code is deleted on lookup — persistence's `take_code` — so it is
+one-time even on the failing paths. What that binding does *not* do is
+authenticate: every client here is public (see below), so `client_id` is
 asserted rather than proven, and PKCE is the actual defence against code
 injection. (§4.5.3.1)
 
@@ -541,9 +542,26 @@ flow again, consent page included.
 
 ### Error format
 
-RFC 6749: `{"error": "...", "error_description": "..."}` with HTTP 400, except
-`invalid_client` which returns 401. Permitted values: `invalid_request`,
-`invalid_client`, `invalid_grant`, `unsupported_grant_type`, `invalid_target`.
+Every refusal is a JSON object with one field, `{"error": "..."}`. Apart from
+the rate limit below, it comes with HTTP 400:
+
+| `error` | When |
+|---|---|
+| `invalid_request` | the body could not be read whole — longer than one read, or not readable at all |
+| `unsupported_grant_type` | `grant_type` is absent or names neither grant above |
+| `invalid_grant` | every other failure of either grant's checks above |
+| `invalid_target` | a `resource` other than the one the grant was issued for |
+
+There is no `error_description`, no `invalid_client` and no 401: no client
+authenticates at this endpoint (see the RFC 9700 walk above), so there is no
+client authentication to fail.
+
+What RFC 6749 §5.2 permits is wider. A response may carry `error_description`
+and `error_uri`; `invalid_client` answers a failed client authentication, with
+401 when the client authenticated through the `Authorization` header; and
+`unauthorized_client` and `invalid_scope` are defined too. `invalid_target` is
+RFC 8707's. Apart from the departure below, vigil sends the four codes above
+and nothing else.
 
 **A rate-limited request is the one deliberate departure**: HTTP 429,
 `{"error": "temporarily_unavailable"}`, and a `Retry-After` carrying the
@@ -560,11 +578,11 @@ fact rather than a guess.
 
 ## Token verification at `/mcp`
 
-One call: `Vigil.OAuth.Token.validate_access(token, resource)`, which answers
-`{:ok, scope}` or `:error`. It looks the token up, refuses a refresh token
-presented as an access token, checks expiry (deleting the record if expired),
-and compares the stored audience against the configured resource with a
-constant-time comparison.
+One call: `Vigil.OAuth.Token.validate_access(persistence, token, resource)`,
+which answers `{:ok, scope}` or `:error`. It looks the token up in the
+persistence it is handed, refuses a refresh token presented as an access token,
+checks expiry (deleting the record if expired), and compares the stored
+audience against the configured resource with a constant-time comparison.
 
 There is one failure shape on purpose. `/mcp` answers every one of them with
 the same 401 challenge, so a caller learns nothing from which check rejected

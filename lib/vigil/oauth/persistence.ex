@@ -50,7 +50,7 @@ defmodule Vigil.OAuth.Persistence do
     # {:ok, attrs} | :error.
     :get_token,
     # :ok. Expiry deletes; rotation deliberately does not
-    # (Vigil.OAuth.Token.spend_refresh/3).
+    # (Vigil.OAuth.Token.spend_refresh/4).
     :delete_token,
     # Delete every token descended from one authorization grant — the replay
     # defence of RFC 9700 §4.14.2. A nil grant revokes nothing. :ok.

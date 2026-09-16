@@ -378,7 +378,7 @@ defmodule Vigil.OAuth.TokenTest do
     end
   end
 
-  describe "issue_out_of_band/4" do
+  describe "issue_out_of_band/5" do
     test "mints an access token that validates at the resource", %{persistence: persistence} do
       now = System.system_time(:second)
 
