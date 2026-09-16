@@ -270,7 +270,7 @@ defmodule Vigil.MCP.Tools do
     %{
       name: "update_frontmatter",
       description:
-        "Sets type/starts/ends in the frontmatter of an existing note; the body is untouched.",
+        "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
       write: true,
       call: :update_frontmatter,
       now: true,

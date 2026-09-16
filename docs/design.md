@@ -264,6 +264,19 @@ report until a human fixes the file. Vigil never writes such a note: the write
 gate refuses it on the same verdict, so it can only arrive hand-written, and
 the doctor names it.
 
+**A note without frontmatter is given one when asked.** It is an expected
+finding of adopting an existing vault, and `update_frontmatter` writes the
+block such a note lacks in front of it, leaving every byte of what was there
+as the body — the one exception being how the file ends, which
+`Vigil.Markdown` decides for every write ("How a file is written"). That is
+not the server repairing on its own initiative (principle 5): the line runs
+between what vigil does unprompted, which is report, and what a tool call
+explicitly asks for, which it does. `rewrite_note` still refuses such a note,
+because it preserves the block it finds and has no type of its own to write,
+and its refusal names `update_frontmatter`. A block that opens and never closes
+is refused by both: where it ends, and so where the body starts, is not
+something the file says, and neither write guesses.
+
 ### Derived metadata
 
 | Metadatum | Source |

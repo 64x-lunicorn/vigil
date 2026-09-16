@@ -32,6 +32,9 @@ defmodule Vigil.Vault.PlanTest do
   Gearing body.
   """
 
+  # A block that opens and never closes: not the same thing as no block.
+  @unterminated "---\ntype: reference\n# Terra Speed\n\n## Fueling\nOld body.\n"
+
   # The vault the policy decides against: one domain, one note in it, and
   # nothing else. Every other question answers "nothing there" until a test
   # names it (see Vigil.Vault.AbsentFacts).
@@ -180,7 +183,10 @@ defmodule Vigil.Vault.PlanTest do
       assert plan.message == "rewrite_note: #{@path}"
     end
 
-    test "a note whose frontmatter cannot be split is an error" do
+    # A rewrite has no type to write, so a note without a block is refused —
+    # and the refusal names the tool that can give it one, rather than
+    # reporting the absence as a parse failure.
+    test "a note without frontmatter is refused, pointing at update_frontmatter" do
       request = %{path: @path, content: "# T"}
 
       assert {:error, message} =
@@ -188,10 +194,25 @@ defmodule Vigil.Vault.PlanTest do
                  :rewrite_note,
                  decide(:rewrite_note, request),
                  request,
-                 "# No frontmatter"
+                 "# No frontmatter\n"
                )
 
-      assert is_binary(message)
+      assert message =~ "has no frontmatter"
+      assert message =~ "update_frontmatter"
+    end
+
+    test "a note whose frontmatter block never closes is refused as unterminated" do
+      request = %{path: @path, content: "# T"}
+
+      assert {:error, message} =
+               Plan.build(
+                 :rewrite_note,
+                 decide(:rewrite_note, request),
+                 request,
+                 @unterminated
+               )
+
+      assert message =~ "Unterminated frontmatter"
     end
   end
 
@@ -223,14 +244,32 @@ defmodule Vigil.Vault.PlanTest do
       assert written(plan) =~ "ends: 2026-05-01T18:00:00Z"
     end
 
-    test "a note whose frontmatter cannot be split is an error" do
+    # A note without frontmatter is an expected finding of vault adoption, and
+    # setting frontmatter is this tool's whole job: the block goes in front of
+    # the note as it stands, every byte of which is the body.
+    test "a note without frontmatter is given the block it lacks, the body byte for byte" do
+      request = %{path: @path, type: "decision"}
+      decision = decide(:update_frontmatter, request)
+      body = "# Terra Speed\n\n## Fueling\n  Old body.  \n\n---\n\nAfter a rule.\n"
+
+      assert {:ok, plan} = Plan.build(:update_frontmatter, decision, request, body)
+
+      assert written(plan) == "---\ntype: decision\n---\n" <> body
+      assert plan.message == "update_frontmatter: #{@path}"
+    end
+
+    # Where an unterminated block ends, and so where the body starts, is not
+    # something the file says. Writing a block in front of it would bury the
+    # open one in the body.
+    test "a note whose frontmatter block never closes is refused, and says so" do
       request = %{path: @path, type: "reference"}
       decision = decide(:update_frontmatter, request)
 
       assert {:error, message} =
-               Plan.build(:update_frontmatter, decision, request, "# No frontmatter")
+               Plan.build(:update_frontmatter, decision, request, @unterminated)
 
-      assert is_binary(message)
+      assert message =~ "Unterminated frontmatter"
+      refute message =~ "has no frontmatter"
     end
   end
 

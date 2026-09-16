@@ -702,6 +702,53 @@ defmodule Vigil.StoreTest do
     # "enforces the same starts/ends rules as create" moved to
     # policy_test.exs, "update_frontmatter enforces the same content rules
     # as create".
+
+    # A note without frontmatter is what adopting an existing vault turns up;
+    # the parser indexes it as `reference` with a warning, and this is the
+    # write that repairs it. The fixture vault carries one.
+    test "gives a note without frontmatter the block it lacks, and it reindexes as that type", %{
+      vault: vault
+    } do
+      path = "training/note-without-anything.md"
+      body = File.read!(Path.join(vault, path))
+
+      assert {:ok, _} = Store.call(@store, :update_frontmatter, %{path: path, type: "decision"})
+
+      assert File.read!(Path.join(vault, path)) == "---\ntype: decision\n---\n" <> body
+
+      {:ok, result} = Store.call(@store, :read, %{id: path, backlinks: false})
+      assert result.type == :decision
+    end
+
+    test "refuses a note whose frontmatter block never closes, and says which case it is", %{
+      vault: vault
+    } do
+      path = "bike/left-open.md"
+      content = "---\ntype: decision\n# Left Open\n\n## Notes\nThe block never closes.\n"
+
+      # Written by hand, outside vigil, and loaded the way such a note arrives.
+      File.write!(Path.join(vault, path), content)
+      assert %{reloaded: true} = Store.call(@store, :reload, %{})
+
+      assert {:error, msg} =
+               Store.call(@store, :update_frontmatter, %{path: path, type: "decision"})
+
+      assert msg =~ "Unterminated frontmatter"
+      assert File.read!(Path.join(vault, path)) == content
+    end
+  end
+
+  describe "rewrite_note on a note without frontmatter" do
+    test "refuses, naming update_frontmatter as the way to give it one", %{vault: vault} do
+      path = "training/note-without-anything.md"
+      before = File.read!(Path.join(vault, path))
+
+      assert {:error, msg} =
+               Store.call(@store, :rewrite_note, %{path: path, content: "# Transfer\n\nNew."})
+
+      assert msg =~ "update_frontmatter"
+      assert File.read!(Path.join(vault, path)) == before
+    end
   end
 
   describe "delete" do

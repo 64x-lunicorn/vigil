@@ -68,8 +68,9 @@ defmodule Vigil.Vault.Plan do
   the clause, and not as a `KeyError` several frames into the writer.
 
   Returns `{:ok, plan}`, or `{:error, message}` when the content cannot be
-  shaped: an edit whose chunk is gone, or a note whose frontmatter block is
-  unparsable. Both are the caller's message to hand back verbatim.
+  shaped: an edit whose chunk is gone, a note whose frontmatter block never
+  closes, or a rewrite of a note that has no block to preserve. Each is the
+  caller's message to hand back verbatim.
   """
   @spec build(op, Decision.t(), map, String.t() | nil) :: {:ok, t} | {:error, String.t()}
   def build(op, decision, request, current)
@@ -114,29 +115,41 @@ defmodule Vigil.Vault.Plan do
   # The frontmatter block is the half of the file a rewrite never touches, and
   # the body is the half update_frontmatter never touches. Both are the same
   # split, from opposite sides.
+  #
+  # The split does not end there when the note has no block. A rewrite has no
+  # type to write and preserves the block it finds, so it has nothing to
+  # preserve and refuses, naming the tool that can give the note one.
   def build(:rewrite_note, %Decision.RewriteNote{} = resolved, request, current) do
-    with {:ok, frontmatter, _old_body} <- Markdown.split_frontmatter(current) do
-      content = frontmatter <> Map.fetch!(request, :content)
+    case Markdown.split_frontmatter(current) do
+      {:ok, frontmatter, _old_body} ->
+        content = frontmatter <> Map.fetch!(request, :content)
 
-      {:ok,
-       plan(
-         resolved.path,
-         Markdown.normalize_trailing_newline(content),
-         "rewrite_note: #{resolved.path}"
-       )}
+        {:ok,
+         plan(
+           resolved.path,
+           Markdown.normalize_trailing_newline(content),
+           "rewrite_note: #{resolved.path}"
+         )}
+
+      :none ->
+        {:error,
+         "#{resolved.path} has no frontmatter, and rewrite_note preserves the frontmatter it finds. " <>
+           "Give the note one with update_frontmatter first."}
+
+      :unterminated ->
+        unterminated(resolved.path)
     end
   end
 
+  # With no block, the whole note is the body, and the block it lacks goes in
+  # front of it. That is an explicit call to write frontmatter, not the server
+  # repairing a note on its own initiative (docs/design.md, "Frontmatter —
+  # exactly one required field").
   def build(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
-    with {:ok, _old_frontmatter, body} <- Markdown.split_frontmatter(current) do
-      content = frontmatter(resolved.type, resolved.starts, resolved.ends) <> body
-
-      {:ok,
-       plan(
-         resolved.path,
-         Markdown.normalize_trailing_newline(content),
-         "update_frontmatter: #{resolved.path}"
-       )}
+    case Markdown.split_frontmatter(current) do
+      {:ok, _old_frontmatter, body} -> {:ok, frontmatter_plan(resolved, body)}
+      :none -> {:ok, frontmatter_plan(resolved, current)}
+      :unterminated -> unterminated(resolved.path)
     end
   end
 
@@ -159,6 +172,25 @@ defmodule Vigil.Vault.Plan do
        action: {:move, resolved.from, resolved.to},
        message: "move: #{resolved.from} -> #{resolved.to}"
      }}
+  end
+
+  defp frontmatter_plan(resolved, body) do
+    content = frontmatter(resolved.type, resolved.starts, resolved.ends) <> body
+
+    plan(
+      resolved.path,
+      Markdown.normalize_trailing_newline(content),
+      "update_frontmatter: #{resolved.path}"
+    )
+  end
+
+  # A block left open is not a note without one: where it ends, and so where
+  # the body starts, is not something the file says. Neither whole-file write
+  # guesses.
+  defp unterminated(path) do
+    {:error,
+     "Unterminated frontmatter in #{path}: the block opened by its first line never closes " <>
+       "with ---, so where the body starts is unknown."}
   end
 
   defp plan(path, content, message) do
