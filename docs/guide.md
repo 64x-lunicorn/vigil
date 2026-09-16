@@ -248,7 +248,7 @@ token gets an explicit error. "Key" means the call must carry a current
 | `move_note` | from, to, confirm | `{from, to, pushed, broken_backlinks}` | RW | ✓ |
 | `lint` | – | duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
-| `reload` | – | `{reloaded, pull_failed?}` | RW | – |
+| `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content | `{name, pushed}` | RW | ✓ |
