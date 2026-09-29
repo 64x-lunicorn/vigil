@@ -245,8 +245,9 @@ Cloudflare tunnel with its DNS record (`--tunnel-name` if a tunnel called
 audits dependencies, runs the test suite, builds a release, starts the service,
 seeds two OAuth tokens, and finishes with an acceptance check.
 
-`init.sh` prints both tokens **once** at the end. After that they exist only in
-`/var/lib/vigil/oauth_tokens.dets`, readable by root. It also installs the push
+`init.sh` prints both tokens **once** at the end. After that they exist
+nowhere: `/var/lib/vigil/oauth_tokens.dets` keeps only their SHA-256 digests,
+so a lost token is seeded again, not recovered. It also installs the push
 safety net as `/etc/cron.d/vigil-push-safety-net`. An adopted vault keeps its
 own `vigil-vault-conventions` skill; the template is only written when the
 vault has none.

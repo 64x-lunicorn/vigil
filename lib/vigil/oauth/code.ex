@@ -46,6 +46,9 @@ defmodule Vigil.OAuth.Code do
   rather than from configuration read a second time here, so a code cannot be
   minted for a resource the request was never checked against. What is left
   for this module is the grant the code opens and the minute it lives.
+
+  Raises `Vigil.OAuth.Persistence.Unavailable` when the record could not be
+  stored, so no code is redirected to a client that could never redeem it.
   """
   def issue(persistence, ctx, now \\ System.system_time(:second)) do
     code = Token.random()
@@ -61,6 +64,7 @@ defmodule Vigil.OAuth.Code do
       grant_id: Vigil.Uuid.v4(),
       expires_at: now + @ttl
     })
+    |> Persistence.stored!()
 
     code
   end

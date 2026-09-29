@@ -223,6 +223,12 @@ defmodule Vigil.OAuth.Endpoint do
 
       :rate_limited ->
         send_resp(conn, 429, "")
+
+      # RFC 6749 §4.1.2.1 names this one for the authorization endpoint: the
+      # code could not be stored, so the client is told to try again rather
+      # than handed one it can never redeem.
+      :unavailable ->
+        redirect_with_error(conn, ctx.redirect_uri, "temporarily_unavailable", ctx.state)
     end
   end
 

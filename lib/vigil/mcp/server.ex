@@ -121,10 +121,14 @@ defmodule Vigil.MCP.Server do
         budget = conn.private.rate_limit_budget
         now = System.system_time(:second)
 
-        if conn.private.rate_limiter.limited?.(token, budget, now) do
+        # Counted under the token's digest, not the token: the limiter's table
+        # is as much a copy of what the server holds as the `:dets` files are.
+        digest = OAuth.Token.digest(token)
+
+        if conn.private.rate_limiter.limited?.(digest, budget, now) do
           send_resp(conn, 429, "")
         else
-          handle_mcp_authenticated(conn, %{scope: scope, token: token})
+          handle_mcp_authenticated(conn, %{scope: scope, token_digest: digest})
         end
 
       {:error, :challenge} ->
@@ -167,7 +171,8 @@ defmodule Vigil.MCP.Server do
   end
 
   # `auth` is what the validated token says about the caller: its scope, and
-  # the token itself, which is what every budget here is counted against.
+  # the token's digest, which is what every budget here is counted against —
+  # the token itself goes no further than the lookup.
   defp handle_mcp_authenticated(conn, auth) do
     with {:ok, protocol_version_ok?, conn} <- check_protocol_version(conn),
          true <- protocol_version_ok?,
@@ -281,7 +286,7 @@ defmodule Vigil.MCP.Server do
           Tools.write_tool?(name) and not OAuth.may_write?(auth.scope) ->
             {:error, "Read-only token: write access denied."}
 
-          reload_limited?(conn, name, auth.token) ->
+          reload_limited?(conn, name, auth.token_digest) ->
             {:error,
              "Rate limit exceeded for reload: at most #{conn.private.reload_rate_limit_budget} per minute. Try again in #{RateLimit.window_seconds()} seconds."}
 
@@ -311,15 +316,15 @@ defmodule Vigil.MCP.Server do
   # answers as a tool error rather than a 429: the request itself was within
   # its budget, the session goes on, and the caller is told which call to
   # stop repeating.
-  defp reload_limited?(conn, "reload", token) do
+  defp reload_limited?(conn, "reload", token_digest) do
     conn.private.rate_limiter.limited?.(
-      {:reload, token},
+      {:reload, token_digest},
       conn.private.reload_rate_limit_budget,
       System.system_time(:second)
     )
   end
 
-  defp reload_limited?(_conn, _name, _token), do: false
+  defp reload_limited?(_conn, _name, _token_digest), do: false
 
   defp with_session(conn, fun) do
     case get_req_header(conn, "mcp-session-id") do

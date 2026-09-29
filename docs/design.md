@@ -900,6 +900,37 @@ the `:dets`/`:ets` implementation it wires. That module keeps the files'
 lifecycle — opened under the state dir, `chmod 0600`, closed on terminate —
 and stops being something the other five name.
 
+**What it stores is digests, not credentials.** A code and a token are asked
+about by their value and kept under `Vigil.OAuth.Token.digest/1` of it —
+`{:sha256, <<32 bytes>>}` — so a row is `{{:sha256, digest}, attrs}`, and the
+attrs are the record its owner writes (`Vigil.OAuth.Code`, `Vigil.OAuth.Token`)
+with no value in them. A client is kept under its `client_id`, which is
+public. Hashing is each adapter's, before every write, lookup and delete; no
+caller ever holds a digest, so nothing above the seam changed. The value is
+256 random bits, which is why there is no salt and no slow KDF: there is no
+dictionary to precompute. The tag is what tells a digest from the raw binary
+key an earlier version wrote, and what a later format would be told apart
+by. The `/mcp` limiter counts a token under the same digest, so its table
+holds none either.
+
+**State from before that is migrated, not invalidated.** `Vigil.OAuth.Store`
+rekeys every binary key to its digest when it opens the tables and rewrites
+the file from its live rows, since `:dets` does not zero what it deletes; the
+journal gets a count, never a key. Invalidating would have cost every connected
+client a consent round for a fold of a few lines, and the frozen pre-seam
+fixture already recorded exactly the state to migrate —
+`test/vigil/oauth/store_compatibility_test.exs` holds the migration to it.
+
+**A write answers whether it persisted.** `put_code` and `put_token` answer
+`:ok` or the `{:error, reason}` `:dets` gives on a full disk or at the size
+limit, and `Vigil.OAuth.Persistence.stored!/1` turns an error into
+`Vigil.OAuth.Persistence.Unavailable` at every place a value is about to leave
+the server. The flow renders it as `temporarily_unavailable` — 503 at the
+token endpoint, a redirect at consent — and never hands out a value nobody
+can look up again. Rotation stores the new pair before it marks the old
+refresh token spent, so a failure part-way leaves the client a retry rather
+than a replay that revokes its grant.
+
 **The routers resolve it once.** `Vigil.OAuth.Endpoint.init/1` builds the
 production adapter when it is not handed one, exactly as it resolves its proxy
 configuration and its budgets, and `Vigil.MCP.Server.init/1` passes its own

@@ -1047,6 +1047,48 @@ defmodule Vigil.MCP.ServerTest do
 
       refute Map.get(call.(4, "current"), "isError")
     end
+
+    # The limiter's table is a copy of what the server holds like any other,
+    # so it counts a token under its digest and never holds the token — in
+    # both windows a `reload` is counted in.
+    test "a token's requests are counted under its digest", %{
+      persistence: persistence,
+      token: token
+    } do
+      test = self()
+
+      limiter =
+        RateLimit.new(
+          limited?: fn key, _budget, _now ->
+            send(test, {:counted, key})
+            false
+          end,
+          sweep_expired: fn _now -> :ok end
+        )
+
+      conn =
+        post_with_budget(
+          persistence,
+          limiter,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: %{name: "reload", arguments: %{}}
+          },
+          3,
+          [{"mcp-session-id", "session-digest"}]
+        )
+
+      assert conn.status == 200
+      digest = OAuth.Token.digest(token)
+      # Once for the request, once more for `reload`'s own window.
+      assert_received {:counted, ^digest}
+      assert_received {:counted, {:reload, ^digest}}
+      refute_received {:counted, _}
+      refute digest == token
+    end
   end
 
   test "an access token with the wrong audience is rejected", %{persistence: persistence} do

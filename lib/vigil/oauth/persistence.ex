@@ -31,13 +31,23 @@ defmodule Vigil.OAuth.Persistence do
 
   @enforce_keys [
     ## Clients
-    # Write a registered client's record. :ok.
+    # Write a registered client's record. :ok, or {:error, reason} as for a
+    # code below. Keyed by the client_id itself: it is public, published in
+    # every authorization request, and grants nothing on its own.
     :put_client,
     # {:ok, attrs} | :error.
     :get_client,
 
     ## Authorization codes
-    # Write a minted code's record. :ok.
+    #
+    # A code and a token are asked about by their value and kept under its
+    # digest, `Vigil.OAuth.Token.digest/1` — never under the value itself, so
+    # a copy of the state holds nothing a caller could present. Hashing is the
+    # adapter's, before every write, lookup and delete; no caller ever holds
+    # a digest.
+    #
+    # Write a minted code's record. :ok, or {:error, reason} when the write
+    # did not reach the disk — `stored!/1` turns that into a refusal.
     :put_code,
     # Look one up and delete it in the same breath — a code is one-time use.
     # {:ok, attrs} | :error.
@@ -45,7 +55,7 @@ defmodule Vigil.OAuth.Persistence do
 
     ## Tokens (access and refresh alike)
     # Write a token record, and rewrite one: rotation marks a refresh token
-    # spent by putting it back. :ok.
+    # spent by putting it back. :ok, or {:error, reason} as for a code.
     :put_token,
     # {:ok, attrs} | :error.
     :get_token,
@@ -104,6 +114,32 @@ defmodule Vigil.OAuth.Persistence do
   @doc "How long a cached CIMD document stays good for, in seconds."
   @spec cimd_ttl() :: pos_integer()
   def cimd_ttl, do: @cimd_ttl
+
+  defmodule Unavailable do
+    @moduledoc """
+    Raised when a code or a token could not be stored — a full disk, the
+    `:dets` size limit. The value that was minted is never handed out: a
+    credential nobody can look up again is worse than a refusal, because the
+    caller believes it holds one. `Vigil.OAuth.Flow` answers it as
+    `temporarily_unavailable`; a seeding task dies of it without printing a
+    token.
+    """
+    defexception [:reason]
+
+    @impl true
+    def message(%{reason: reason}),
+      do: "OAuth state could not be written: #{inspect(reason)}"
+  end
+
+  @doc """
+  Passes `:ok` through and raises `Unavailable` for the `{:error, reason}` a
+  write answers when it did not persist. Every write whose value is handed
+  out afterwards goes through here, so no code or token leaves the server
+  that was not stored first.
+  """
+  @spec stored!(:ok | {:error, term()}) :: :ok
+  def stored!(:ok), do: :ok
+  def stored!({:error, reason}), do: raise(Unavailable, reason: reason)
 
   @doc """
   Builds a persistence adapter from an answer to every one of the fourteen

@@ -29,7 +29,7 @@ defmodule Vigil.OAuth.Token do
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.Code
+  alias Vigil.OAuth.{Code, Persistence}
 
   @access_ttl 3600
   @refresh_ttl 30 * 86_400
@@ -38,6 +38,24 @@ defmodule Vigil.OAuth.Token do
   def random do
     :crypto.strong_rand_bytes(32) |> Base.encode16(case: :lower)
   end
+
+  @doc """
+  What a code or a token is kept under: `{:sha256, digest}`, the 32-byte
+  SHA-256 of the value.
+
+  The stored shape `docs/design.md`, "OAuth persistence is reached through a
+  value", records. A backup or a snapshot of the state dir then holds nothing
+  a caller could present. No salt and no slow KDF, because none is needed: a
+  value is 256 bits from `random/0`, so there is no dictionary to precompute
+  and nothing a guess could be checked against faster than the server
+  answers. The tag keeps a digest apart from the raw binary keys an earlier
+  version wrote, which is what lets `Vigil.OAuth.Store` migrate those on boot.
+
+  It is also what `/mcp` counts a token's requests under, so the limiter's
+  table holds no bearer token either.
+  """
+  @spec digest(String.t()) :: {:sha256, <<_::256>>}
+  def digest(value) when is_binary(value), do: {:sha256, :crypto.hash(:sha256, value)}
 
   @doc "RFC 7636 S256 PKCE check."
   def pkce_valid?(code_verifier, code_challenge)
@@ -62,6 +80,10 @@ defmodule Vigil.OAuth.Token do
   Both tokens carry the same `grant_id`: the family is what a replay revokes.
   They expire on different schedules — an hour against thirty days — because
   rotation is what bounds a refresh token, not its lifetime.
+
+  Raises `Vigil.OAuth.Persistence.Unavailable` when either record could not
+  be stored, rather than returning a pair one half of which nobody can look
+  up.
   """
   def issue_pair(persistence, record, now) do
     access_token = random()
@@ -75,6 +97,7 @@ defmodule Vigil.OAuth.Token do
       scope: scope,
       expires_at: now + @access_ttl
     })
+    |> Persistence.stored!()
 
     persistence.put_token.(refresh_token, %{
       type: :refresh,
@@ -84,6 +107,7 @@ defmodule Vigil.OAuth.Token do
       scope: scope,
       expires_at: now + @refresh_ttl
     })
+    |> Persistence.stored!()
 
     %{
       access_token: access_token,
@@ -103,6 +127,9 @@ defmodule Vigil.OAuth.Token do
   replay defence can revoke like any other. Leaving the field out would make
   it indistinguishable from a record written before grants existed, which is
   the one thing revocation must not treat as a family.
+
+  Raises `Vigil.OAuth.Persistence.Unavailable` when the record could not be
+  stored, so a seeding task never prints a token that does not exist.
   """
   def issue_out_of_band(persistence, aud, scope, ttl_seconds, now) do
     token = random()
@@ -113,6 +140,7 @@ defmodule Vigil.OAuth.Token do
       scope: scope,
       expires_at: now + ttl_seconds
     })
+    |> Persistence.stored!()
 
     token
   end
@@ -242,9 +270,13 @@ defmodule Vigil.OAuth.Token do
   `classify/1` reads `:spent_at`. The marker can mean "replayed" only because
   rotation is the one thing that writes it and this is the only place
   rotation can.
+
+  Raises `Vigil.OAuth.Persistence.Unavailable` when the marker could not be
+  stored: a rotation whose spend did not persist has not happened.
   """
   def spend_refresh(persistence, token, %{type: :refresh} = record, now) do
     persistence.put_token.(token, Map.put(record, :spent_at, now))
+    |> Persistence.stored!()
   end
 
   @doc """

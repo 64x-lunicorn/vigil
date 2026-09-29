@@ -56,11 +56,13 @@ defmodule Vigil.OAuth.Persistence.Memory do
       Persistence.new(
         put_client: &put(tables, :clients, &1, &2),
         get_client: &fetch(tables, :clients, &1),
-        put_code: &put(tables, :codes, &1, &2),
-        take_code: &take(tables, :codes, &1),
-        put_token: &put(tables, :tokens, &1, &2),
-        get_token: &fetch(tables, :tokens, &1),
-        delete_token: &drop(tables, :tokens, &1),
+        # Codes and tokens under their digest, as the `:dets` adapter keeps
+        # them: a test that reads this table sees what a backup would.
+        put_code: &put(tables, :codes, Token.digest(&1), &2),
+        take_code: &take(tables, :codes, Token.digest(&1)),
+        put_token: &put(tables, :tokens, Token.digest(&1), &2),
+        get_token: &fetch(tables, :tokens, Token.digest(&1)),
+        delete_token: &drop(tables, :tokens, Token.digest(&1)),
         revoke_grant: &revoke_grant(tables, &1),
         rate_limited?: &rate_limited?(tables, &1, &2),
         record_failure: &record_failure(tables, &1, &2),

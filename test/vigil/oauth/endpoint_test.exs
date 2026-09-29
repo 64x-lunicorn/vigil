@@ -289,6 +289,70 @@ defmodule Vigil.OAuth.EndpointTest do
     assert record.aud == @settings.resource
   end
 
+  # What a full disk or the `:dets` size limit looks like through the seam:
+  # the write answers an error instead of :ok.
+  defp refusing(persistence, write) do
+    Map.put(persistence, write, fn _value, _attrs -> {:error, :enospc} end)
+  end
+
+  defp consent_code(endpoint, client_id, redirect_uri, challenge) do
+    post_form(
+      endpoint,
+      "/oauth/authorize",
+      Map.merge(authorize_query(client_id, redirect_uri, challenge), %{
+        "password" => @settings.auth_password,
+        "decision" => "allow"
+      })
+    )
+  end
+
+  test "a pair that could not be stored is refused with temporarily_unavailable", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
+    {verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    [location] =
+      endpoint
+      |> consent_code(client["client_id"], redirect_uri, challenge)
+      |> get_resp_header("location")
+
+    full_disk = endpoint(persistence: refusing(persistence, :put_token))
+
+    conn =
+      post_form(full_disk, "/oauth/token", %{
+        "grant_type" => "authorization_code",
+        "code" => extract_query_param(location, "code"),
+        "redirect_uri" => redirect_uri,
+        "client_id" => client["client_id"],
+        "code_verifier" => verifier
+      })
+
+    assert conn.status == 503
+    assert Jason.decode!(conn.resp_body) == %{"error" => "temporarily_unavailable"}
+    assert get_resp_header(conn, "cache-control") == ["no-store"]
+  end
+
+  test "a code that could not be stored is not redirected to the client", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    full_disk = endpoint(persistence: refusing(persistence, :put_code))
+    conn = consent_code(full_disk, client["client_id"], redirect_uri, challenge)
+
+    assert conn.status == 302
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "temporarily_unavailable"
+    assert extract_query_param(location, "state") == "xyz"
+    assert extract_query_param(location, "code") == nil
+  end
+
   test "wrong code_verifier is rejected and the code becomes permanently unusable", %{
     endpoint: endpoint
   } do

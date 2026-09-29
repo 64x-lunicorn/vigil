@@ -12,9 +12,9 @@ defmodule Vigil.RateLimit do
   only one place should hold it.
 
   The key is whatever the caller counts by and the budget is the caller's to
-  choose, so the same window serves `/mcp` keyed by access token (AP-6.3) and
-  the authorization server keyed by client address. Both are defence in depth,
-  independent of Cloudflare — not a replacement for it.
+  choose, so the same window serves `/mcp` keyed by the access token's digest
+  (AP-6.3) and the authorization server keyed by client address. Both are
+  defence in depth, independent of Cloudflare — not a replacement for it.
 
   `now` is an argument because a test that cannot name the instant can only
   observe the window by waiting a minute for it.

@@ -31,7 +31,7 @@ defmodule Vigil.OAuth.Flow do
   """
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Server, Token}
+  alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Server, Token}
 
   @doc """
   Dynamic client registration. Returns the registration response, or
@@ -156,9 +156,12 @@ defmodule Vigil.OAuth.Flow do
   `:wrong_password` otherwise, and `{:ok, code}` with a fresh one-time
   authorization code when the password is right. Recording the attempt is part
   of the decision, so the caller cannot forget to.
+
+  `:unavailable` when the right password was given but the code could not be
+  stored: a code that was never written is not handed to the client.
   """
   @spec consent(Server.t(), String.t(), String.t() | nil, map(), integer()) ::
-          :rate_limited | :wrong_password | {:ok, String.t()}
+          :rate_limited | :wrong_password | :unavailable | {:ok, String.t()}
   def consent(
         %Server{persistence: persistence, settings: settings},
         ip,
@@ -172,12 +175,18 @@ defmodule Vigil.OAuth.Flow do
 
       Plug.Crypto.secure_compare(password || "", settings.auth_password) ->
         persistence.reset_rate_limit.(ip)
-        {:ok, Code.issue(persistence, ctx, now)}
+        issue_code(persistence, ctx, now)
 
       true ->
         persistence.record_failure.(ip, now)
         :wrong_password
     end
+  end
+
+  defp issue_code(persistence, ctx, now) do
+    {:ok, Code.issue(persistence, ctx, now)}
+  rescue
+    Persistence.Unavailable -> :unavailable
   end
 
   @doc """
@@ -186,13 +195,24 @@ defmodule Vigil.OAuth.Flow do
   Both grants are deliberately uniform about failure: every way an
   authorization code can be wrong reports `invalid_grant`, so a caller
   learns nothing from which check rejected it.
+
+  A write that did not persist answers `{:error, 503,
+  "temporarily_unavailable"}` rather than a pair nobody can look up again —
+  RFC 6749's code for a server "unable to handle the request due to a
+  temporary overloading or maintenance", and the status that says so.
   """
   def grant(persistence, params, now \\ System.system_time(:second)) do
     # Redeeming a code and rotating a refresh token are each a lookup followed
     # by a delete, not one step. Two requests racing on the same code or the
     # same refresh token must not both succeed, so grants run one at a time.
     # The token endpoint is rate-limited and rare; the lock costs nothing.
-    :global.trans({__MODULE__, :grant}, fn -> do_grant(persistence, params, now) end)
+    :global.trans({__MODULE__, :grant}, fn -> stored_grant(persistence, params, now) end)
+  end
+
+  defp stored_grant(persistence, params, now) do
+    do_grant(persistence, params, now)
+  rescue
+    Persistence.Unavailable -> {:error, 503, "temporarily_unavailable"}
   end
 
   defp do_grant(persistence, %{"grant_type" => "authorization_code"} = params, now) do
@@ -244,12 +264,19 @@ defmodule Vigil.OAuth.Flow do
         {:error, 400, "invalid_target"}
 
       true ->
-        # Rotation: the presented token is spent before the new pair is minted,
-        # so a replay is refused — and, because it is marked rather than
-        # deleted, recognised as a replay rather than mistaken for a token that
-        # never existed.
+        # Rotation: the presented token is spent, so a replay is refused — and,
+        # because it is marked rather than deleted, recognised as a replay
+        # rather than mistaken for a token that never existed.
+        #
+        # The pair is stored *before* the spend, and only handed out once both
+        # are. A write that fails part-way then leaves the presented token
+        # live, and the client's retry is a retry rather than a replay that
+        # would revoke its whole grant. What a failed spend leaves behind is a
+        # pair nobody was given, which expires on its own. Grants run one at a
+        # time (`grant/3`), so the order opens no race.
+        pair = Token.issue_pair(persistence, scope_defaulted(data), now)
         Token.spend_refresh(persistence, refresh_token, data, now)
-        {:ok, Token.issue_pair(persistence, scope_defaulted(data), now)}
+        {:ok, pair}
     end
   end
 

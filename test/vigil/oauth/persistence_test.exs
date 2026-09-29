@@ -22,7 +22,7 @@ defmodule Vigil.OAuth.PersistenceTest do
   use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Persistence, Store, Token}
+  alias Vigil.OAuth.{Flow, Persistence, Store, Token}
   alias Vigil.OAuthCase
 
   @now 1_700_000_000
@@ -385,10 +385,94 @@ defmodule Vigil.OAuth.PersistenceTest do
                :ets.lookup(:oauth_cimd_cache, "https://fresh.example/m")
     end
 
+    # A copy of the state dir — a backup, a container snapshot — must hold
+    # nothing a caller could present. So the claim is made against what is
+    # stored: every row of every table, and the bytes of every file.
+    test "no code or token it was handed is kept as itself", %{
+      persistence: persistence,
+      state_dir: state_dir
+    } do
+      code = mint_code(persistence)
+      {:ok, record} = persistence.take_code.(code)
+      pair = Token.issue_pair(persistence, record, @now)
+      pending = mint_code(persistence)
+      seeded = Token.issue_out_of_band(persistence, @resource, OAuth.scope(), 3600, @now)
+
+      values = [code, pending, pair.access_token, pair.refresh_token, seeded]
+
+      stored =
+        for table <- [:oauth_clients, :oauth_codes, :oauth_tokens],
+            row <- :dets.foldl(fn row, acc -> [row | acc] end, [], table),
+            do: :erlang.term_to_binary(row)
+
+      files =
+        for file <- ["oauth_clients.dets", "oauth_codes.dets", "oauth_tokens.dets"],
+            do: File.read!(Path.join(state_dir, file))
+
+      for value <- values, bytes <- stored ++ files do
+        refute String.contains?(bytes, value)
+      end
+
+      # Kept under the digest instead, and found by the value all the same.
+      assert [{{:sha256, _}, _}] = :dets.lookup(:oauth_codes, Token.digest(pending))
+      assert {:ok, _} = persistence.get_token.(pair.access_token)
+    end
+
     test "the files it opens are readable by their owner alone", %{state_dir: state_dir} do
       for file <- ["oauth_clients.dets", "oauth_codes.dets", "oauth_tokens.dets"] do
         assert {:ok, %File.Stat{mode: mode}} = File.stat(Path.join(state_dir, file))
         assert Bitwise.band(mode, 0o077) == 0
+      end
+    end
+  end
+
+  describe "the :dets tables, when a write does not persist" do
+    setup :dets_tables
+
+    # A full disk and the `:dets` size limit both make `:dets.insert/2`
+    # answer `{:error, reason}`. A table reopened read-only answers the same
+    # way, which is how this makes one happen: the store is stopped, and the
+    # named tables its adapter writes to are reopened under the same names
+    # with nothing but read access.
+    setup %{persistence: persistence, state_dir: state_dir} do
+      :ok = persistence.put_token.("refresh-1", refresh_attrs(%{}))
+
+      stop_supervised!(Store)
+
+      for {table, file} <- [oauth_codes: "oauth_codes.dets", oauth_tokens: "oauth_tokens.dets"] do
+        path = String.to_charlist(Path.join(state_dir, file))
+        {:ok, ^table} = :dets.open_file(table, file: path, access: :read, type: :set)
+        on_exit(fn -> :dets.close(table) end)
+      end
+
+      :ok
+    end
+
+    test "a write answers the error rather than :ok", %{persistence: persistence} do
+      assert {:error, _} = persistence.put_token.("token-1", token_attrs(%{}))
+      assert {:error, _} = persistence.put_code.("code-1", %{expires_at: @now + 60})
+    end
+
+    test "the token endpoint answers temporarily_unavailable, and the refresh token stays live",
+         %{persistence: persistence} do
+      assert Flow.grant(
+               persistence,
+               %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "refresh-1",
+                 "client_id" => "client-1"
+               },
+               @now
+             ) == {:error, 503, "temporarily_unavailable"}
+
+      # Not spent: the client's retry is a retry, not a replay that would
+      # revoke its grant.
+      assert {:ok, _} = Token.fetch_refresh(persistence, "refresh-1")
+    end
+
+    test "a minted token is refused rather than handed out", %{persistence: persistence} do
+      assert_raise Persistence.Unavailable, fn ->
+        Token.issue_out_of_band(persistence, @resource, OAuth.scope(), 3600, @now)
       end
     end
   end

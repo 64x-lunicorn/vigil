@@ -154,7 +154,7 @@ sender-constrained or use refresh token rotation" — and acts on the detection
 §4.14.2 asks for, rather than only generating it.
 
 The mechanism is a marker, not a deletion. The presented token is marked
-**spent** before the new pair is minted; presenting a spent token is the
+**spent** as the new pair is minted; presenting a spent token is the
 signal, because §4.14.2's case is precisely that "if a refresh token is
 compromised and subsequently used by both the attacker and the legitimate
 client, one of them will present an invalidated refresh token". vigil cannot
@@ -448,6 +448,10 @@ sequenceDiagram
 The consent page requires the `VIGIL_AUTH_PASSWORD` every time. There is no
 session cookie after login — it happens rarely enough.
 
+A code that could not be stored is not redirected to the client: the consent
+answers with `error=temporarily_unavailable` instead, the RFC 6749 §4.1.2.1
+code for exactly that, and the client starts over.
+
 Every redirect back to the client carries `iss`, the issuer identifier of
 RFC 9207, next to `code` (or `error`) and the `state` the client sent. See the
 mix-up answer in the RFC 9700 walk above.
@@ -523,7 +527,10 @@ carrying the `grant_id` minted with the code.
 ### `grant_type=refresh_token`
 
 **Rotation is mandatory** for a public client: the old refresh token is marked
-spent and a new pair is issued.
+spent and a new pair is issued. The pair is stored first and the spend second,
+and the pair is handed out only once both are stored: a write that fails
+part-way leaves the presented token live, so the client's retry is a retry
+and not a replay that revokes its grant (see "Storage and cleanup").
 
 Checks run in this order:
 
@@ -544,7 +551,7 @@ flow again, consent page included.
 ### Error format
 
 Every refusal is a JSON object with one field, `{"error": "..."}`. Apart from
-the rate limit below, it comes with HTTP 400:
+the two departures below, it comes with HTTP 400:
 
 | `error` | When |
 |---|---|
@@ -561,10 +568,10 @@ What RFC 6749 §5.2 permits is wider. A response may carry `error_description`
 and `error_uri`; `invalid_client` answers a failed client authentication, with
 401 when the client authenticated through the `Authorization` header; and
 `unauthorized_client` and `invalid_scope` are defined too. `invalid_target` is
-RFC 8707's. Apart from the departure below, vigil sends the four codes above
-and nothing else.
+RFC 8707's. Apart from the two departures below, vigil sends the four codes
+above and nothing else.
 
-**A rate-limited request is the one deliberate departure**: HTTP 429,
+**A rate-limited request is one deliberate departure**: HTTP 429,
 `{"error": "temporarily_unavailable"}`, and a `Retry-After` carrying the
 window. §5.2 lists neither — it mandates 400 for the token endpoint, and
 `temporarily_unavailable` is §4.1.2.1's code, defined for the authorization
@@ -574,6 +581,13 @@ for rate" rather than "your request was malformed"; and a client that renews
 reactively on a 401 has to tell those two apart or it will retry a malformed
 request forever. `Retry-After` comes from the window itself, so the wait is a
 fact rather than a guess.
+
+**A write that did not persist is the other**: HTTP 503,
+`{"error": "temporarily_unavailable"}`, when a token could not be stored — a
+full disk, the `:dets` size limit. Nothing is handed out in that case; see
+"Storage and cleanup". The code is the same one, for the reason its
+definition gives — the server is "unable to handle the request due to a
+temporary overloading or maintenance" — and 503 is the status that says so.
 
 ---
 
@@ -620,6 +634,37 @@ Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
 `:dets.sync/1` after every write — the write rate is low enough that it does
 not matter, and a token lost to a crash costs one re-authorization.
 
+**The files hold digests, not credentials.** Every row is `{key, attrs}`:
+
+| File | Key | Attrs |
+|---|---|---|
+| `oauth_clients.dets` | the `client_id` itself — public, it grants nothing | `Vigil.OAuth.Client`'s record |
+| `oauth_codes.dets` | `{:sha256, <<32 bytes>>}`, the SHA-256 of the code | `Vigil.OAuth.Code`'s record |
+| `oauth_tokens.dets` | `{:sha256, <<32 bytes>>}`, the SHA-256 of the token | `Vigil.OAuth.Token`'s record |
+
+`Vigil.OAuth.Token.digest/1` makes the key, and `Vigil.OAuth.Store` applies it
+before every write, lookup and delete, so a backup or a container snapshot of
+the state dir holds nothing a caller could present. No salt and no slow KDF:
+every value is 256 random bits, so there is no dictionary to precompute. No
+attrs carry a value either. The `/mcp` rate limiter counts a token under the
+same digest, so its table holds none.
+
+State written before this change keyed codes and tokens by the raw value. The
+first boot **migrates it**: every binary key is rehashed in place and the file
+is rewritten from its live rows, since `:dets` does not zero what it deletes.
+The journal says how many rows moved (`rekeyed 4 oauth_tokens rows to their
+digests`), never which. Every client connected before the upgrade stays
+connected. `test/vigil/oauth/store_compatibility_test.exs` holds the
+migration to the frozen pre-seam fixture.
+
+**A write that does not persist fails the request.** `:dets.insert/2` answers
+`{:error, reason}` on a full disk or at the size limit, and the adapter hands
+that back instead of dropping it. `Vigil.OAuth.Persistence.stored!/1` turns it
+into a refusal wherever a value is about to leave the server: the token
+endpoint answers 503 `temporarily_unavailable`, the consent redirects with the
+same code, and `mix vigil.seed_token` dies without printing a token. A value
+that was never stored is never handed out.
+
 `Vigil.OAuth.Janitor` runs every five minutes and sweeps five tables, which is
 every table that holds something with an expiry. `oauth_clients.dets` is not
 among them and is deliberately not swept: a registration has no expiry to read,
@@ -640,10 +685,10 @@ answers it today.
 No cron, no job library — just `Process.send_after/3`.
 
 The last row is both request limiters, not one of them: `Vigil.RateLimit`
-holds a single table for `/mcp` keyed by access token *and* the OAuth endpoints
-keyed by client address, so one sweep covers both. Only the third row is the
-15-minute consent lockout, and it covers wrong passwords on the consent form
-and nothing else.
+holds a single table for `/mcp` keyed by the access token's digest *and* the
+OAuth endpoints keyed by client address, so one sweep covers both. Only the
+third row is the 15-minute consent lockout, and it covers wrong passwords on
+the consent form and nothing else.
 
 The janitor's list is its own rather than the OAuth store's inventory. It was
 that inventory in effect until #89, and the one swept table that store does
