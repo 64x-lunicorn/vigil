@@ -434,7 +434,7 @@ record_done "set up the service user's SSH identity"
 
 step "5/9  Clone the code repo"
 
-if [ -d /opt/vigil/repo/.git ]; then
+if [ -e /opt/vigil/repo/.git ]; then
   log "Repo already exists at /opt/vigil/repo — fetching instead of cloning."
   run_step "git fetch" -- as_vigil git -C /opt/vigil/repo fetch --all
   as_vigil git -C /opt/vigil/repo status --short || true

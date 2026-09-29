@@ -49,7 +49,7 @@ cd "$VAULT_DIR"
 
 # On VIGIL_GIT_BRANCH when it is set (scripts/init.sh sets it), otherwise on
 # whatever branch this machine's git starts a repository on.
-if [ ! -d .git ]; then
+if [ ! -e .git ]; then
   git init ${VIGIL_GIT_BRANCH:+-b "$VIGIL_GIT_BRANCH"}
   echo "initialized git repository in $VAULT_DIR ($(git symbolic-ref --short HEAD))"
 fi

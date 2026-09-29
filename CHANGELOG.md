@@ -225,6 +225,9 @@ read it afterwards.
 
 - A failed commit leaves the working tree and the index as they were, for
   every write, including `delete_note` and `move_note`.
+- `init.sh` and `init_vault.sh` take a vault that is a git worktree (`.git` a
+  file) for the clone it is, as the server does; `init_vault.sh` ran `git
+  init` over it.
 - Two first `bin/vigil` commands at once on a release without a cookie no
   longer each write one: the second keeps the first one's instead of
   replacing the cookie its node already runs with.

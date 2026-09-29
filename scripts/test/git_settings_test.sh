@@ -8,8 +8,9 @@
 # update.sh, verify() and the push safety net, and a vault on `master` failed
 # every one of them with a git error. This checks the reading, the one script
 # that does nothing but act on the two (push_pending.sh, against a real
-# repository on `master`), and that no script or deploy file names either
-# value again.
+# repository on `master`), that no script or deploy file names either
+# value again, and that a vault that is a git worktree — `.git` a file, not a
+# directory — is a clone to the scripts as it is to the server.
 #
 # Everything happens in a temp directory. No root, no network.
 #
@@ -75,7 +76,7 @@ ask() {
 
 ## ── 1. Reading the two settings ──────────────────────────────────────────
 
-section "1/3  lib.sh reads both from the env file"
+section "1/4  lib.sh reads both from the env file"
 
 env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master"
 assert_eq "the remote is the env file's" "upstream" "$(ask vault_git_remote)"
@@ -99,7 +100,7 @@ assert_eq "with no env file at all, the remote is the default" "github" "$(ask v
 
 ## ── 2. push_pending.sh on master ─────────────────────────────────────────
 
-section "2/3  push_pending.sh pushes the configured branch to the configured remote"
+section "2/4  push_pending.sh pushes the configured branch to the configured remote"
 
 push_pending() {
   bash "${REPO_ROOT}/scripts/push_pending.sh" >"${WORK}/out.txt" 2>&1
@@ -143,7 +144,7 @@ fi
 
 ## ── 3. Nothing restates them ─────────────────────────────────────────────
 
-section "3/3  No script or deploy file names the remote or the branch"
+section "3/4  No script or deploy file names the remote or the branch"
 
 # A git command, a ref or an env line naming `github` or `main` as the vault's
 # remote or branch. github.com, the host, is not a remote name. Not matched,
@@ -160,5 +161,30 @@ hardcoded="$(
     grep -vE '^scripts/update\.sh:[0-9]+:(TARGET_REF=|  --to )' || true
 )"
 assert_eq "no hard-coded remote or branch in scripts/ or deploy/" "" "$hardcoded"
+
+## ── 4. A worktree is a clone ─────────────────────────────────────────────
+
+section "4/4  A vault that is a git worktree is a clone to every script"
+
+# The server takes a vault whose `.git` is a file (Vigil.Git.clone?/1): a
+# worktree. init_vault.sh used to find no `.git` directory there and run `git
+# init` over it; init.sh to read no branch from it and to clone into it.
+WORKTREE="${WORK}/worktree-vault"
+git -C "$VIGIL_VAULT_DIR" worktree add --quiet -b drafts "$WORKTREE"
+output="$(GIT_CONFIG_COUNT=3 \
+  GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+  GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1="git settings test" \
+  GIT_CONFIG_KEY_2=user.email GIT_CONFIG_VALUE_2="test@localhost" \
+  VIGIL_GIT_BRANCH=elsewhere bash "${REPO_ROOT}/scripts/init_vault.sh" "$WORKTREE" 2>&1)"
+case "$output" in
+  *"initialized git repository"*) fail "init_vault.sh does not initialise a worktree again" "$output" ;;
+  *) pass "init_vault.sh does not initialise a worktree again" ;;
+esac
+assert_eq "the worktree stays on its branch" "drafts" \
+  "$(git -C "$WORKTREE" symbolic-ref --short HEAD)"
+
+# And no script asks for a `.git` directory where a clone is meant.
+directory_tests="$(cd "$REPO_ROOT" && grep -nE '\-d [^]]*\.git"?[[:space:]]*\]' scripts/*.sh || true)"
+assert_eq "no script tests for a .git directory rather than a .git" "" "$directory_tests"
 
 report

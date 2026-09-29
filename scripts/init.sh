@@ -158,7 +158,7 @@ GIT_REMOTE="$(vault_git_remote)"
 vault_branch() {
   local vault="$1" branch
   branch="$(env_file_value VIGIL_GIT_BRANCH)"
-  if [ -z "$branch" ] && [ -d "${vault}/.git" ]; then
+  if [ -z "$branch" ] && [ -e "${vault}/.git" ]; then
     branch="$(as_vigil git -C "$vault" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
   fi
   echo "${branch:-$DEFAULT_GIT_BRANCH}"
@@ -507,7 +507,7 @@ if [ "$CHECK_ONLY" = "1" ]; then
 
   require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
-  if [ "${VIGIL_INIT_TEST_STUBS:-0}" != "1" ] && [ ! -d /opt/vigil/repo/.git ]; then
+  if [ "${VIGIL_INIT_TEST_STUBS:-0}" != "1" ] && [ ! -e /opt/vigil/repo/.git ]; then
     err "Code repo missing at /opt/vigil/repo — run setup.sh first."
     exit 2
   fi
@@ -545,7 +545,7 @@ if ! id vigil >/dev/null 2>&1; then
   err "User 'vigil' missing — run setup.sh first."
   exit 2
 fi
-if [ ! -d /opt/vigil/repo/.git ]; then
+if [ ! -e /opt/vigil/repo/.git ]; then
   err "Code repo missing at /opt/vigil/repo — run setup.sh first."
   exit 2
 fi
@@ -626,7 +626,7 @@ fi
 # a vault that is already there says it.
 GIT_BRANCH="$(vault_branch "$VAULT")"
 
-if [ -d "${VAULT}/.git" ]; then
+if [ -e "${VAULT}/.git" ]; then
   log "Vault already exists at ${VAULT} — skipping create/clone."
 elif [ -n "$EXISTING_VAULT_URL" ]; then
   run_step "clone vault (${EXISTING_VAULT_URL})" -- as_vigil git clone "$EXISTING_VAULT_URL" "$VAULT"
