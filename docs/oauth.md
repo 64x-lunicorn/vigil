@@ -522,6 +522,12 @@ reachable as that address — `64:ff9b::10.0.0.1` is `10.0.0.1`:
 | 6to4 `2002::/16` | bits 16–47 |
 | Teredo `2001::/32` | two addresses, both checked: the server in bits 32–63, the client in the last 32 bits with every bit inverted |
 
+The mapped and compatible forms sit outside `2000::/3`, which alone would
+refuse them. They are judged by the IPv4 address instead, like the other
+three: `::ffff:93.184.216.34` and `::5db8:d822` carry the public 93.184.216.34
+and are fetched from, because that address is where the socket ends up; one
+carrying a private or special-purpose address is refused.
+
 ---
 
 ## Redirect URI matching
@@ -704,6 +710,15 @@ client could not be stored or the client table is full. Nothing is handed out in
 "Storage and cleanup". The code is the same one, for the reason its
 definition gives — the server is "unable to handle the request due to a
 temporary overloading or maintenance" — and 503 is the status that says so.
+
+What a retry finds differs between the two grants. A refresh token stays live
+when its rotation fails part-way (the new pair is stored before the old token
+is spent), so the client's retry is a retry. An authorization code does not:
+redeeming takes it out of the table before the pair is written, as a one-time
+code must be, so a code whose redemption failed to store is spent, the retry
+answers `invalid_grant`, and the client has to send its user through consent
+again. Putting the code back would make a failed write the one way a code is
+redeemed twice.
 
 ---
 
