@@ -1978,8 +1978,13 @@ share — and hands it out separately (`non_utf8_paths/1`). The load skips it
 with the same kind of warning, and `lint` (`invalid_utf8`) and `vault_check`
 (`b0_encoding`) name it with every stray byte spelled out as `\xHH`
 (`bike/caf\xE9.md`), so the report is valid JSON and still says which file to
-rename. APFS refuses such a name outright, so on macOS the case cannot arise;
-the tests that need one on disk run where the filesystem holds it.
+rename. The same holds for a skill: `Vigil.Skills.list/1` leaves a file under
+`skills/` whose name is not UTF-8 out of `skill_list` with a warning that
+names it the same way — the whole list is one JSON answer, and it is the
+bootstrap every session starts with — and `skill_read` could never reach it,
+because a skill name is `[a-z0-9_-]+`. APFS refuses such a name outright, so on
+macOS the case cannot arise; the tests that need one on disk run where the
+filesystem holds it.
 
 ---
 

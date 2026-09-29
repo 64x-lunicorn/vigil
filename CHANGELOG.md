@@ -217,6 +217,8 @@ read it afterwards.
 
 - A failed commit leaves the working tree and the index as they were, for
   every write, including `delete_note` and `move_note`.
+- A skill file whose name is not UTF-8 is left out of `skill_list` with a
+  warning naming it; it made the whole list fail to encode.
 - A write while another branch is checked out in the vault's clone — a
   `git switch` there after boot — is refused, and so is the update before it,
   naming `VIGIL_GIT_BRANCH` and the branch found; it used to commit on that

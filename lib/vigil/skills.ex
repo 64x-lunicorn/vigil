@@ -18,23 +18,47 @@ defmodule Vigil.Skills do
   the one caller that has it hands it over.
   """
 
-  alias Vigil.{Commit, Markdown, SkillKey}
+  require Logger
 
-  @doc "Lists skills (name + description) found under `vault_path`/skills/."
+  alias Vigil.{Commit, Markdown, SkillKey}
+  alias Vigil.Vault.Layout
+
+  @doc """
+  Lists skills (name + description) found under `vault_path`/skills/.
+
+  A file whose name is not UTF-8 is left out with a warning: its name could
+  not travel as a skill name in `skill_list`'s JSON, and `read/3` refuses it
+  anyway (docs/design.md, "A note that is not UTF-8 is skipped").
+  """
   def list(vault_path) do
     dir = Path.join(vault_path, "skills")
 
-    if File.dir?(dir) do
-      dir
-      |> File.ls!()
-      |> Enum.filter(&String.ends_with?(&1, ".md"))
-      |> Enum.map(fn filename ->
-        name = Path.basename(filename, ".md")
-        description = skill_description(Path.join(dir, filename))
-        %{name: name, description: description}
-      end)
+    if File.dir?(dir), do: listed(dir, File.ls!(dir)), else: []
+  end
+
+  @doc false
+  # list/1 over file names handed in, so a name the test filesystem refuses
+  # (APFS will not hold one that is not UTF-8) can still be handed to it.
+  def listed(dir, filenames) do
+    filenames
+    |> Enum.filter(&(String.ends_with?(&1, ".md") and utf8_name?(&1)))
+    |> Enum.map(fn filename ->
+      name = Path.basename(filename, ".md")
+      description = skill_description(Path.join(dir, filename))
+      %{name: name, description: description}
+    end)
+  end
+
+  defp utf8_name?(filename) do
+    if String.valid?(filename) do
+      true
     else
-      []
+      Logger.warning(
+        "vigil: skipped skills/#{Layout.printable_path(filename)}: its file name is not " <>
+          "UTF-8, so it cannot be a skill name; rename it in UTF-8 to list it"
+      )
+
+      false
     end
   end
 

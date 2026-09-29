@@ -53,6 +53,47 @@ defmodule Vigil.SkillsTest do
     end
   end
 
+  # skill_list is the mandatory bootstrap, and its answer is JSON: a skill
+  # file whose name is not UTF-8 — `caf\xE9.md`, saved from Windows-1252 on
+  # a Linux clone — cannot be a skill name, and used to make the encoder
+  # raise on the whole list (docs/design.md, "A note that is not UTF-8 is
+  # skipped").
+  describe "a skill file whose name is not UTF-8" do
+    @non_utf8 "caf" <> <<0xE9>> <> ".md"
+
+    test "is left out of the list with a warning naming it, and the list encodes" do
+      dir = tmp_dir()
+      File.write!(Path.join(dir, "tdd.md"), "---\ndescription: Tests first\n---\n# TDD\n")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:listed, Skills.listed(dir, [@non_utf8, "tdd.md"])})
+        end)
+
+      assert_received {:listed, [%{name: "tdd", description: "Tests first"}] = listed}
+      assert log =~ "skills/caf\\xE9.md"
+      assert {:ok, _json} = Jason.encode(listed)
+    end
+
+    @tag :non_utf8_file_names
+    test "on disk, is left out of list/1" do
+      vault = tmp_dir()
+      File.mkdir_p!(Path.join(vault, "skills"))
+      File.write!(Path.join([vault, "skills", @non_utf8]), "# Caf\n")
+
+      ExUnit.CaptureLog.capture_log(fn -> send(self(), {:listed, Skills.list(vault)}) end)
+
+      assert_received {:listed, []}
+    end
+
+    test "cannot be read by that name" do
+      vault = tmp_dir()
+
+      assert {:error, "Invalid path"} = Skills.read("caf" <> <<0xE9>>, vault, @key)
+      assert {:error, "Invalid path"} = Skills.read(@non_utf8, vault, @key)
+    end
+  end
+
   describe "read/3 (FixtureVault-backed)" do
     setup do
       vault = Vigil.FixtureVault.build()
