@@ -16,11 +16,13 @@
 #
 # Pushes only when commits are pending, and takes a lock so two runs never
 # overlap. The lock is this job's alone: vigil's own push does not take it.
-# The vault's hooks are not run, and the push is given VIGIL_PUSH_TIMEOUT
-# seconds. Prints nothing when there is nothing to push. Exits non-zero —
-# which fails the unit, shows in the journal and starts its OnFailure= unit —
-# when the push fails, and when commits have been waiting longer than
-# VIGIL_PUSH_ALERT_AFTER minutes.
+# It fetches first, and refuses to push commits a force-push took off the
+# remote, as vigil's own push does. The vault's hooks are not run, and the
+# fetch and the push are each given VIGIL_PUSH_TIMEOUT seconds. Prints nothing
+# when there is nothing to push. Exits non-zero — which fails the unit, shows
+# in the journal and starts its OnFailure= unit — when the fetch or the push
+# fails, when the push is refused, and when commits have been waiting longer
+# than VIGIL_PUSH_ALERT_AFTER minutes.
 
 # shellcheck source=scripts/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -98,27 +100,91 @@ pending() {
 
 [ "$(pending)" = "0" ] && exit 0
 
-# core.hooksPath=/dev/null: a pre-push hook in the vault is code whoever can
-# write the vault chose, and it is not run. The ssh options are the ones
-# Vigil.Git gives the server's own push, so a remote that stalls is noticed by
-# ssh first; `timeout` bounds whatever ssh does not, and the unit's
+# rewritten — how many commits the branch holds that the remote once held and
+# a force-push took away: the rule Vigil.Git.push/3 refuses on
+# (docs/design.md, "The server stays in step with the remote"). The fork
+# point is the newest commit of the branch the remote-tracking branch ever
+# pointed at, by that ref's reflog (`git merge-base --fork-point`, what
+# `git pull --rebase` asks); what lies before it and not on the
+# remote-tracking branch any more, the remote no longer has. 0 when the
+# reflog does not reach back that far.
+rewritten() {
+  local tracking="refs/remotes/${REMOTE}/${BRANCH}" fork
+  fork="$(git -C "$VAULT" merge-base --fork-point "$tracking" "refs/heads/${BRANCH}" 2>/dev/null)" || {
+    echo 0
+    return 0
+  }
+  git -C "$VAULT" rev-list --count "${tracking}..${fork}" 2>/dev/null || echo 0
+}
+
+# Fetched first, then pushed. The remote is asked what it holds now: after a
+# human took a commit off it with a force-push, the branch is ahead of the
+# remote again, git would take the push as a fast-forward, and this run would
+# put back what was removed. That is refused and reported instead, as vigil's
+# own push refuses it — the fetch is forced (`+`), like the server's, so the
+# remote-tracking branch says what the remote holds, and its reflog what it
+# held before.
+#
+# core.hooksPath=/dev/null: a hook in the vault is code whoever can write the
+# vault chose, and none is run. push.gpgSign=false: the service user has no
+# key, and a signature asked for by the ambient configuration would fail the
+# push. The ssh options are the ones Vigil.Git gives the server's own fetch
+# and push, so a remote that stalls is noticed by ssh first; `timeout` bounds
+# whatever ssh does not, each of the two on its own, and the unit's
 # TimeoutStartSec= bounds the whole run.
+#
+# The subshell's exit code says which step ended it: 0 pushed (or the lock was
+# taken), 110/111 the fetch timed out / failed, 112 the push was refused,
+# anything else the push's own.
+REWRITTEN=0
 PUSH_RC=0
 (
   flock -n 9 || exit 0
-  GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3" \
-    timeout --kill-after=10 "$PUSH_TIMEOUT" \
-    git -c core.hooksPath=/dev/null -C "$VAULT" push --quiet "$REMOTE" "$BRANCH"
+  export GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+  rc=0
+  timeout --kill-after=10 "$PUSH_TIMEOUT" \
+    git -c core.hooksPath=/dev/null -C "$VAULT" fetch --quiet "$REMOTE" \
+    "+refs/heads/${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}" || rc=$?
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    exit 110
+  elif [ "$rc" -ne 0 ]; then
+    exit 111
+  fi
+  count="$(rewritten)"
+  if [ "$count" != "0" ]; then
+    echo "$count" >"${LOCK_DIR}/rewritten"
+    exit 112
+  fi
+  timeout --kill-after=10 "$PUSH_TIMEOUT" \
+    git -c core.hooksPath=/dev/null -c push.gpgSign=false -C "$VAULT" push --quiet "$REMOTE" "$BRANCH"
 ) 9>"$LOCK" || PUSH_RC=$?
 
 FAILED=0
-if [ "$PUSH_RC" -eq 124 ] || [ "$PUSH_RC" -eq 137 ]; then
-  err "git push ${REMOTE} ${BRANCH} did not finish within ${PUSH_TIMEOUT}s and was stopped."
-  FAILED=1
-elif [ "$PUSH_RC" -ne 0 ]; then
-  err "git push ${REMOTE} ${BRANCH} failed (exit ${PUSH_RC})."
-  FAILED=1
-fi
+case "$PUSH_RC" in
+  0) ;;
+  110)
+    err "git fetch ${REMOTE} ${BRANCH} did not finish within ${PUSH_TIMEOUT}s and was stopped; nothing was pushed."
+    FAILED=1
+    ;;
+  111)
+    err "git fetch ${REMOTE} ${BRANCH} failed; nothing was pushed."
+    FAILED=1
+    ;;
+  112)
+    REWRITTEN="$(cat "${LOCK_DIR}/rewritten" 2>/dev/null || echo "?")"
+    rm -f "${LOCK_DIR}/rewritten"
+    err "The remote's history was rewritten: ${REWRITTEN} commit(s) this vault holds were taken off ${REMOTE}/${BRANCH} by a force-push, and pushing would put them back. Not pushed; decide by hand whether they go back (git -C ${VAULT} log ${REMOTE}/${BRANCH}..${BRANCH})."
+    FAILED=1
+    ;;
+  124 | 137)
+    err "git push ${REMOTE} ${BRANCH} did not finish within ${PUSH_TIMEOUT}s and was stopped."
+    FAILED=1
+    ;;
+  *)
+    err "git push ${REMOTE} ${BRANCH} failed (exit ${PUSH_RC})."
+    FAILED=1
+    ;;
+esac
 
 # The alert on its own: whatever the reason — a push that keeps failing, a run
 # that found the lock taken — commits that have waited too long are reported.

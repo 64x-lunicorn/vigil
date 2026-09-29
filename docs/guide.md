@@ -1134,11 +1134,15 @@ journalctl -u vigil-push -n 50                 # what the runs said
 It runs as `vigil` under the same sandbox as the service, with the settings
 of `/etc/vigil/env` handed to it by systemd; the lock is in
 `/run/vigil-push/`, which only `vigil` can enter; the vault's git hooks are
-not run; and the push is stopped after `VIGIL_PUSH_TIMEOUT` seconds, the whole
-run after five minutes. A run **fails** — the unit shows as failed and the
-reason is in its journal — when the push fails or is stopped, and when
-commits have been waiting longer than `VIGIL_PUSH_ALERT_AFTER` minutes, even
-if this run could not tell why.
+not run; it fetches before it pushes, and the fetch and the push are each
+stopped after `VIGIL_PUSH_TIMEOUT` seconds, the whole run after five minutes.
+It does not push commits a force-push took off the remote, as vigil's own push
+does not: pushing them would put back what someone removed. A run **fails** —
+the unit shows as failed and the reason is in its journal — when the fetch or
+the push fails or is stopped, when that refusal stops the push (decide by hand
+whether the commits go back: `git -C /var/lib/vigil/vault log
+<remote>/<branch>..<branch>`), and when commits have been waiting longer than
+`VIGIL_PUSH_ALERT_AFTER` minutes, even if this run could not tell why.
 
 **Being told.** A failed run starts `vigil-notify@vigil-push.service`
 (`OnFailure=`). As shipped it logs one line at priority `crit`:

@@ -205,7 +205,7 @@ section "4/7  A failed push fails the run and says so"
 env_file "VIGIL_GIT_REMOTE=gone" "VIGIL_GIT_BRANCH=master"
 RC="$(push)"
 assert_eq "exits 1" "1" "$RC"
-says "names the remote and the branch" "git push gone master failed"
+says "names the remote and the branch" "git fetch gone master failed"
 if grep -q "unpushed for" "$OUT"; then
   fail "a fresh commit raises no waiting alert"
 else
@@ -252,6 +252,41 @@ done
 env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master" "VIGIL_PUSH_TIMEOUT=280" "VIGIL_PUSH_ALERT_AFTER=10080"
 RC="$(push)"
 assert_eq "the largest values in range are taken" "0" "$RC"
+
+section "5c   Commits a force-push took off the remote are not pushed back"
+
+# A human drops the vault's last pushed commit from the remote, and vigil's own
+# fetch has seen it: the branch is one ahead of the remote again. vigil's push
+# refuses that (Vigil.Git.push/3); a plain push here would fast-forward the
+# remote and put the commit back.
+env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master"
+commit_pending
+RC="$(push)"
+assert_eq "the commit is pushed first" "0" "$RC"
+dropped="$(vault_head)"
+git --git-dir="$UPSTREAM" update-ref refs/heads/master "${dropped}~1"
+git -C "$VAULT" fetch --quiet upstream "+refs/heads/master:refs/remotes/upstream/master"
+RC="$(push)"
+assert_eq "exits 1" "1" "$RC"
+assert_eq "the remote stays without the commit" "$(git -C "$VAULT" rev-parse "${dropped}~1")" "$(upstream_head)"
+says "says the remote's history was rewritten, and how many" "history was rewritten: 1 commit"
+
+# The same, with the force-push not yet fetched: this run's own fetch finds it.
+git --git-dir="$UPSTREAM" update-ref refs/heads/master "$dropped"
+git -C "$VAULT" fetch --quiet upstream "+refs/heads/master:refs/remotes/upstream/master"
+commit_pending
+git --git-dir="$UPSTREAM" update-ref refs/heads/master "${dropped}~1"
+RC="$(push)"
+assert_eq "found by its own fetch: exits 1" "1" "$RC"
+assert_eq "found by its own fetch: nothing pushed" "$(git -C "$VAULT" rev-parse "${dropped}~1")" "$(upstream_head)"
+
+# Put back as it was for what follows: the remote at the vault's head, as a
+# human who decided the commits go back would do it.
+git -C "$VAULT" -c core.hooksPath=/dev/null push --quiet --force upstream master
+commit_pending
+RC="$(push)"
+assert_eq "a commit on top of what the remote holds is pushed" "0" "$RC"
+assert_eq "and reaches it" "$(vault_head)" "$(upstream_head)"
 
 ## ── 6. The settings the unit hands over ──────────────────────────────────
 

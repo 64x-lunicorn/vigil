@@ -2375,8 +2375,17 @@ script and the root scripts read one file. The lock is in the unit's
 `RuntimeDirectory=` (`/run/vigil-push`, 0700, the service user's), and the
 script refuses a lock directory anyone else could write to — `/run/lock`, the
 first replacement for `/tmp`, is writable by everyone too. Hooks are off
-(`core.hooksPath=/dev/null`); the push has the server's ssh options and
-`VIGIL_PUSH_TIMEOUT` seconds, the unit five minutes.
+(`core.hooksPath=/dev/null`); the fetch and the push have the server's ssh
+options and `VIGIL_PUSH_TIMEOUT` seconds each, the unit five minutes.
+
+**The push safety net refuses what vigil's own push refuses.** It fetches
+before it pushes, forced like the server's fetch, and does not push while the
+branch holds commits a force-push took off the remote — the same fork-point
+rule `Vigil.Git.push/3` refuses on (the remote-tracking branch's reflog, `git
+merge-base --fork-point`). A plain push would take the branch's lead over the
+rewritten remote for a fast-forward and put back what a human removed; the
+run fails instead, and says how many commits and where to look. Its push is
+unsigned (`push.gpgSign=false`), like the server's.
 
 **Every failed run fails the unit, and the unit says so.** A failed or stopped
 push exits non-zero, which puts the reason in the unit's journal and starts
@@ -2394,6 +2403,12 @@ vigil has no mail, pager or webhook of its own to assume. `init.sh` installs
 the three units; `update.sh` reinstalls them on every update rather than
 behind `--update-unit`, since the timer runs a script from the checkout the
 update has just moved, and removes the cron file on a host that still has it.
+Both take the units from the checkout and judge them before the first `mix`
+step, which runs every dependency's code as the account that owns the
+checkout; `update.sh` installs that copy only once the update stands, so a
+rollback leaves the old units, or the cron line, to the old release. The
+service's own unit (`--update-unit`) is installed before the switch, since the
+new release may need it to boot, and the rollback puts the old one back.
 
 **The operator scripts never expose a secret.** A secret reaches no argument
 vector, no trace and no journal line. `verify()` hands curl the bearer, the
