@@ -487,10 +487,13 @@ defmodule Vigil.Store do
     do: state.git.fetch.(state.vault_path, state.git_remote, state.git_branch)
 
   defp fetch(state, timeout) do
-    {pid, ref} = spawn_monitor(fn -> exit({:fetched, fetch(state, :infinity)}) end)
+    writer = self()
+    tag = make_ref()
+    {pid, ref} = spawn_monitor(fn -> send(writer, {tag, fetch(state, :infinity)}) end)
 
     receive do
-      {:DOWN, ^ref, :process, ^pid, {:fetched, result}} ->
+      {^tag, result} ->
+        Process.demonitor(ref, [:flush])
         result
 
       {:DOWN, ^ref, :process, ^pid, reason} ->
@@ -499,6 +502,13 @@ defmodule Vigil.Store do
       timeout ->
         Process.demonitor(ref, [:flush])
         Process.exit(pid, :kill)
+        # An answer sent just before the kill must not linger in the writer's
+        # mailbox.
+        receive do
+          {^tag, _late} -> :ok
+        after
+          0 -> :ok
+        end
 
         {:error,
          "fetch from #{state.git_remote}/#{state.git_branch} did not answer within #{timeout} ms"}
