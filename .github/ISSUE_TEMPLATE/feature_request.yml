@@ -1,0 +1,30 @@
+name: Feature request
+description: Something vigil should do that it does not.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Plain Markdown, Git-backed history and the single-writer model are
+        deliberate constraints, not missing features — the
+        [design notes](https://github.com/64x-lunicorn/vigil/blob/main/docs/design.md)
+        say why. Search the existing issues first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and where vigil gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like vigil to do
+      description: The behaviour you have in mind, as seen from a client or an operator.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds you use now, or other ways this could be solved.

@@ -196,7 +196,9 @@ Start with the [deployment guide](docs/guide.md#deploy-on-a-server), then read
 | [OAuth](docs/oauth.md) | Integrate a client or inspect the authentication flow. |
 | [Project history](docs/history.md) | Follow implementation decisions and lessons learned. |
 | [Contributing](CONTRIBUTING.md) | Set up development, run checks and submit a focused change. |
-| [Security policy](SECURITY.md) | Report a vulnerability privately or review deployment precautions. |
+| [Security policy](SECURITY.md) | Report a vulnerability privately, see supported versions and response targets, or review deployment precautions. |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | How we treat each other in every project space. |
+| [Governance](GOVERNANCE.md) | Who decides, how, and what happens if the maintainer is gone. |
 
 ## Contributing
 

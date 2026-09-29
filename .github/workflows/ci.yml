@@ -350,6 +350,12 @@ jobs:
       - name: The operator scripts never expose a secret
         run: bash scripts/test/operator_secrets_test.sh
 
+      # The release packaging release.yml runs: the same release gives the
+      # same tarball bytes, with the notices inside and nothing of the
+      # packaging machine's owner, times or umask.
+      - name: package_release.sh packs a release deterministically
+        run: bash scripts/test/package_release_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest

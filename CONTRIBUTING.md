@@ -11,7 +11,9 @@ Bug reports, clearer documentation and focused code changes are welcome.
 - Read the [project overview](README.md) and [design notes](docs/design.md).
   Plain Markdown, Git-backed history and the single-writer model are deliberate
   constraints, not missing features.
-- Keep discussions respectful, constructive and focused on the work.
+- Keep discussions respectful, constructive and focused on the work. The
+  [Code of Conduct](CODE_OF_CONDUCT.md) applies to every project space, and
+  [GOVERNANCE.md](GOVERNANCE.md) says how decisions are made.
 - For vulnerabilities, follow [SECURITY.md](SECURITY.md) rather than opening a
   public issue.
 
@@ -178,6 +180,7 @@ The pipeline itself is described in [docs/ci-cd.md](docs/ci-cd.md).
 
 ## Writing a useful issue
 
+Open issues from the [bug report or feature request form](https://github.com/64x-lunicorn/vigil/issues/new/choose).
 Include:
 
 - The version or commit, operating system, and Elixir/Erlang versions.

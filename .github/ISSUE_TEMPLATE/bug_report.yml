@@ -1,0 +1,56 @@
+name: Bug report
+description: Something vigil does is wrong, or a documented behaviour does not hold.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerabilities do not go here.** Report them privately:
+        https://github.com/64x-lunicorn/vigil/security/advisories/new
+
+        Redact passwords, access tokens, private repository URLs, personal
+        notes and OAuth state. Do not upload a real vault or an environment
+        file; a small synthetic vault is enough.
+  - type: input
+    id: version
+    attributes:
+      label: vigil version or commit
+      description: "`bin/vigil eval 'IO.puts(Application.spec(:vigil, :vsn))'` on the host, or the commit you built."
+      placeholder: 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, and the Elixir/Erlang versions if you built vigil yourself.
+      placeholder: Debian 13, Elixir 1.18.3, OTP 27.3.4
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client
+      description: The client that talked to vigil, if the bug shows up through one.
+      placeholder: Claude Desktop, Claude Code, ...
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the bug, with the tool calls or commands involved.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Include error messages and relevant log lines (`journalctl -u vigil`), redacted.
+      render: text
+    validations:
+      required: true

@@ -16,6 +16,7 @@ instead of after a round trip.
 - [ ] `mix ci` passes locally
 - [ ] `bash scripts/test/check_only_test.sh` (deployment script changes)
 - [ ] `bash scripts/test/release_smoke.sh` (release, config or boot-path changes)
+- [ ] `bash scripts/test/reproducible_release.sh` (release configuration or packaging changes)
 - [ ] Regression test added for the changed behaviour
 - [ ] Affected documentation updated
 - [ ] [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) updated (dependency changes)

@@ -35,15 +35,76 @@ The tag triggers [`release.yml`](../.github/workflows/release.yml), which:
 2. refuses to continue if the tag disagrees with the version in `mix.exs`,
    because a release that misreports its own version makes every later
    "which version is running?" answer worthless;
-3. builds a `MIX_ENV=prod` release, packages it, and re-extracts the tarball to
-   confirm the archive is complete and its ERTS actually runs;
-4. attaches the tarball, a `SHA256SUMS` file and the exact `mix.lock` it was
-   built from;
-5. records a signed **build-provenance attestation** (verifiable with
-   `gh attestation verify`), so the artifact can be traced to this workflow,
-   this repository and this commit;
-6. publishes the GitHub Release. A tag with a suffix (`v0.2.0-rc.1`) is marked
-   as a pre-release, so `update.sh` never picks it up by accident.
+3. builds a `MIX_ENV=prod` release, writes its SBOM, packages it
+   deterministically, and re-extracts the tarball to confirm the archive is
+   complete and its ERTS actually runs;
+4. records one signed **build-provenance attestation** for every file it is
+   about to publish (verifiable with `gh attestation verify`), so each can be
+   traced to this workflow, this repository and this commit;
+5. publishes the GitHub Release with the assets below. A tag with a suffix
+   (`v0.2.0-rc.1`) is marked as a pre-release, so `update.sh` never picks it
+   up by accident.
+
+### Release assets
+
+| Asset | What it is |
+| :--- | :--- |
+| `<name>.tar.gz` | The OTP release for linux-x86_64, ERTS included, with `LICENSE` and `THIRD_PARTY_NOTICES.md` at its root. |
+| `<name>-mix.lock` | The exact dependency set it was built from. |
+| `<name>.cdx.json` | A CycloneDX 1.6 SBOM of what the tarball bundles. |
+| `<name>-SHA256SUMS` | The checksums of the three above. |
+| `<name>.intoto.jsonl` | The build-provenance attestation bundle; its subjects are all four files above. |
+
+`<name>` is `vigil-<version>-otp<OTP version>-linux-x86_64`. Verify a
+download with:
+
+```bash
+sha256sum -c <name>-SHA256SUMS
+gh attestation verify <name>.tar.gz --repo 64x-lunicorn/vigil
+gh attestation verify <name>.tar.gz --repo 64x-lunicorn/vigil --bundle <name>.intoto.jsonl
+```
+
+The attestation is kept in GitHub's attestation store as well; the bundle is
+attached because only an asset is visible from the release itself, which is
+where the OpenSSF Scorecard's Signed-Releases check looks.
+
+**The SBOM** is written by the project's own task,
+[`mix vigil.sbom`](../lib/mix/tasks/vigil.sbom.ex), run under
+`MIX_ENV=prod`: one component per Hex package the release contains, with the
+version and package checksum `mix.lock` pins and the licenses its Hex metadata
+declares, plus the Erlang/OTP (with its ERTS version) and Elixir the release
+bundles from the VM that built it, and the dependency graph between them. A
+Hex SBOM generator would do the same with one more third-party package running
+in the job that holds the signing permission; all it would read is `mix.lock`
+and each dependency's `hex_metadata.config`, so the task reads those itself.
+
+**The tarball** is packed by
+[`scripts/package_release.sh`](../scripts/package_release.sh), the same script
+[`package_release_test.sh`](../scripts/test/package_release_test.sh) runs in
+CI: entries sorted by name, every entry stamped with `SOURCE_DATE_EPOCH` (the
+commit time of the tagged commit), owner and group `0` without names, no
+group- or world-writable modes, and `gzip -n` so the compressed stream records
+neither a name nor a time. Packing the same release directory gives the same
+bytes on any machine with GNU tar.
+
+### Reproducibility
+
+Two builds of one commit do not yet give the same tarball. The packing is
+deterministic; two files of the release it packs are not:
+
+| File | Why it differs between builds |
+| :--- | :--- |
+| `releases/COOKIE` | `mix release` generates a new random distribution cookie for every build. |
+| `lib/tz-*/ebin/Elixir.Tz.PeriodsProvider.beam` | The `tz` dependency compiles its build time into the module (`compiled_at/0`). |
+
+Everything else is byte for byte the same when the builds use the same
+toolchain (`.tool-versions`) and the same checkout path — compiled modules
+record where their source was, and the release workflow always builds in the
+same directory. [`scripts/test/reproducible_release.sh`](../scripts/test/reproducible_release.sh)
+builds `HEAD` twice from a clean `_build` and passes when the two trees differ
+in exactly these two files, so a new source of difference fails it rather than
+hiding behind the known ones. It takes a few minutes and is not part of the
+CI gate; run it after changing the release configuration or the packaging.
 
 ### Deploying
 

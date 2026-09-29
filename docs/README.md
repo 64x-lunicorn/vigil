@@ -9,7 +9,9 @@
 | [history.md](history.md) | What was built in each round and why, including the bugs found along the way. |
 | [ci-cd.md](ci-cd.md) | The pipeline: how to ship a version, what guards `main` and a release, and how the project is hardened against mistakes. |
 | [Contributing](../CONTRIBUTING.md) | Development setup, checks and contribution guidelines. |
-| [Security policy](../SECURITY.md) | Private vulnerability reporting and deployment precautions. |
+| [Security policy](../SECURITY.md) | Private vulnerability reporting, supported versions, response targets and deployment precautions. |
+| [Code of Conduct](../CODE_OF_CONDUCT.md) | The Contributor Covenant, and whom to contact. |
+| [Governance](../GOVERNANCE.md) | The single-maintainer model and what continuity there is. |
 | [Third-party notices](../THIRD_PARTY_NOTICES.md) | Dependency licenses and attribution for bundled development skills. |
 
 For the writing conventions handed to the assistant itself, see

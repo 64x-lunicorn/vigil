@@ -80,6 +80,10 @@ MIT-only. Check the actual artifacts you ship, including the Elixir/Erlang
 runtime and any operating-system packages; those are outside the Hex inventory
 above.
 
+The release tarballs published on GitHub carry this file and `LICENSE` at
+their root, and a CycloneDX SBOM beside them lists the packages, the Erlang/OTP
+runtime and the Elixir version each one bundles.
+
 Update this inventory when the lockfile or bundled third-party material
 changes. Your own vault content is separate from this software and is not
 relicensed by using vigil.
