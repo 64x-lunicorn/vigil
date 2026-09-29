@@ -60,18 +60,21 @@ Before pushing, run the whole gate in one command:
 mix ci
 ```
 
-This is exactly what CI runs, in the same order: unused lock entries,
-formatting, compilation with warnings as errors, Credo, the dependency audits,
-the test suite and Dialyzer. The first Dialyzer run builds a PLT and takes a
-few minutes; later runs reuse it from `priv/plts/`.
+This is the Elixir part of CI, in one run: unused lock entries, formatting,
+compilation with warnings as errors, Credo, Sobelow, the dependency audits,
+the test suite and Dialyzer. CI spreads the same checks over its Test, Static
+analysis and Security scan jobs; the deployment scripts, the contract check,
+the release smoke test and the workflow and secret scans are further jobs,
+below. The first Dialyzer run builds a PLT and takes a few minutes; later runs
+reuse it from `priv/plts/`.
 
 Tests run in `MIX_ENV=test`; do not run them with `MIX_ENV=prod` or source
 production environment files first. Test configuration pins the vault path,
 the OAuth state path, the authorization server's issuer, resource and
 consent password, and the SkillKey secret independently of deployment environment variables.
 
-For changes to the deployment scripts, also run ShellCheck and the existing
-shell tests:
+For changes to the deployment scripts, also run ShellCheck and the shell
+tests — the same list, in the same order, as CI's Deployment scripts job:
 
 ```bash
 shellcheck -x scripts/*.sh scripts/test/*.sh
@@ -82,11 +85,15 @@ bash scripts/test/secrets_test.sh
 bash scripts/test/git_settings_test.sh
 bash scripts/test/push_safety_net_test.sh
 bash scripts/test/conventions_skill_test.sh
-bash scripts/test/grants_test.sh
 bash scripts/test/obsidian_templates_test.sh
+bash scripts/test/obsidian_dirs_test.sh
 node scripts/test/slug_js_test.mjs
+bash scripts/test/grants_test.sh
+bash scripts/test/proxy_settings_test.sh
+bash scripts/test/setup_test.sh
 bash scripts/test/operator_secrets_test.sh
 bash scripts/test/check_changelog_test.sh
+bash scripts/test/package_release_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -94,7 +101,7 @@ CI pins ShellCheck to the version named in
 ShellCheck is older it may report findings that version no longer emits, and
 miss ones it does — match it when a local run and CI disagree.
 
-`verify_test.sh` drives each of `verify()`'s twelve checks against both
+`verify_test.sh` drives each of `verify()`'s thirteen checks against both
 outcomes, with `systemctl`, `journalctl`, `curl`, `mcp_call` and `as_vigil`
 replaced by stand-ins and the installation layout pointed at a temp directory.
 Every check's own logic — its conditions, its verdict, its exit code — is the
@@ -104,8 +111,9 @@ real one.
 switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
 refusals that must leave the running service alone (among them an env file
 without `VIGIL_SKILLKEY_SECRET`), the chunk-id comparison before a switch
-(the question it asks, `--accept-id-changes`), and the release retention
-rule. It needs no root, no systemd and no production paths.
+(the question it asks, `--accept-id-changes`), the hand-over to the target
+checkout's own `update.sh`, the units taken before `mix` runs and put back by a
+rollback, the unit's start limit, and the release retention rule. It needs no root, no systemd and no production paths.
 
 `check_changelog_test.sh` drives `scripts/check_changelog.sh`, the CI check
 that a change to a recorded contract carries a CHANGELOG entry, against
@@ -141,12 +149,21 @@ handed to it on stdin); `verify()`, `update.sh --rollback` and
 one line, keeps every other, restarts the service and names
 `grants.sh revoke-all`.
 
-Those two and `release_smoke.sh` source
+Every shell suite but `check_only_test.sh` — `release_smoke.sh` and
+`reproducible_release.sh` included — sources
 [`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the
-reporting — `pass`, `fail`, `assert_eq`, `section`, and the `report` a suite
+reporting: `pass`, `fail`, `assert_eq`, `section`, and the `report` a suite
 ends on, which is what decides its exit code. `check_only_test.sh` is the
 exception: its `assert_eq` and `assert_contains` carry a message shape of
 their own. A new suite sources the harness.
+
+`obsidian_dirs_test.sh` holds vault adoption to keeping `.obsidian/` and
+`.trash/` out of a vault's history. `proxy_settings_test.sh` and
+`setup_test.sh` hold `init.sh` and `setup.sh` to their own text where they
+cannot run off a host: the tunnel's proxy lines and an `https` issuer, and
+epmd masked. `package_release_test.sh` packs a stand-in release twice and
+compares the bytes, and checks that a release unpacked from the tarball writes
+its own cookie.
 
 `obsidian_templates_test.sh` runs `init_vault.sh` against a temp directory:
 that a new vault gets the Obsidian templates committed, and that a vault's own

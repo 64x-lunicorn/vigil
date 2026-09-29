@@ -162,7 +162,7 @@ release.
 | **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes (including the recorded interface contracts), no retired or vulnerable dependencies. |
 | **Static analysis** | Credo finds no issues; Dialyzer finds no new type errors. |
 | **Security scan** | Sobelow finds nothing that was not triaged, and its SARIF goes to the repository's Security tab. See below. |
-| **Deployment scripts** | ShellCheck is clean, `init.sh --check-only` is still strictly read-only, `update.sh` switches over, rolls back and prunes releases correctly, and each of `verify()`'s twelve checks decides both outcomes correctly. |
+| **Deployment scripts** | ShellCheck is clean, and every shell suite passes: `init.sh --check-only` is still strictly read-only, `update.sh` switches over, rolls back and prunes releases correctly, each of `verify()`'s thirteen checks decides both outcomes correctly, and the rest — the secrets, the vault's remote and branch, the push safety net, the conventions skill, the Obsidian templates and directories, the Obsidian slug, `grants.sh`, the proxy settings, `setup.sh`, the operator scripts' secrets, `check_changelog.sh` and the release packaging — hold to what they promise ([the list](#the-same-gate-locally)). |
 | **Contract changes** | A pull request or merge group that changes a recorded contract under `test/fixtures/contracts/` also changes `CHANGELOG.md` ([`check_changelog.sh`](../scripts/check_changelog.sh)). See below. |
 | **Release smoke test** | A real production release boots and serves. See below. |
 | **Workflow lint** | actionlint and zizmor, both verified before they run: the pipeline's own configuration is checked like code. |
@@ -375,12 +375,32 @@ no provider registers a pattern for.
 mix ci
 ```
 
-runs the identical Elixir checks in the same order as CI. For the parts that
-need a shell and a running server:
+runs the Elixir checks CI runs — Test, Static analysis and Security scan — in
+one go. The Deployment scripts job, in the same order:
 
 ```bash
 shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
+bash scripts/test/update_test.sh
+bash scripts/test/verify_test.sh
+bash scripts/test/secrets_test.sh
+bash scripts/test/git_settings_test.sh
+bash scripts/test/push_safety_net_test.sh
+bash scripts/test/conventions_skill_test.sh
+bash scripts/test/obsidian_templates_test.sh
+bash scripts/test/obsidian_dirs_test.sh
+node scripts/test/slug_js_test.mjs
+bash scripts/test/grants_test.sh
+bash scripts/test/proxy_settings_test.sh
+bash scripts/test/setup_test.sh
+bash scripts/test/operator_secrets_test.sh
+bash scripts/test/check_changelog_test.sh
+bash scripts/test/package_release_test.sh
+```
+
+and the Release smoke test job, which needs a shell and a running server:
+
+```bash
 bash scripts/test/release_smoke.sh
 ```
 
@@ -502,7 +522,7 @@ covers `verify()`, which is what update.sh's automatic rollback hangs on. It was
 one 210-line block that could only run against a real vault host — systemd,
 journald, Cloudflare, a git remote and a booted release — so the one thing
 nothing could test was the thing that decides whether a delivery stands. It is
-twelve functions now, and each is driven against both outcomes: what stays real
+thirteen functions now, and each is driven against both outcomes: what stays real
 is every check's own logic, and what is replaced is only what it reaches for
 outside the process.
 
@@ -516,12 +536,12 @@ is an incident, not a lint warning. ShellCheck is blocking, and
 `check_only_test.sh` guards the specific regression where `--check-only`
 silently fell through to apply-mode.
 
-`verify_test.sh`, `update_test.sh` and `release_smoke.sh` share one assertion
-harness, [`scripts/test/harness.sh`](../scripts/test/harness.sh). Each keeps
-its own subjects and its own stand-ins; what it sources is the counting, the
-headings and the summary — one statement of what a pass prints and what a
-green run exits with, rather than three kept in step by hand. Each of the
-three ends on `report`, which is what turns the counters into an exit code.
+Every shell suite but `check_only_test.sh` shares one assertion harness,
+[`scripts/test/harness.sh`](../scripts/test/harness.sh). Each keeps its own
+subjects and its own stand-ins; what it sources is the counting, the headings
+and the summary — one statement of what a pass prints and what a green run
+exits with, rather than one per suite kept in step by hand. Each ends on
+`report`, which is what turns the counters into an exit code.
 `check_only_test.sh` is the exception: its `assert_eq` and `assert_contains`
 carry a message shape of their own.
 

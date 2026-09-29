@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # scripts/test/harness.sh — the counting and the reporting, for the shell suites.
 #
-# Sourced by verify_test.sh, update_test.sh and release_smoke.sh; it has no
-# execution path of its own. What it owns is what all three had a copy of: an
-# assertion that counts, an assertion that compares, a heading, and the summary
-# that decides what the run exits with. What it deliberately does not own is a
-# subject or a stand-in — each suite still builds its own world and keeps it.
+# Sourced by every shell suite under scripts/test/ but check_only_test.sh; it
+# has no execution path of its own. It began as what verify_test.sh,
+# update_test.sh and release_smoke.sh each had a copy of: an assertion that
+# counts, an assertion that compares, a heading, and the summary that decides
+# what the run exits with. What it deliberately does not own is a subject or a
+# stand-in — each suite still builds its own world and keeps it.
 #
-# Three copies is three statements of one rule — what a pass prints, what a
+# Three copies were three statements of one rule — what a pass prints, what a
 # failure prints, what a green run exits with — kept in step across three files
 # by hand. Stated once here, a suite ends on `report` and `report` is what
 # turns the counters into an exit code.
@@ -51,7 +52,7 @@ assert_eq() {
   fi
 }
 
-# A heading between groups of assertions. All three suites number theirs
+# A heading between groups of assertions. Most suites number theirs
 # ("3/7", "12/12"), so a log that stops early says how far the run got.
 section() {
   echo

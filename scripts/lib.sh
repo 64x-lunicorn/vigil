@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# scripts/lib.sh — shared library for setup.sh / init.sh / update.sh.
-# Sourced via `source "$(dirname "$0")/lib.sh"`; has no execution path of its
-# own.
+# scripts/lib.sh — shared library for the operator scripts: setup.sh,
+# init.sh, update.sh, grants.sh, rotate_secret.sh and push_pending.sh, and
+# for the shell suites that test them. Sourced via
+# `source "$(dirname "$0")/lib.sh"`; has no execution path of its own.
 #
-# Exit codes (identical across all three scripts):
+# Exit codes (identical across every script that sources it):
 #   0  success
 #   1  runtime error (unexpected — anything not explicitly 2/3/4)
 #   2  preflight failed — nothing was changed
@@ -37,9 +38,10 @@ NEXT_STEPS=()
 # to refuse the overrides outside its own test. They live here now, and that
 # refusal is gone.
 #
-# The defaults are the production install. Overriding them is what
-# scripts/test/verify_test.sh and scripts/test/update_test.sh do; nothing else
-# should.
+# The defaults are the production install. Overriding them is what the shell
+# suites do that drive the scripts against a temp directory — verify_test.sh,
+# update_test.sh, check_only_test.sh, git_settings_test.sh, grants_test.sh,
+# operator_secrets_test.sh and push_safety_net_test.sh; nothing else should.
 #
 # The *shell* names are unprefixed on purpose: `source_env_for_verify` does
 # `set -a; source "$ENV_FILE"`, and /etc/vigil/env owns the VIGIL_* namespace,
@@ -301,6 +303,10 @@ OBSIDIAN_LOCAL_DIRS=(.obsidian .trash)
 # in order. Commits nothing: what it stages is the caller's to commit.
 # Returns 1 when a change fails: it is called in a command substitution, where
 # `set -e` does not reach.
+#
+# A .gitignore names a directory in any of the four spellings that ignore it
+# at the vault's root — `.trash/`, `.trash`, `/.trash/`, `/.trash` — so one
+# written by hand is not given a second line.
 ignore_obsidian_dirs() {
   local vault="$1" mode="$2"
   local gitignore="${vault}/.gitignore"
@@ -309,7 +315,7 @@ ignore_obsidian_dirs() {
   for dir in "${OBSIDIAN_LOCAL_DIRS[@]}"; do
     needs_append=1
     is_tracked=0
-    if [ -f "$gitignore" ] && grep -qxF "${dir}/" "$gitignore"; then
+    if [ -f "$gitignore" ] && grep -qxE -- "/?${dir//./[.]}/?" "$gitignore"; then
       needs_append=0
     fi
     if as_vigil git -C "$vault" ls-files --error-unmatch -- "$dir" >/dev/null 2>&1; then
@@ -318,9 +324,13 @@ ignore_obsidian_dirs() {
     [ "$needs_append" = "0" ] && [ "$is_tracked" = "0" ] && continue
 
     if [ "$mode" = "check" ]; then
-      echo "gitignore: add ${dir}/$(
-        [ "$is_tracked" = "1" ] && echo ", and remove the already-tracked ${dir} directory from the index"
-      )"
+      if [ "$needs_append" = "0" ]; then
+        echo "gitignore: remove the already-tracked ${dir} directory from the index (.gitignore names it already)"
+      else
+        echo "gitignore: add ${dir}/$(
+          [ "$is_tracked" = "1" ] && echo ", and remove the already-tracked ${dir} directory from the index"
+        )"
+      fi
       continue
     fi
 
@@ -338,9 +348,13 @@ ignore_obsidian_dirs() {
     if [ "$is_tracked" = "1" ]; then
       as_vigil git -C "$vault" rm -r -q --cached -- "$dir" >/dev/null || return 1
     fi
-    echo "added ${dir}/ to .gitignore$(
-      [ "$is_tracked" = "1" ] && echo " (and removed the already-tracked ${dir} directory from the index)"
-    )"
+    if [ "$needs_append" = "0" ]; then
+      echo "removed the already-tracked ${dir} directory from the index (.gitignore names it already)"
+    else
+      echo "added ${dir}/ to .gitignore$(
+        [ "$is_tracked" = "1" ] && echo " (and removed the already-tracked ${dir} directory from the index)"
+      )"
+    fi
   done
 }
 

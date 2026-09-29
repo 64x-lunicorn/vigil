@@ -111,13 +111,28 @@ vault="$(new_vault check)"
 printf '.trash/\n' >"${vault}/.gitignore"
 output="$(ignore_obsidian_dirs "$vault" check)"
 
-assert_eq "reports what it would do for each directory" \
+assert_eq "reports what it would do for each directory, adding only what is missing" \
   "$(printf '%s\n%s' \
     "gitignore: add .obsidian/, and remove the already-tracked .obsidian directory from the index" \
-    "gitignore: add .trash/, and remove the already-tracked .trash directory from the index")" \
+    "gitignore: remove the already-tracked .trash directory from the index (.gitignore names it already)")" \
   "$output"
 assert_eq "changes no .gitignore" ".trash/" "$(cat "${vault}/.gitignore")"
 assert_eq "untracks nothing" "?? .gitignore" "$(git -C "$vault" status --porcelain)"
+
+section "4b   a directory named in another spelling, and tracked anyway"
+
+for spelling in ".trash" "/.trash/" "/.trash"; do
+  vault="$(new_vault "spelling${spelling//\//_}")"
+  printf '.obsidian/\n%s\n' "$spelling" >"${vault}/.gitignore"
+  output="$(ignore_obsidian_dirs "$vault" apply)"
+  assert_eq "'${spelling}': only untracked, and said so" \
+    "$(printf '%s\n%s' \
+      "removed the already-tracked .obsidian directory from the index (.gitignore names it already)" \
+      "removed the already-tracked .trash directory from the index (.gitignore names it already)")" \
+    "$output"
+  assert_eq "'${spelling}': .gitignore gets no second line" \
+    "$(printf '.obsidian/\n%s' "$spelling")" "$(cat "${vault}/.gitignore")"
+done
 
 ## ── 5. A new vault ───────────────────────────────────────────────────────
 

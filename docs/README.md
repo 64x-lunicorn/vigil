@@ -8,7 +8,7 @@
 | [design.md](design.md) | Why it is built this way: principles, the vault model, chunking, search, the link index, the write path, deliberate non-goals and known trade-offs. |
 | [oauth.md](oauth.md) | The OAuth 2.1 implementation: endpoints, discovery documents, registration, redirect-URI matching, token handling, storage. |
 | [history.md](history.md) | What was built in each round and why, including the bugs found along the way. |
-| [compatibility.md](compatibility.md) | What vigil keeps stable from 1.0: what counts as a major, minor or patch change to the tools, `initialize`, OAuth, settings, state, vault conventions and scripts, and the deprecation policy. |
+| [Compatibility](compatibility.md) | What vigil keeps stable from 1.0: what counts as a major, minor or patch change to the tools, `initialize`, OAuth, settings, state, vault conventions and scripts, and the deprecation policy. |
 | [Changelog](../CHANGELOG.md) | Every release's changes, with an "Upgrading" note for operators. |
 | [ci-cd.md](ci-cd.md) | The pipeline: how to ship a version, what guards `main` and a release, and how the project is hardened against mistakes. |
 | [Contributing](../CONTRIBUTING.md) | Development setup, checks and contribution guidelines. |
