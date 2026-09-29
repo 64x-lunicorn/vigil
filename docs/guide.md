@@ -993,8 +993,8 @@ server as a commit through the remote, not as a file edited in
 
 1. **Work in a clone of your own.** Clone the vault's remote (the one vigil
    pushes to, e.g. GitHub) and open that directory as an Obsidian vault.
-   Obsidian's `.obsidian/` stays local — the adoption phase already put it in
-   `.gitignore`.
+   Obsidian's `.obsidian/` and `.trash/` stay local — the adoption phase
+   already put both in `.gitignore`.
 2. **Start from the current state:** `git pull --rebase`.
 3. **Edit, commit under your own name, push:**
 
@@ -1100,7 +1100,8 @@ non-canonical filenames. `init.sh --existing-vault` therefore runs an adoption
 phase that separates two kinds of finding:
 
 **Applied automatically** (additive, committed as one `vault adoption` commit):
-`.gitignore` entry for `.obsidian/` including untracking it, local git identity
+`.gitignore` entries for `.obsidian/` and Obsidian's trash `.trash/`, including
+untracking whichever is already committed, local git identity
 and `commit.gpgsign false`, the branch's upstream → `<remote>/<branch>` as
 `VIGIL_GIT_REMOTE` and `VIGIL_GIT_BRANCH` say (a clone's `origin` is renamed
 to the remote; the branch is the one the clone checked out), missing

@@ -173,45 +173,23 @@ vault_branch() {
 ADOPTION_FIXES_APPLIED=()
 ADOPTION_FIXES_PENDING=()
 
+# Obsidian's device-local directories (OBSIDIAN_LOCAL_DIRS in lib.sh): one
+# finding per directory the .gitignore misses or the index still tracks.
 fix_vault_gitignore() {
   local vault="$1" mode="$2"
-  local gitignore="${vault}/.gitignore"
-  local needs_append=1 is_tracked=0
-
-  if [ -f "$gitignore" ] && grep -qxF '.obsidian/' "$gitignore"; then
-    needs_append=0
+  local lines line
+  if ! lines="$(ignore_obsidian_dirs "$vault" "$mode")"; then
+    err "gitignore: could not keep Obsidian's directories out of the vault history."
+    return 1
   fi
-  if as_vigil git -C "$vault" ls-files --error-unmatch -- .obsidian >/dev/null 2>&1; then
-    is_tracked=1
-  fi
-  [ "$needs_append" = "0" ] && [ "$is_tracked" = "0" ] && return 0
-
-  local description="gitignore: add .obsidian/"
-  if [ "$is_tracked" = "1" ]; then
-    description="${description}, and remove the already-tracked .obsidian directory from the index"
-  fi
-
-  if [ "$mode" = "check" ]; then
-    ADOPTION_FIXES_PENDING+=("$description")
-    return 0
-  fi
-
-  if [ "$needs_append" = "1" ]; then
-    # shellcheck disable=SC2016 # $file is expanded by the inner bash -c, not here
-    as_vigil bash -c '
-      file="$1"
-      if [ -s "$file" ] && [ "$(tail -c1 "$file" | wc -l)" = "0" ]; then
-        printf "\n" >>"$file"
-      fi
-      printf ".obsidian/\n" >>"$file"
-    ' _ "$gitignore"
-  fi
-  if [ "$is_tracked" = "1" ]; then
-    as_vigil git -C "$vault" rm -r --cached -- .obsidian >/dev/null
-  fi
-  ADOPTION_FIXES_APPLIED+=("added .obsidian/ to .gitignore$(
-    [ "$is_tracked" = "1" ] && echo " (and removed the already-tracked .obsidian directory from the index)"
-  )")
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "$mode" = "check" ]; then
+      ADOPTION_FIXES_PENDING+=("$line")
+    else
+      ADOPTION_FIXES_APPLIED+=("$line")
+    fi
+  done <<<"$lines"
 }
 
 fix_vault_git_config() {
@@ -352,7 +330,7 @@ run_vault_adoption() {
   fi
 
   # ── Automatic fixes ───────────────────────────────────────────────────
-  fix_vault_gitignore "$vault" "$mode"
+  fix_vault_gitignore "$vault" "$mode" || return 1
   fix_vault_git_config "$vault" "$mode"
   fix_vault_upstream "$vault" "$mode" "$branch"
   fix_vault_domains_yml "$vault" "$mode" "$findings_json"
@@ -365,7 +343,7 @@ run_vault_adoption() {
   # vigil like Vigil.Git does.
   if [ "$mode" = "apply" ]; then
     as_vigil git -C "$vault" add -- .gitignore _domains.yml 2>/dev/null || true
-    if ! as_vigil git -C "$vault" diff --cached --quiet -- .gitignore _domains.yml .obsidian 2>/dev/null; then
+    if ! as_vigil git -C "$vault" diff --cached --quiet -- .gitignore _domains.yml "${OBSIDIAN_LOCAL_DIRS[@]}" 2>/dev/null; then
       # No pathspec on the commit itself: `git commit -- .obsidian` drops an
       # already-staged directory deletion (a git quirk, found empirically —
       # `git diff --cached -- .obsidian` shows it correctly, `git commit --

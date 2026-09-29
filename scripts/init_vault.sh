@@ -46,6 +46,7 @@ fi
 if [ ! -f .gitignore ]; then
   cat > .gitignore <<'EOF'
 .obsidian/
+.trash/
 .DS_Store
 EOF
   echo "created .gitignore"

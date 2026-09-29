@@ -278,6 +278,64 @@ install_conventions_skill() {
   fi
 }
 
+# The directories Obsidian keeps inside a vault that belong to the device it
+# runs on and never to the vault's history: `.obsidian/`, its settings and
+# plugins, and `.trash/`, where a note deleted with the trash setting at
+# "Obsidian trash" goes. Committed, Obsidian Git pushes both to every other
+# clone — one device's settings, and every note ever deleted.
+OBSIDIAN_LOCAL_DIRS=(.obsidian .trash)
+
+# ignore_obsidian_dirs <vault> <mode> — mode "check" | "apply". For each of
+# OBSIDIAN_LOCAL_DIRS the vault's .gitignore does not name, or the index still
+# tracks, prints one line: in "check" what would be done, changing nothing; in
+# "apply" what was done — the entry appended to .gitignore, the directory
+# removed from the index (its files stay on disk). Prints nothing when all are
+# in order. Commits nothing: what it stages is the caller's to commit.
+# Returns 1 when a change fails: it is called in a command substitution, where
+# `set -e` does not reach.
+ignore_obsidian_dirs() {
+  local vault="$1" mode="$2"
+  local gitignore="${vault}/.gitignore"
+  local dir needs_append is_tracked
+
+  for dir in "${OBSIDIAN_LOCAL_DIRS[@]}"; do
+    needs_append=1
+    is_tracked=0
+    if [ -f "$gitignore" ] && grep -qxF "${dir}/" "$gitignore"; then
+      needs_append=0
+    fi
+    if as_vigil git -C "$vault" ls-files --error-unmatch -- "$dir" >/dev/null 2>&1; then
+      is_tracked=1
+    fi
+    [ "$needs_append" = "0" ] && [ "$is_tracked" = "0" ] && continue
+
+    if [ "$mode" = "check" ]; then
+      echo "gitignore: add ${dir}/$(
+        [ "$is_tracked" = "1" ] && echo ", and remove the already-tracked ${dir} directory from the index"
+      )"
+      continue
+    fi
+
+    if [ "$needs_append" = "1" ]; then
+      # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
+      as_vigil bash -c '
+        file="$1"
+        # A last byte that is not a newline survives the command substitution.
+        if [ -n "$(tail -c1 "$file" 2>/dev/null)" ]; then
+          printf "\n" >>"$file"
+        fi
+        printf "%s/\n" "$2" >>"$file"
+      ' _ "$gitignore" "$dir" || return 1
+    fi
+    if [ "$is_tracked" = "1" ]; then
+      as_vigil git -C "$vault" rm -r -q --cached -- "$dir" >/dev/null || return 1
+    fi
+    echo "added ${dir}/ to .gitignore$(
+      [ "$is_tracked" = "1" ] && echo " (and removed the already-tracked ${dir} directory from the index)"
+    )"
+  done
+}
+
 ## ── Logging ──────────────────────────────────────────────────────────────
 
 _timestamp() { date +%H:%M:%S; }

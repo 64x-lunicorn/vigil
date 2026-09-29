@@ -318,6 +318,11 @@ jobs:
       - name: init_vault.sh installs the Obsidian templates
         run: bash scripts/test/obsidian_templates_test.sh
 
+      # Adoption keeps Obsidian's settings and its trash out of the vault's
+      # history, and a new vault's .gitignore names both.
+      - name: Vault adoption ignores .obsidian/ and .trash/
+        run: bash scripts/test/obsidian_dirs_test.sh
+
       # The Obsidian template's slug is a JavaScript copy of Vigil.Slug. The
       # test job checks the Elixir against test/fixtures/slug_examples.json;
       # this checks the copy against the same table. Node is pinned like
