@@ -453,11 +453,25 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
 
-Every budget above (`VIGIL_RATE_LIMIT_RPM` and the two OAuth ones) goes through
-one check: a value that is not a positive integer is refused, the default is
-used instead, and a warning names the setting. A limit that is quietly not the
-one you configured is worse than a loud one, so look for that warning in the
-journal after changing one.
+Every setting is checked once, when the service starts and before anything
+else does. A bad one stops the start, and the journal names every variable that
+failed and what it expected, all in one message:
+
+- `VIGIL_PORT` must be an integer from 1 to 65535.
+- `VIGIL_SKILLKEY_TTL`, `VIGIL_RATE_LIMIT_RPM` and the two OAuth budgets must
+  be positive integers. `0`, `-5` or `60rpm` is refused, not replaced by the
+  default.
+- `VIGIL_TZ` must be a timezone name the timezone database knows, such as
+  `Europe/Berlin`. An unknown one is refused rather than quietly becoming UTC.
+- `VIGIL_BIND` must be an IP address.
+- `VIGIL_AUTH_PASSWORD` must be at least 12 characters. The message names the
+  variable and never shows the value.
+- In prod, `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be `https` URLs, and the
+  resource must sit on the issuer's origin (same scheme, host and port):
+  `https://vault.example.org` and `https://vault.example.org/mcp`, not
+  `https://mcp.example.org`. In dev, the `http://localhost` defaults pass.
+- In prod, `VIGIL_VAULT_PATH`, `VIGIL_STATE_DIR`, `VIGIL_ISSUER` and
+  `VIGIL_RESOURCE` must be set.
 
 The last two only affect the instructions handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
@@ -608,7 +622,7 @@ editing the vault in another tool.
 | Symptom | Cause | Fix |
 |---|---|---|
 | Requests hang, then fail with HTTP 500; the journal shows `GenServer.call ... timeout` | the single writer is blocked for over two minutes, almost always on a git pull or push that cannot reach the remote | check `journalctl -u vigil` and the network path to the remote; git's own connect and stall timeouts should normally end the call well before this |
-| Service refuses to start: "VIGIL_… not set" | a required setting is missing from `/etc/vigil/env` | add it (see `deploy/vigil.env.example`) |
+| Service refuses to start: "vigil refuses to start: VIGIL_… is not set" or "VIGIL_… must be …" | a required setting is missing from `/etc/vigil/env`, or one is malformed | fix every variable the message names (see [Configuration](#configuration) and `deploy/vigil.env.example`) |
 | Service fails with `226/NAMESPACE` | an LXC container without `nesting=1` cannot give the unit its sandbox | enable the container's nesting feature in Proxmox and restart it |
 | Service will not start, journal shows an OAuth store error | `Vigil.OAuth.Store` could not open the `dets` files | check ownership and permissions of `VIGIL_STATE_DIR`. A broken OAuth store deliberately takes the whole service down — a service that cannot authenticate anyone is worse than no service |
 | `git pull failed: Host key verification failed` | the service user's `known_hosts` is empty | re-run `setup.sh` (idempotent) |
@@ -645,6 +659,7 @@ against a throwaway fixture vault without needing root or a real
 lib/vigil/
 ├── application.ex       # supervisor
 ├── settings.ex          # what the deployment says about itself, resolved once
+├── settings/check.ex    # every setting checked once at boot, a bad one named
 ├── store.ex             # GenServer — loading, the write sequence, the mailbox
 ├── index.ex             # notes, chunks and links as one plain value, and the search over it
 ├── parser.ex            # file → frontmatter + chunks + raw links

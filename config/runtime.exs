@@ -1,7 +1,23 @@
 import Config
 
+# A variable that reads as an integer is handed on as one, and anything else
+# as written. Nothing here judges a value: `Vigil.Settings.Check` does, once,
+# before anything starts, and names the variable it refuses — which a raise
+# from `String.to_integer/1` in this file could not.
+integer = fn var, default ->
+  value = System.get_env(var, default)
+
+  case Integer.parse(value) do
+    {int, ""} -> int
+    _ -> value
+  end
+end
+
 config :vigil,
-  port: String.to_integer(System.get_env("VIGIL_PORT", "4000")),
+  # Whether `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be https and share an
+  # origin. Only a deployment talks to real clients; dev runs on localhost.
+  https_required: config_env() == :prod,
+  port: integer.("VIGIL_PORT", "4000"),
   # Loopback by default: cloudflared runs on the same host, and a port open on
   # the LAN is a way around Cloudflare Access. Set 0.0.0.0 (or an interface
   # address) only when a proxy on another host forwards to vigil.
@@ -28,14 +44,13 @@ config :vigil,
   issuer: System.get_env("VIGIL_ISSUER", "http://localhost:4000"),
   resource: System.get_env("VIGIL_RESOURCE", "http://localhost:4000/mcp"),
   auth_password: System.get_env("VIGIL_AUTH_PASSWORD"),
-  skillkey_ttl_seconds: String.to_integer(System.get_env("VIGIL_SKILLKEY_TTL", "3600")),
-  rate_limit_rpm: String.to_integer(System.get_env("VIGIL_RATE_LIMIT_RPM", "60")),
+  skillkey_ttl_seconds: integer.("VIGIL_SKILLKEY_TTL", "3600"),
+  rate_limit_rpm: integer.("VIGIL_RATE_LIMIT_RPM", "60"),
   # The authorization server's own budgets, per client address per minute.
   # Registration gets the tighter one: it is rare, and each call writes a
   # `:dets` row and fsyncs it.
-  oauth_rate_limit_rpm: String.to_integer(System.get_env("VIGIL_OAUTH_RATE_LIMIT_RPM", "30")),
-  oauth_register_rate_limit_rpm:
-    String.to_integer(System.get_env("VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", "5")),
+  oauth_rate_limit_rpm: integer.("VIGIL_OAUTH_RATE_LIMIT_RPM", "30"),
+  oauth_register_rate_limit_rpm: integer.("VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", "5"),
   # Shape the writing instructions the server hands to the MCP client. These
   # describe the *vault*, not the server: whose notes these are, and which
   # language they are written in. The server's own output is always English.
@@ -82,7 +97,7 @@ else
   # boot against the demo vault, keep OAuth state inside the release directory
   # (replaced on every update) or announce `localhost` as the issuer, which
   # fails every real token's audience check. Unset, they stay nil here and
-  # Vigil.Application refuses to start, naming the variable.
+  # Vigil.Settings.Check refuses to start, naming the variable.
   #
   # Only the server refuses: mix tasks run under MIX_ENV=prod (seed_token,
   # vault_check) evaluate this file too and take what they need as arguments.

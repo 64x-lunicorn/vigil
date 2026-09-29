@@ -1046,6 +1046,48 @@ application env and put it back afterwards; it passes a timezone now.
 issuer/resource from application env" — and now hands both metadata functions
 the settings value the fixture already had.
 
+### Every setting is checked in the same place, once
+
+Resolving once is half of it; the other half is judging what was resolved
+before anything uses it. `Vigil.Settings.Check` holds one table with one entry
+per setting — the application key, the variable an operator set, and the
+check — and `Vigil.Application` runs `check!/0` before any child starts. Every
+entry is checked and every failure is reported in one message, each naming its
+variable and saying what it expected, so an operator fixing `/etc/vigil/env`
+does not restart once per typo. A new setting is one more entry.
+
+**`config/runtime.exs` parses nothing it could fail on.** A variable that reads
+as an integer is handed on as one, anything else as written. A
+`String.to_integer/1` there stopped boot with a bare `ArgumentError` that named
+no variable, and a raise in that file cannot be tested apart from the process
+environment; the check takes the configuration as an argument and can.
+
+**A positive integer is positive.** The port, the three rate-limit budgets and
+the SkillKey TTL refuse boot when they are not positive integers. A TTL of `0`
+used to boot and then fail every `skill_read` and every write, and a budget
+that fell back to its default with a warning was a limit quietly not the one
+configured. `Vigil.RateLimit.budget/3` keeps its fallback for a router built
+outside the supervision tree, but a deployment never reaches it.
+
+**An unknown `VIGIL_TZ` refuses boot; it does not fall back.** Of refusing
+and falling back to UTC with a logged warning, refusing is the simpler and the
+safer: every response and every write is stamped in this zone, and a stamp
+silently in UTC is wrong in a way no operator reads a warning for.
+`Vigil.Clock.now/1` keeps its own fallback to UTC, because the write path must
+stay crash-safe by construction, but the deployment's zone can no longer reach
+it invalid.
+
+**In prod the authorization server's identity is https, on one origin.**
+`VIGIL_ISSUER` and `VIGIL_RESOURCE` must be `https` URLs, and the resource must
+sit on the issuer's origin — same scheme, host and port — because a client
+finds the one through the other's metadata. Which environment is "prod" is
+`config/runtime.exs`'s to say (`https_required`), as it already says which
+settings have no fallback there; dev keeps its `http://localhost` defaults.
+
+**The secret is named, never echoed.** A check that wants the offending value
+in its message puts it there itself, so `VIGIL_AUTH_PASSWORD`'s says what it
+expected and nothing about what it got — and so will any secret added later.
+
 ---
 
 ## The flow decides for one authorization server

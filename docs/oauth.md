@@ -683,7 +683,9 @@ VIGIL_STATE_DIR=/var/lib/vigil
 
 **Startup check:** if `VIGIL_AUTH_PASSWORD` is missing or shorter than 12
 characters the application refuses to start. A publicly reachable authorization
-server without a strong password is an open door to the vault.
+server without a strong password is an open door to the vault. In prod the
+same check (`Vigil.Settings.Check`) refuses an issuer or resource that is not
+`https`, and a resource that is not on the issuer's origin.
 
 A broken OAuth store deliberately takes the whole service down: a service that
 cannot authenticate anyone is worse than no service.

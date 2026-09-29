@@ -113,6 +113,10 @@ defmodule Vigil.RateLimit do
   and the warning keeps it from being invisible: a limit that is quietly not
   the one you configured is worse than a loud one.
 
+  A deployment does not get this far with one: `Vigil.Settings.Check` refuses
+  a budget that is not a positive integer before anything starts. What is left
+  here is the router built outside the supervision tree.
+
   `key` is taken for that warning and nothing else, and this is where it
   belongs: the function that decides to ignore what a deployment configured is
   the one that has to say so, and a deployment configures three budgets, so it
