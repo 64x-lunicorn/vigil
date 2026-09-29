@@ -252,6 +252,10 @@ jobs:
       # the units init.sh and update.sh install in place of the cron line.
       - name: The push safety net pushes sandboxed and fails loudly
         run: bash scripts/test/push_safety_net_test.sh
+      # skill_write refuses the conventions skill, so init.sh commits and
+      # pushes it itself, and keeps a vault's own.
+      - name: init.sh installs the conventions skill as a commit
+        run: bash scripts/test/conventions_skill_test.sh
 
       # The operator's revocation command: what it sends into the node, what
       # it asks before revoking everything, and the exit codes.

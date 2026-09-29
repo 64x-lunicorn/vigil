@@ -2048,6 +2048,43 @@ defmodule Vigil.StoreTest do
       assert length(commits(log)) == 1
     end
 
+    # The retry of a confirmed replace finds the skill it wrote, which exists
+    # now; it is answered from the first write rather than gated again.
+    test "a retried skill replace with confirm is applied once", %{vault: vault} do
+      log = recorded_store(vault)
+
+      request = %{
+        name: "tdd",
+        content: "---\nname: tdd\ndescription: Replaced.\n---\n# Replaced\n",
+        confirm: true,
+        request_id: "r-5"
+      }
+
+      assert {:ok, first} = Store.call(@store, :skill_write, request)
+      assert {:ok, second} = Store.call(@store, :skill_write, request)
+      assert second == Map.put(first, :already_applied, true)
+      assert length(commits(log)) == 1
+    end
+
+    # A refusal is not remembered, so the same request_id can carry the
+    # confirmed call the refusal asked for.
+    test "a skill replace refused for want of confirm can be retried with it", %{vault: vault} do
+      log = recorded_store(vault)
+      request = %{name: "tdd", content: "---\nname: tdd\ndescription: R.\n---\n# R\n"}
+
+      assert {:error, "Destructive operation: " <> _} =
+               Store.call(@store, :skill_write, Map.put(request, :request_id, "r-6"))
+
+      assert {:ok, %{name: "tdd"}} =
+               Store.call(
+                 @store,
+                 :skill_write,
+                 Map.merge(request, %{request_id: "r-6", confirm: true})
+               )
+
+      assert length(commits(log)) == 1
+    end
+
     test "delete_section with the if_match of a section since renumbered is refused", %{
       vault: vault
     } do

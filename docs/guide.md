@@ -267,12 +267,13 @@ nowhere: `/var/lib/vigil/oauth_tokens.dets` keeps only their SHA-256 digests,
 so a lost token is seeded again, not recovered. Each lives 90 days, and either
 can be revoked sooner (see [revoking access](#revoking-access)). With
 `--keep-token` — moving an instance whose clients keep the tokens they hold —
-no token is minted for the owner and none is printed; the skill bootstrap and
-the acceptance check use two of their own that live 15 minutes. It also
+no token is minted for the owner and none is printed; the acceptance check
+uses two of its own that live 15 minutes. It also
 installs the [push safety net](#the-push-safety-net), `vigil-push.timer`,
 which runs `scripts/push_pending.sh` every 15 minutes. An adopted vault keeps its
 own `vigil-vault-conventions` skill; the template is only written when the
-vault has none.
+vault has none, and then as a commit of its own, pushed before the service
+starts — `skill_write` refuses that skill (see [Tools](#tools)).
 
 ---
 
@@ -303,7 +304,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push}` | RO/RW | – |
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
-| `skill_write` | name, content | `{name, pushed}` | RW | ✓ |
+| `skill_write` | name, content, confirm? | `{name, pushed}` | RW | ✓ |
 
 Every tool also publishes a title and the four MCP hints, so a client can tell
 `delete_note` from `read` before asking you to approve it. The read tools are
@@ -327,6 +328,12 @@ leaving everything already in the file as its body. `rewrite_note` preserves
 the block it finds, so it refuses a note that has none and points at
 `update_frontmatter`. Both refuse a block that opens and never closes; that one
 needs a human.
+
+`skill_write` creates a new skill as asked, but replaces an existing one only
+with `confirm: true` — a skill is an instruction every later session follows.
+`vigil-vault-conventions` is protected: `skill_write` refuses it whatever the
+call carries, and it changes only by hand (see
+[Editing by hand](#editing-by-hand)).
 
 ### Paths are normalized, not rejected
 
@@ -919,6 +926,12 @@ what the assistant wrote from what you wrote.
 
 **Mind the chunk ids.** Renaming a heading changes its chunk id, and links to
 the old id break. `links` and `lint` show what broke.
+
+**The conventions skill changes only this way.** `skills/vigil-vault-conventions.md`
+is what every session reads before it writes, so `skill_write` refuses it.
+Edit it in your clone, commit and push like any note; once the server has
+adopted the commit (`reload`, or its next write), `skill_read` returns your
+version.
 
 **If `reload` answers `pull_failed` with a conflict**, or `status` stays both
 `ahead` and `behind` above zero, the server holds a commit of vigil's that

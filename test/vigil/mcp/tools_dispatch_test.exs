@@ -251,7 +251,7 @@ defmodule Vigil.MCP.ToolsDispatchTest do
       )
 
       assert_receive {:store_call, {:skill_write, params}}
-      assert Map.keys(params) |> Enum.sort() == [:content, :name, :request_id]
+      assert Map.keys(params) |> Enum.sort() == [:confirm, :content, :name, :request_id]
     end
   end
 

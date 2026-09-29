@@ -39,8 +39,8 @@ Prerequisite: setup.sh has already run.
   --ignore-audit              continue despite a failed dependency audit
   --keep-token                mint no token for the owner, who keeps the ones
                               carried over from the old container (the dets
-                              files; how is printed). The skill bootstrap and
-                              verify() get two that live 15 minutes
+                              files; how is printed). verify() gets two that
+                              live 15 minutes
   --dry-run                   log changes with [DRY RUN] instead of applying
   --non-interactive           run through without any prompts
   --verbose                   extra debug output (set -x)
@@ -797,16 +797,32 @@ record_done "mix test green, release built"
 step "7/9  Start, token bootstrap, skill bootstrap"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] systemctl start vigil, wait for health, seed tokens, create vigil-vault-conventions via skill_write"
+  log "[DRY RUN] commit and push skills/vigil-vault-conventions.md if missing, systemctl start vigil, wait for health, seed tokens"
 else
+  # The conventions skill is protected: skill_write refuses it, so it is
+  # committed to the vault directly, like a hand edit, before the server is
+  # there to write alongside it. An adopted vault may already carry its own,
+  # tuned by its owner — that one is kept as it is.
+  case "$(install_conventions_skill "$VAULT" "${SCRIPT_DIR}/templates/vigil-vault-conventions.md" "$GIT_REMOTE" "$GIT_BRANCH")" in
+    kept) ok "Skill 'vigil-vault-conventions' already in the vault — kept as it is." ;;
+    pushed) ok "Created skill 'vigil-vault-conventions'." ;;
+    committed)
+      warn "Skill 'vigil-vault-conventions' committed, but the push failed — the server pushes it with its next write, or push it by hand."
+      ;;
+    *)
+      err "Could not commit skills/vigil-vault-conventions.md to ${VAULT}."
+      exit 1
+      ;;
+  esac
+
   systemctl start vigil
   wait_until_healthy || exit 1
 
   # The owner's pair lives 90 days (vigil_seed_token's default) and is printed
   # in step 9. Under --keep-token the owner keeps the tokens carried over from
   # the old container and nothing is printed, so nothing long-lived is minted:
-  # the skill bootstrap and verify() still need a bearer each, and theirs live
-  # 15 minutes, like the pair update.sh mints for verify().
+  # verify() still needs a bearer for each scope, and those live 15 minutes,
+  # like the pair update.sh mints for verify().
   if [ "$KEEP_TOKEN" = "1" ]; then
     RW_TOKEN="$(vigil_seed_token "$RESOURCE" vault 900)"
     RO_TOKEN="$(vigil_seed_token "$RESOURCE" vault:read 900)"
@@ -823,39 +839,6 @@ else
     echo "  and copy them into /var/lib/vigil/ (stop the service briefly for that)."
     echo
     record_next_step "carry over oauth_tokens.dets/oauth_clients.dets from the old container, if wanted"
-  fi
-
-  # An adopted vault may already carry its own conventions skill, tuned by
-  # its owner — never overwrite it with the template. (The bootstrap below
-  # also depends on skill_read failing, which it does not for a skill that
-  # exists.)
-  if [ -f "${VAULT}/skills/vigil-vault-conventions.md" ]; then
-    ok "Skill 'vigil-vault-conventions' already in the vault — kept as it is."
-  else
-    SKILL_CONTENT="$(cat "${SCRIPT_DIR}/templates/vigil-vault-conventions.md")"
-    SKILL_JSON_CONTENT="$(printf '%s' "$SKILL_CONTENT" | jq -Rs .)"
-    # skill_write requires a SkillKey like every other write tool. That creates
-    # a chicken-and-egg problem on a fresh vault: the vigil-vault-conventions
-    # skill does not exist yet, so there is no skill_read response to take the
-    # key from. Vigil.Skills.read/3 therefore returns the current SkillKey in the
-    # error case as well (it is a pure HMAC over secret + time, independent of
-    # any skill existing) — parsed here out of the failing skill_read
-    # response.
-    SKILL_READ_RESPONSE="$(mcp_call "http://localhost:4000" "$RW_TOKEN" "skill_read" \
-      '{"name":"vigil-vault-conventions"}')"
-    BOOTSTRAP_SKILL_KEY="$(echo "$SKILL_READ_RESPONSE" | mcp_error_text 2>/dev/null | grep -oP 'SkillKey: \K[0-9a-f]+' || true)"
-    if [ -z "$BOOTSTRAP_SKILL_KEY" ]; then
-      err "Could not extract a SkillKey from the skill_read response for bootstrapping: ${SKILL_READ_RESPONSE}"
-      exit 1
-    fi
-
-    SKILL_WRITE_RESPONSE="$(mcp_call "http://localhost:4000" "$RW_TOKEN" "skill_write" \
-      "{\"name\":\"vigil-vault-conventions\",\"content\":${SKILL_JSON_CONTENT},\"skill_key\":\"${BOOTSTRAP_SKILL_KEY}\"}")"
-    if echo "$SKILL_WRITE_RESPONSE" | mcp_is_error; then
-      err "skill_write for vigil-vault-conventions failed: $(echo "$SKILL_WRITE_RESPONSE" | mcp_error_text 2>/dev/null || echo "$SKILL_WRITE_RESPONSE")"
-      exit 1
-    fi
-    ok "Created skill 'vigil-vault-conventions'."
   fi
 fi
 record_done "service started, tokens seeded, conventions skill created"

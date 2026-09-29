@@ -598,9 +598,13 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Creates or replaces a skill; only on explicit instruction.",
+    "description": "Creates or replaces a skill; only on explicit instruction. Replacing an existing skill is destructive — requires confirm: true. vigil-vault-conventions is protected and cannot be written.",
     "inputSchema": {
       "properties": {
+        "confirm": {
+          "description": "Must be true to replace a skill that exists, otherwise the call is rejected; a new skill needs none.",
+          "type": "boolean"
+        },
         "content": {
           "description": "Full file content including frontmatter.",
           "minLength": 1,

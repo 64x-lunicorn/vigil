@@ -460,7 +460,8 @@ defmodule Vigil.MCP.Tools do
     %{
       name: "skill_write",
       title: "Write a skill",
-      description: "Creates or replaces a skill; only on explicit instruction.",
+      description:
+        "Creates or replaces a skill; only on explicit instruction. Replacing an existing skill is destructive — requires confirm: true. vigil-vault-conventions is protected and cannot be written.",
       write: true,
       call: :skill_write,
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
@@ -476,6 +477,13 @@ defmodule Vigil.MCP.Tools do
           type: :string,
           required: true,
           description: "Full file content including frontmatter."
+        },
+        %{
+          name: "confirm",
+          type: :boolean,
+          default: false,
+          description:
+            "Must be true to replace a skill that exists, otherwise the call is rejected; a new skill needs none."
         }
       ]
     }

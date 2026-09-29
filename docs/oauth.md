@@ -862,8 +862,8 @@ asks persistence four questions nothing on a request path asks:
 
 Seeded tokens live 90 days by default, not ten years: a bearer token nobody
 rotates is bounded by its lifetime, and by revocation. `init.sh --keep-token`
-mints none for the owner; the two its skill bootstrap and acceptance check
-need live 15 minutes, like the pair `update.sh` mints for its check.
+mints none for the owner; the two its acceptance check needs live 15
+minutes, like the pair `update.sh` mints for its check.
 
 > **Note:** `:dets` is not safe for concurrent access from multiple OS
 > processes. Seeding a token while the service is running must go through

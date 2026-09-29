@@ -83,6 +83,18 @@ defmodule Vigil.MCP.ToolsTest do
       assert move_note.inputSchema.properties.confirm.description =~ "rejected"
     end
 
+    # A new skill needs no confirm, so the parameter is optional and says when
+    # it is required — replacing one that exists.
+    test "skill_write keeps confirm out of required and says it is for replacing" do
+      [skill_write] = Enum.filter(Tools.definitions(), &(&1.name == "skill_write"))
+
+      refute "confirm" in skill_write.inputSchema.required
+      assert skill_write.inputSchema.properties.confirm.type == "boolean"
+      assert skill_write.inputSchema.properties.confirm.description =~ "rejected"
+      assert skill_write.description =~ "requires confirm: true"
+      assert skill_write.description =~ "vigil-vault-conventions is protected"
+    end
+
     # No row declares `skill_key`: a tool takes one because it writes, and the
     # row already says `write: true`. What the derivation replaces is nine
     # identical blocks, each free to drift in its description or its

@@ -136,6 +136,39 @@ vault_git_branch() {
   echo "${branch:-$DEFAULT_GIT_BRANCH}"
 }
 
+# install_conventions_skill <vault> <template> <remote> <branch> — puts the
+# conventions skill into the vault as a commit of its own, named after the
+# template's file name, and pushes it. Prints `kept` when the vault already
+# holds one (an adopted vault's own, tuned by its owner, is never replaced),
+# `pushed` when the commit reached the remote, `committed` when only the push
+# failed, `failed` when there is no commit. The server refuses to write this skill through MCP (docs/design.md,
+# "skills/ — one repository, two systems"), so it arrives the way a hand edit
+# does: as a commit, before the server starts.
+install_conventions_skill() {
+  local vault="$1" template="$2" remote="$3" branch="$4"
+  local rel
+  rel="skills/$(basename "$template")"
+  if [ -f "${vault}/${rel}" ]; then
+    echo kept
+    return 0
+  fi
+  # Called in a command substitution, where `set -e` does not reach: each step
+  # says whether it worked.
+  if ! { as_vigil mkdir -p "${vault}/skills" &&
+    as_vigil tee "${vault}/${rel}" <"$template" >/dev/null &&
+    as_vigil git -C "$vault" add -- "$rel" &&
+    as_vigil git -C "$vault" -c user.name=vigil -c user.email=vigil@local -c commit.gpgsign=false \
+      commit -q -m "init: ${rel}" -- "$rel"; } >/dev/null 2>&1; then
+    echo failed
+    return 0
+  fi
+  if as_vigil git -C "$vault" push -q "$remote" "$branch" >/dev/null 2>&1; then
+    echo pushed
+  else
+    echo committed
+  fi
+}
+
 ## ── Logging ──────────────────────────────────────────────────────────────
 
 _timestamp() { date +%H:%M:%S; }

@@ -217,6 +217,26 @@ path `Vigil.Store` publishes at startup rather than answers questions about.
 `Vigil.Skills` takes that path as a plain argument and holds no state of its
 own, which is what makes the two reads free to leave.
 
+**Replacing a skill takes `confirm: true`; a protected skill is not written
+through MCP at all.** A skill is an instruction every later session follows,
+and `vigil-vault-conventions` is the one every session reads before it writes.
+An instruction smuggled into something the assistant read could otherwise
+change what every session after it is told — with one call, unasked. So
+`skill_write` creates a skill that does not exist as before, but refuses to
+replace one that does unless the call carries `confirm: true`, in the same
+words `delete_note` and `move_note` refuse with. A short, fixed list in
+`Vigil.Skills` — `vigil-vault-conventions` and nothing else so far — is
+refused whatever the call carries, created or replaced, and the refusal points
+to "Editing by hand" in the guide: those change as a commit through the
+remote, where a human wrote them. `init.sh` installs the conventions skill that
+way too, as a commit of its own pushed before the service starts, and keeps a
+vault's own. The checks are `Vigil.Skills`'s rather than `Vigil.Vault.Policy`'s,
+which owns the note rules and never sees a skill; both run inside the writer,
+after the vault is brought up to date, so "exists" is the remote's answer. A
+refusal is not remembered under a `request_id`, so the confirmed call it asks
+for can carry the same one, and the retry of a confirmed replace is answered
+from the first — it is not refused for replacing the skill it just wrote.
+
 ### Frontmatter — exactly one required field
 
 ```yaml
@@ -555,7 +575,7 @@ drift in its description or its required-ness while the gate went on requiring
 the same thing. The other is `request_id`, optional on every write for the
 same reason, and a parameter of the operation: it travels to the writer, which
 is what remembers it (see "A retried write is applied once"). `confirm` is not derivable the same way and stays declared per
-row: only three of the nine writes take one, and `write: true` does not say
+row: only four of the nine writes take one, and `write: true` does not say
 which. An enum's internal form is the atom of the same name, derived once from
 the values the table already declares rather than restated in each tool's
 dispatch; that restatement is what let `search` convert its `type` while
@@ -1903,7 +1923,7 @@ recorded: it would be a disk write on the `/mcp` hot path for a column. Of an
 RFC 7009 endpoint and nothing, nothing: the operator is on the host, and a
 client has never needed to give a token back. Seeded tokens live 90 days,
 not ten years, and `init.sh --keep-token` mints none for the owner — its
-bootstrap and acceptance check get two that live 15 minutes.
+acceptance check gets two that live 15 minutes.
 
 The SkillKey creates a bootstrap problem: `skill_write` needs a key, but a
 fresh vault has no conventions skill to read one from. Resolved by having
@@ -1911,7 +1931,10 @@ fresh vault has no conventions skill to read one from. Resolved by having
 pure HMAC over secret and time and does not depend on any skill existing.
 That is a bootstrap affordance, not the way back in after a rotation: the
 conventions skill names itself `vigil-vault-conventions`, the name `init.sh`
-installs it under, so the retry it instructs reads a skill that exists. Both
+installs it under, so the retry it instructs reads a skill that exists.
+`init.sh` itself no longer needs the affordance — it commits that skill
+directly, since `skill_write` refuses it — but in a vault without the skill,
+the not-found response is still where a key comes from. Both
 responses say how long the key lives from the key bundle they were handed —
 the deployment's window, and that the previous window's key is still accepted
 — rather than a fixed hour, which is true only of the default.

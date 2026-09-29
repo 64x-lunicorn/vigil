@@ -79,6 +79,7 @@ bash scripts/test/verify_test.sh
 bash scripts/test/secrets_test.sh
 bash scripts/test/git_settings_test.sh
 bash scripts/test/push_safety_net_test.sh
+bash scripts/test/conventions_skill_test.sh
 bash scripts/test/grants_test.sh
 ```
 

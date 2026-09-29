@@ -4,7 +4,9 @@ defmodule Vigil.Skills do
 
   Skills are a genuinely separate concern from notes: `skills/` is excluded
   from domain discovery, skill files are never parsed or indexed as notes,
-  and skill writes carry no `Vigil.Vault.Policy` check. The write effect is
+  and skill writes carry no `Vigil.Vault.Policy` check — only this module's
+  own two: a protected skill is not written at all, and an existing one is
+  replaced only on `confirm: true`. The write effect is
   still the same effect, and `Vigil.Commit` owns it for both — what `write/3`
   does not do is `Vigil.Store`'s reparse between commit and push, which would
   index a skill as a note.
@@ -99,17 +101,29 @@ defmodule Vigil.Skills do
 
   defp valid_skill_name?(name), do: Regex.match?(~r/^[a-z0-9_-]+$/, name)
 
+  # Skills no MCP call may write, created or replaced: the conventions skill is
+  # what every session reads before it writes, so an instruction smuggled into
+  # something the assistant read could otherwise rewrite what every later
+  # session is told (docs/design.md, "skills/ — one repository, two systems").
+  # They change the way a hand edit does, as a commit through the remote.
+  @protected ~w(vigil-vault-conventions)
+
   @doc """
   Writes a skill, commits and pushes it. Does not parse or index the file —
   skills are never notes.
+
+  A skill that already exists is replaced only with `confirm: true` in
+  `opts`, and a protected one (`vigil-vault-conventions`) is never written.
   """
-  def write(name, content, %{vault_path: vault_path, git: git} = target) do
+  def write(name, content, %{vault_path: vault_path, git: git} = target, opts \\ []) do
     normalized = normalize_skill_name(name)
 
     rel_path = "skills/#{normalized}.md"
 
     with true <- valid_skill_name?(normalized),
+         :ok <- writable(normalized),
          :ok <- validate_skill_frontmatter(content),
+         :ok <- confirm_replace(vault_path, rel_path, Keyword.get(opts, :confirm, false)),
          {:ok, _commit_meta} <-
            Commit.write(
              git,
@@ -122,6 +136,27 @@ defmodule Vigil.Skills do
     else
       false -> {:error, "Invalid path"}
       {:error, msg} -> {:error, msg}
+    end
+  end
+
+  defp writable(name) when name in @protected do
+    {:error,
+     "#{name} is protected and cannot be written through MCP. " <>
+       "Change it by hand, as a commit through the remote " <>
+       ~s{(docs/guide.md, "Editing by hand").}}
+  end
+
+  defp writable(_name), do: :ok
+
+  # The same gate, in the same words, as Vigil.Vault.Policy's on delete_note
+  # and move_note: replacing a skill takes away what it said.
+  defp confirm_replace(vault_path, rel_path, confirm) do
+    if confirm == true or not File.exists?(Path.join(vault_path, rel_path)) do
+      :ok
+    else
+      {:error,
+       "Destructive operation: replaces the existing skill #{rel_path}. " <>
+         "Call again with confirm: true to execute it."}
     end
   end
 

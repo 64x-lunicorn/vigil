@@ -272,7 +272,7 @@ defmodule Vigil.Store do
     {result, new_state} =
       once(:skill_write, params, state, fn params, state ->
         in_step(params, state, fn params, state ->
-          {do_skill_write(params.name, params.content, state), state}
+          {do_skill_write(params, state), state}
         end)
       end)
 
@@ -1012,12 +1012,17 @@ defmodule Vigil.Store do
   # vault_path/0), so the bootstrap read every write begins with does not
   # queue behind the push of the write before it.
 
-  defp do_skill_write(name, content, state) do
-    Skills.write(name, content, %{
-      vault_path: state.vault_path,
-      git_remote: state.git_remote,
-      git_branch: state.git_branch,
-      git: state.git
-    })
+  defp do_skill_write(params, state) do
+    Skills.write(
+      params.name,
+      params.content,
+      %{
+        vault_path: state.vault_path,
+        git_remote: state.git_remote,
+        git_branch: state.git_branch,
+        git: state.git
+      },
+      confirm: Map.get(params, :confirm, false)
+    )
   end
 end

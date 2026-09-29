@@ -13,7 +13,7 @@
 # an id reaches the node as data, and which exit status the operator sees.
 #
 # It also holds init.sh to what its --keep-token promises: no token for the
-# owner, only the two short-lived ones the skill bootstrap and verify() use.
+# owner, only the two short-lived ones verify() uses.
 #
 # Usage: bash scripts/test/grants_test.sh [--keep]
 
