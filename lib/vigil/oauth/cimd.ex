@@ -25,8 +25,13 @@ defmodule Vigil.OAuth.Cimd do
   still asks a real resolver about a host, and one that fakes the resolution but
   not the request still opens a socket. Only both together take this module off
   the network.
+
+  `resolve_timeout` bounds the resolution, both families together, in
+  milliseconds. It travels with the resolver so a test that fakes a resolver
+  which never answers can wait for a deadline of its choosing; a `net` without
+  it gets the same 5 s the request has.
   """
-  def net, do: %{request: &http_get/2, resolve: &:inet.getaddr/2}
+  def net, do: %{request: &http_get/2, resolve: &:inet.getaddr/2, resolve_timeout: @timeout}
 
   @doc """
   Fetches and validates a CIMD document, cached for 1h through the persistence
@@ -39,7 +44,7 @@ defmodule Vigil.OAuth.Cimd do
 
       :error ->
         with {:ok, uri} <- validate_url(url),
-             {:ok, ip} <- public_address(uri.host, net.resolve),
+             {:ok, ip} <- public_address(uri.host, net),
              {:ok, body} <- net.request.(uri, ip),
              # `read_capped/2` already refuses an oversized body during the
              # read. The bound is repeated here because the request is a seam:
@@ -72,55 +77,195 @@ defmodule Vigil.OAuth.Cimd do
   ## The SSRF guard
 
   # One lookup, one decision, one address handed on. IPv4 first, IPv6 only when
-  # the host has no A record.
-  defp public_address(host, resolve) do
+  # the host has no A record. Both lookups together run under one deadline: the
+  # resolver is the other party's DNS, and a name server that never answers
+  # would otherwise hold the request that asked for the client open for as long
+  # as the system resolver cares to wait.
+  defp public_address(host, net) do
     host = String.to_charlist(host)
+    timeout = Map.get(net, :resolve_timeout, @timeout)
+    task = Task.async(fn -> lookup(host, net.resolve) end)
 
-    case resolve.(host, :inet) do
-      {:ok, ip} ->
-        if_public(ip)
-
-      {:error, _} ->
-        case resolve.(host, :inet6) do
-          {:ok, ip} -> if_public(ip)
-          {:error, _} -> :error
-        end
+    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, ip}} -> if(public?(ip), do: {:ok, ip}, else: :error)
+      _ -> :error
     end
   end
 
-  defp if_public(ip), do: if(private_ip?(ip), do: :error, else: {:ok, ip})
+  defp lookup(host, resolve) do
+    case resolve.(host, :inet) do
+      {:ok, ip} -> {:ok, ip}
+      {:error, _} -> resolve.(host, :inet6)
+    end
+  end
 
-  # `::` and `::1` share their shape with the IPv4-compatible form below, which
-  # would unfold them into 0.0.0.0/8 and refuse them anyway. They are named here,
-  # ahead of it, so the IPv6 unspecified and loopback addresses are refused as
-  # themselves rather than by coincidence.
-  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
-  defp private_ip?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  # The guard is an allow-list. A deny-list of the ranges someone remembered
+  # to name is only as good as that memory, and it had already missed NAT64,
+  # 6to4, Teredo, the TEST-NETs and 240.0.0.0/4. Here an IPv4 address is
+  # reachable only outside every block below, and an IPv6 address only inside
+  # 2000::/3, the global unicast space, and outside every block below.
+  #
+  # The tables are the IANA IPv4 and IPv6 Special-Purpose Address Registries
+  # (RFC 6890), every entry, including the few the registry marks globally
+  # reachable — an anycast relay or an AS112 sink is never where a client
+  # publishes its metadata.
+  cidr = fn block ->
+    [address, length] = String.split(block, "/")
+    {:ok, ip} = :inet.parse_address(String.to_charlist(address))
+    bits = if tuple_size(ip) == 4, do: 8, else: 16
+    value = ip |> Tuple.to_list() |> Enum.reduce(0, &(&2 * Bitwise.bsl(1, bits) + &1))
+    {value, String.to_integer(length)}
+  end
 
-  # An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is an IPv4 address wearing an
-  # eight-element tuple: it matches neither the IPv6 loopback clause nor
-  # fc00::/7, so without this it fell through to "public" and `::ffff:127.0.0.1`
-  # reached the loopback interface. The deprecated IPv4-compatible form
-  # (::a.b.c.d) is the same address without the 0xffff, and fell through the
-  # same way. Both are unfolded first, so every IPv4 range below covers them too.
-  defp private_ip?({0, 0, 0, 0, 0, 0xFFFF, ab, cd}), do: private_ip?(unfold(ab, cd))
-  defp private_ip?({0, 0, 0, 0, 0, 0, ab, cd}), do: private_ip?(unfold(ab, cd))
+  @ipv4_special Enum.map(
+                  [
+                    # "This network" — RFC 791 §3.2 (0.0.0.0/32, "this host", inside it)
+                    "0.0.0.0/8",
+                    # Private-use — RFC 1918
+                    "10.0.0.0/8",
+                    # Shared address space, carrier-grade NAT — RFC 6598
+                    "100.64.0.0/10",
+                    # Loopback — RFC 1122 §3.2.1.3
+                    "127.0.0.0/8",
+                    # Link-local — RFC 3927
+                    "169.254.0.0/16",
+                    # Private-use — RFC 1918
+                    "172.16.0.0/12",
+                    # IETF protocol assignments — RFC 6890 §2.1; holds DS-Lite
+                    # 192.0.0.0/29 (RFC 7335), the dummy address 192.0.0.8/32
+                    # (RFC 7600), PCP anycast 192.0.0.9/32 (RFC 7723), TURN
+                    # anycast 192.0.0.10/32 (RFC 8155) and NAT64/DNS64
+                    # discovery 192.0.0.170/31 (RFC 8880)
+                    "192.0.0.0/24",
+                    # Documentation, TEST-NET-1 — RFC 5737
+                    "192.0.2.0/24",
+                    # AS112-v4 — RFC 7535
+                    "192.31.196.0/24",
+                    # AMT — RFC 7450
+                    "192.52.193.0/24",
+                    # Deprecated 6to4 relay anycast — RFC 7526
+                    "192.88.99.0/24",
+                    # Private-use — RFC 1918
+                    "192.168.0.0/16",
+                    # Direct delegation AS112 service — RFC 7534
+                    "192.175.48.0/24",
+                    # Benchmarking — RFC 2544
+                    "198.18.0.0/15",
+                    # Documentation, TEST-NET-2 — RFC 5737
+                    "198.51.100.0/24",
+                    # Documentation, TEST-NET-3 — RFC 5737
+                    "203.0.113.0/24",
+                    # Multicast — RFC 5771. Not a special-purpose entry, it has
+                    # a registry of its own, but no unicast fetch belongs there.
+                    "224.0.0.0/4",
+                    # Reserved — RFC 1112 §4
+                    "240.0.0.0/4",
+                    # Limited broadcast — RFC 8190, RFC 919 §7 (inside 240/4 too)
+                    "255.255.255.255/32"
+                  ],
+                  cidr
+                )
 
-  defp private_ip?({0, _, _, _}), do: true
-  defp private_ip?({10, _, _, _}), do: true
-  defp private_ip?({100, b, _, _}) when b >= 64 and b <= 127, do: true
-  defp private_ip?({127, _, _, _}), do: true
-  defp private_ip?({169, 254, _, _}), do: true
-  defp private_ip?({172, b, _, _}) when b >= 16 and b <= 31, do: true
-  defp private_ip?({192, 168, _, _}), do: true
-  defp private_ip?({198, b, _, _}) when b >= 18 and b <= 19, do: true
-  defp private_ip?({a, _, _, _}) when a >= 224 and a <= 239, do: true
-  defp private_ip?({255, 255, 255, 255}), do: true
-  defp private_ip?({a, _, _, _, _, _, _, _}) when a >= 0xFC00 and a <= 0xFDFF, do: true
-  defp private_ip?({a, _, _, _, _, _, _, _}) when a >= 0xFE80 and a <= 0xFEBF, do: true
-  defp private_ip?(_), do: false
+  @global_unicast cidr.("2000::/3")
+
+  # The registry entries outside 2000::/3 are refused by that alone; they are
+  # listed anyway so this table reads as the registry does. Four entries are
+  # absent because the address they carry decides instead — ::ffff:0:0/96,
+  # 64:ff9b::/96, 2001::/32 and 2002::/16, see `embedded_ipv4/1` — and one,
+  # 64:ff9b:1::/48, is refused by a clause of its own.
+  @ipv6_special Enum.map(
+                  [
+                    # Unspecified — RFC 4291
+                    "::/128",
+                    # Loopback — RFC 4291
+                    "::1/128",
+                    # Discard-only — RFC 6666
+                    "100::/64",
+                    # Dummy IPv6 prefix — RFC 9780
+                    "100:0:0:1::/64",
+                    # IETF protocol assignments — RFC 2928; holds PCP anycast
+                    # 2001:1::1 (RFC 7723), TURN anycast 2001:1::2 (RFC 8155),
+                    # DNS-SD SRP anycast 2001:1::3 (RFC 9665), benchmarking
+                    # 2001:2::/48 (RFC 5180), AMT 2001:3::/32 (RFC 7450),
+                    # AS112-v6 2001:4:112::/48 (RFC 7535), ORCHID 2001:10::/28
+                    # (RFC 4843), ORCHIDv2 2001:20::/28 (RFC 7343) and Drone
+                    # Remote ID 2001:30::/28 (RFC 9374). Teredo, 2001::/32, is
+                    # the one entry inside it judged by what it carries.
+                    "2001::/23",
+                    # Documentation — RFC 3849
+                    "2001:db8::/32",
+                    # Direct delegation AS112 service — RFC 7534
+                    "2620:4f:8000::/48",
+                    # Documentation — RFC 9637
+                    "3fff::/20",
+                    # Segment Routing (SRv6) SIDs — RFC 9602
+                    "5f00::/16",
+                    # Unique local — RFC 4193, RFC 8190
+                    "fc00::/7",
+                    # Link-local unicast — RFC 4291
+                    "fe80::/10"
+                  ],
+                  cidr
+                )
+
+  defp public?({_, _, _, _} = ip), do: not in_any?(integer(ip, 8), 32, @ipv4_special)
+
+  defp public?(ip) do
+    case embedded_ipv4(ip) do
+      {:carries, ipv4s} ->
+        Enum.all?(ipv4s, &public?/1)
+
+      :refuse ->
+        false
+
+      :native ->
+        value = integer(ip, 16)
+        in_block?(value, 128, @global_unicast) and not in_any?(value, 128, @ipv6_special)
+    end
+  end
+
+  # The IPv6 forms that are an IPv4 address in transit. Each is judged by the
+  # IPv4 address it will end up at, so a NAT64 or tunnel prefix is exactly as
+  # reachable as the address inside it, and `64:ff9b::10.0.0.1` is 10.0.0.1.
+  #
+  # `::` and `::1` share their shape with the IPv4-compatible form, which would
+  # unfold them into 0.0.0.0/8 and refuse them anyway. They are named first so
+  # the IPv6 unspecified and loopback addresses are refused as themselves
+  # rather than by coincidence.
+  defp embedded_ipv4({0, 0, 0, 0, 0, 0, 0, a}) when a in [0, 1], do: :native
+  # IPv4-mapped — RFC 4291 §2.5.5.2
+  defp embedded_ipv4({0, 0, 0, 0, 0, 0xFFFF, ab, cd}), do: {:carries, [unfold(ab, cd)]}
+  # IPv4-compatible, deprecated — RFC 4291 §2.5.5.1
+  defp embedded_ipv4({0, 0, 0, 0, 0, 0, ab, cd}), do: {:carries, [unfold(ab, cd)]}
+  # NAT64 well-known prefix 64:ff9b::/96 — RFC 6052 §2.1: the last 32 bits
+  defp embedded_ipv4({0x64, 0xFF9B, 0, 0, 0, 0, ab, cd}), do: {:carries, [unfold(ab, cd)]}
+  # NAT64 local-use prefix 64:ff9b:1::/48 — RFC 8215. Where the IPv4 address
+  # sits depends on the length of the network-specific prefix the operator cut
+  # from it (RFC 6052 §2.2), which nothing in the address says, so the address
+  # it carries cannot be told and the prefix is refused outright.
+  defp embedded_ipv4({0x64, 0xFF9B, 1, _, _, _, _, _}), do: :refuse
+  # 6to4 2002::/16 — RFC 3056 §2: bits 16–47
+  defp embedded_ipv4({0x2002, ab, cd, _, _, _, _, _}), do: {:carries, [unfold(ab, cd)]}
+  # Teredo 2001::/32 — RFC 4380 §4: the server in bits 32–63, the client in the
+  # last 32 bits with every bit inverted. Both are addresses the packet reaches.
+  defp embedded_ipv4({0x2001, 0, server_ab, server_cd, _, _, client_ab, client_cd}) do
+    client = unfold(Bitwise.bxor(client_ab, 0xFFFF), Bitwise.bxor(client_cd, 0xFFFF))
+    {:carries, [unfold(server_ab, server_cd), client]}
+  end
+
+  defp embedded_ipv4(_ip), do: :native
 
   defp unfold(ab, cd), do: {div(ab, 256), rem(ab, 256), div(cd, 256), rem(cd, 256)}
+
+  defp in_any?(value, width, blocks), do: Enum.any?(blocks, &in_block?(value, width, &1))
+
+  defp in_block?(value, width, {prefix, length}) do
+    Bitwise.bsr(value, width - length) == Bitwise.bsr(prefix, width - length)
+  end
+
+  defp integer(ip, bits) do
+    ip |> Tuple.to_list() |> Enum.reduce(0, &(&2 * Bitwise.bsl(1, bits) + &1))
+  end
 
   ## The request
 

@@ -154,56 +154,215 @@ defmodule Vigil.OAuth.CimdTest do
     refute_received {:request, _, _}
   end
 
-  ## The ranges the guard refuses
-
-  test "the IPv4 ranges that must not be reachable are refused, one per range", %{
+  test "a resolver that does not answer makes the fetch fail within the timeout", %{
     persistence: persistence
   } do
-    for {label, ip} <- [
-          {"0.0.0.0/8 (this network)", {0, 0, 0, 0}},
-          {"10.0.0.0/8 (private)", {10, 1, 2, 3}},
-          {"100.64.0.0/10 (carrier-grade NAT)", {100, 64, 0, 1}},
-          {"100.64.0.0/10 upper edge", {100, 127, 255, 254}},
-          {"127.0.0.0/8 (loopback)", {127, 0, 0, 1}},
-          {"169.254.0.0/16 (link-local)", {169, 254, 169, 254}},
-          {"172.16.0.0/12 (private)", {172, 16, 0, 1}},
-          {"192.168.0.0/16 (private)", {192, 168, 1, 1}},
-          {"198.18.0.0/15 (benchmarking)", {198, 18, 0, 1}},
-          {"198.18.0.0/15 upper half", {198, 19, 255, 254}},
-          {"224.0.0.0/4 (multicast)", {224, 0, 0, 1}},
-          {"224.0.0.0/4 upper edge", {239, 255, 255, 254}},
-          {"255.255.255.255 (broadcast)", {255, 255, 255, 255}}
-        ] do
-      assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
+    net = %{
+      net([])
+      | resolve: fn _host, _family -> Process.sleep(:infinity) end
+    }
+
+    net = Map.put(net, :resolve_timeout, 100)
+
+    {elapsed, result} =
+      :timer.tc(fn -> Cimd.fetch(persistence, @url, @now, net) end, :millisecond)
+
+    assert result == :error
+    assert elapsed < 1_000
+    refute_received {:request, _, _}
+  end
+
+  test "the resolution is bounded by the same 5 s the request is" do
+    assert Cimd.net().resolve_timeout == 5_000
+  end
+
+  ## The ranges the guard refuses
+
+  # Every entry of the IANA IPv4 Special-Purpose Address Registry, and
+  # multicast, which has a registry of its own.
+  @ipv4_special [
+    "0.0.0.0/8",
+    "0.0.0.0/32",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.0.0/29",
+    "192.0.0.8/32",
+    "192.0.0.9/32",
+    "192.0.0.10/32",
+    "192.0.0.170/31",
+    "192.0.2.0/24",
+    "192.31.196.0/24",
+    "192.52.193.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "192.175.48.0/24",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "255.255.255.255/32"
+  ]
+
+  # Every entry of the IANA IPv6 Special-Purpose Address Registry. The
+  # translation and tunnel prefixes are refused here through the IPv4 address
+  # at each end of the block — 0.0.0.0 and 255.255.255.255 — which is what
+  # they carry; a public one is the test further down.
+  @ipv6_special [
+    "::1/128",
+    "::/128",
+    "::ffff:0:0/96",
+    "64:ff9b::/96",
+    "64:ff9b:1::/48",
+    "100::/64",
+    "100:0:0:1::/64",
+    "2001::/23",
+    "2001::/32",
+    "2001:1::1/128",
+    "2001:1::2/128",
+    "2001:1::3/128",
+    "2001:2::/48",
+    "2001:3::/32",
+    "2001:4:112::/48",
+    "2001:10::/28",
+    "2001:20::/28",
+    "2001:30::/28",
+    "2001:db8::/32",
+    "2002::/16",
+    "2620:4f:8000::/48",
+    "3fff::/20",
+    "5f00::/16",
+    "fc00::/7",
+    "fe80::/10"
+  ]
+
+  # The first and the last address of a block, worked out here rather than
+  # asked of the guard.
+  defp edges(block) do
+    [address, length] = String.split(block, "/")
+    {:ok, ip} = :inet.parse_address(String.to_charlist(address))
+    {bits, width} = if tuple_size(ip) == 4, do: {8, 32}, else: {16, 128}
+    value = ip |> Tuple.to_list() |> Enum.reduce(0, &(&2 * Bitwise.bsl(1, bits) + &1))
+    host_bits = width - String.to_integer(length)
+    last = Bitwise.bor(value, Bitwise.bsl(1, host_bits) - 1)
+    [value, last] |> Enum.map(&to_tuple(&1, bits, div(width, bits))) |> Enum.uniq()
+  end
+
+  defp to_tuple(value, bits, count) do
+    for(
+      i <- (count - 1)..0//-1,
+      do: Bitwise.band(Bitwise.bsr(value, i * bits), Bitwise.bsl(1, bits) - 1)
+    )
+    |> List.to_tuple()
+  end
+
+  test "every IANA special-purpose IPv4 block is refused, at both of its edges", %{
+    persistence: persistence
+  } do
+    for block <- @ipv4_special, ip <- edges(block) do
+      assert :error = fetch_resolving_to(persistence, ip),
+             "#{:inet.ntoa(ip)} in #{block} was not refused"
     end
   end
 
-  test "an address just outside each added range stays reachable", %{persistence: persistence} do
+  test "every IANA special-purpose IPv6 block is refused, at both of its edges", %{
+    persistence: persistence
+  } do
+    for block <- @ipv6_special, ip <- edges(block) do
+      assert :error = fetch_resolving_to(persistence, ip),
+             "#{:inet.ntoa(ip)} in #{block} was not refused"
+    end
+  end
+
+  test "an address just outside a special-purpose IPv4 block stays reachable", %{
+    persistence: persistence
+  } do
     for {label, ip} <- [
           {"1.0.0.0 is not 0.0.0.0/8", {1, 0, 0, 1}},
           {"100.63.x is below the CGNAT range", {100, 63, 255, 254}},
           {"100.128.x is above the CGNAT range", {100, 128, 0, 1}},
+          {"192.0.1.x is between 192.0.0.0/24 and TEST-NET-1", {192, 0, 1, 1}},
+          {"192.0.3.x is above TEST-NET-1", {192, 0, 3, 1}},
           {"198.17.x is below the benchmarking range", {198, 17, 255, 254}},
           {"198.20.x is above the benchmarking range", {198, 20, 0, 1}},
+          {"203.0.112.x is below TEST-NET-3", {203, 0, 112, 1}},
           {"223.x is below the multicast range", {223, 255, 255, 254}}
         ] do
       assert {:ok, _doc} = fetch_resolving_to(persistence, ip), "#{label} was refused"
     end
   end
 
-  test "the IPv6 ranges that must not be reachable are refused, one per range", %{
+  test "an IPv6 address outside global unicast 2000::/3 is refused", %{
     persistence: persistence
   } do
     for {label, ip} <- [
-          {":: (unspecified)", {0, 0, 0, 0, 0, 0, 0, 0}},
-          {"::1 (loopback)", {0, 0, 0, 0, 0, 0, 0, 1}},
-          {"fc00::/7 (unique local)", {0xFC00, 0, 0, 0, 0, 0, 0, 1}},
-          {"fd00::/8 (unique local)", {0xFD12, 0x3456, 0, 0, 0, 0, 0, 1}},
-          {"fe80::/10 (link-local)", {0xFE80, 0, 0, 0, 0, 0, 0, 1}},
-          {"febf::/10 upper edge", {0xFEBF, 0, 0, 0, 0, 0, 0, 1}}
+          {"1fff:ffff:... is below 2000::/3", {0x1FFF, 0xFFFF, 0, 0, 0, 0, 0, 1}},
+          {"4000::1 is above 2000::/3", {0x4000, 0, 0, 0, 0, 0, 0, 1}},
+          {"fec0::1 (site-local, deprecated)", {0xFEC0, 0, 0, 0, 0, 0, 0, 1}},
+          {"ff02::1 (multicast)", {0xFF02, 0, 0, 0, 0, 0, 0, 1}},
+          {"ff0e::1 (global multicast)", {0xFF0E, 0, 0, 0, 0, 0, 0, 1}}
         ] do
       assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
     end
+  end
+
+  test "a global unicast IPv6 address just outside a special-purpose block stays reachable",
+       %{persistence: persistence} do
+    for {label, ip} <- [
+          {"2001:200::1 is above 2001::/23", {0x2001, 0x0200, 0, 0, 0, 0, 0, 1}},
+          {"2001:db9::1 is above 2001:db8::/32", {0x2001, 0x0DB9, 0, 0, 0, 0, 0, 1}},
+          {"2003::1 is above 6to4", {0x2003, 0, 0, 0, 0, 0, 0, 1}},
+          {"3fff:1000::1 is above 3fff::/20", {0x3FFF, 0x1000, 0, 0, 0, 0, 0, 1}},
+          {"2606:2800::1", {0x2606, 0x2800, 0, 0, 0, 0, 0, 1}}
+        ] do
+      assert {:ok, _doc} = fetch_resolving_to(persistence, ip), "#{label} was refused"
+    end
+  end
+
+  ## Addresses that carry an IPv4 address
+
+  test "an address that embeds a private IPv4 address is refused", %{persistence: persistence} do
+    for {label, ip} <- [
+          {"64:ff9b::10.0.0.1 (NAT64)", {0x64, 0xFF9B, 0, 0, 0, 0, 0x0A00, 0x0001}},
+          {"64:ff9b::127.0.0.1 (NAT64)", {0x64, 0xFF9B, 0, 0, 0, 0, 0x7F00, 0x0001}},
+          {"64:ff9b::169.254.169.254 (NAT64)", {0x64, 0xFF9B, 0, 0, 0, 0, 0xA9FE, 0xA9FE}},
+          {"2002:c0a8:101:: (6to4 of 192.168.1.1)", {0x2002, 0xC0A8, 0x0101, 0, 0, 0, 0, 1}},
+          {"2002:7f00:1:: (6to4 of 127.0.0.1)", {0x2002, 0x7F00, 0x0001, 0, 0, 0, 0, 0}},
+          # Teredo: server 93.184.216.34, client 10.0.0.1 inverted to f5ff:fffe
+          {"Teredo with a private client", {0x2001, 0, 0x5DB8, 0xD822, 0, 0, 0xF5FF, 0xFFFE}},
+          # Teredo: server 10.0.0.1, client 93.184.216.34 inverted to a247:27dd
+          {"Teredo with a private server", {0x2001, 0, 0x0A00, 0x0001, 0, 0, 0xA247, 0x27DD}}
+        ] do
+      assert :error = fetch_resolving_to(persistence, ip), "#{label} was not refused"
+    end
+  end
+
+  test "an address that embeds a public IPv4 address stays reachable", %{
+    persistence: persistence
+  } do
+    for {label, ip} <- [
+          {"64:ff9b::93.184.216.34 (NAT64)", {0x64, 0xFF9B, 0, 0, 0, 0, 0x5DB8, 0xD822}},
+          {"2002:5db8:d822::1 (6to4)", {0x2002, 0x5DB8, 0xD822, 0, 0, 0, 0, 1}},
+          # Teredo: server 93.184.216.34, client 8.8.8.8 inverted to f7f7:f7f7.
+          # Read without the inversion the client would be 247.247.247.247,
+          # inside 240.0.0.0/4, and this would be refused.
+          {"Teredo, public both ends", {0x2001, 0, 0x5DB8, 0xD822, 0, 0, 0xF7F7, 0xF7F7}}
+        ] do
+      assert {:ok, _doc} = fetch_resolving_to(persistence, ip), "#{label} was refused"
+    end
+  end
+
+  test "the NAT64 local-use prefix is refused even around a public address", %{
+    persistence: persistence
+  } do
+    # Where the IPv4 address sits in 64:ff9b:1::/48 depends on a prefix length
+    # the address does not carry, so there is no address to check.
+    assert :error =
+             fetch_resolving_to(persistence, {0x64, 0xFF9B, 1, 0, 0, 0, 0x5DB8, 0xD822})
   end
 
   test "an IPv4-mapped IPv6 address is unfolded before the ranges are checked", %{

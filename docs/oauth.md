@@ -482,14 +482,33 @@ both the SNI extension and the reference identity the hostname check runs
 against — so TLS is still verified against the system trust store, for the name
 in the `client_id`, not for the address.
 
-The address must not fall into any of:
+The host is resolved under a 5 s deadline, both families together, so a name
+server that never answers fails the fetch rather than holding the request open.
+
+The address is checked against an **allow-list**: an IPv4 address is reachable
+only if it is public unicast, and an IPv6 address only if it is inside
+`2000::/3`, the global unicast space. Everything in the IANA IPv4 and IPv6
+Special-Purpose Address Registries is refused on top of that — every entry,
+including the few the registry marks globally reachable, since an anycast relay
+or an AS112 sink is never where a client publishes its metadata.
 
 | Family | Refused |
 |---|---|
-| IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.18.0.0/15` (benchmarking), `224.0.0.0/4` (multicast), `255.255.255.255` (broadcast) |
-| IPv6 | `::`, `::1`, `fc00::/7` (unique local), `fe80::/10` (link-local) |
-| IPv4-mapped IPv6 | `::ffff:a.b.c.d` is unfolded to `a.b.c.d` first, so every IPv4 row above covers its mapped form |
-| IPv4-compatible IPv6 | `::a.b.c.d` (deprecated) is unfolded to `a.b.c.d` first, so every IPv4 row above covers its compatible form |
+| IPv4 | `0.0.0.0/8` (this network), `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24` (IETF protocol assignments), `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` (TEST-NET-1 to 3), `192.31.196.0/24` and `192.175.48.0/24` (AS112), `192.52.193.0/24` (AMT), `192.88.99.0/24` (6to4 relay anycast), `192.168.0.0/16`, `198.18.0.0/15` (benchmarking), `224.0.0.0/4` (multicast), `240.0.0.0/4` (reserved, with `255.255.255.255`) |
+| IPv6 | everything outside `2000::/3` — `::`, `::1`, `100::/64`, `fc00::/7` (unique local), `fe80::/10` (link-local), `fec0::/10` (site-local), `ff00::/8` (multicast) among it — and inside it `2001::/23` (IETF protocol assignments), `2001:db8::/32` and `3fff::/20` (documentation), `2620:4f:8000::/48` (AS112), `5f00::/16` (SRv6 SIDs) |
+| NAT64 local-use | `64:ff9b:1::/48` is refused outright: where the IPv4 address sits depends on a prefix length the address does not carry |
+
+Five IPv6 forms are an IPv4 address in transit. Each is unfolded and judged by
+the IPv4 address it carries, against the IPv4 row above, so it is exactly as
+reachable as that address — `64:ff9b::10.0.0.1` is `10.0.0.1`:
+
+| Form | Carries |
+|---|---|
+| IPv4-mapped `::ffff:a.b.c.d` | the last 32 bits |
+| IPv4-compatible `::a.b.c.d` (deprecated) | the last 32 bits |
+| NAT64 `64:ff9b::/96` | the last 32 bits |
+| 6to4 `2002::/16` | bits 16–47 |
+| Teredo `2001::/32` | two addresses, both checked: the server in bits 32–63, the client in the last 32 bits with every bit inverted |
 
 ---
 
