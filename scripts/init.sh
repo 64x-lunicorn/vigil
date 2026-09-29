@@ -724,7 +724,7 @@ existing_or() {
 # notes these are and which language they are written in.
 VAULT_OWNER="$(ask_value "Vault owner (named in the writing instructions)" "$(existing_or VIGIL_VAULT_OWNER "the vault owner")")"
 VAULT_LANGUAGE="$(ask_value "Language the notes are written in" "$(existing_or VIGIL_VAULT_LANGUAGE "English")")"
-VAULT_TZ="$(ask_value "Time zone of the vault" "$(existing_or VIGIL_TZ "Europe/Berlin")")"
+VAULT_TZ="$(ask_value "Time zone of the vault" "$(existing_or VIGIL_TZ "UTC")")"
 
 # Two sets of lines. What this run decides — the paths, the answers above and
 # the two secrets — replaces the line that sets it. The defaults are written
@@ -937,7 +937,8 @@ if [ "$DRY_RUN" != "1" ] && [ "$KEEP_TOKEN" != "1" ]; then
   hide_trace
   echo
   echo "  ──────────────────────────────────────────────────────"
-  echo "  RW token (full access — paste into the Claude.ai connector):"
+  echo "  RW token (full access — for a client that sends it as a header, such as"
+  echo "  Claude Code or Cursor; see docs/clients.md):"
   echo "  ${RW_TOKEN}"
   echo
   echo "  RO token (read-only, for read-only clients):"

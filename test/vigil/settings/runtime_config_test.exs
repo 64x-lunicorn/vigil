@@ -59,6 +59,14 @@ defmodule Vigil.Settings.RuntimeConfigTest do
     assert checked.read_fetch_interval == 60
   end
 
+  test "an unset timezone is UTC, and a named one is read as written" do
+    assert {:ok, %{tz: "UTC"}} = check(prod_config())
+
+    System.put_env("VIGIL_TZ", "Europe/Berlin")
+
+    assert {:ok, %{tz: "Europe/Berlin"}} = check(prod_config())
+  end
+
   test "a non-integer reaches the check as written and is refused by name" do
     for var <-
           ~w(VIGIL_PORT VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM VIGIL_RELOAD_RATE_LIMIT_RPM

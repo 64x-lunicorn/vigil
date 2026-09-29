@@ -1627,6 +1627,13 @@ silently in UTC is wrong in a way no operator reads a warning for.
 stay crash-safe by construction, but the deployment's zone can no longer reach
 it invalid.
 
+**An unset `VIGIL_TZ` is UTC.** Of defaulting to UTC and requiring the
+setting, the default is the simpler: `init.sh` asks for the zone and writes
+it, so every scripted host names one, and a local run needs no line for it.
+The default used to be `Europe/Berlin`, the zone of the one deployment that
+existed — a place nobody else chose. UTC is the zone that is wrong for
+everyone equally and says so in every offset.
+
 **In prod the authorization server's identity is https, on one origin.**
 `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be `https` URLs, and the resource must
 sit on the issuer's origin — same scheme, host and port — because a client

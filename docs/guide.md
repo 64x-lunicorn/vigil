@@ -24,11 +24,13 @@ folder of Markdown files and their full history.
 - [How it works](#how-it-works)
 - [The vault](#the-vault)
 - [Quickstart](#quickstart)
+- [Connecting clients](clients.md) — its own document
 - [Tools](#tools)
 - [Writing safely](#writing-safely)
 - [Links between notes](#links-between-notes)
 - [Security model](#security-model)
 - [Configuration](#configuration)
+- [Supported platforms](#supported-platforms)
 - [Operations](#operations)
 - [Revoking access](#revoking-access)
 - [Rotating secrets](#rotating-secrets)
@@ -240,7 +242,8 @@ sudo ./scripts/setup.sh --hostname vault.example.org   # packages, user, deploy 
 
 `setup.sh` prints the service user's public key. Add it to the vault
 repository as a deploy key **with write access**, and set up a Cloudflare
-Access application for the hostname. Then:
+Access application for the hostname — which policy depends on the clients you
+mean to connect, see [Cloudflare Access](clients.md#cloudflare-access). Then:
 
 ```bash
 sudo ./scripts/init.sh --new-vault          # vault, secrets, build, start, verify
@@ -281,6 +284,14 @@ which runs `scripts/push_pending.sh` every 15 minutes. An adopted vault keeps it
 own `vigil-vault-conventions` skill; the template is only written when the
 vault has none, and then as a commit of its own, pushed before the service
 starts — `skill_write` refuses that skill (see [Tools](#tools)).
+
+### Connect a client
+
+[Connecting clients](clients.md) has a section per client — Claude.ai, Claude
+Desktop, Claude Code, ChatGPT and Cursor — with the steps, whether it uses
+OAuth or a seeded token, and which paths Cloudflare Access has to let through
+for it. Those sections are drafts written from the vendors' documentation and
+say so; none has been tested end to end yet.
 
 ---
 
@@ -516,6 +527,10 @@ flowchart TB
    public endpoint answers with anything other than 403 — that is, unless
    Access is actually in place. Put the consent page behind a person, too:
    see [an Access policy for the consent page](#an-access-policy-for-the-consent-page).
+   A client that calls from its vendor's servers — Claude.ai, Claude Desktop,
+   ChatGPT — cannot pass a service-token policy; which paths it needs let
+   through, and why OAuth covers them, is in
+   [Cloudflare Access](clients.md#cloudflare-access).
 2. **OAuth 2.1** with Authorization Code + PKCE. Dynamic Client Registration
    and Client-ID Metadata Documents are both supported. No static bearer token.
 3. **Scopes.** `vault` for full access, `vault:read` for read-only clients.
@@ -621,7 +636,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_BIND` | `127.0.0.1` | listen address; loopback keeps the LAN from bypassing Cloudflare Access. Widen it only for a proxy on another host |
 | `VIGIL_GIT_REMOTE` | `github` | remote used for pull **and** push; must be a remote of the vault clone |
 | `VIGIL_GIT_BRANCH` | the clone's checked-out branch when it tracks a branch on the remote, otherwise `main` | branch used for pull **and** push; must exist and track `<remote>/<branch>` (`git branch -vv`) |
-| `VIGIL_TZ` | `Europe/Berlin` | timezone for `current`, envelopes, relative times |
+| `VIGIL_TZ` | `UTC`; `init.sh` asks, suggesting what the file already says | timezone for `current`, envelopes, relative times — an IANA name such as `Europe/Berlin` |
 | `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
 | `VIGIL_ISSUER` | **required in prod**; `http://localhost:4000` in dev | OAuth issuer |
 | `VIGIL_RESOURCE` | **required in prod**; `http://localhost:4000/mcp` in dev | canonical MCP endpoint URI (audience) |
@@ -766,6 +781,86 @@ value it chose.
 
 ---
 
+## Supported platforms
+
+| | Scripted: `setup.sh`, `init.sh`, `update.sh` | By hand |
+|---|---|---|
+| **OS** | Debian 13 (trixie), on a host, a VM or a Proxmox LXC with `nesting=1` — `setup.sh` refuses any other release | another Linux with systemd: build the release with the toolchain `.tool-versions` names and install [`deploy/vigil.service`](../deploy/vigil.service) yourself. macOS and Windows only for the [local quickstart](../README.md#quickstart) |
+| **Architecture** | amd64 and arm64 — the release is built on the host | the [published release tarball](ci-cd.md) is linux-x86_64 only |
+| **Service manager** | systemd | systemd; the sandbox, the push safety net and the scripts assume it |
+| **Proxy** | a Cloudflare tunnel (`cloudflared` on the same host) with Cloudflare Access in front | Caddy, nginx or Tailscale, below |
+| **Memory** | 2 GB for the build; the service itself needs far less | — |
+
+Only the first column is exercised by the scripts' own checks. A proxy other
+than Cloudflare means `setup.sh --skip-cloudflared` and, at the end of
+`init.sh`, `--allow-unprotected`: the acceptance check requires the public
+`/mcp` to answer 403 from Cloudflare Access. `update.sh` runs the same check
+with no way to skip it, so **on a host without Access in front of `/mcp`,
+`update.sh` rolls back every update** — the same open problem as
+[the bypass for cloud connectors](clients.md#the-bypass-for-cloud-connectors).
+Such a host is updated by hand for now.
+
+### Bring your own proxy
+
+Whatever sits in front, three things stay the same:
+
+- **The issuer is the public name.** `VIGIL_ISSUER` is `https://` plus the
+  name clients use, and `VIGIL_RESOURCE` is that plus `/mcp`. The consent page
+  posts back to the issuer's origin, and [browser origins](#browser-origins)
+  refuses a POST from any other, so open it on that name.
+- **Keep `VIGIL_BIND=127.0.0.1`** when the proxy runs on the same host. A proxy
+  on another host needs `VIGIL_BIND` set to the interface it connects to, and
+  that address kept off every other network.
+- **Replace the tunnel's proxy settings.** `init.sh` writes
+  `CF-Connecting-IP` and loopback into `/etc/vigil/env` and keeps what the file
+  already says on later runs. For another proxy, name the header it sets and
+  the address it connects from — or neither
+  ([why](#the-two-proxy-settings-and-why-they-default-to-unset)).
+
+**Caddy**, on the same host:
+
+```
+vault.example.org {
+    reverse_proxy 127.0.0.1:4000
+}
+```
+
+```
+VIGIL_TRUSTED_PROXY_HEADER=X-Forwarded-For
+VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128
+```
+
+Caddy obtains the certificate and sets `X-Forwarded-For`; vigil takes the
+rightmost hop it did not add itself, which is the client Caddy saw.
+
+**nginx**, on the same host, inside the `server` block that terminates TLS for
+the name:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:4000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    client_max_body_size 8m;
+}
+```
+
+with the same two settings as for Caddy. `client_max_body_size` matters:
+nginx's default of 1 MB answers a large `create` or `rewrite_note` with its
+own 413 long before vigil's limit of 8,000,000 bytes.
+
+**Tailscale.** `tailscale serve 4000` reaches only the devices on your
+tailnet — clients on your own machines, never a cloud connector.
+`tailscale funnel 4000` publishes it on the internet, on port 443 of
+`<machine>.<tailnet>.ts.net`, which is then the issuer. Tailscale documents
+the identity headers Serve adds but not a client-address header, so leave
+`VIGIL_TRUSTED_PROXY_HEADER` and `VIGIL_TRUSTED_PROXIES` unset: every
+request then counts against one bucket, which is stricter, not weaker. A
+funnel has no Access in front of it — vigil's OAuth, the consent password and
+its rate limits are all there is.
+
+---
+
 ## Operations
 
 ```bash
@@ -801,6 +896,38 @@ an update that failed can simply be run again.
   from the installed one, and keeps the old one until it is run with
   `--update-unit`, which verifies the new unit, scores its sandbox and then
   installs it.
+
+### Backups
+
+The vault's backup is its remote: every write is pushed, and what has not
+been pushed yet is what `status` counts as `ahead`. Three things live only on
+the host:
+
+| What | Where | Losing it means |
+|---|---|---|
+| the env file | `/etc/vigil/env` | the settings, the consent password and the SkillKey secret. `init.sh` writes a new one; clients keep their grants, since [rotation revokes no token](#rotating-secrets) |
+| the OAuth state | `oauth_clients.dets`, `oauth_codes.dets` and `oauth_tokens.dets` in `VIGIL_STATE_DIR` (`/var/lib/vigil`) | every registration and every grant: each client connects and consents again, and seeded tokens are seeded again |
+| the deploy key | `/var/lib/vigil/.ssh/id_ed25519` | the host's write access to the vault. `setup.sh` makes a new one when it is missing; register its public key in place of the old one |
+
+The env file and the deploy key are secrets: keep their copies encrypted, or
+decide not to copy the key at all and replace it when needed — a copy of it is
+write access to the vault. `:dets` files are copied consistently only while
+nothing has them open:
+
+```bash
+sudo systemctl stop vigil
+sudo tar -C / -czf vigil-state-$(date -u +%F).tar.gz \
+  etc/vigil/env var/lib/vigil/oauth_clients.dets var/lib/vigil/oauth_codes.dets \
+  var/lib/vigil/oauth_tokens.dets var/lib/vigil/.ssh/id_ed25519
+sudo systemctl start vigil
+```
+
+To restore, stop the service and unpack with `sudo tar -C / -xpzf <file>` —
+as root, tar keeps the owners and modes — then start it. Moving to a new host
+is not scripted as a restore: `init.sh` refuses an existing env file without
+`--force`, and `--force` generates both secrets anew. There, run `setup.sh`
+and `init.sh --existing-vault --keep-token` as for a new host, then put the
+three `:dets` files back and restart, and every client keeps its grant.
 
 ### Erlang/OTP security updates
 
@@ -1197,7 +1324,12 @@ editing the vault in another tool.
 | Chunk ids change unexpectedly after a deploy | the slug logic changed without checking the migration diff | run `mix vigil.slug_diff <vault>` *before* deploying |
 | Client gets 401 | token wrong, expired or revoked (`sudo ./scripts/grants.sh list`) | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
 | A write tool answers "Read-only token: write access denied." | the token's scope is not `vault` (for example `vault:read`) | connect with a `vault` token |
-| Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client | fix the Access configuration — never disable Access to "solve" this |
+| Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client — or the client calls from its vendor's servers (Claude.ai, Claude Desktop, ChatGPT) and cannot send one | fix the Access configuration: a service token for a client on your machine, [the bypass](clients.md#the-bypass-for-cloud-connectors) for a cloud connector — never disable Access for the whole host to "solve" this |
+| `reload` answers `pull_failed`, or a write answers `pushed: false` with a `push_error` naming a path; `status` stays both `ahead` and `behind` | the remote and the server diverged and vigil's own commits do not rebase onto the remote: a human and vigil changed the same lines. A divergence without a conflict is rebased on its own, before every write and on `reload` | resolve the conflict on the server as the service user, as [Editing by hand](#editing-by-hand) shows, then `reload`. A `pull_failed` that names no conflict is the remote not answering — see the rows on SSH and the push safety net |
+| `/mcp` answers 400 with an empty body | the request's `MCP-Protocol-Version` names a version vigil does not speak, names two, or differs from the version its session negotiated; or a request in a session lacks `Mcp-Session-Id` | update the client, or see which versions vigil speaks ([Protocol versions](design.md#protocol-versions)). A client that sends one version at `initialize` and another afterwards has a bug of its own |
+| `/mcp` answers 429 with `Retry-After`, while nobody is using the assistant much | the per-token budget (`VIGIL_RATE_LIMIT_RPM`, 60 a minute) counts every request to `/mcp` — `initialize`, notifications, `tools/list` and `DELETE` as well as tool calls. A client stuck reconnecting (after a restart every session id is a 404, and each reconnect is several requests) or several clients sharing one seeded token spend it together | wait out the minute the header names; find the looping client in the proxy's log or the journal. Give each client its own grant rather than one shared token. Raise `VIGIL_RATE_LIMIT_RPM` only for a client that genuinely needs more |
+| Consent page or `/oauth/token` answers 429 | the per-address OAuth budgets (`VIGIL_OAUTH_RATE_LIMIT_RPM`, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`), or the consent lockout. Without [the two proxy settings](#the-two-proxy-settings-and-why-they-default-to-unset) every client shares one address — the proxy's | wait the minute out; check `VIGIL_TRUSTED_PROXY_HEADER` and `VIGIL_TRUSTED_PROXIES` match the proxy in front |
+| Every `update.sh` rolls back, and verify() says `[2] Public endpoint answers with 405 instead of 403` (or 401) | `/mcp` is not behind Access: [the bypass](clients.md#the-bypass-for-cloud-connectors) for cloud connectors, or a proxy other than Cloudflare | open: the acceptance check requires Access in front of `/mcp`. See [Supported platforms](#supported-platforms) |
 | Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | `vigil-push.timer` retries every 15 minutes; check `journalctl -u vigil-push`, `systemctl list-timers vigil-push.timer` and `git -C /var/lib/vigil/vault rev-list --count @{u}..` |
 
 ---
@@ -1324,6 +1456,7 @@ else.
 | Document | What it covers |
 |---|---|
 | [design.md](design.md) | Principles, the vault model, chunking, search, the link index, the write path, non-goals and known trade-offs |
+| [clients.md](clients.md) | Connecting Claude.ai, Claude Desktop, Claude Code, ChatGPT and Cursor, and the Cloudflare Access policy each needs |
 | [oauth.md](oauth.md) | The OAuth 2.1 implementation in detail |
 | [history.md](history.md) | What was built in each round, and the bugs found along the way |
 

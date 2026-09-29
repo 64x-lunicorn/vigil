@@ -599,7 +599,7 @@ cat <<'EOF'
 
 EOF
 warn "Cloudflare Access is not configured yet (manual step)."
-record_next_step "configure Cloudflare Access (see the README) before running init.sh"
+record_next_step "configure Cloudflare Access (see docs/clients.md) before running init.sh"
 
 ## ── Step 9 — summary ─────────────────────────────────────────────────────
 

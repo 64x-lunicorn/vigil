@@ -4,6 +4,7 @@
 |---|---|
 | [Project overview](../README.md) | **Start here.** What vigil is, why it exists and a local quickstart. |
 | [User guide](guide.md) | Vault structure, the full tool reference, configuration, deployment, operations and troubleshooting. |
+| [Connecting clients](clients.md) | Claude.ai, Claude Desktop, Claude Code, ChatGPT and Cursor: the steps, OAuth or a seeded token, and the Cloudflare Access policy each needs. Drafts until tested. |
 | [design.md](design.md) | Why it is built this way: principles, the vault model, chunking, search, the link index, the write path, deliberate non-goals and known trade-offs. |
 | [oauth.md](oauth.md) | The OAuth 2.1 implementation: endpoints, discovery documents, registration, redirect-URI matching, token handling, storage. |
 | [history.md](history.md) | What was built in each round and why, including the bugs found along the way. |

@@ -29,7 +29,9 @@ config :vigil,
   # the same two defaults for the scripts.
   git_remote: System.get_env("VIGIL_GIT_REMOTE", "github"),
   git_branch: System.get_env("VIGIL_GIT_BRANCH"),
-  tz: System.get_env("VIGIL_TZ", "Europe/Berlin"),
+  # UTC unless the deployment names its zone: a default that is some
+  # particular place is a zone nobody chose. init.sh asks for it.
+  tz: System.get_env("VIGIL_TZ", "UTC"),
   exclude:
     System.get_env("VIGIL_EXCLUDE", "")
     |> String.split(",", trim: true)

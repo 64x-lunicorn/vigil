@@ -135,7 +135,9 @@ Add `http://localhost:4000/mcp` as a remote HTTP MCP server in a client that
 supports OAuth with PKCE. Complete the consent screen using the password above.
 Choose `vault:read` for read-only access or `vault` for read/write access.
 A cloud-hosted client cannot reach your machine's `localhost`; use the
-[server deployment guide](docs/guide.md#deploy-on-a-server) instead.
+[server deployment guide](docs/guide.md#deploy-on-a-server) instead, and
+[Connecting clients](docs/clients.md) for each client's steps and the
+Cloudflare Access policy it needs.
 
 Try asking your assistant:
 
@@ -191,6 +193,7 @@ Start with the [deployment guide](docs/guide.md#deploy-on-a-server), then read
 | Guide | Start here when you want to... |
 | :--- | :--- |
 | [User guide](docs/guide.md) | Understand vault structure, tools, safe writes and day-to-day operations. |
+| [Connecting clients](docs/clients.md) | Connect Claude.ai, Claude Desktop, Claude Code, ChatGPT or Cursor, and set up Cloudflare Access for them. |
 | [Design](docs/design.md) | Explore the architecture, trade-offs and deliberate non-goals. |
 | [CI/CD](docs/ci-cd.md) | Ship a version, see what guards `main` and releases, and run the same gate locally. |
 | [OAuth](docs/oauth.md) | Integrate a client or inspect the authentication flow. |
