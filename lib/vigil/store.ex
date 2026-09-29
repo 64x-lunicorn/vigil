@@ -320,14 +320,13 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:status, _params}, _from, state) do
-    {ahead, behind} =
-      case state.git.divergence.(state.vault_path, state.git_remote, state.git_branch) do
-        {:ok, %{ahead: ahead, behind: behind}} -> {ahead, behind}
-        {:error, _reason} -> {nil, nil}
+    counts =
+      case divergence(state) do
+        {:ok, divergence} -> Map.take(divergence, [:ahead, :behind, :rewritten])
+        {:error, _reason} -> %{ahead: nil, behind: nil, rewritten: nil}
       end
 
-    {:reply, %{ahead: ahead, behind: behind, last_push: state.last_push, stale: state.stale},
-     state}
+    {:reply, Map.merge(counts, %{last_push: state.last_push, stale: state.stale}), state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
@@ -530,6 +529,13 @@ defmodule Vigil.Store do
   # top of whatever was pushed, merge commits included (principle 2). A rebase
   # that conflicts is aborted at once: vigil's commits stay local, nothing on
   # the remote is overwritten, and which paths are in the way is the answer.
+  #
+  # A remote a force-push rewrote holds less than the vault: commits it once
+  # had are gone (`rewritten`), whether or not anything new came with them.
+  # That is adopted too, by the same rebase — which replays only vigil's own
+  # commits, so what the human took away leaves the vault as well and no push
+  # puts it back — and said in the log, since it is a human's history that
+  # moved backwards.
   defp update(state, fetch_timeout \\ :infinity) do
     outcome = adopt_remote(state, fetch_timeout)
     {outcome, noted(state, outcome)}
@@ -539,15 +545,25 @@ defmodule Vigil.Store do
     %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
 
     with :ok <- fetch(state, fetch_timeout),
-         {:ok, %{behind: behind} = divergence} when behind > 0 <- divergence(state),
+         {:ok, divergence} <- divergence(state),
+         :moved <- moved(divergence),
          :ok <- adopt(git, vault_path, remote, branch, divergence) do
-      Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch}")
+      log_adopted(divergence, remote, branch)
       :moved
-    else
-      {:ok, %{behind: 0}} -> :in_step
-      {:conflict, reason} -> {:conflict, reason}
-      {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp moved(%{behind: 0, rewritten: 0}), do: :in_step
+  defp moved(_divergence), do: :moved
+
+  defp log_adopted(%{behind: behind, rewritten: 0}, remote, branch),
+    do: Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch}")
+
+  defp log_adopted(%{behind: behind, rewritten: rewritten}, remote, branch) do
+    Logger.warning(
+      "vigil: #{remote}/#{branch} was force-pushed: dropped #{rewritten} commit(s) it no " <>
+        "longer holds, adopted #{behind} new one(s), and replayed vigil's own on top"
+    )
   end
 
   defp noted(state, {_error_or_conflict, reason}) do
@@ -557,7 +573,7 @@ defmodule Vigil.Store do
 
   defp noted(state, _moved_or_in_step), do: %{state | fetched_at: state.clock_ms.(), stale: nil}
 
-  defp adopt(git, vault_path, remote, branch, %{ahead: 0}),
+  defp adopt(git, vault_path, remote, branch, %{ahead: 0, rewritten: 0}),
     do: git.fast_forward.(vault_path, remote, branch)
 
   defp adopt(git, vault_path, remote, branch, _unpushed) do
@@ -675,8 +691,9 @@ defmodule Vigil.Store do
   Asked in the caller's process: whether the index is loaded is read from the
   writer's table, and the writer is asked the rest with a timeout of its own,
   so a writer that does not answer is reported rather than waited on.
-  `ahead` and `behind` are `nil` when the writer does not answer or the clone
-  cannot count them; `behind` is as fresh as the last fetch.
+  `ahead`, `behind` and `rewritten` are `nil` when the writer does not answer
+  or the clone cannot count them; `behind` and `rewritten` are as fresh as
+  the last fetch.
   """
   @spec status(atom(), timeout()) :: map()
   def status(store \\ @default_name, timeout \\ @status_timeout) do
@@ -700,6 +717,7 @@ defmodule Vigil.Store do
           healthy: false,
           ahead: nil,
           behind: nil,
+          rewritten: nil,
           last_push: nil,
           stale: nil
         }

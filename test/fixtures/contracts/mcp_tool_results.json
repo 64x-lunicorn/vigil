@@ -485,6 +485,7 @@
             "healthy": "boolean",
             "index_loaded": "boolean",
             "last_push": "null",
+            "rewritten": "integer",
             "stale": "null",
             "writer_answers": "boolean"
           }

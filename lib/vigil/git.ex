@@ -69,15 +69,17 @@ defmodule Vigil.Git do
     :snapshot_index,
     # Put the index back as a snapshot found it. :ok | {:error, reason}.
     :restore_index,
-    # git push <remote> <branch>. :ok | {:error, reason}.
+    # git push <remote> <branch>, refused before it is tried while the branch
+    # holds commits a force-push took off the remote. :ok | {:error, reason}.
     :push,
     # What the clone's remotes and branches are, for the boot check of
     # VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH.
     # {:ok, %{head:, remotes:, branches:}} | {:error, reason} — see tracking/1.
     :tracking,
     # How many commits the branch holds that <remote>/<branch> lacks, and the
-    # other way round, as the clone last saw the remote — read locally.
-    # {:ok, %{ahead:, behind:}} | {:error, reason}.
+    # other way round, as the clone last saw the remote — read locally — and
+    # how many of the first the remote once held and a force-push took away.
+    # {:ok, %{ahead:, behind:, rewritten:}} | {:error, reason}.
     :divergence,
     # git fetch <remote> <branch>, into <remote>/<branch>. Touches neither the
     # branch nor the working tree. :ok | {:error, reason}.
@@ -85,9 +87,11 @@ defmodule Vigil.Git do
     # git merge --ff-only <remote>/<branch>: adopts what the last fetch
     # brought, or refuses. :ok | {:error, reason}.
     :fast_forward,
-    # git rebase <remote>/<branch>: vigil's unpushed commits replayed on top
-    # of what the last fetch brought, never a merge. :ok | {:conflict, paths}
-    # — the rebase stopped, and is left for abort_rebase — | {:error, reason}.
+    # git rebase --onto <remote>/<branch> <fork point>: vigil's own unpushed
+    # commits — never what a force-push took off the remote — replayed on
+    # top of what the last fetch brought, never a merge. :ok |
+    # {:conflict, paths} — the rebase stopped, and is left for abort_rebase —
+    # | {:error, reason}.
     :rebase,
     # git rebase --abort: the branch and the working tree back as they were
     # before the rebase. :ok | {:error, reason}.
@@ -408,27 +412,84 @@ defmodule Vigil.Git do
   defp update_index(path, {mode, sha}),
     do: ["update-index", "--add", "--cacheinfo", "#{mode},#{sha},#{path}"]
 
-  @doc "git push <remote> <branch>. Returns :ok | {:error, reason}."
+  @doc """
+  git push <remote> <branch>. Returns :ok | {:error, reason}.
+
+  Refused before anything leaves the machine while the branch holds commits a
+  force-push took off the remote (`divergence/3`'s `rewritten`): the remote
+  is then an ancestor of the branch, so git would take the push as a
+  fast-forward and put back what a human removed.
+  """
   def push(vault_path, remote, branch) do
-    case run(vault_path, ["push", remote, branch], @network_env) do
-      {:ok, _} -> :ok
-      {:error, out} -> {:error, out}
+    with :ok <- nothing_rewritten(vault_path, remote, branch),
+         {:ok, _} <- run(vault_path, ["push", remote, branch], @network_env),
+         do: :ok
+  end
+
+  defp nothing_rewritten(vault_path, remote, branch) do
+    case rewritten(vault_path, remote, branch) do
+      0 ->
+        :ok
+
+      count ->
+        {:error,
+         "the remote's history was rewritten: #{count} commit(s) this vault holds were " <>
+           "taken off #{remote}/#{branch} by a force-push, and pushing would put them back"}
     end
   end
 
   @doc """
   How far `branch` and `remote`'s copy of it are apart, as the clone last saw
-  the remote: `{:ok, %{ahead: ahead, behind: behind}}`, where `ahead` counts
-  the commits only the branch holds — committed, not pushed — and `behind`
-  the ones only the remote-tracking branch holds. Read locally; `behind` is as
-  fresh as the last fetch. `{:error, reason}` when either ref is missing.
+  the remote: `{:ok, %{ahead: ahead, behind: behind, rewritten: rewritten}}`,
+  where `ahead` counts the commits only the branch holds — committed, not
+  pushed — `behind` the ones only the remote-tracking branch holds, and
+  `rewritten` those of `ahead` that the remote once held and a force-push
+  took away. Read locally; `behind` and `rewritten` are as fresh as the last
+  fetch. `{:error, reason}` when either ref is missing.
   """
   def divergence(vault_path, remote, branch) do
     range = "refs/heads/#{branch}...#{tracking_ref(remote, branch)}"
 
     with {:ok, out} <- run(vault_path, ["rev-list", "--left-right", "--count", range]) do
       [ahead, behind] = out |> String.trim() |> String.split()
-      {:ok, %{ahead: String.to_integer(ahead), behind: String.to_integer(behind)}}
+
+      {:ok,
+       %{
+         ahead: String.to_integer(ahead),
+         behind: String.to_integer(behind),
+         rewritten: rewritten(vault_path, remote, branch)
+       }}
+    end
+  end
+
+  # Where the branch forked from the remote-tracking branch, by that ref's
+  # reflog: the newest commit of the branch the remote-tracking branch ever
+  # pointed at — every fetch and every push vigil makes moves it, and records
+  # where it was (`git merge-base --fork-point`, what `git pull --rebase`
+  # asks). What lies after it is the branch's own, never pushed; what lies
+  # before it and not on the remote-tracking branch any more, a force-push
+  # took away. `:none` when the reflog does not reach back that far — the
+  # remote-tracking branch is then taken as the fork point, which is what a
+  # plain `git rebase` does.
+  defp fork_point(vault_path, remote, branch) do
+    case run(vault_path, [
+           "merge-base",
+           "--fork-point",
+           tracking_ref(remote, branch),
+           "refs/heads/#{branch}"
+         ]) do
+      {:ok, out} -> {:ok, String.trim(out)}
+      {:error, _} -> :none
+    end
+  end
+
+  defp rewritten(vault_path, remote, branch) do
+    with {:ok, fork} <- fork_point(vault_path, remote, branch),
+         {:ok, out} <-
+           run(vault_path, ["rev-list", "--count", "#{tracking_ref(remote, branch)}..#{fork}"]) do
+      out |> String.trim() |> String.to_integer()
+    else
+      _ -> 0
     end
   end
 
@@ -471,9 +532,12 @@ defmodule Vigil.Git do
 
   @doc """
   `git rebase` of the checked-out branch onto what the last `fetch/3` brought
-  from `remote`: the commits only the branch holds — vigil's, committed and
-  not pushed — are replayed on top of `remote`'s, whatever that history holds,
-  merge commits included. Never a merge (`docs/design.md`, principle 2).
+  from `remote`: the branch's own commits — vigil's, committed and never
+  pushed, the ones after the fork point — are replayed on top of `remote`'s,
+  whatever that history holds, merge commits included. Never a merge
+  (`docs/design.md`, principle 2). Commits the branch holds that the remote
+  once held and a force-push took away (`divergence/3`'s `rewritten`) are
+  not replayed: they leave the branch as they left the remote.
 
   `:ok` when nothing was left to replay or every commit applied.
   `{:conflict, paths}` when a commit does not apply: the rebase has stopped,
@@ -482,10 +546,18 @@ defmodule Vigil.Git do
   `{:error, reason}` for any other refusal, a rebase that did not start.
   """
   def rebase(vault_path, remote, branch) do
+    onto = tracking_ref(remote, branch)
+
+    upstream =
+      case fork_point(vault_path, remote, branch) do
+        {:ok, fork} -> fork
+        :none -> onto
+      end
+
     args =
       @rebase_config ++
         ["rebase", "--quiet", "--no-autosquash", "--no-autostash", "--no-update-refs"] ++
-        [tracking_ref(remote, branch)]
+        ["--onto", onto, upstream]
 
     case run(vault_path, args, @rebase_env) do
       {:ok, _} ->

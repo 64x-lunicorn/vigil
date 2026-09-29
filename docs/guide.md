@@ -321,7 +321,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `lint` | – | notes that are not UTF-8, duplicate/sentence headings, broken links, overlong notes, stale decisions — at most 50 each, with `totals` and `truncated` | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
-| `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push, stale}` | RO/RW | – |
+| `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, rewritten, last_push, stale}` | RO/RW | – |
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content, confirm? | `{name, pushed}` | RW | ✓ |
@@ -1020,14 +1020,18 @@ seconds, 503 otherwise:
 
 ```json
 {"healthy": true, "index_loaded": true, "writer_answers": true,
- "ahead": 0, "behind": 0, "last_push": {"pushed": true, "at": "2026-09-29T08:12:03Z"},
- "stale": null}
+ "ahead": 0, "behind": 0, "rewritten": 0,
+ "last_push": {"pushed": true, "at": "2026-09-29T08:12:03Z"}, "stale": null}
 ```
 
 `ahead` counts commits the server holds and has not pushed; `behind` counts
 commits the remote holds and the server has not adopted, as of the last fetch —
 the server fetches before every write, and before a read at most once per
-`VIGIL_READ_FETCH_INTERVAL`. `last_push` is `null` until the first write since
+`VIGIL_READ_FETCH_INTERVAL`. `rewritten` counts commits the server holds that
+the remote once held and a force-push took away; the server drops them too at
+its next update and never pushes them back, so it stays above zero only when
+vigil's own commits do not rebase without them — resolve that on the server
+like a conflict. `last_push` is `null` until the first write since
 the service started. `stale` is `null` while the last attempt to bring the
 vault up to date with the remote succeeded, and otherwise says when it failed
 (`at`). None of them decides the status code: a failed push or fetch is

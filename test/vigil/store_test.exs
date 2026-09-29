@@ -1180,6 +1180,22 @@ defmodule Vigil.StoreTest do
       }
     end
 
+    # A push that fails the `round`-th time it is asked, and only then.
+    defp failing_push_round(git, round) do
+      asked = :counters.new(1, [])
+
+      %{
+        git
+        | push: fn vault, remote, branch ->
+            :counters.add(asked, 1, 1)
+
+            if :counters.get(asked, 1) == round,
+              do: {:error, "unreachable"},
+              else: git.push.(vault, remote, branch)
+          end
+      }
+    end
+
     # A human who pushes between vigil's update and vigil's push, the first
     # `n` times vigil pushes: each of those pushes is refused as not a
     # fast-forward, as git refuses it.
@@ -1344,6 +1360,49 @@ defmodule Vigil.StoreTest do
 
       assert %{ahead: 2, behind: 1, last_push: %{pushed: false, error: ^msg}} =
                Store.status(@store)
+    end
+
+    # A force-push elsewhere that took a pushed commit away is followed: the
+    # next write drops the commit here too, and its push does not put it
+    # back. Only vigil's own unpushed commits are ever replayed.
+    @tag :capture_log
+    test "a force-push that took a commit away is followed, and the next push does not put it back",
+         %{vault: vault} do
+      log = recording_store(vault)
+      {:ok, %{pushed: true}} = create_note("bike/taken-away.md")
+      CommitLog.drop_from_elsewhere(log, 1)
+
+      assert {:ok, %{pushed: true}} = create_note("bike/after.md")
+
+      refute File.exists?(Path.join(vault, "bike/taken-away.md"))
+
+      assert {:error, _} =
+               Store.call(@store, :read, %{id: "bike/taken-away.md", backlinks: false})
+
+      assert {:rebase, "origin", "main"} in CommitLog.calls(log)
+
+      assert %{ahead: 0, behind: 0, rewritten: 0, last_push: %{pushed: true}} =
+               Store.status(@store)
+    end
+
+    # When vigil's own commit cannot be replayed without what the force-push
+    # took away, the rebase is aborted — and the push is refused rather than
+    # putting the commit back, with a reason that says so.
+    @tag :capture_log
+    test "a force-push vigil's own commit cannot be replayed over is reported, and nothing is pushed back",
+         %{vault: vault} do
+      log = recording_store(vault, wrap: &failing_push_round(&1, 2))
+      path = "bike/taken-away.md"
+      {:ok, %{pushed: true}} = create_note(path)
+      {:ok, %{pushed: false}} = Store.call(@store, :append, %{path: path, content: "More."})
+      CommitLog.drop_from_elsewhere(log, 1)
+
+      assert {:ok, %{pushed: false, push_error: msg}} = create_note("bike/after.md")
+      assert msg =~ "the remote's history was rewritten"
+      assert msg =~ "conflicts in #{path}"
+
+      assert File.read!(Path.join(vault, path)) =~ "More."
+      assert %{ahead: 3, rewritten: 1, last_push: %{pushed: false}} = Store.status(@store)
     end
 
     test "an edit whose section the update took away is refused and asks for a fresh read",

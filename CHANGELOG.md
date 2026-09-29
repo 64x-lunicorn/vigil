@@ -122,8 +122,8 @@ read it afterwards.
 - `history` and `read` with `at`: the commits that touched a note, following
   renames, and a note or chunk as it was at one of them.
 - `status` and `GET /healthz` (loopback only): whether the index is loaded and
-  the writer answers, ahead/behind and the last push; `update.sh` waits on
-  `/healthz`.
+  the writer answers, ahead/behind, the commits a force-push took off the
+  remote (`rewritten`) and the last push; `update.sh` waits on `/healthz`.
 - `move_note` with `update_links` rewrites every link to the moved note in the
   same commit; `rewrite_note` reports `broken_chunk_links`.
 - `request_id` on every write, so a retried write is applied once
@@ -158,7 +158,9 @@ read it afterwards.
 - Before every write the vault is brought up to date with the remote, and
   vigil's own unpushed commits are rebased onto a push from elsewhere instead of
   leaving the vault diverged. A rebase that conflicts is aborted and reported;
-  a human's work is never merged or overwritten.
+  a human's work is never merged or overwritten. Only vigil's own commits are
+  replayed: what a force-push took off the remote leaves the vault too, and no
+  push puts it back.
 - `read` of a note returns its preamble, the text before the first `##`, as
   `body`.
 - `update_frontmatter` edits only `type`, `starts` and `ends` and keeps every

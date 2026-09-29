@@ -3,13 +3,15 @@ defmodule Vigil.Git.CommitLog do
   A `Vigil.Git` that remembers instead of shelling out — the second adapter
   `docs/design.md`, "Git is reached through a value", records.
 
-  It keeps the metadata. What it is asked to commit is written down under the
-  instant it was handed, authored as `vigil`, and `log_metadata` answers out of
-  that record. So is what each commit changed — the content of every path it
-  added, which it removed and which it renamed — and `history` and `show`
-  answer out of that, following a rename the way `git log --follow` does. It reads no clock of its own. The alternative — an adapter
-  answering "no metadata" — was rejected: it would put a `created_at` of `nil`
-  under every test in the suite, which is a shape production never has.
+  It keeps the history. What it is asked to commit is written down under the
+  instant it was handed, authored as `vigil`, with what the commit changed —
+  the content of every path it added, which it removed and which it renamed —
+  and `log_metadata`, `history` and `show` answer out of that record, following
+  a rename the way `git log --follow` does. A commit that changes nothing is
+  not made, as git makes none. It reads no clock of its own. The alternative —
+  an adapter answering "no metadata" — was rejected: it would put a
+  `created_at` of `nil` under every test in the suite, which is a shape
+  production never has.
 
   This is not a second metadata database. "Creation date = first commit"
   (`docs/design.md`, principle 3) is a claim about where a fact lives; what the
@@ -19,15 +21,24 @@ defmodule Vigil.Git.CommitLog do
   drifting apart.
 
   The remote is a record too. What `push_from_elsewhere/4` puts there is a
-  commit another clone pushed: `fetch` brings it into view, `divergence`
-  counts it as behind, `fast_forward` writes it into the working tree, and
-  `push` is refused while the remote holds anything the vault lacks — which is
-  what git does with a push that is not a fast-forward. `rebase` puts the
-  vault's unpushed commits on top of what was fetched, and stops at a
-  conflict when a fetched commit touches a path one of them touched — a
-  whole-file notion of a conflict, coarser than git's line-wise one, and the
-  same answer for the one case the contract suite pins: both sides changed
-  the same note. A stopped rebase stays stopped until `abort_rebase`.
+  commit another clone pushed, and `drop_from_elsewhere/2` is a force-push
+  there that took commits away: `fetch` brings either into view,
+  `divergence` counts them as behind or as `rewritten`, `fast_forward` writes
+  what was pushed into the working tree, and `push` is refused while the
+  remote holds anything the vault lacks — which is what git does with a push
+  that is not a fast-forward — or while the vault holds what the remote had
+  taken away. `rebase` replays the vault's own unpushed commits on top of
+  what was fetched, drops what the remote took away, and stops at a conflict.
+  A stopped rebase stays stopped until `abort_rebase`.
+
+  **Where it is coarser than git.** A conflict here is a whole-file notion:
+  any path one of the vault's own commits touched that a fetched or a dropped
+  commit touched too. Git's is line-wise, so two edits to different parts of
+  one note rebase cleanly under git and conflict here; and a replayed commit
+  that only depends on what a dropped commit brought — without touching the
+  same path — conflicts under git and applies here. The contract suite pins
+  the one case both agree on, both sides changing the same note, and a test
+  that needs anything finer belongs in the repository-only part of it.
 
   The working tree is real: `remove` deletes the file and `move` renames it,
   because that is what `git rm` and `git mv` do to a vault, and the callers
@@ -65,35 +76,50 @@ defmodule Vigil.Git.CommitLog do
   `push`, `fetch` and `rebase` succeed for, `"origin"` and `"main"` unless given; a
   `remote:` of `nil` is a vault with none configured. Anything else answers
   the error git answers, which is how a test provokes a push failure.
-  `tracking:` — what `tracking` answers; by default a clone with that one
-  remote and that one branch checked out, tracking its namesake there.
+  `tracking:` — what `tracking` answers, fixed; by default a clone with that
+  one remote and that one branch checked out (unless `detach/1` detached
+  HEAD), tracking its namesake there, and whether a rebase is in progress.
   """
   @spec recording(Path.t(), keyword()) :: {Git.t(), pid()}
   def recording(vault_path, opts \\ []) do
     remote = Keyword.get(opts, :remote, "origin")
     branch = Keyword.get(opts, :branch, "main")
-    tracking = Keyword.get_lazy(opts, :tracking, fn -> tracking(remote, branch) end)
     at = @commit_at
 
     {:ok, log} =
       Agent.start_link(fn ->
         %{
-          metadata: seed(vault_path),
-          # Every commit, oldest first, with what it changed.
+          # The branch's history, oldest first, each commit with what it
+          # changed. `log_metadata` is read out of it, as git reads it out of
+          # its own.
           commits: [initial_commit(vault_path)],
+          # How many of `commits`, from the first, the remote-tracking branch
+          # holds — and how many it has ever held, which is more than that
+          # once a force-push elsewhere took some of them away. What lies
+          # beyond `fork` is the vault's own: committed here, never pushed.
+          base: 1,
+          fork: 1,
           staged: [],
           calls: [],
-          # Committed here and not pushed: the paths of each commit.
-          unpushed: [],
           # The paths a stopped rebase could not apply, until it is aborted.
           rebasing: nil,
-          # Pushed from elsewhere, not fetched yet; fetched, not adopted yet.
+          detached: false,
+          # Pushed from elsewhere, not fetched yet; fetched, not adopted yet;
+          # and how many commits a force-push elsewhere took off the end of
+          # the remote, not fetched yet.
           remote_only: [],
-          fetched: []
+          fetched: [],
+          remote_drop: 0
         }
       end)
 
     ours = {remote, branch}
+
+    tracking =
+      case Keyword.fetch(opts, :tracking) do
+        {:ok, answer} -> fn -> answer end
+        :error -> fn -> Agent.get(log, &tracking(&1, remote, branch)) end
+      end
 
     git =
       Git.new(
@@ -101,9 +127,7 @@ defmodule Vigil.Git.CommitLog do
           with :ok <- remote_result(log, {:push, name, ref}, ours, {name, ref}), do: push(log)
         end,
         divergence: fn _vault, name, ref ->
-          with :ok <- remote_known(ours, {name, ref}) do
-            {:ok, Agent.get(log, &%{ahead: length(&1.unpushed), behind: length(&1.fetched)})}
-          end
+          with :ok <- remote_known(ours, {name, ref}), do: {:ok, Agent.get(log, &divergence/1)}
         end,
         fetch: fn _vault, name, ref ->
           with :ok <- remote_result(log, {:fetch, name, ref}, ours, {name, ref}), do: fetch(log)
@@ -120,8 +144,8 @@ defmodule Vigil.Git.CommitLog do
           record(log, :abort_rebase)
           abort_rebase(log)
         end,
-        tracking: fn _vault -> tracking end,
-        log_metadata: fn _vault -> Agent.get(log, & &1.metadata) end,
+        tracking: fn _vault -> tracking.() end,
+        log_metadata: fn _vault -> Agent.get(log, &metadata(&1.commits)) end,
         history: fn _vault, path, limit ->
           {:ok, Agent.get(log, &history(&1.commits, path, limit))}
         end,
@@ -140,7 +164,7 @@ defmodule Vigil.Git.CommitLog do
         end,
         commit: fn vault, paths, message ->
           record(log, {:commit, paths, message})
-          {:ok, commit(log, vault, paths, message, at)}
+          commit(log, vault, paths, message, at)
         end,
         snapshot_index: fn _vault, _paths -> {:ok, Agent.get(log, & &1.staged)} end,
         restore_index: fn _vault, staged ->
@@ -171,6 +195,23 @@ defmodule Vigil.Git.CommitLog do
     Agent.update(log, &%{&1 | remote_only: &1.remote_only ++ [commit]})
   end
 
+  @doc """
+  A force-push from another clone that took the last `count` commits off the
+  remote — `git reset --hard HEAD~<count>` and `git push --force` there. The
+  vault sees it after a `fetch`. A `push_from_elsewhere/4` after it lands on
+  top of what is left.
+  """
+  @spec drop_from_elsewhere(pid(), pos_integer()) :: :ok
+  def drop_from_elsewhere(log, count) do
+    Agent.update(log, fn %{remote_only: []} = state ->
+      %{state | remote_drop: state.remote_drop + count}
+    end)
+  end
+
+  @doc "`git checkout --detach`: HEAD on the branch's commit, no branch checked out."
+  @spec detach(pid()) :: :ok
+  def detach(log), do: Agent.update(log, &%{&1 | detached: true})
+
   ## The record
 
   defp record(log, call), do: Agent.update(log, &%{&1 | calls: [call | &1.calls]})
@@ -183,42 +224,57 @@ defmodule Vigil.Git.CommitLog do
     Agent.update(log, &%{&1 | staged: &1.staged ++ changes})
   end
 
-  # A commit authored as vigil, of everything staged. `created_at` survives
-  # one: the first commit a path had is what principle 3 calls its creation
-  # date, and every later commit only moves `updated_at`.
+  # A commit authored as vigil, of everything staged — or, when nothing staged
+  # changes anything, none at all, as `Vigil.Git.commit/3` makes none. Either
+  # way the answer is the last commit that touched the paths, which is what
+  # git answers. A detached HEAD is refused before anything is committed.
   defp commit(log, vault_path, paths, message, at) do
-    Agent.update(log, fn state ->
-      metadata = Enum.reduce(state.staged, state.metadata, &apply_staged(&1, &2, at))
-      changes = Enum.flat_map(state.staged, &change(&1, vault_path))
+    Agent.get_and_update(log, fn
+      %{detached: true} = state ->
+        {{:error, "HEAD is detached: vigil commits only onto a checked-out branch"}, state}
 
-      %{
-        state
-        | metadata: metadata,
-          staged: [],
-          unpushed: state.unpushed ++ [paths],
-          commits: record_commit(state.commits, changes, "vigil", "vigil@local", message, at)
-      }
+      state ->
+        changes = Enum.flat_map(state.staged, &change(&1, vault_path))
+        commits = record_commit(state.commits, changes, "vigil", "vigil@local", message, at)
+        {{:ok, last_touching(commits, paths)}, %{state | staged: [], commits: commits}}
     end)
-
-    %{updated_at: at, last_author: "vigil"}
   end
 
-  defp apply_staged({:add, path}, metadata, at),
-    do: Map.put(metadata, path, touch(metadata[path], at))
+  defp last_touching(commits, paths) do
+    commit =
+      commits
+      |> Enum.reverse()
+      |> Enum.find(fn commit -> Enum.any?(paths, &(&1 in changed_paths([commit]))) end)
 
-  # The record is not touched: `git log` keeps the history of a path that was
-  # removed, and `log_metadata` reads it back out of exactly that history. A
-  # note deleted and written again therefore keeps the creation date it had —
-  # under real git and here alike.
-  defp apply_staged({:remove, _path}, metadata, _at), do: metadata
+    %{updated_at: commit.at, last_author: commit.author}
+  end
 
-  # A rename carries the old path's record to the new one, dated by the move:
-  # `log_metadata` follows `R` entries, so a moved note keeps the creation date
-  # it had, and the old path no longer answers.
-  defp apply_staged({:rename, from, to}, metadata, at) do
+  # What `git log` makes of the history: the first commit a path had is what
+  # principle 3 calls its creation date, every later one only moves
+  # `updated_at`. A removal leaves the record as it was — `log_metadata`
+  # reads additions, modifications and renames only — so a note deleted and
+  # written again keeps the creation date it had. A rename carries the old
+  # path's record to the new one.
+  defp metadata(commits) do
+    Enum.reduce(commits, %{}, fn commit, metadata ->
+      Enum.reduce(commit.changes, metadata, &metadata_change(&1, &2, commit))
+    end)
+  end
+
+  defp metadata_change({:put, path, _content}, metadata, commit),
+    do: Map.put(metadata, path, touch(metadata[path], commit))
+
+  defp metadata_change({:remove, _path}, metadata, _commit), do: metadata
+
+  defp metadata_change({:rename, from, to}, metadata, commit) do
     {entry, metadata} = Map.pop(metadata, from)
-    Map.put(metadata, to, touch(entry, at))
+    Map.put(metadata, to, touch(entry, commit))
   end
+
+  defp touch(nil, commit),
+    do: %{created_at: commit.at, updated_at: commit.at, last_author: commit.author}
+
+  defp touch(entry, commit), do: %{entry | updated_at: commit.at, last_author: commit.author}
 
   # What a staged change leaves in the history: the content an added path
   # holds now, a removal, or a rename carrying the content it arrived with.
@@ -229,9 +285,6 @@ defmodule Vigil.Git.CommitLog do
     do: [{:rename, from, to}, {:put, to, read(vault_path, to)}]
 
   defp read(vault_path, path), do: File.read!(Path.join(vault_path, path))
-
-  defp touch(nil, at), do: %{created_at: at, updated_at: at, last_author: "vigil"}
-  defp touch(entry, at), do: %{entry | updated_at: at, last_author: "vigil"}
 
   defp remove(log, vault_path, paths) do
     Enum.reduce_while(paths, :ok, fn path, :ok ->
@@ -258,49 +311,91 @@ defmodule Vigil.Git.CommitLog do
 
   ## The remote
 
-  defp fetch(log) do
-    Agent.update(log, &%{&1 | fetched: &1.fetched ++ &1.remote_only, remote_only: []})
+  # What `git rev-list --left-right --count` and `git merge-base --fork-point`
+  # say: the commits only the branch holds, the ones only the remote-tracking
+  # branch holds, and of the first, the ones the remote once held and a
+  # force-push took away.
+  defp divergence(state) do
+    %{
+      ahead: length(state.commits) - state.base,
+      behind: length(state.fetched),
+      rewritten: state.fork - state.base
+    }
   end
+
+  # A forced fetch: the remote-tracking branch says what the remote holds,
+  # even when a force-push there took commits away. What it took is counted
+  # off the end of what was fetched first, and then off the vault's own
+  # history; `fork` remembers how far the remote-tracking branch once went.
+  defp fetch(log) do
+    Agent.update(log, fn state ->
+      {base, fetched} = drop_remote(state.base, state.fetched, state.remote_drop)
+
+      %{
+        state
+        | base: base,
+          fetched: fetched ++ state.remote_only,
+          remote_only: [],
+          remote_drop: 0
+      }
+    end)
+  end
+
+  defp drop_remote(base, fetched, count) when count <= length(fetched),
+    do: {base, Enum.drop(fetched, -count)}
+
+  defp drop_remote(base, fetched, count), do: {base - (count - length(fetched)), []}
 
   # What git does: nothing to adopt is not an error, a branch with commits of
   # its own cannot be fast-forwarded, and otherwise every fetched commit lands
-  # in the working tree and in the metadata, under its own author.
+  # in the working tree and in the history, under its own author.
   defp fast_forward(log, vault_path) do
     Agent.get_and_update(log, fn
       %{fetched: []} = state ->
         {:ok, state}
 
-      %{unpushed: [_ | _]} = state ->
+      %{commits: commits, base: base} = state when length(commits) > base ->
         {{:error, "fatal: Not possible to fast-forward, aborting."}, state}
 
       state ->
-        metadata = Enum.reduce(state.fetched, state.metadata, &adopt(&1, &2, vault_path))
         commits = adopt_commits(state.commits, state.fetched)
-        {:ok, %{state | metadata: metadata, commits: commits, fetched: []}}
+        write_tree(vault_path, commits, changed_paths(state.fetched))
+
+        {:ok,
+         %{state | commits: commits, base: length(commits), fork: length(commits), fetched: []}}
     end)
   end
 
-  # What git does, file by file: with nothing fetched there is nothing to
-  # replay onto; a fetched commit touching a path an unpushed one touched
-  # stops the rebase at a conflict, the working tree left as it was; and
-  # otherwise every fetched commit lands under the vault's own, which keep
-  # their metadata — a rebase keeps a commit's author and its date.
+  # What `Vigil.Git.rebase/3` does, file by file. The vault's own commits —
+  # the ones beyond `fork`, which the remote never held — are replayed on top
+  # of what was fetched; the ones a force-push took off the remote are
+  # dropped rather than replayed, and the working tree loses what they
+  # brought. With nothing fetched and nothing dropped there is nothing to do.
+  # A path one of the vault's own commits touched that a fetched or a dropped
+  # commit touched too stops the rebase at a conflict, the working tree left
+  # as it was — a whole-file notion of a conflict (see the moduledoc).
   defp rebase(log, vault_path) do
     Agent.get_and_update(log, fn
       %{rebasing: paths} = state when is_list(paths) ->
         {{:error, "fatal: It seems that there is already a rebase-merge directory"}, state}
 
-      %{fetched: []} = state ->
+      %{fetched: [], base: same, fork: same} = state ->
         {:ok, state}
 
       state ->
-        ours = state.unpushed |> List.flatten() |> MapSet.new()
+        {kept, rest} = Enum.split(state.commits, state.base)
+        {dropped, own} = Enum.split(rest, state.fork - state.base)
+        theirs = Enum.uniq(changed_paths(state.fetched) ++ changed_paths(dropped))
+        ours = MapSet.new(changed_paths(own))
 
-        case state.fetched |> Enum.map(& &1.path) |> Enum.filter(&(&1 in ours)) |> Enum.uniq() do
+        case Enum.filter(theirs, &(&1 in ours)) do
           [] ->
-            metadata = Enum.reduce(state.fetched, state.metadata, &adopt(&1, &2, vault_path))
-            commits = adopt_commits(state.commits, state.fetched)
-            {:ok, %{state | metadata: metadata, commits: commits, fetched: []}}
+            onto = adopt_commits(kept, state.fetched)
+            commits = onto ++ own
+            write_tree(vault_path, commits, theirs)
+
+            {:ok,
+             %{state | commits: commits, base: length(onto), fork: length(onto), fetched: []}}
 
           conflicting ->
             {{:conflict, conflicting}, %{state | rebasing: conflicting}}
@@ -315,18 +410,37 @@ defmodule Vigil.Git.CommitLog do
     end)
   end
 
-  defp adopt(%{path: path, content: content, author: author}, metadata, vault_path) do
-    abs = Path.join(vault_path, path)
-    File.mkdir_p!(Path.dirname(abs))
-    File.write!(abs, content)
+  # Every path a list of commits touched — fetched ones, which are one path
+  # each, or recorded ones, with their changes.
+  defp changed_paths(commits) do
+    Enum.flat_map(commits, fn
+      %{changes: changes} ->
+        Enum.flat_map(changes, fn
+          {:put, path, _content} -> [path]
+          {:remove, path} -> [path]
+          {:rename, from, to} -> [from, to]
+        end)
 
-    entry =
-      case metadata[path] do
-        nil -> %{created_at: @elsewhere_at, updated_at: @elsewhere_at, last_author: author}
-        entry -> %{entry | updated_at: @elsewhere_at, last_author: author}
+      %{path: path} ->
+        [path]
+    end)
+  end
+
+  # The working tree brought to what `commits` say about `paths`: the content
+  # each holds after the last of them, or no file at all.
+  defp write_tree(vault_path, commits, paths) do
+    Enum.each(paths, fn path ->
+      abs = Path.join(vault_path, path)
+
+      case content_at(commits, path) do
+        {:ok, content} ->
+          File.mkdir_p!(Path.dirname(abs))
+          File.write!(abs, content)
+
+        {:error, :not_found} ->
+          File.rm(abs)
       end
-
-    Map.put(metadata, path, entry)
+    end)
   end
 
   defp adopt_commits(commits, fetched) do
@@ -354,7 +468,7 @@ defmodule Vigil.Git.CommitLog do
         commits
 
       changes ->
-        sha = sha(length(commits))
+        sha = sha(System.unique_integer([:positive]))
 
         commits ++
           [
@@ -374,7 +488,8 @@ defmodule Vigil.Git.CommitLog do
   defp unchanged?(_change, _commits), do: false
 
   # A commit id is forty hex digits, like git's, and a different one for every
-  # commit this adapter records.
+  # commit this adapter records — a rebase that drops or replays commits
+  # never hands one out twice.
   defp sha(n), do: :crypto.hash(:sha, "commit #{n}") |> Base.encode16(case: :lower)
 
   # Newest first, following the path back across every rename that led to it
@@ -435,11 +550,19 @@ defmodule Vigil.Git.CommitLog do
     end)
   end
 
-  # A push that is not a fast-forward is refused, as git refuses it.
+  # A push that is not a fast-forward is refused, as git refuses it; and one
+  # that would put back what a force-push elsewhere took off the remote is
+  # refused before it is tried, as `Vigil.Git.push/3` refuses it.
   defp push(log) do
     Agent.get_and_update(log, fn
+      %{fork: fork, base: base} = state when fork > base ->
+        {{:error,
+          "the remote's history was rewritten: #{fork - base} commit(s) the vault holds were taken off it"},
+         state}
+
       %{remote_only: [], fetched: []} = state ->
-        {:ok, %{state | unpushed: []}}
+        pushed = length(state.commits)
+        {:ok, %{state | base: pushed, fork: pushed, remote_drop: 0}}
 
       state ->
         {{:error, "! [rejected] (fetch first): the remote contains work the vault does not have"},
@@ -465,10 +588,27 @@ defmodule Vigil.Git.CommitLog do
     end
   end
 
-  defp tracking(nil, branch), do: {:ok, %{head: branch, remotes: [], branches: %{branch => nil}}}
+  # A clone with the one remote and the one branch, tracking its namesake
+  # there; HEAD on it unless detached — and, like `Vigil.Git.tracking/1`, on
+  # it while a rebase of it is in progress.
+  defp tracking(state, remote, branch) do
+    head = if state.detached, do: nil, else: branch
+    rebasing = state.rebasing != nil
 
-  defp tracking(remote, branch),
-    do: {:ok, %{head: branch, remotes: [remote], branches: %{branch => {remote, branch}}}}
+    case remote do
+      nil ->
+        {:ok, %{head: head, remotes: [], branches: %{branch => nil}, rebasing: rebasing}}
+
+      remote ->
+        {:ok,
+         %{
+           head: head,
+           remotes: [remote],
+           branches: %{branch => {remote, branch}},
+           rebasing: rebasing
+         }}
+    end
+  end
 
   # Everything the vault holds when the adapter is built, as one commit by
   # whoever put it there. Without it every note in every test would carry a
@@ -489,15 +629,5 @@ defmodule Vigil.Git.CommitLog do
     |> Path.wildcard(match_dot: false)
     |> Enum.filter(&File.regular?/1)
     |> Enum.map(&Path.relative_to(&1, vault_path))
-  end
-
-  defp seed(vault_path) do
-    Path.join(vault_path, "**")
-    |> Path.wildcard(match_dot: false)
-    |> Enum.filter(&File.regular?/1)
-    |> Map.new(fn abs ->
-      {Path.relative_to(abs, vault_path),
-       %{created_at: @initial_at, updated_at: @initial_at, last_author: @initial_author}}
-    end)
   end
 end

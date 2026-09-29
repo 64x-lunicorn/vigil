@@ -365,6 +365,92 @@ defmodule Vigil.GitTest do
         assert {:error, _reason} = git.push.(vault, "origin", "main")
       end
 
+      # docs/design.md, "The server stays in step with the remote": what a
+      # force-push elsewhere took off the remote is followed, never put back.
+      # Only the vault's own commits — the ones the remote never held — are
+      # replayed.
+      test "a force-push that took a pushed commit away counts it as rewritten, and a rebase drops it and keeps the vault's own on top",
+           %{git: git, vault: vault} = ctx do
+        pushed = note(vault, "bike/pushed.md", "Pushed")
+        {:ok, _} = add_commit(git, vault, pushed, "create: #{pushed}")
+        :ok = git.push.(vault, "origin", "main")
+        mine = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, mine, "create: #{mine}")
+        drop_from_elsewhere(ctx, 1)
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 2, behind: 1, rewritten: 1}} =
+                 git.divergence.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+
+        refute File.exists?(Path.join(vault, pushed))
+        assert File.exists?(Path.join(vault, mine))
+        assert File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        refute Map.has_key?(git.log_metadata.(vault), pushed)
+
+        assert {:ok, %{ahead: 1, behind: 0, rewritten: 0}} =
+                 git.divergence.(vault, "origin", "main")
+
+        assert :ok = git.push.(vault, "origin", "main")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 0, behind: 0, rewritten: 0}} =
+                 git.divergence.(vault, "origin", "main")
+      end
+
+      # The same force-push with nothing pushed after it: the remote is not
+      # ahead of the vault — it is an ancestor of it — and a push would be a
+      # fast-forward that restores what was taken away.
+      test "a force-push that only took a commit away is rewritten, not behind, and a rebase takes it away here too",
+           %{git: git, vault: vault} = ctx do
+        pushed = note(vault, "bike/pushed.md", "Pushed")
+        {:ok, _} = add_commit(git, vault, pushed, "create: #{pushed}")
+        :ok = git.push.(vault, "origin", "main")
+        drop_from_elsewhere(ctx, 1)
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 1, behind: 0, rewritten: 1}} =
+                 git.divergence.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+
+        refute File.exists?(Path.join(vault, pushed))
+
+        assert {:ok, %{ahead: 0, behind: 0, rewritten: 0}} =
+                 git.divergence.(vault, "origin", "main")
+      end
+
+      test "a push is refused while the vault holds a commit a force-push took off the remote",
+           %{git: git, vault: vault} = ctx do
+        pushed = note(vault, "bike/pushed.md", "Pushed")
+        {:ok, _} = add_commit(git, vault, pushed, "create: #{pushed}")
+        :ok = git.push.(vault, "origin", "main")
+        drop_from_elsewhere(ctx, 1)
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:error, reason} = git.push.(vault, "origin", "main")
+        assert reason =~ "rewritten"
+
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 1, behind: 0, rewritten: 1}} =
+                 git.divergence.(vault, "origin", "main")
+      end
+
+      # What `git commit` does with nothing to commit is make no commit, and
+      # a write of what the file already holds leaves nothing to push.
+      test "committing unchanged content answers the last commit and leaves nothing to push", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:ok, %{updated_at: %DateTime{}, last_author: "Daniel"}} =
+                 add_commit(git, vault, "bike/terra-speed.md", "update: unchanged")
+
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
       test "aborting when no rebase is in progress is an error", %{git: git, vault: vault} do
         assert {:error, _reason} = git.abort_rebase.(vault)
       end
@@ -425,6 +511,20 @@ defmodule Vigil.GitTest do
       )
 
     {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
+    File.rm_rf!(other)
+    :ok
+  end
+
+  # A force-push from another clone that took the last `count` commits off
+  # the remote: through a real second clone for the repository, recorded as
+  # such for the commit log.
+  defp drop_from_elsewhere(%{log: log}, count), do: CommitLog.drop_from_elsewhere(log, count)
+
+  defp drop_from_elsewhere(%{remote: remote, vault: vault}, count) do
+    other = vault <> "_rewriting"
+    {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
+    {_out, 0} = System.cmd("git", ["reset", "-q", "--hard", "HEAD~#{count}"], cd: other)
+    {_out, 0} = System.cmd("git", ["push", "-q", "--force", "origin", "main"], cd: other)
     File.rm_rf!(other)
     :ok
   end

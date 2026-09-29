@@ -1234,6 +1234,32 @@ vigil's on top, and the next push takes them out. What stops the update — an
 unreachable remote, a conflict — is what `reload` reports as `pull_failed`,
 and the vault is read as it stands regardless.
 
+**Only vigil's own commits are replayed, and a force-push is followed.** The
+fetch is forced, so the remote-tracking branch says what the remote holds even
+after a human rewrote it — took commits away with `git push --force`, with or
+without new ones on top. A plain `git rebase <remote>/<branch>` would then
+replay every commit the branch holds and the remote does not, the removed ones
+among them, and the next push would put back what the human took away; with
+nothing new on top the remote is even an ancestor of the branch, the vault
+looks merely ahead, and that push is a fast-forward nobody refuses. So what
+counts as vigil's own is decided by the remote-tracking branch's reflog:
+`git merge-base --fork-point` names the newest commit of the branch the
+remote-tracking branch ever pointed at — every fetch and every push moves it
+and records where it was — and only what comes after it, never pushed, is
+replayed (`git rebase --onto <remote>/<branch> <fork point>`, what `git pull
+--rebase` does). What lies before it and is no longer on the remote is counted
+as `rewritten` beside `ahead` and `behind`, and an update that finds any
+adopts the rewrite through that rebase, logging a warning that the remote was
+force-pushed and how many commits it dropped. When vigil's own commits cannot
+be replayed without what was taken away, the rebase conflicts and is aborted
+like any other; the vault then still holds the removed commits, and `push`
+refuses to run at all while `rewritten` is not zero — git would take it as a
+fast-forward — so the write's `push_error` says the remote's history was
+rewritten and names the conflict, and `status` shows `rewritten`. Where the
+reflog does not reach back that far (it is expired, or disabled), the
+remote-tracking branch is taken as the fork point, which is the plain rebase
+again; nothing in a clone vigil runs in expires it sooner than git's defaults.
+
 The decision is in that one function on purpose, so that what it adopts and
 when is a change to it rather than a second path beside it — which is how
 reads came to use it too (see "Reads see what another clone pushed").
@@ -1249,7 +1275,8 @@ Git value like every other (see "Git is reached through a value"); only
 
 **`status` and `/healthz` say whether it is.** Both report the same facts: is
 the index loaded, does the writer answer, how many commits is the vault
-`ahead` of the remote and `behind` it, the last push's result and time, and
+`ahead` of the remote and `behind` it, how many of those ahead a force-push
+took off the remote (`rewritten`), the last push's result and time, and
 `stale` — `null` while the last attempt to bring the vault up to date
 succeeded, otherwise when it failed and why. `ahead` and `behind` are read
 locally — `behind` is as fresh as the last fetch, which happens before every
