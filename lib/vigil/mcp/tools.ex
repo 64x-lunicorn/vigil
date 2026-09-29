@@ -751,6 +751,9 @@ defmodule Vigil.MCP.Tools do
 
   defp param_specs(%{write: false} = tool), do: tool.params
 
+  # Sobelow: parameter names come from this module's own tool table, never from
+  # a client.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp input_schema(params) do
     properties = Map.new(params, &{String.to_atom(&1.name), property_schema(&1)})
     required = for %{name: name} = spec <- params, required?(spec), do: name
@@ -908,6 +911,9 @@ defmodule Vigil.MCP.Tools do
   defp require_object(args) when is_map(args), do: :ok
   defp require_object(_args), do: {:error, "Invalid arguments: expected an object"}
 
+  # Sobelow: parameter names come from this module's own tool table, never from
+  # a client.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp validate_params(param_specs, args) do
     {values, errors} =
       Enum.reduce(param_specs, {[], []}, fn spec, {values, errors} ->

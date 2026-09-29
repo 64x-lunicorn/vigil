@@ -142,6 +142,9 @@ defmodule Vigil.Commit do
   # Every touched path's content — or that it was not there — and every
   # directory above it that did not exist yet, so a directory the change
   # created goes again with it.
+  # Sobelow: rel_path passed Vigil.Slug.safe_path/1 before the store handed it
+  # down.
+  # sobelow_skip ["Traversal.FileModule"]
   defp snapshot_tree(vault_path, paths) do
     Enum.map(paths, fn rel_path ->
       abs_path = Path.join(vault_path, rel_path)
@@ -185,6 +188,9 @@ defmodule Vigil.Commit do
     end
   end
 
+  # Sobelow: abs_path is one snapshot_tree/2 built from a safe_path-checked
+  # path.
+  # sobelow_skip ["Traversal.FileModule"]
   defp restore_file(abs_path, {:error, :enoent}) do
     case File.rm(abs_path) do
       :ok -> :ok
@@ -237,6 +243,8 @@ defmodule Vigil.Commit do
   rather than to the file.
   """
   @spec mkdir_p(String.t()) :: :ok | {:error, String.t()}
+  # Sobelow: callers join the vault root with a safe_path-checked path.
+  # sobelow_skip ["Traversal.FileModule"]
   def mkdir_p(path) do
     case File.mkdir_p(path) do
       :ok -> :ok
@@ -261,6 +269,8 @@ defmodule Vigil.Commit do
   # Into a temporary file beside the target, then renamed over it: a crash
   # mid-write leaves the note as it was and a stray dotfile, never a truncated
   # note. The rename is atomic because both names are in one directory.
+  # Sobelow: path is the vault root joined with a safe_path-checked path.
+  # sobelow_skip ["Traversal.FileModule"]
   defp write_file(path, content) do
     tmp =
       Path.join(

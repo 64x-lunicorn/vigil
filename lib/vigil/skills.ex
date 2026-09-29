@@ -38,6 +38,8 @@ defmodule Vigil.Skills do
     end
   end
 
+  # Sobelow: a file name vigil listed from skills/ itself.
+  # sobelow_skip ["Traversal.FileModule"]
   defp skill_description(abs_path) do
     with {:ok, content} <- File.read(abs_path),
          {:ok, yaml_text, _body, _offset} <- Markdown.frontmatter(content),
@@ -57,6 +59,9 @@ defmodule Vigil.Skills do
   `key` is the deployment's SkillKey, handed in the way the vault path is:
   this module reads no configuration of its own.
   """
+  # Sobelow: name must match ^[a-z0-9_-]+$ (valid_skill_name?/1) before it is
+  # joined.
+  # sobelow_skip ["Traversal.FileModule"]
   def read(name, vault_path, key) do
     normalized = normalize_skill_name(name)
 

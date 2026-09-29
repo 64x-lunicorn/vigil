@@ -37,8 +37,11 @@ jobs:
     # that cannot be exercised on a pull request, so it keeps the syntax with
     # the longer track record.
     uses: ./.github/workflows/ci.yml # zizmor: ignore[self-repository]
+    # A called workflow's jobs get at most what the caller grants, and ci.yml's
+    # Security scan uploads its SARIF to code scanning.
     permissions:
       contents: read
+      security-events: write
 
   publish:
     name: Publish release

@@ -103,6 +103,9 @@ defmodule Vigil.Vault.Facts do
   second clock read behind the writer cost.
   """
   @spec over_vault(Index.t(), vault, DateTime.t()) :: t
+  # Sobelow: paths reach read_note after Vigil.Slug.safe_path/1 or from the
+  # index.
+  # sobelow_skip ["Traversal.FileModule"]
   def over_vault(
         %Index{} = index,
         %{layout: %Layout{vault_path: vault_path} = layout, naming: naming},

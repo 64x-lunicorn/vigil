@@ -1,0 +1,21 @@
+# Sobelow findings triaged as not applicable, one reason per entry.
+# Findings inside a function are skipped at the function instead, with a
+# `# sobelow_skip` comment and its reason beside the code; this file holds
+# only the ones in config/, which have no function to carry a comment.
+#
+# Entries are keyed by file and line: when a line moves, the finding is
+# reported again and the gate fails. Check that the reason below still holds,
+# then run `mix sobelow --mark-skip-all` and remove the stale entry.
+#
+# Config.HTTPS (config/prod.exs) - vigil listens on loopback behind the
+# Cloudflare Tunnel, which terminates TLS. The Phoenix force_ssl setting
+# this check looks for does not exist in a Plug app; https for the issuer
+# and resource is enforced at boot by Vigil.Settings.Check instead.
+#
+# Config.Secrets (config/runtime.exs:124 and :125) - the auth_password and
+# skillkey_secret of the test environment only, inside
+# `if config_env() == :test`. They key nothing outside the suite; in prod
+# both come from /etc/vigil/env.
+Config.HTTPS: HTTPS Not Enabled,config/prod.exs:0,2B5C077
+Config.Secrets: Hardcoded Secret,config/runtime.exs:124,676AF68
+Config.Secrets: Hardcoded Secret,config/runtime.exs:125,7530331

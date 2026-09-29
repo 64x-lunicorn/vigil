@@ -78,9 +78,10 @@ release.
 | :--- | :--- |
 | **Test** | Locked deps resolve, no unused lock entries, formatting is clean, the project compiles with **warnings as errors**, the suite passes (including the recorded interface contracts), no retired or vulnerable dependencies. |
 | **Static analysis** | Credo finds no issues; Dialyzer finds no new type errors. |
+| **Security scan** | Sobelow finds nothing that was not triaged, and its SARIF goes to the repository's Security tab. See below. |
 | **Deployment scripts** | ShellCheck is clean, `init.sh --check-only` is still strictly read-only, `update.sh` switches over, rolls back and prunes releases correctly, and each of `verify()`'s twelve checks decides both outcomes correctly. |
 | **Release smoke test** | A real production release boots and serves. See below. |
-| **Workflow lint** | actionlint and zizmor: the pipeline's own configuration is checked like code. |
+| **Workflow lint** | actionlint and zizmor, both verified before they run: the pipeline's own configuration is checked like code. |
 | **Secret scan** | gitleaks over the full history, not just the diff. |
 | **CI gate** | Aggregates all of the above into one status check. |
 
@@ -144,6 +145,32 @@ the ignore list cannot rot into a dumping ground.
 codebase today, so existing code passes but nothing is allowed to get worse.
 Purely stylistic checks are off — a gate nobody can make green on day one gets
 bypassed rather than respected.
+
+**Security.** Sobelow, the security-focused static analyser for Elixir —
+CodeQL, which fills the Security tab for most languages, has no Elixir support.
+Everything it is told lives in [`.sobelow-conf`](../.sobelow-conf), so
+`mix ci` and the **Security scan** job run the same scan: every finding at any
+confidence fails it, no update check goes out over the network, and vigil being
+a Plug application rather than Phoenix is stated (`router: :none`) instead of
+warned about. The job uploads the scan as SARIF through
+`github/codeql-action/upload-sarif`, so findings show up as code-scanning
+alerts on the Security tab, and a fixed one closes there too.
+
+Sobelow over-reports on purpose, so each finding is triaged, and a skipped one
+carries its reason:
+
+- a finding inside a function is skipped with a `# sobelow_skip [...]` comment
+  directly above that function, and the comment above it says why. Most are
+  `Traversal.FileModule` at the file layer: the paths there were either
+  enumerated from the vault by vigil itself, come from the operator's
+  configuration, or already passed `Vigil.Slug.safe_path/1`, the rule every
+  client path crosses. The skip names one check, so any other finding in the
+  same function still fails the gate.
+- a finding in `config/` has no function to annotate, so it is an entry in
+  [`.sobelow-skips`](../.sobelow-skips), with its reason in that file's header.
+  Those entries are keyed by line: when the line moves the finding comes back
+  and the gate fails, which is the prompt to check the reason still holds and
+  re-mark it with `mix sobelow --mark-skip-all`.
 
 **Behaviour.** `mix test`, in `MIX_ENV=test` against the fixture vault.
 
@@ -246,8 +273,13 @@ and a booted release) and pins:
 
 **Supply chain.** `mix hex.audit` (retired packages) and `mix deps.audit`
 (published CVEs) run in CI. Every third-party action is pinned to a **commit
-SHA**, not a tag; gitleaks binaries are downloaded and **checksum-verified**
-rather than pulled in as another action with repository access. Workflows
+SHA**, not a tag. Every tool CI downloads is verified before it runs:
+gitleaks, ShellCheck and actionlint are pinned by version and their release
+tarball by **SHA-256**, rather than pulled in as another action with
+repository access, and zizmor is installed with
+`pip install --require-hashes --only-binary=:all:` from
+[`.github/zizmor-requirements.txt`](../.github/zizmor-requirements.txt), which
+pins its version and the digest of every one of its wheels. Workflows
 declare `permissions: {}` by default and grant the minimum per job, and
 `persist-credentials: false` keeps the workflow token out of `.git/config`
 where later steps could read it.
@@ -257,6 +289,12 @@ audit nightly and **files an issue** when it turns red. Nothing in the
 repository has to change for `main` to become vulnerable: a CVE published today
 does that on its own, and a scheduled workflow failing quietly in the Actions
 tab is indistinguishable from nobody looking.
+
+[`scorecard.yml`](../.github/workflows/scorecard.yml) runs the OpenSSF
+Scorecard weekly and on every push to `main`: an outside reading of pinned
+dependencies, token permissions, branch protection and static analysis. Its
+SARIF goes to the Security tab, and its published result is the badge in the
+README.
 
 **Dependencies.** [`dependabot.yml`](../.github/dependabot.yml) opens pull
 requests for Hex and GitHub Actions, which means updates go through the same
@@ -271,9 +309,16 @@ the server. Bumping the file bumps CI. The advisory `next` matrix leg tests the
 following Elixir/OTP pair and is allowed to fail: it is an early warning, not a
 reason to block an unrelated bugfix.
 
-**Pinned tool versions.** `actionlint`, `zizmor` and `gitleaks` are pinned by
-version in the workflow `env:` blocks. When bumping gitleaks, update
-`GITLEAKS_SHA256` from the release's `checksums.txt` in the same commit.
+**Pinned tool versions.** `actionlint`, `gitleaks` and `ShellCheck` are pinned
+by version in the workflow `env:` blocks, each beside the SHA-256 of its
+release tarball. Bump both in the same commit: `ACTIONLINT_SHA256` from the
+release's `actionlint_<version>_checksums.txt`, `GITLEAKS_SHA256` from its
+`checksums.txt`, and `SHELLCHECK_SHA256` from `sha256sum` of the downloaded
+tarball, which ShellCheck's releases do not publish. `zizmor` is pinned in
+[`.github/zizmor-requirements.txt`](../.github/zizmor-requirements.txt):
+replace the version and every `--hash` line together, from
+`https://pypi.org/pypi/zizmor/<version>/json`. Sobelow is a Hex dependency
+and moves with `mix.lock` like any other.
 
 **Loosening a ratchet.** Lower a `.credo.exs` threshold whenever a refactor
 makes room for it; remove a `.dialyzer_ignore.exs` entry when the finding is

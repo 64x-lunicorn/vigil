@@ -418,6 +418,9 @@ defmodule Vigil.OAuth.Endpoint do
     |> send_resp(status, Jason.encode!(payload))
   end
 
+  # Sobelow: every caller builds html with its variable parts escaped
+  # (ConsentPage.render/1, error_html/1).
+  # sobelow_skip ["XSS.SendResp"]
   defp send_html(conn, status, html, nonce \\ nil) do
     conn
     |> put_resp_content_type("text/html")

@@ -179,6 +179,62 @@ jobs:
       - name: Dialyzer
         run: mix dialyzer --format github
 
+  # CodeQL has no Elixir support, so Sobelow is the static security scan.
+  # Everything it is told lives in .sobelow-conf, which is what `mix ci` reads
+  # as well: fail on any finding at any confidence, skip only what was triaged
+  # — a `# sobelow_skip` comment with its reason above the function, or an
+  # entry in .sobelow-skips with its reason in that file's header — and no
+  # update check over the network.
+  sobelow:
+    name: Security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload the SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-sobelow-${{ hashFiles('**/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-sobelow-
+
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      - name: Sobelow
+        run: mix sobelow
+
+      # The same scan again as SARIF, for the Security tab. --exit none: the
+      # step above is the one that decides, and this one has to produce the
+      # file whether or not it found something.
+      - name: Sobelow (SARIF)
+        if: ${{ !cancelled() }}
+        run: mix sobelow --format sarif --out sobelow.sarif --exit none
+
+      # A pull request from a fork gets a read-only token whatever the job
+      # asks for, so its upload could only fail; the gate above still ran.
+      - name: Upload to code scanning
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: sobelow.sarif
+          category: sobelow
+
   scripts:
     name: Deployment scripts
     runs-on: ubuntu-latest
@@ -346,13 +402,18 @@ jobs:
           # over git.
           persist-credentials: false
 
+      # Pinned and checksum-verified like gitleaks and ShellCheck: the digest
+      # is the release's own actionlint_<version>_checksums.txt entry for
+      # linux_amd64, so a replaced asset fails here instead of running.
       - name: actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
           set -euo pipefail
           curl -sSfL -o actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 
@@ -371,13 +432,18 @@ jobs:
       # --persona=regular and not pedantic: pedantic adds findings that are
       # style preferences rather than security properties, and a gate that
       # argues about taste gets bypassed rather than respected.
+      #
+      # The version and the digest of every one of its wheels are pinned in
+      # .github/zizmor-requirements.txt. --require-hashes refuses a wheel whose
+      # digest is not listed there, and --only-binary refuses the sdist, whose
+      # build would pull in a toolchain nothing here verifies.
       - name: zizmor
-        env:
-          ZIZMOR_VERSION: 1.30.1
         run: |
           set -euo pipefail
-          pipx install "zizmor==${ZIZMOR_VERSION}"
-          zizmor --persona=regular --min-severity=low .github/workflows
+          python3 -m venv "${RUNNER_TEMP}/zizmor"
+          "${RUNNER_TEMP}/zizmor/bin/pip" install --quiet --require-hashes --only-binary=:all: \
+            -r .github/zizmor-requirements.txt
+          "${RUNNER_TEMP}/zizmor/bin/zizmor" --persona=regular --min-severity=low .github/workflows
 
   secrets:
     name: Secret scan
@@ -412,7 +478,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [test, static, scripts, release-smoke, workflows, secrets]
+    needs: [test, static, sobelow, scripts, release-smoke, workflows, secrets]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -752,6 +752,8 @@ defmodule Vigil.Store do
   # One file that cannot be read or is not UTF-8 costs that file, never the
   # load: a raise here is a restart loop at boot (docs/design.md, "A note that
   # is not UTF-8 is skipped"). The skipped path is kept for `lint`.
+  # Sobelow: rel_path is a file vigil enumerated from the vault itself.
+  # sobelow_skip ["Traversal.FileModule"]
   defp load_file(vault_path, rel_path, git_meta) do
     abs_path = Path.join(vault_path, rel_path)
 
@@ -782,6 +784,8 @@ defmodule Vigil.Store do
   # the same file per MCP `initialize`; that divergence is the decision recorded
   # in docs/design.md, "_domains.yml is a description, not configuration", not
   # an oversight.
+  # Sobelow: a fixed file name under the configured vault root.
+  # sobelow_skip ["Traversal.FileModule"]
   defp load_domains(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
@@ -811,6 +815,8 @@ defmodule Vigil.Store do
   # (docs/design.md, "_domains.yml is a description, not configuration"). An
   # absent file is already warned about at load, so only a file that exists and
   # still cannot be read is worth a warning here.
+  # Sobelow: a fixed file name under the configured vault root.
+  # sobelow_skip ["Traversal.FileModule"]
   defp domains_yaml_raw(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
@@ -1086,6 +1092,8 @@ defmodule Vigil.Store do
   # A read failure here happens before anything is written, so it is
   # reported back to the caller as an ordinary error tuple rather than
   # crashing the GenServer.
+  # Sobelow: callers resolve a path that passed Vigil.Slug.safe_path/1.
+  # sobelow_skip ["Traversal.FileModule"]
   defp read_existing_file(path) do
     case File.read(path) do
       {:ok, content} -> {:ok, content}
@@ -1098,6 +1106,8 @@ defmodule Vigil.Store do
   # the GenServer and take down unrelated calls — it only means the index
   # stays stale for `rel_path` until the next reload, so the failure is logged
   # rather than propagated.
+  # Sobelow: rel_path was just written or moved, after Vigil.Slug.safe_path/1.
+  # sobelow_skip ["Traversal.FileModule"]
   defp read_for_reparse(vault_path, rel_path, verb) do
     case File.read(Path.join(vault_path, rel_path)) do
       {:ok, content} ->

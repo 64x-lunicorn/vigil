@@ -70,6 +70,8 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
+  # Sobelow: the operator's configured state_dir, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp safe_mkdir_p(path) do
     case File.mkdir_p(path) do
       :ok -> :ok
@@ -92,6 +94,9 @@ defmodule Vigil.OAuth.Store do
     end)
   end
 
+  # Sobelow: state_dir from the operator's configuration, file names from
+  # @files.
+  # sobelow_skip ["Traversal.FileModule"]
   defp open(name, path, extra \\ []) do
     case :dets.open_file(name, [file: String.to_charlist(path), type: :set] ++ extra) do
       {:ok, ^name} ->
@@ -163,6 +168,9 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
+  # Sobelow: state_dir from the operator's configuration, file names from
+  # @files.
+  # sobelow_skip ["Traversal.FileModule"]
   defp write_fresh(path, rows) do
     File.rm(path)
 

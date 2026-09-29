@@ -13,6 +13,7 @@ that turns a Markdown vault into long-term memory for AI assistants.
 [![Built with Elixir](https://img.shields.io/badge/built_with-Elixir-6e4a7e?style=flat-square)](mix.exs)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-0ea5e9?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-by_design-334155?style=flat-square)](#how-it-works)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/64x-lunicorn/vigil?label=openssf+scorecard&style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/64x-lunicorn/vigil)
 
 [Quickstart](#quickstart) &nbsp; / &nbsp;
 [Documentation](docs/README.md) &nbsp; / &nbsp;

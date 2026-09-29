@@ -22,6 +22,9 @@ defmodule Vigil.VaultCheck do
   @max_basename_length 60
   @max_frontmatter_bytes 1024
 
+  # Sobelow: an operator's own vault; the paths are files vigil enumerated
+  # there.
+  # sobelow_skip ["Traversal.FileModule"]
   def run(vault_path, exclude \\ []) do
     unless File.dir?(vault_path) do
       raise "Not a directory: #{vault_path}"
@@ -252,6 +255,8 @@ defmodule Vigil.VaultCheck do
   # no drift at all. Drift measured against keys nobody read is one false
   # "unknown to the runtime" per domain — a report on a file the doctor could
   # not read, in the voice of one it had read.
+  # Sobelow: a fixed file name under the operator's vault root.
+  # sobelow_skip ["Traversal.FileModule"]
   defp b4_drift(vault_path, domain_dirs) do
     case File.read(Path.join(vault_path, "_domains.yml")) do
       {:ok, text} ->

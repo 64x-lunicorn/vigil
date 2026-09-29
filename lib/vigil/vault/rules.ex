@@ -129,6 +129,8 @@ defmodule Vigil.Vault.Rules do
     end
   end
 
+  # Sobelow: rel_path is a file vigil enumerated from the vault itself.
+  # sobelow_skip ["Traversal.FileModule"]
   defp heading_changes(vault_path, rel_path) do
     # A note that is not UTF-8 has no chunk ids to change: the server skips it
     # (docs/design.md, "A note that is not UTF-8 is skipped").
