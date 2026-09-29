@@ -415,20 +415,43 @@ This is what keeps retrieval cheap: the assistant fetches one section, not a
 All of the following is decided in `Vigil.Index.search/2` — one module, one
 result shape.
 
-- Literal matching, no regex: `String.contains?/2` over the note title and
-  each heading, `:binary.matches/2` counting occurrences in the chunk body.
-- **The query is a phrase**, exactly as entered. No token split, no AND/OR.
-  `"terra speed"` matches only contiguous `terra speed`.
-- Case-insensitive: the query is downcased, every chunk carries a downcased
-  copy of its body alongside the original, and the title and headings are
-  downcased as they are compared. Previews come from the original.
-- Filters apply *before* matching: `domain`, `type`.
+- Literal matching, no regex over the text: `String.contains?/2` over the note
+  title and each heading, `:binary.matches/2` counting occurrences in the chunk
+  body.
+- **Query and text are folded alike.** The query is trimmed, then query and
+  text go through `Vigil.Slug.fold/1`: NFC, downcased, and the transliteration
+  paths are slugged with (`ä` to `ae`, `ß` to `ss`, remaining diacritics
+  stripped). `heizoel` finds `Heizöl`, and a body a macOS editor wrote
+  decomposed (NFD) is found by a composed query. The text is folded once, as
+  a chunk is indexed — every chunk carries its folded title, headings and body
+  beside the originals, in place of the downcased body it used to carry.
+  Previews come from the original.
+- **The phrase is the strongest signal, the words the fallback.** A chunk that
+  holds the folded query as one contiguous phrase is a *phrase hit*. A chunk
+  that does not, but holds every word of the query (a run of letters and
+  digits) somewhere in its note title, headings or body, is a *words hit*:
+  `raised bed tomatoes` finds a section on tomatoes in the raised beds. Every
+  word must be there; there is no OR. The callers are assistants, whose
+  queries are keyword lists, and a phrase-only search left memories that hold
+  every word unfindable, so they were written a second time. This reverses
+  the earlier rule that the query is only a phrase, with no token split.
+- Filters apply *before* matching: `domain`, `type`. `journal/` is hidden
+  unless it is the `domain` asked for.
 - Ranking is a simple additive score, deliberately not BM25 and deliberately
   not machine-learned: title hit +10, heading hit +5, body occurrences +1 each
-  capped at 5, `type == prefer` +5. Score 0 drops out. Ties break on the more
-  recently updated chunk.
+  capped at 5, `type == prefer` +5. A phrase hit scores its phrase. A words
+  hit scores each word on the same scale as if it were the query, and takes
+  the weakest word's score — a hit is only as strong as the least of the
+  words it has to hold — plus the `prefer` bonus. Score 0 drops out.
+- **Every phrase hit ranks above every words hit**, whatever their scores;
+  the score orders hits within each group. Ties break on the more recently
+  updated chunk, then on the id, so the same query over the same vault answers
+  in the same order.
 - Results carry only `id`, `title`, `type`, `score`, `preview` — and `hub` when
   the note has exactly one incoming link. Never bodies.
+- Still literal: no stemming, no fuzzy matching, no synonyms, no embeddings
+  (see "Deliberate non-goals"). A word matches wherever its folded letters
+  appear, inside a longer word too, as the phrase always did.
 
 ---
 
@@ -794,9 +817,11 @@ before any fact was asked, arriving through a door the `Facts` seam does not
 cover. Every unforced create now asks the vault at least one question. Where segments
 already qualify the name is the weakest of the terms — a segment is a substring
 of it, so wherever the name matches, each of its segments matches too and scores
-at least as high. What it costs there is one more query per create, and the one
-note it can still surface on its own: the one a broad segment's best 25 had no
-room for.
+at least as high. That holds for a words hit too (see "Search"): the name's
+`-`-separated segments are its words, and a words hit scores its weakest word,
+so the name as words never outscores a segment of it. What it costs there is one
+more query per create, and the one note it can still surface on its own: the
+one a broad segment's best 25 had no room for.
 
 **The write path returns a plan; the process executes it.** A resolved
 decision plus the note's current content becomes a `Vigil.Vault.Plan`: the

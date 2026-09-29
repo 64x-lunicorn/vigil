@@ -6,7 +6,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Searches chunk bodies and headings for a phrase.",
+    "description": "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl).",
     "inputSchema": {
       "properties": {
         "domain": {
@@ -30,7 +30,7 @@
           "type": "string"
         },
         "query": {
-          "description": "Exact search phrase.",
+          "description": "Words or a phrase to search for.",
           "maxLength": 1024,
           "minLength": 1,
           "type": "string"

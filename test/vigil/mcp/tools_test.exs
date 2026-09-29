@@ -32,7 +32,7 @@ defmodule Vigil.MCP.ToolsTest do
 
       assert props.query == %{
                type: "string",
-               description: "Exact search phrase.",
+               description: "Words or a phrase to search for.",
                minLength: 1,
                maxLength: 1_024
              }

@@ -155,7 +155,8 @@ defmodule Vigil.MCP.Tools do
     %{
       name: "search",
       title: "Search the vault",
-      description: "Searches chunk bodies and headings for a phrase.",
+      description:
+        "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl).",
       write: false,
       call: :search,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
@@ -165,7 +166,7 @@ defmodule Vigil.MCP.Tools do
           type: :string,
           max_length: @short_max,
           required: true,
-          description: "Exact search phrase."
+          description: "Words or a phrase to search for."
         },
         %{
           name: "domain",

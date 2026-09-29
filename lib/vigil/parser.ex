@@ -30,6 +30,13 @@ defmodule Vigil.Parser do
     be cheap (docs/design.md, "Chunking"). A chunk fresh out of the parser
     carries `nil` in both — nothing in a parse knows them, and nothing in a
     parse reads them.
+
+    `folded` is the text search compares against — the note's title, the
+    chunk's headings and its body, each put through `Vigil.Slug.fold/1` —
+    and `Vigil.Index` adds it as it indexes the chunk, for the same reason:
+    folding a body is paid once per write, not once per chunk on every query
+    (docs/design.md, "Search"). A chunk fresh out of the parser carries `nil`
+    there too.
     """
     defstruct [
       :id,
@@ -39,7 +46,6 @@ defmodule Vigil.Parser do
       :heading_line,
       :body_end_line,
       :body,
-      :body_downcased,
       :links,
       :type,
       :starts,
@@ -48,7 +54,9 @@ defmodule Vigil.Parser do
       :updated_at,
       # The note's, denormalised onto the chunk by Vigil.Index — see above.
       :domain,
-      :file_title
+      :file_title,
+      # %{title:, headings:, body:}, added by Vigil.Index — see above.
+      :folded
     ]
 
     @type t :: %__MODULE__{}
@@ -319,7 +327,6 @@ defmodule Vigil.Parser do
       heading_line: heading_line,
       body_end_line: end_line,
       body: body,
-      body_downcased: String.downcase(body),
       links: extract_links(body),
       type: type,
       starts: starts,
@@ -394,7 +401,6 @@ defmodule Vigil.Parser do
         heading_line: nil,
         body_end_line: body_end,
         body: body,
-        body_downcased: String.downcase(body),
         links: extract_links(body),
         type: type,
         starts: starts,

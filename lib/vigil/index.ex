@@ -40,6 +40,9 @@ defmodule Vigil.Index do
   @preferred_type 5
   @preview_len 120
 
+  # A word of a query, once folded: a run of letters and digits.
+  @word ~r/[\p{L}\p{N}]+/u
+
   defmodule Note do
     @moduledoc "One vault note, as the index carries it."
     defstruct [
@@ -350,6 +353,10 @@ defmodule Vigil.Index do
   zero without matching the query anywhere. `Vigil.Vault.Policy`'s duplicate
   gate is asked without a preference, which is what makes the reading it
   relies on true.
+
+  A words hit is scored on the same scale, one word at a time, and scores its
+  weakest word: it reaches `strength(:title)` only when every word of the
+  query does — each one names the note, if the phrase does not.
   """
   @spec strength(atom) :: pos_integer
   def strength(:title), do: @title
@@ -360,10 +367,18 @@ defmodule Vigil.Index do
 
   @doc """
   Answers the `search` tool: the domain and type filters apply before
-  matching, `journal/` is hidden unless asked for by name, matching is a
-  literal phrase against a chunk's title/headings/body, scoring is the
-  additive scale `strength/1` publishes, and `hub` is attached when exactly
-  one other note links to the hit's note.
+  matching, `journal/` is hidden unless asked for by name, and `hub` is
+  attached when exactly one other note links to the hit's note.
+
+  The query is trimmed and folded (`Vigil.Slug.fold/1`) as every chunk's
+  title, headings and body were when it was indexed. A chunk that holds the
+  folded query as a phrase is a *phrase hit*, scored on the additive scale
+  `strength/1` publishes. A chunk that does not, but holds every one of the
+  query's words somewhere in its title, headings or body, is a *words hit*:
+  each word is scored on the same scale as if it were the query, and the hit
+  scores what its weakest word scores. Every phrase hit ranks above every
+  words hit; within each, the higher score first, then the more recently
+  updated chunk, then the lower id — so the order is the same on every call.
 
   `opts` inside `params`: `:prefer`, and `:limit`, which is required. The
   bound on `limit` is declared in `Vigil.MCP.Tools`' table and refused there;
@@ -397,40 +412,65 @@ defmodule Vigil.Index do
   end
 
   defp rank(chunks, query, opts) do
-    q = String.downcase(query)
+    phrase = query |> String.trim() |> Slug.fold()
+    words = query_words(phrase)
     limit = Map.fetch!(opts, :limit)
     prefer = Map.get(opts, :prefer)
 
     chunks
-    |> Enum.map(&{score(&1, q, prefer), &1})
-    |> Enum.filter(fn {score, _} -> score > 0 end)
-    |> Enum.sort_by(fn {score, chunk} -> {-score, negated_time(chunk.updated_at)} end)
+    |> Enum.map(&{match(&1, phrase, words, prefer), &1})
+    |> Enum.filter(fn {{_group, score}, _} -> score > 0 end)
+    |> Enum.sort_by(fn {{group, score}, chunk} ->
+      {group, -score, negated_time(chunk.updated_at), chunk.id}
+    end)
     |> Enum.take(limit)
-    |> Enum.map(fn {score, chunk} -> to_search_result(chunk, score) end)
+    |> Enum.map(fn {{_group, score}, chunk} -> to_search_result(chunk, score) end)
+  end
+
+  # The words of a folded query: its runs of letters and digits, each once.
+  # A query that is one word and nothing else has no words beyond its phrase,
+  # and is not matched a second time.
+  defp query_words(phrase) do
+    case @word |> Regex.scan(phrase) |> List.flatten() |> Enum.uniq() do
+      [^phrase] -> []
+      words -> words
+    end
   end
 
   defp negated_time(nil), do: 0
   defp negated_time(%DateTime{} = dt), do: -DateTime.to_unix(dt)
 
-  defp score(chunk, q, prefer) when q != "" do
-    title_hit? = String.contains?(String.downcase(chunk.file_title), q)
+  # `{group, score}`: group 0 is a phrase hit, group 1 everything else, so a
+  # phrase hit sorts first whatever the scores.
+  defp match(_chunk, "", _words, _prefer), do: {1, 0}
 
-    heading_hit? =
-      Enum.any?(chunk.heading_path, fn h -> String.contains?(String.downcase(h), q) end)
+  defp match(chunk, phrase, words, prefer) do
+    preferred = if prefer && chunk.type == prefer, do: @preferred_type, else: 0
 
-    body_hits = count_occurrences(chunk.body_downcased, q)
+    case occurrence_score(chunk.folded, phrase) do
+      0 -> {1, words_score(chunk.folded, words) + preferred}
+      score -> {0, score + preferred}
+    end
+  end
+
+  # A words hit is only as strong as the weakest of the words it must hold;
+  # a word it does not hold at all scores 0, and so does the hit.
+  defp words_score(_folded, []), do: 0
+
+  defp words_score(folded, words) do
+    words |> Enum.map(&occurrence_score(folded, &1)) |> Enum.min()
+  end
+
+  defp occurrence_score(folded, needle) do
+    title_hit? = String.contains?(folded.title, needle)
+    heading_hit? = Enum.any?(folded.headings, &String.contains?(&1, needle))
+    body_hits = count_occurrences(folded.body, needle)
 
     score = 0
     score = if title_hit?, do: score + @title, else: score
     score = if heading_hit?, do: score + @heading, else: score
-    score = score + @body_occurrence * min(body_hits, @body_occurrence_cap)
-    score = if prefer && chunk.type == prefer, do: score + @preferred_type, else: score
-    score
+    score + @body_occurrence * min(body_hits, @body_occurrence_cap)
   end
-
-  defp score(_chunk, "", _prefer), do: 0
-
-  defp count_occurrences(_haystack, ""), do: 0
 
   defp count_occurrences(haystack, needle) do
     case :binary.matches(haystack, needle) do
@@ -934,9 +974,20 @@ defmodule Vigil.Index do
     # denormalised onto it (`Vigil.Parser.Chunk`): search filters and titles
     # per chunk, and a note lookup per chunk is what this pays to avoid
     # (docs/design.md, "Chunking").
+    #
+    # And the text search compares against, folded once here rather than on
+    # every query (docs/design.md, "Search").
+    title_folded = Slug.fold(file.title)
+
     chunks =
       Map.new(file.chunks, fn chunk ->
-        {chunk.id, %{chunk | domain: domain, file_title: file.title}}
+        folded = %{
+          title: title_folded,
+          headings: Enum.map(chunk.heading_path, &Slug.fold/1),
+          body: Slug.fold(chunk.body)
+        }
+
+        {chunk.id, %{chunk | domain: domain, file_title: file.title, folded: folded}}
       end)
 
     {note, chunks}

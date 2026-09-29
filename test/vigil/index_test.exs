@@ -1,7 +1,7 @@
 defmodule Vigil.IndexTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.{Index, Parser}
+  alias Vigil.{Index, Parser, Slug}
   alias Vigil.Vault.Layout
 
   @fixtures Path.expand("../fixtures/vault", __DIR__)
@@ -30,11 +30,24 @@ defmodule Vigil.IndexTest do
         heading_path: [],
         type: :reference,
         body: "",
-        body_downcased: "",
         updated_at: nil
       },
       overrides
     )
+    |> with_folded_text()
+  end
+
+  # What Vigil.Index adds to a chunk as it indexes one: the text search
+  # compares against, folded once.
+  defp with_folded_text(chunk) do
+    %{
+      chunk
+      | folded: %{
+          title: Slug.fold(chunk.file_title),
+          headings: Enum.map(chunk.heading_path, &Slug.fold/1),
+          body: Slug.fold(chunk.body)
+        }
+    }
   end
 
   defp ranking_index(chunks), do: %Index{chunks: Map.new(chunks, &{&1.id, &1})}
@@ -233,6 +246,32 @@ defmodule Vigil.IndexTest do
       assert hit.hub == "bike/via-carolina.md"
     end
 
+    # macOS writes file names, and editors on it sometimes text, decomposed
+    # (NFD); an assistant sends its query composed (NFC).
+    test "an NFD body is found by an NFC query, and by its transliteration", %{index: index} do
+      nfd = String.normalize("# Tank\n\nDer Heizöltank ist voll.\n", :nfd)
+      {:ok, file} = Parser.parse("home/tank.md", nfd, @git_meta)
+      updated = Index.put(index, file)
+
+      query = String.normalize("Heizöltank", :nfc)
+      assert [%{id: "home/tank.md"}] = search(updated, %{query: query})
+      assert [%{id: "home/tank.md"}] = search(updated, %{query: "heizoeltank voll"})
+    end
+
+    test "words of a query are found apart in an indexed note", %{index: index} do
+      {:ok, file} =
+        Parser.parse(
+          "garden/tomatoes.md",
+          "# Tomatoes\n\n## Where\n\nThey grow in the raised beds.\n",
+          @git_meta
+        )
+
+      updated = Index.put(index, file)
+
+      assert [%{id: "garden/tomatoes.md#where"}] =
+               search(updated, %{query: "raised bed tomatoes", domain: "garden"})
+    end
+
     test "hub is absent when zero notes link to the hit's note", %{index: index} do
       {:ok, file} = Parser.parse("bike/unlinked.md", "# Unlinked Tubeless\ntext", @git_meta)
       updated = Index.put(index, file)
@@ -265,14 +304,12 @@ defmodule Vigil.IndexTest do
           ranking_chunk(%{
             id: "x/a.md",
             file_title: "Terra Speed",
-            body: "nothing",
-            body_downcased: "nothing"
+            body: "nothing"
           }),
           ranking_chunk(%{
             id: "x/b.md",
             file_title: "Anderes",
-            body: "mentions terra speed once",
-            body_downcased: "mentions terra speed once"
+            body: "mentions terra speed once"
           })
         ])
 
@@ -288,10 +325,9 @@ defmodule Vigil.IndexTest do
           ranking_chunk(%{
             id: "x/ref.md",
             type: :reference,
-            body: "wort",
-            body_downcased: "wort"
+            body: "wort"
           }),
-          ranking_chunk(%{id: "x/dec.md", type: :decision, body: "wort", body_downcased: "wort"})
+          ranking_chunk(%{id: "x/dec.md", type: :decision, body: "wort"})
         ])
 
       [first, _second] = search(index, %{query: "wort", prefer: :decision})
@@ -303,30 +339,89 @@ defmodule Vigil.IndexTest do
 
       index =
         ranking_index([
-          ranking_chunk(%{file_title: "Treffer", body: long_body, body_downcased: long_body})
+          ranking_chunk(%{file_title: "Treffer", body: long_body})
         ])
 
       [result] = search(index, %{query: "treffer"})
       assert String.length(result.preview) <= 121
     end
 
-    test "phrase match requires contiguous substring" do
+    test "a chunk holding all the query's words apart is found, below a phrase hit" do
       index =
         ranking_index([
-          ranking_chunk(%{
-            id: "x/together.md",
-            body: "terra speed is good",
-            body_downcased: "terra speed is good"
-          }),
+          ranking_chunk(%{id: "x/together.md", body: "terra speed is good"}),
           ranking_chunk(%{
             id: "x/apart.md",
-            body: "terra Reifen ... weit entfernt speed",
-            body_downcased: "terra reifen ... weit entfernt speed"
-          })
+            file_title: "Speed and Terra",
+            body: "terra Reifen ... weit entfernt speed"
+          }),
+          ranking_chunk(%{id: "x/one-word.md", file_title: "Terra", body: "only one of them"})
         ])
 
       results = search(index, %{query: "terra speed"})
-      assert Enum.map(results, & &1.id) == ["x/together.md"]
+      assert Enum.map(results, & &1.id) == ["x/together.md", "x/apart.md"]
+    end
+
+    test "a phrase hit ranks above a words-apart hit whatever their scores" do
+      index =
+        ranking_index([
+          ranking_chunk(%{id: "x/phrase.md", body: "the raised bed"}),
+          ranking_chunk(%{
+            id: "x/apart.md",
+            file_title: "Bed, raised",
+            type: :decision,
+            body: String.duplicate("raised and bed ", 10)
+          })
+        ])
+
+      assert [phrase, apart] = search(index, %{query: "raised bed", prefer: :decision})
+      assert phrase.id == "x/phrase.md"
+      assert apart.id == "x/apart.md"
+      assert apart.score > phrase.score
+    end
+
+    test "a chunk missing one of the query's words is not found" do
+      index = ranking_index([ranking_chunk(%{body: "raised beds of tomatoes"})])
+
+      assert search(index, %{query: "raised bed peppers"}) == []
+    end
+
+    # The words-apart score is the weakest word's: a hit is only as strong as
+    # the least of the words it has to contain.
+    test "a words-apart hit scores what its weakest word scores" do
+      index =
+        ranking_index([
+          ranking_chunk(%{file_title: "Tomatoes", body: "raised, raised, raised, then tomatoes"})
+        ])
+
+      assert [%{score: score}] = search(index, %{query: "raised tomatoes"})
+      # "raised": three body occurrences; "tomatoes": the title and one occurrence.
+      assert score == 3 * Index.strength(:body_occurrence)
+    end
+
+    test "query and text are folded alike: heizoel finds Heizöl" do
+      index =
+        ranking_index([
+          ranking_chunk(%{id: "x/tank.md", file_title: "Heizöl", body: "Der Heizöltank"})
+        ])
+
+      assert [%{id: "x/tank.md"}] = search(index, %{query: "heizoel"})
+      assert [%{id: "x/tank.md"}] = search(index, %{query: "HEIZÖL"})
+    end
+
+    test "leading and trailing whitespace in a query is ignored" do
+      index = ranking_index([ranking_chunk(%{id: "x/bed.md", body: "the raised bed"})])
+
+      assert search(index, %{query: "  raised bed\n"}) == search(index, %{query: "raised bed"})
+      assert [%{id: "x/bed.md"}] = search(index, %{query: " raised bed "})
+      assert search(index, %{query: "   "}) == []
+    end
+
+    test "equal scores and times rank by id, so the order is the same on every call" do
+      chunks = for id <- ~w(x/c.md x/a.md x/b.md), do: ranking_chunk(%{id: id, body: "wort"})
+      index = ranking_index(chunks)
+
+      assert Enum.map(search(index, %{query: "wort"}), & &1.id) == ~w(x/a.md x/b.md x/c.md)
     end
 
     test "limit is taken at its word — no clamp, no default of its own" do
@@ -363,7 +458,7 @@ defmodule Vigil.IndexTest do
       assert [%{score: score}] = search(heading, %{query: "terra"})
       assert score == Index.strength(:heading)
 
-      once = ranking_index([ranking_chunk(%{body: "terra", body_downcased: "terra"})])
+      once = ranking_index([ranking_chunk(%{body: "terra"})])
       assert [%{score: score}] = search(once, %{query: "terra"})
       assert score == Index.strength(:body_occurrence)
 
@@ -376,7 +471,7 @@ defmodule Vigil.IndexTest do
 
     test "the body contributes at most its published maximum, however often it hits" do
       body = String.duplicate("terra ", 20)
-      index = ranking_index([ranking_chunk(%{body: body, body_downcased: body})])
+      index = ranking_index([ranking_chunk(%{body: body})])
 
       assert [%{score: score}] = search(index, %{query: "terra"})
       assert score == Index.strength(:body_occurrences_max)
@@ -390,7 +485,7 @@ defmodule Vigil.IndexTest do
 
       index =
         ranking_index([
-          ranking_chunk(%{heading_path: ["Terra"], body: body, body_downcased: body})
+          ranking_chunk(%{heading_path: ["Terra"], body: body})
         ])
 
       assert [%{score: score}] = search(index, %{query: "terra"})
@@ -853,18 +948,28 @@ defmodule Vigil.IndexTest do
   end
 
   # One chunk, one owner (docs/design.md, "Chunking"): what the index holds is
-  # the value the parser produced, with the two fields search needs on it.
+  # the value the parser produced, with the fields search needs on it.
   # Nothing copies it field by field, which is what this asserts by comparing
   # the whole struct — a field added to the parser's chunk arrives here with
   # no second edit, and a copy that forgot one would fail.
   describe "the chunk the index holds" do
-    test "is the parser's own chunk, plus the note's domain and title", %{index: index} do
+    test "is the parser's own chunk, plus the note's domain and title, and its folded text",
+         %{index: index} do
       parsed =
         parse("bike/via-carolina.md").chunks
         |> Enum.find(&(&1.heading == "Fueling"))
 
       assert Index.find_chunk(index, parsed.id) ==
-               %{parsed | domain: "bike", file_title: "Via Carolina"}
+               %{
+                 parsed
+                 | domain: "bike",
+                   file_title: "Via Carolina",
+                   folded: %{
+                     title: "via carolina",
+                     headings: ["fueling"],
+                     body: "steady baseline intake across the day."
+                   }
+               }
     end
   end
 end
