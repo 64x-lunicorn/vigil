@@ -137,12 +137,20 @@ MIX
   # outside systemd, and it answers with the chunk ids the running release
   # derives — one id naming the release, so the test can see whose list
   # reached the comparison. A release holding .no-chunk-ids is one built
-  # before Vigil.Release.chunk_ids/0 existed.
+  # before Vigil.Release.chunk_ids/0 existed, and says so the way `eval` does;
+  # one holding .chunk-ids-crash fails for any other reason.
   cat >"${BIN}/release-bin" <<'REL'
 #!/bin/sh
 release="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = "eval" ]; then
-  [ -f "${release}/.no-chunk-ids" ] && exit 1
+  if [ -f "${release}/.no-chunk-ids" ]; then
+    echo "** (UndefinedFunctionError) function Vigil.Release.chunk_ids/0 is undefined (module Vigil.Release is not available)" >&2
+    exit 1
+  fi
+  if [ -f "${release}/.chunk-ids-crash" ]; then
+    echo "** (File.Error) could not read vault: permission denied" >&2
+    exit 1
+  fi
   echo "note.md#seen-by-$(basename "$release") vault=${VIGIL_VAULT_PATH:-}"
 fi
 exit 0
@@ -1030,6 +1038,33 @@ if grep -q "slug_diff" "$FAKE_MIX_LOG"; then
   fail "the target was not asked to compare against nothing"
 else
   pass "the target was not asked to compare against nothing"
+fi
+
+section "12e2 A running release that fails to list its ids stops the run"
+
+# Only a release too old to be asked is let through uncompared. Any other
+# failure — the one fs.protected_regular=2 made of root writing the list into
+# a file the service account had made in /tmp, say — used to read the same.
+build_host
+touch "${PREFIX}/releases/v0/.chunk-ids-crash"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+assert_eq "the service was never cycled" "(none)" "$(systemctl_calls)"
+if grep -q "permission denied" "${WORK}/out.log" && grep -q "could not list its chunk ids" "${WORK}/out.log"; then
+  pass "shows what the release said and that the switch is not made"
+else
+  fail "shows what the release said and that the switch is not made" "$(grep -i chunk "${WORK}/out.log" || echo none)"
+fi
+
+# The list reaches the comparison through a file the service account writes;
+# the root shell never opens one it did not create itself.
+# shellcheck disable=SC2016 # the needle is update.sh's text, not an expansion
+if grep -nE '>>? *"\$running_ids"' "$UPDATE_SH"; then
+  fail "update.sh never redirects into the service account's ids file"
+else
+  pass "update.sh never redirects into the service account's ids file"
 fi
 
 section "12f  --rebuild moves no id and compares nothing"

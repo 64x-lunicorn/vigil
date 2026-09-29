@@ -529,19 +529,37 @@ record_done "built release $(basename "$RELEASE_DIR")"
 # A change is asked about, and refused under --non-interactive (exit 2)
 # unless --accept-id-changes says the operator has read the release notes.
 # Declining is exit 4. A running release that cannot list its ids — one built
-# before it could — is compared against nothing, and that is said.
+# before it could, whose `eval` names Vigil.Release.chunk_ids/0 as undefined —
+# is compared against nothing, and that is said. Any other failure to list
+# them stops the run (exit 1) before anything is switched: that is a release
+# that could not answer, not one too old to be asked.
+#
+# The list is taken in by this shell and written to the file by the service
+# account, which also made it. This shell (root) never opens that file:
+# /tmp is sticky, and with fs.protected_regular=2 (Debian's default) root may
+# not open for writing a file another user owns there — the redirect failed,
+# and the failure read as "a release too old to list its ids".
 check_chunk_ids() {
-  local running_ids exclude output
+  local running_ids exclude output ids eval_err
   exclude="$(env_file_value VIGIL_EXCLUDE)"
-  # Owned by the service account, which reads it below; written by this shell.
-  running_ids="$(as_vigil mktemp)"
+  eval_err="$(mktemp)"
 
-  if ! as_vigil env VIGIL_VAULT_PATH="$VAULT" VIGIL_EXCLUDE="$exclude" \
-    "${PREVIOUS_RELEASE}/bin/vigil" eval 'Vigil.Release.chunk_ids()' >"$running_ids" 2>/dev/null; then
-    rm -f "$running_ids"
-    warn "The running release cannot list its chunk ids (a release built before Vigil.Release.chunk_ids/0 cannot), so this switch is not compared. Before a slug change: mix vigil.slug_diff <vault>."
-    return 0
+  if ! ids="$(as_vigil env VIGIL_VAULT_PATH="$VAULT" VIGIL_EXCLUDE="$exclude" \
+    "${PREVIOUS_RELEASE}/bin/vigil" eval 'Vigil.Release.chunk_ids()' 2>"$eval_err")"; then
+    if grep -q "chunk_ids/0 is undefined" "$eval_err"; then
+      rm -f "$eval_err"
+      warn "The running release cannot list its chunk ids (a release built before Vigil.Release.chunk_ids/0 cannot), so this switch is not compared. Before a slug change: mix vigil.slug_diff <vault>."
+      return 0
+    fi
+    cat "$eval_err" >&2
+    rm -f "$eval_err"
+    err "The running release could not list its chunk ids (output above), so the switch cannot be compared. The running service is untouched."
+    exit 1
   fi
+  rm -f "$eval_err"
+
+  running_ids="$(as_vigil mktemp)"
+  printf '%s\n' "$ids" | as_vigil tee "$running_ids" >/dev/null
 
   # shellcheck disable=SC2016 # $1-$3 are expanded by the inner bash -c, not here
   if output="$(as_vigil env VIGIL_EXCLUDE="$exclude" bash -c \

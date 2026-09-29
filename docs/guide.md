@@ -943,7 +943,9 @@ before switching; declining exits 4. Under `--non-interactive` it refuses with
 exit 2 unless `--accept-id-changes` is given. Read the release's
 [changelog](../CHANGELOG.md) entry before accepting. A running release built
 before `Vigil.Release.chunk_ids/0` existed cannot list its ids; the switch is
-then not compared, and `update.sh` says so.
+then not compared, and `update.sh` says so. A running release that fails to
+list them for any other reason stops the update (exit 1) before anything is
+switched, and its error is printed.
 
 - **Logs:** `journalctl -u vigil -f`
 - **Vault state:** `git -C /var/lib/vigil/vault log --oneline -5`
