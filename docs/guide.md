@@ -379,9 +379,9 @@ every other string (`path`, `id`, `from`, `to`, `query`, `domain`, `heading`,
 1,024.
 A longer value is a tool error naming the parameter, e.g. `Invalid parameter
 content: expected at most 1000000 characters`. The `/mcp` request body is read
-up to 8,000,000 bytes, which fits the longest `content` sent as UTF-8; a
-larger body is answered `413` with a JSON-RPC error
-(`-32600`).
+up to 8,000,000 bytes, which fits the longest `content` sent as UTF-8 (not
+sent with every character escaped as `\uXXXX`); a larger body is answered
+`413` with a JSON-RPC error (`-32600`).
 
 `update_frontmatter` changes only `type`, `starts` and `ends`; every other key
 in the block (`tags`, `aliases`, …) stays as it was, line for line. A block

@@ -1412,6 +1412,36 @@ defmodule Vigil.MCP.ServerTest do
       assert delete(persistence, token, [{"mcp-session-id", session_id}]).status == 404
     end
 
+    # The transport's rule for every request after initialization, DELETE
+    # included: a version header this server does not speak, or one other
+    # than the session negotiated, is a 400 — and the session stays.
+    test "DELETE /mcp checks MCP-Protocol-Version like every other request", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+
+      for version <- ["1999-01-01", "2025-03-26"] do
+        conn =
+          delete(persistence, token, [
+            {"mcp-session-id", session_id},
+            {"mcp-protocol-version", version}
+          ])
+
+        assert conn.status == 400, version
+      end
+
+      assert ping(persistence, token, session_id).status == 200
+
+      conn =
+        delete(persistence, token, [
+          {"mcp-session-id", session_id},
+          {"mcp-protocol-version", "2025-11-25"}
+        ])
+
+      assert conn.status == 204
+    end
+
     test "DELETE /mcp needs a token and a session id", %{persistence: persistence, token: token} do
       no_token = conn(:delete, "/mcp") |> Server.call(opts(persistence))
       assert no_token.status == 401

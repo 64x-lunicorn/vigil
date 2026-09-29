@@ -26,9 +26,14 @@ defmodule Vigil.MCP.Server do
   # How many bytes of a `/mcp` body are read (docs/design.md, "Input sizes are
   # bounded"). Stated here rather than left to Plug's default, which is a
   # number nothing in vigil decided. It is kept above the longest argument the
-  # tool table admits — a million characters of `content`, up to four bytes
-  # each in UTF-8 — plus the rest of the message, so a too-long note is
-  # refused by the validation that names its parameter, not by this.
+  # tool table admits sent as UTF-8 — a million characters of `content`, up
+  # to four bytes each — plus the rest of the message, so a too-long note is
+  # refused by the validation that names its parameter, not by this. It is
+  # deliberately not kept above the same argument sent escaped: `\uXXXX` is
+  # six bytes a character and a surrogate pair twelve, and a limit covering
+  # that would let every request hold half again as much memory for a
+  # client that escapes a whole book of emoji. Such a body gets the 413
+  # below instead of the validation error — refused all the same.
   @max_body_bytes 8_000_000
 
   # Who this server says it is on `initialize`, beside its name and version.
@@ -144,15 +149,24 @@ defmodule Vigil.MCP.Server do
   # Ends the session the header names — the transport's way for a client to
   # say it is done. Authenticated and counted like every other request, and
   # answered as a request in an unknown session is: only the token the session
-  # is bound to can end it, and every other answer is 404.
+  # is bound to can end it, and every other answer is 404. Its
+  # `MCP-Protocol-Version` is held to the same rule as a POST's — a version
+  # this server does not speak, or one other than the session negotiated, is
+  # a 400 and ends nothing.
   delete "/mcp" do
     authenticate(conn, fn conn, auth ->
-      with_header_session(conn, fn session_id ->
-        case Session.finish(conn.private.sessions, session_id, auth.token_digest, unix_now()) do
-          :ok -> send_resp(conn, 204, "")
-          :error -> send_resp(conn, 404, "")
-        end
-      end)
+      case check_protocol_version(conn) do
+        {:ok, true, conn} ->
+          with_session(conn, auth, fn conn, session_id ->
+            case Session.finish(conn.private.sessions, session_id, auth.token_digest, unix_now()) do
+              :ok -> send_resp(conn, 204, "")
+              :error -> send_resp(conn, 404, "")
+            end
+          end)
+
+        {:ok, false, conn} ->
+          send_resp(conn, 400, "")
+      end
     end)
   end
 

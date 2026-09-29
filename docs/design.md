@@ -746,10 +746,13 @@ that 1,024 does not already.
 `Vigil.MCP.Server` rather than left to Plug's default. It stays above the
 longest argument the table admits — a million characters of up to four bytes
 each in UTF-8 — plus the rest of the message, so a note that is too long is
-refused by the validation that names its parameter, not by the transport. (A
-client that escapes every character as `\uXXXX` spends up to twelve bytes on
-one and can reach the body limit first; it is refused all the same, only in
-the transport's words.) A body over the limit is not read to its end and is answered `413` with a
+refused by the validation that names its parameter, not by the transport.
+It is deliberately not raised to cover the same argument sent escaped: JSON
+lets a client spend six bytes on a character (`\uXXXX`) and twelve on one
+outside the Basic Multilingual Plane (a surrogate pair), and a limit of twelve
+times the longest `content` would let every request hold half again as much
+memory, for a client that escapes a book's worth of emoji. Such a body is
+refused all the same, only in the transport's words. A body over the limit is not read to its end and is answered `413` with a
 JSON-RPC error (`-32600`, `id: null`): there is no complete message to take an
 id from, and a client should learn why in the protocol's words, not from an
 empty `400`.
@@ -2031,7 +2034,8 @@ it is one of these, and with 2025-11-25 otherwise — the client then accepts it
 or disconnects, as the lifecycle says. The negotiated version belongs to the
 session (`Vigil.MCP.Session`): every later request in it that carries
 `MCP-Protocol-Version` must name that version, and anything else — another
-supported version, one vigil does not speak, the header twice — is a 400. A
+supported version, one vigil does not speak, the header twice — is a 400.
+That includes the `DELETE` that ends the session, which ends nothing then. A
 request with no header at all is accepted as the session's version: 2025-03-26
 defined no such header, so its clients send none, and the transport's fallback
 for a missing header only applies to a server with no other way to know.
