@@ -266,7 +266,9 @@ defmodule Vigil.StoreExcludeTest do
     test "leave out the commits a note had under an excluded name", %{vault: vault, git: git} do
       at = initial_commit()
       :ok = git.move.(vault, "work/secret.md", "bike/secret.md")
-      {:ok, _} = git.commit.(vault, ["work/secret.md", "bike/secret.md"], "move out of work")
+
+      {:ok, _} =
+        git.commit.(vault, "main", ["work/secret.md", "bike/secret.md"], "move out of work")
 
       assert {:ok, %{path: "bike/secret.md", commits: [moved]}} = history("bike/secret.md")
       assert %{path: "bike/secret.md", message: "move out of work"} = moved

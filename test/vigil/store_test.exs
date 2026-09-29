@@ -1538,7 +1538,7 @@ defmodule Vigil.StoreTest do
       CommitLog.push_from_elsewhere(log, path, @human_note)
       File.write!(Path.join(vault, path), "---\ntype: reference\n---\n# Ours\n")
       :ok = git.add.(vault, [path])
-      {:ok, _} = git.commit.(vault, [path], "update: #{path}")
+      {:ok, _} = git.commit.(vault, "main", [path], "update: #{path}")
       :ok = git.fetch.(vault, "origin", "main")
       {:conflict, [^path]} = git.rebase.(vault, "origin", "main")
 
@@ -1559,6 +1559,28 @@ defmodule Vigil.StoreTest do
       CommitLog.detach(log)
 
       assert %{healthy: false, on_branch: false, writer_answers: true} = Store.status(@store)
+    end
+
+    # A `git switch` in the clone after boot: the write is refused, the file
+    # left as it was, and nothing claims a push that carried it.
+    @tag :capture_log
+    test "a write while another branch is checked out is refused, naming both branches",
+         %{vault: vault} do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+      start_store(vault, git: git)
+      path = Path.join(vault, "bike/terra-speed.md")
+      before = File.read!(path)
+
+      CommitLog.switch(log, "elsewhere")
+
+      assert {:error, reason} =
+               Store.call(@store, :append, %{path: "bike/terra-speed.md", content: "More"})
+
+      assert reason =~ "VIGIL_GIT_BRANCH" and reason =~ "elsewhere"
+      assert File.read!(path) == before
+      refute Enum.any?(CommitLog.calls(log), &match?({:push, _, _}, &1))
+      assert %{on_branch: false, healthy: false} = Store.status(@store)
     end
 
     test "status: a writer that does not answer is reported, not waited on", %{vault: vault} do
@@ -2004,7 +2026,7 @@ defmodule Vigil.StoreTest do
   describe "write-path robustness" do
     test "a write whose commit fails leaves the file as it was", %{vault: vault} do
       :ok = stop_supervised(Store)
-      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      git = %{CommitLog.new(vault) | commit: fn _, _, _, _ -> {:error, "boom"} end}
       start_store(vault, git: git)
 
       path = Path.join(vault, "bike/terra-speed.md")
@@ -2055,7 +2077,7 @@ defmodule Vigil.StoreTest do
     # was asked for: when the change does not happen, neither does it.
     test "a create into a new project whose commit fails leaves no directory", %{vault: vault} do
       :ok = stop_supervised(Store)
-      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      git = %{CommitLog.new(vault) | commit: fn _, _, _, _ -> {:error, "boom"} end}
       start_store(vault, git: git)
 
       assert {:error, "git commit failed: boom"} =
@@ -2071,7 +2093,7 @@ defmodule Vigil.StoreTest do
 
     test "a delete or a move whose commit fails leaves the note where it was", %{vault: vault} do
       :ok = stop_supervised(Store)
-      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      git = %{CommitLog.new(vault) | commit: fn _, _, _, _ -> {:error, "boom"} end}
       start_store(vault, git: git)
 
       path = Path.join(vault, "bike/via-carolina.md")
@@ -2372,7 +2394,7 @@ defmodule Vigil.StoreTest do
       vault: vault
     } do
       :ok = stop_supervised(Store)
-      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      git = %{CommitLog.new(vault) | commit: fn _, _, _, _ -> {:error, "boom"} end}
       start_store(vault, git: git)
 
       paths = ["bike/terra-speed.md", "bike/via-carolina.md"]

@@ -1105,9 +1105,9 @@ order they came in.
 
 ## A failed commit leaves the vault as it was
 
-A commit can fail — `HEAD` is detached, a lock is held, the disk is full — after
-the working tree and git's staging area have already been changed: the file
-written and added, `git rm` or `git mv` already run. A change that did not
+A commit can fail — `HEAD` is detached or on another branch, a lock is held,
+the disk is full — after the working tree and git's staging area have already
+been changed: the file written and added, `git rm` or `git mv` already run. A change that did not
 commit must not stay behind. The index still describes the vault before it, and
 the next write's commit would sweep the stray change in under its own message.
 `write` used to put the file back and leave the staged blob; `delete_note` and
@@ -1306,7 +1306,13 @@ it is still due — or, offline, leaves it for the next one. And `commit`
 refuses a detached `HEAD` outright, so a clone that got there some other way
 fails the write, with the staging undone like any failed commit, instead of
 losing it; `status` reports `on_branch: false` and `/healthz` answers 503
-until someone checks the branch out again.
+until someone checks the branch out again. The same holds for another branch
+checked out after boot — a `git switch` in the clone while the service runs:
+`commit`, `fast_forward` and `rebase` are handed the branch every push names
+and refuse, before git is asked, unless it is the one checked out, with a
+message that names `VIGIL_GIT_BRANCH`, the branch found and the `git switch`
+that fixes it. The boot check says this once; the Git value says it on every
+write, because a clone can change under a running server.
 
 **Nothing about it can fail a write.** A fetch, a fast-forward or a rebase
 that fails is logged, and the write goes ahead on the vault as it was; its

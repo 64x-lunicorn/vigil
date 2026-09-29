@@ -39,20 +39,20 @@ defmodule Vigil.GitTest do
   end
 
   # What a write asks for, as one step: stage the path, commit it.
-  defp add_commit(git, vault, path, message) do
+  defp add_commit(git, vault, path, message, branch \\ "main") do
     :ok = git.add.(vault, [path])
-    git.commit.(vault, [path], message)
+    git.commit.(vault, branch, [path], message)
   end
 
   defp remove_commit(git, vault, path, message) do
     with :ok <- git.remove.(vault, [path]),
-         {:ok, _} <- git.commit.(vault, [path], message),
+         {:ok, _} <- git.commit.(vault, "main", [path], message),
          do: :ok
   end
 
   defp move_commit(git, vault, from, to, message) do
     :ok = git.move.(vault, from, to)
-    git.commit.(vault, [from, to], message)
+    git.commit.(vault, "main", [from, to], message)
   end
 
   # One body per claim, run against the repository and against the commit log.
@@ -115,7 +115,7 @@ defmodule Vigil.GitTest do
         glob = note(vault, "bike/*.md", "Glob")
         {:ok, _} = add_commit(git, vault, glob, "create: #{glob}")
 
-        assert :ok = Commit.delete(git, vault, glob, "delete: #{glob}")
+        assert :ok = Commit.delete(git, vault, "main", glob, "delete: #{glob}")
 
         refute File.exists?(Path.join(vault, glob))
         assert File.exists?(Path.join(vault, "bike/terra-speed.md"))
@@ -478,10 +478,44 @@ defmodule Vigil.GitTest do
         path = note(vault, "bike/detached.md", "Detached")
         :ok = git.add.(vault, [path])
 
-        assert {:error, reason} = git.commit.(vault, [path], "create: #{path}")
+        assert {:error, reason} = git.commit.(vault, "main", [path], "create: #{path}")
         assert reason =~ "detached"
         assert {:ok, %{head: nil, rebasing: false}} = git.tracking.(vault)
         assert {:ok, %{ahead: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      # docs/design.md, "The vault's remote and branch are checked against
+      # the clone": what boot checked holds for every write after it. A `git
+      # switch` in the clone after boot puts HEAD on a branch no push names;
+      # a commit there would never leave the host while the push that
+      # follows found the configured branch up to date.
+      test "a commit while another branch is checked out is refused, naming both branches",
+           %{git: git, vault: vault} = ctx do
+        switch(ctx, "elsewhere")
+        path = note(vault, "bike/switched.md", "Switched")
+        :ok = git.add.(vault, [path])
+
+        assert {:error, reason} = git.commit.(vault, "main", [path], "create: #{path}")
+        assert reason =~ "VIGIL_GIT_BRANCH"
+        assert reason =~ "main"
+        assert reason =~ "elsewhere"
+        assert {:ok, %{head: "elsewhere"}} = git.tracking.(vault)
+        assert {:ok, %{ahead: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      test "a fast-forward and a rebase are refused while another branch is checked out",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        :ok = git.fetch.(vault, "origin", "main")
+        switch(ctx, "elsewhere")
+
+        assert {:error, reason} = git.fast_forward.(vault, "origin", "main")
+        assert reason =~ "VIGIL_GIT_BRANCH" and reason =~ "elsewhere"
+        assert {:error, reason} = git.rebase.(vault, "origin", "main")
+        assert reason =~ "VIGIL_GIT_BRANCH" and reason =~ "elsewhere"
+
+        refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        assert {:ok, %{ahead: 0, behind: 1}} = git.divergence.(vault, "origin", "main")
       end
 
       test "aborting when no rebase is in progress is an error", %{git: git, vault: vault} do
@@ -504,9 +538,17 @@ defmodule Vigil.GitTest do
 
     test "is one commit holding the rename and every rewritten note", %{git: git, vault: vault} do
       assert {:ok, _} =
-               Commit.move(git, vault, "bike/terra-speed.md", "bike/terra-40c.md", "move", [
-                 {"bike/via-carolina.md", "# Via\n[[terra-40c]]\n"}
-               ])
+               Commit.move(
+                 git,
+                 vault,
+                 "main",
+                 "bike/terra-speed.md",
+                 "bike/terra-40c.md",
+                 "move",
+                 [
+                   {"bike/via-carolina.md", "# Via\n[[terra-40c]]\n"}
+                 ]
+               )
 
       {out, 0} =
         System.cmd("git", ["show", "--name-status", "--format=%s", "HEAD"], cd: vault)
@@ -562,6 +604,13 @@ defmodule Vigil.GitTest do
     :ok
   end
 
+  defp switch(%{log: log}, branch), do: CommitLog.switch(log, branch)
+
+  defp switch(%{vault: vault}, branch) do
+    {_out, 0} = System.cmd("git", ["switch", "-q", "-c", branch], cd: vault)
+    :ok
+  end
+
   defp detach(%{log: log}), do: CommitLog.detach(log)
 
   defp detach(%{vault: vault}) do
@@ -581,7 +630,7 @@ defmodule Vigil.GitTest do
     end)
   end
 
-  defp failing_commit(git), do: %{git | commit: fn _, _, _ -> {:error, "boom"} end}
+  defp failing_commit(git), do: %{git | commit: fn _, _, _, _ -> {:error, "boom"} end}
 
   # docs/design.md, "A failed commit leaves the vault as it was". The commit is
   # made to fail through the value, after the staging it follows has happened,
@@ -608,7 +657,7 @@ defmodule Vigil.GitTest do
         {:ok, index} = git.snapshot_index.(vault, [path])
 
         assert {:error, "git commit failed: boom"} =
-                 Commit.write(failing, vault, path, "# Replaced\n", "update: #{path}")
+                 Commit.write(failing, vault, "main", path, "# Replaced\n", "update: #{path}")
 
         assert tree(vault) == before
         assert git.snapshot_index.(vault, [path]) == {:ok, index}
@@ -624,7 +673,7 @@ defmodule Vigil.GitTest do
         {:ok, index} = git.snapshot_index.(vault, [path])
 
         assert {:error, "git commit failed: boom"} =
-                 Commit.write(failing, vault, path, "# New\n", "create: #{path}")
+                 Commit.write(failing, vault, "main", path, "# New\n", "create: #{path}")
 
         assert tree(vault) == before
         assert git.snapshot_index.(vault, [path]) == {:ok, index}
@@ -640,7 +689,7 @@ defmodule Vigil.GitTest do
         {:ok, index} = git.snapshot_index.(vault, [path])
 
         assert {:error, "git rm/commit failed: boom"} =
-                 Commit.delete(failing, vault, path, "delete: #{path}")
+                 Commit.delete(failing, vault, "main", path, "delete: #{path}")
 
         assert tree(vault) == before
         assert git.snapshot_index.(vault, [path]) == {:ok, index}
@@ -657,7 +706,7 @@ defmodule Vigil.GitTest do
         before = tree(vault)
 
         assert {:error, "git rm/commit failed: boom"} =
-                 Commit.delete(failing, vault, path, "delete: #{path}")
+                 Commit.delete(failing, vault, "main", path, "delete: #{path}")
 
         assert tree(vault) == before
       end
@@ -672,7 +721,14 @@ defmodule Vigil.GitTest do
         {:ok, index} = git.snapshot_index.(vault, paths)
 
         assert {:error, "git mv/commit failed: boom"} =
-                 Commit.move(failing, vault, hd(paths), List.last(paths), "move: via-carolina")
+                 Commit.move(
+                   failing,
+                   vault,
+                   "main",
+                   hd(paths),
+                   List.last(paths),
+                   "move: via-carolina"
+                 )
 
         assert tree(vault) == before
         assert git.snapshot_index.(vault, paths) == {:ok, index}
@@ -696,6 +752,7 @@ defmodule Vigil.GitTest do
                  Commit.move(
                    failing,
                    vault,
+                   "main",
                    "bike/via-carolina.md",
                    "bike/archive/via-carolina.md",
                    "move: via-carolina",
@@ -713,10 +770,17 @@ defmodule Vigil.GitTest do
         failing: failing,
         vault: vault
       } do
-        {:error, _} = Commit.delete(failing, vault, "bike/via-carolina.md", "delete")
+        {:error, _} = Commit.delete(failing, vault, "main", "bike/via-carolina.md", "delete")
 
         assert {:ok, _} =
-                 Commit.write(git, vault, "bike/next.md", "# Next\n", "create: bike/next.md")
+                 Commit.write(
+                   git,
+                   vault,
+                   "main",
+                   "bike/next.md",
+                   "# Next\n",
+                   "create: bike/next.md"
+                 )
 
         assert File.exists?(Path.join(vault, "bike/via-carolina.md"))
         assert git.log_metadata.(vault)["bike/via-carolina.md"].last_author == "Daniel"
@@ -813,13 +877,15 @@ defmodule Vigil.GitTest do
       stage = fn -> System.cmd("git", ["ls-files", "--stage"], cd: vault) end
       {status_before, stage_before} = {status.(), stage.()}
 
-      {:error, _} = Commit.write(failing, vault, "bike/terra-speed.md", "# X\n", "update")
-      {:error, _} = Commit.write(failing, vault, "bike/new/x.md", "# X\n", "create")
-      {:error, _} = Commit.delete(failing, vault, "bike/via-carolina.md", "delete")
-      {:error, _} = Commit.move(failing, vault, "bike/via-carolina.md", "bike/b/v.md", "move")
+      {:error, _} = Commit.write(failing, vault, "main", "bike/terra-speed.md", "# X\n", "update")
+      {:error, _} = Commit.write(failing, vault, "main", "bike/new/x.md", "# X\n", "create")
+      {:error, _} = Commit.delete(failing, vault, "main", "bike/via-carolina.md", "delete")
 
       {:error, _} =
-        Commit.move(failing, vault, "bike/via-carolina.md", "bike/b/v.md", "move", [
+        Commit.move(failing, vault, "main", "bike/via-carolina.md", "bike/b/v.md", "move")
+
+      {:error, _} =
+        Commit.move(failing, vault, "main", "bike/via-carolina.md", "bike/b/v.md", "move", [
           {"bike/terra-speed.md", "# X\n"}
         ])
 
@@ -836,7 +902,7 @@ defmodule Vigil.GitTest do
       before = tree(vault)
 
       assert {:error, "git rm/commit failed: HEAD is detached" <> _} =
-               Commit.delete(git, vault, "bike/via-carolina.md", "delete")
+               Commit.delete(git, vault, "main", "bike/via-carolina.md", "delete")
 
       assert tree(vault) == before
       {out, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
@@ -1020,7 +1086,7 @@ defmodule Vigil.GitTest do
 
     test "a write pushes master to the remote", %{git: git, vault: vault, remote: remote} do
       path = note(vault, "bike/master.md", "Master")
-      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}", "master")
 
       assert :ok = git.push.(vault, "origin", "master")
       assert :ok = git.fetch.(vault, "origin", "master")

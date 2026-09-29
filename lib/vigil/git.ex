@@ -61,8 +61,9 @@ defmodule Vigil.Git do
     :remove,
     # git mv -- from to. :ok | {:error, reason}.
     :move,
-    # Commit what is staged for paths, authored as vigil — refused on a
-    # detached HEAD. {:ok, %{updated_at:, last_author:}} | {:error, reason}.
+    # Commit what is staged for paths onto the branch it is handed, authored
+    # as vigil — refused unless that branch is the one checked out.
+    # {:ok, %{updated_at:, last_author:}} | {:error, reason}.
     :commit,
     # What the index holds for paths, opaque to the caller.
     # {:ok, snapshot} | {:error, reason}.
@@ -86,11 +87,13 @@ defmodule Vigil.Git do
     # branch nor the working tree. :ok | {:error, reason}.
     :fetch,
     # git merge --ff-only <remote>/<branch>: adopts what the last fetch
-    # brought, or refuses. :ok | {:error, reason}.
+    # brought, or refuses — also unless <branch> is the one checked out.
+    # :ok | {:error, reason}.
     :fast_forward,
     # git rebase --onto <remote>/<branch> <fork point>: vigil's own unpushed
     # commits — never what a force-push took off the remote — replayed on
-    # top of what the last fetch brought, never a merge. :ok |
+    # top of what the last fetch brought, never a merge; refused unless
+    # <branch> is the one checked out. :ok |
     # {:conflict, paths} — the rebase stopped, and is left for abort_rebase —
     # | {:error, reason}.
     :rebase,
@@ -126,7 +129,7 @@ defmodule Vigil.Git do
       add: &add/2,
       remove: &remove/2,
       move: &move/3,
-      commit: &commit/3,
+      commit: &commit/4,
       snapshot_index: &snapshot_index/2,
       restore_index: &restore_index/2,
       push: &push/3,
@@ -371,27 +374,47 @@ defmodule Vigil.Git do
   end
 
   @doc """
-  Commits what is staged for `paths` under `message`, authored as
-  `vigil <vigil@local>`, and answers the metadata of the last commit that
+  Commits what is staged for `paths` under `message` onto `branch`, authored
+  as `vigil <vigil@local>`, and answers the metadata of the last commit that
   touched them: `{:ok, %{updated_at:, last_author:}}` or `{:error, reason}`.
 
-  Refused on a detached HEAD — a rebase that stopped and was never aborted,
-  a checkout by hand: a commit there is on no branch, the push that follows
-  names the branch and finds it up to date, and the write would be reported
-  pushed while it never leaves the host.
+  Refused unless `branch` — the one every push names, `VIGIL_GIT_BRANCH` — is
+  the one checked out: on a detached HEAD — a rebase that stopped and was
+  never aborted, a checkout by hand — and on another branch — a `git switch`
+  in the clone after boot. A commit there is not on the branch, the push that
+  follows names the branch and finds it up to date, and the write would be
+  reported pushed while it never leaves the host.
   """
-  def commit(vault_path, paths, message) do
-    with :ok <- on_a_branch(vault_path),
+  def commit(vault_path, branch, paths, message) do
+    with :ok <- on_branch(vault_path, branch),
          {:ok, _} <- commit_if_changed(vault_path, paths, message) do
       last_commit_meta(vault_path, paths)
     end
   end
 
-  defp on_a_branch(vault_path) do
+  # What commit/4, fast_forward/3 and rebase/3 ask first: every one of them
+  # acts on HEAD, and HEAD has to be the branch the push names.
+  defp on_branch(vault_path, branch) do
     case checked_out(vault_path) do
-      nil -> {:error, "HEAD is detached: vigil commits only onto a checked-out branch"}
-      _branch -> :ok
+      ^branch -> :ok
+      found -> {:error, off_branch(found, branch)}
     end
+  end
+
+  @doc """
+  Why a clone whose HEAD is `found` (`nil` when detached) is refused a
+  commit, a fast-forward or a rebase onto `branch`. One sentence for both
+  adapters, so the two refuse in the same words.
+  """
+  @spec off_branch(String.t() | nil, String.t()) :: String.t()
+  def off_branch(nil, branch) do
+    "HEAD is detached: vigil commits only onto the checked-out branch " <>
+      "VIGIL_GIT_BRANCH names (#{branch}); `git switch #{branch}` in the vault's clone fixes it"
+  end
+
+  def off_branch(found, branch) do
+    "HEAD is on #{found}, not on #{branch}, the branch VIGIL_GIT_BRANCH names and every " <>
+      "push pushes; `git switch #{branch}` in the vault's clone fixes it"
   end
 
   # A write whose content is what the file already holds — the same type set
@@ -555,10 +578,13 @@ defmodule Vigil.Git do
   @doc """
   `git merge --ff-only` onto what the last `fetch/3` brought: the checked-out
   branch moves forward to `remote`'s, or git refuses and nothing moves. Never
-  a merge commit (`docs/design.md`, principle 2). `:ok | {:error, reason}`.
+  a merge commit (`docs/design.md`, principle 2). Refused, before git is
+  asked, unless `branch` is the one checked out: a merge moves HEAD, whatever
+  branch it is on. `:ok | {:error, reason}`.
   """
   def fast_forward(vault_path, remote, branch) do
-    with {:ok, _} <-
+    with :ok <- on_branch(vault_path, branch),
+         {:ok, _} <-
            run(
              vault_path,
              @no_hooks ++ ["merge", "--ff-only", "--quiet", tracking_ref(remote, branch)]
@@ -589,9 +615,17 @@ defmodule Vigil.Git do
   `{:conflict, paths}` when a commit does not apply: the rebase has stopped,
   the paths are the ones git could not resolve, and it is the caller's to
   `abort_rebase/1` — nothing here decides that on its behalf.
-  `{:error, reason}` for any other refusal, a rebase that did not start.
+  `{:error, reason}` for any other refusal, a rebase that did not start —
+  among them a clone with another branch than `branch` checked out, or none.
   """
   def rebase(vault_path, remote, branch) do
+    case on_branch(vault_path, branch) do
+      :ok -> rebase_onto(vault_path, remote, branch)
+      error -> error
+    end
+  end
+
+  defp rebase_onto(vault_path, remote, branch) do
     onto = tracking_ref(remote, branch)
 
     upstream =

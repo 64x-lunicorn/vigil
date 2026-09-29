@@ -32,22 +32,24 @@ defmodule Vigil.Commit do
 
   @doc """
   Writes `content` to `rel_path` inside `vault_path` and commits it under
-  `message`, creating the parent directory if it is missing.
+  `message` onto `branch`, creating the parent directory if it is missing.
 
   `git` is the adapter its caller holds (`docs/design.md`, "Git is reached
   through a value") — this module touches the filesystem itself and asks that
-  value for the staging and the commit.
+  value for the staging and the commit. `branch` is the one every push names
+  (`VIGIL_GIT_BRANCH`): a clone with another one checked out, or none, is
+  refused the commit, and the change is undone.
 
   Returns the commit metadata on success — the caller decides what to do
   between the commit and the push. On failure the vault is left as it was.
   """
-  @spec write(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
+  @spec write(Git.t(), String.t(), String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
-  def write(%Git{} = git, vault_path, rel_path, content, message) do
+  def write(%Git{} = git, vault_path, branch, rel_path, content, message) do
     abs_path = Path.join(vault_path, rel_path)
     prefix = "git commit failed"
 
-    change(git, vault_path, [rel_path], message, prefix, fn ->
+    change(git, {vault_path, branch}, [rel_path], message, prefix, fn ->
       with :ok <- mkdir_p(Path.dirname(abs_path)),
            :ok <- write_file(abs_path, content) do
         git_step(git.add.(vault_path, [rel_path]), prefix)
@@ -56,24 +58,27 @@ defmodule Vigil.Commit do
   end
 
   @doc """
-  Removes `rel_path` from the vault and commits the removal under `message`.
+  Removes `rel_path` from the vault and commits the removal under `message`
+  onto `branch`.
 
   Nothing comes back but the verdict: the file is gone, so there is no note to
   reparse and no metadata a caller could put on one.
   """
-  @spec delete(Git.t(), String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
-  def delete(%Git{} = git, vault_path, rel_path, message) do
+  @spec delete(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
+          :ok | {:error, String.t()}
+  def delete(%Git{} = git, vault_path, branch, rel_path, message) do
     prefix = "git rm/commit failed"
 
     with {:ok, _commit_meta} <-
-           change(git, vault_path, [rel_path], message, prefix, fn ->
+           change(git, {vault_path, branch}, [rel_path], message, prefix, fn ->
              git_step(git.remove.(vault_path, [rel_path]), prefix)
            end),
          do: :ok
   end
 
   @doc """
-  Moves `from` to `to` inside the vault and commits it under `message`,
+  Moves `from` to `to` inside the vault and commits it under `message` onto
+  `branch`,
   together with `rewrites` — `{path, content}` pairs written after the move,
   in the same commit. `move_note`'s `update_links` is what hands some over: the
   notes whose links it rewrote, and `to` itself when the note links to itself.
@@ -82,13 +87,20 @@ defmodule Vigil.Commit do
 
   Returns the commit metadata for the note at its new path.
   """
-  @spec move(Git.t(), String.t(), String.t(), String.t(), String.t(), [{String.t(), String.t()}]) ::
-          {:ok, map()} | {:error, String.t()}
-  def move(%Git{} = git, vault_path, from, to, message, rewrites \\ []) do
+  @spec move(
+          Git.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          [{String.t(), String.t()}]
+        ) :: {:ok, map()} | {:error, String.t()}
+  def move(%Git{} = git, vault_path, branch, from, to, message, rewrites \\ []) do
     prefix = "git mv/commit failed"
     rewritten = Enum.map(rewrites, &elem(&1, 0))
 
-    change(git, vault_path, Enum.uniq([from, to | rewritten]), message, prefix, fn ->
+    change(git, {vault_path, branch}, Enum.uniq([from, to | rewritten]), message, prefix, fn ->
       with :ok <- mkdir_p(Path.dirname(Path.join(vault_path, to))),
            :ok <- git_step(git.move.(vault_path, from, to), prefix),
            :ok <- write_all(vault_path, rewrites) do
@@ -120,12 +132,12 @@ defmodule Vigil.Commit do
   # own message.
   #
   # A git failure reads as `prefix: <what git said>`.
-  defp change(git, vault_path, paths, message, prefix, perform) do
+  defp change(git, {vault_path, branch}, paths, message, prefix, perform) do
     tree = snapshot_tree(vault_path, paths)
 
     with {:ok, index} <- git_step(git.snapshot_index.(vault_path, paths), prefix) do
       with :ok <- perform.(),
-           {:ok, commit_meta} <- git_step(git.commit.(vault_path, paths, message), prefix) do
+           {:ok, commit_meta} <- git_step(git.commit.(vault_path, branch, paths, message), prefix) do
         {:ok, commit_meta}
       else
         {:error, msg} ->

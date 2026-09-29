@@ -78,7 +78,8 @@ defmodule Vigil.Git.CommitLog do
   the error git answers, which is how a test provokes a push failure.
   `tracking:` — what `tracking` answers, fixed; by default a clone with that
   one remote and that one branch checked out (unless `detach/1` detached
-  HEAD), tracking its namesake there, and whether a rebase is in progress.
+  HEAD or `switch/2` checked out another), tracking its namesake there, and
+  whether a rebase is in progress.
   """
   @spec recording(Path.t(), keyword()) :: {Git.t(), pid()}
   def recording(vault_path, opts \\ []) do
@@ -103,7 +104,8 @@ defmodule Vigil.Git.CommitLog do
           calls: [],
           # The paths a stopped rebase could not apply, until it is aborted.
           rebasing: nil,
-          detached: false,
+          # The branch checked out: nil once detach/1 detached HEAD.
+          head: branch,
           # Pushed from elsewhere, not fetched yet; fetched, not adopted yet;
           # and how many commits a force-push elsewhere took off the end of
           # the remote, not fetched yet.
@@ -134,10 +136,12 @@ defmodule Vigil.Git.CommitLog do
         end,
         fast_forward: fn vault, name, ref ->
           with :ok <- remote_result(log, {:fast_forward, name, ref}, ours, {name, ref}),
+               :ok <- on_branch(log, ref),
                do: fast_forward(log, vault)
         end,
         rebase: fn vault, name, ref ->
           with :ok <- remote_result(log, {:rebase, name, ref}, ours, {name, ref}),
+               :ok <- on_branch(log, ref),
                do: rebase(log, vault)
         end,
         abort_rebase: fn _vault ->
@@ -162,9 +166,10 @@ defmodule Vigil.Git.CommitLog do
           record(log, {:move, from, to})
           move(log, vault, from, to)
         end,
-        commit: fn vault, paths, message ->
+        commit: fn vault, ref, paths, message ->
           record(log, {:commit, paths, message})
-          commit(log, vault, paths, message, at)
+
+          with :ok <- on_branch(log, ref), do: commit(log, vault, paths, message, at)
         end,
         snapshot_index: fn _vault, _paths -> {:ok, Agent.get(log, & &1.staged)} end,
         restore_index: fn _vault, staged ->
@@ -210,7 +215,20 @@ defmodule Vigil.Git.CommitLog do
 
   @doc "`git checkout --detach`: HEAD on the branch's commit, no branch checked out."
   @spec detach(pid()) :: :ok
-  def detach(log), do: Agent.update(log, &%{&1 | detached: true})
+  def detach(log), do: Agent.update(log, &%{&1 | head: nil})
+
+  @doc "`git switch -c <branch>`: HEAD on the branch's commit, another branch checked out."
+  @spec switch(pid(), String.t()) :: :ok
+  def switch(log, branch), do: Agent.update(log, &%{&1 | head: branch})
+
+  # What `Vigil.Git` asks before a commit, a fast-forward or a rebase, in its
+  # words.
+  defp on_branch(log, branch) do
+    case Agent.get(log, & &1.head) do
+      ^branch -> :ok
+      found -> {:error, Git.off_branch(found, branch)}
+    end
+  end
 
   ## The record
 
@@ -225,18 +243,14 @@ defmodule Vigil.Git.CommitLog do
   end
 
   # A commit authored as vigil, of everything staged — or, when nothing staged
-  # changes anything, none at all, as `Vigil.Git.commit/3` makes none. Either
+  # changes anything, none at all, as `Vigil.Git.commit/4` makes none. Either
   # way the answer is the last commit that touched the paths, which is what
-  # git answers. A detached HEAD is refused before anything is committed.
+  # git answers. A HEAD off the branch is refused before this is reached.
   defp commit(log, vault_path, paths, message, at) do
-    Agent.get_and_update(log, fn
-      %{detached: true} = state ->
-        {{:error, "HEAD is detached: vigil commits only onto a checked-out branch"}, state}
-
-      state ->
-        changes = Enum.flat_map(state.staged, &change(&1, vault_path))
-        commits = record_commit(state.commits, changes, "vigil", "vigil@local", message, at)
-        {{:ok, last_touching(commits, paths)}, %{state | staged: [], commits: commits}}
+    Agent.get_and_update(log, fn state ->
+      changes = Enum.flat_map(state.staged, &change(&1, vault_path))
+      commits = record_commit(state.commits, changes, "vigil", "vigil@local", message, at)
+      {{:ok, last_touching(commits, paths)}, %{state | staged: [], commits: commits}}
     end)
   end
 
@@ -461,7 +475,7 @@ defmodule Vigil.Git.CommitLog do
   ## The history
 
   # A commit is recorded only when it changes something, as git makes none
-  # for content the file already holds (`Vigil.Git.commit/3`).
+  # for content the file already holds (`Vigil.Git.commit/4`).
   defp record_commit(commits, changes, author, email, message, at) do
     case Enum.reject(changes, &unchanged?(&1, commits)) do
       [] ->
@@ -589,10 +603,10 @@ defmodule Vigil.Git.CommitLog do
   end
 
   # A clone with the one remote and the one branch, tracking its namesake
-  # there; HEAD on it unless detached — and, like `Vigil.Git.tracking/1`, on
-  # it while a rebase of it is in progress.
+  # there; HEAD on it unless detached or switched — and, like
+  # `Vigil.Git.tracking/1`, on it while a rebase of it is in progress.
   defp tracking(state, remote, branch) do
-    head = if state.detached, do: nil, else: branch
+    head = state.head
     rebasing = state.rebasing != nil
 
     case remote do

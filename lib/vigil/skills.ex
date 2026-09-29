@@ -133,6 +133,7 @@ defmodule Vigil.Skills do
            Commit.write(
              git,
              vault_path,
+             target.git_branch,
              rel_path,
              Markdown.normalize_trailing_newline(content),
              "skill_write: #{rel_path}"

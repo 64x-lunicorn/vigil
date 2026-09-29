@@ -28,7 +28,7 @@ defmodule Vigil.CommitTest do
     abs = Path.join(vault, path)
     File.chmod!(abs, 0o600)
 
-    assert {:ok, _} = Commit.write(git, vault, path, "# Replaced\n", "update: #{path}")
+    assert {:ok, _} = Commit.write(git, vault, "main", path, "# Replaced\n", "update: #{path}")
 
     assert Bitwise.band(File.stat!(abs).mode, 0o777) == 0o600
     assert File.read!(abs) == "# Replaced\n"
@@ -40,7 +40,7 @@ defmodule Vigil.CommitTest do
     %File.Stat{inode: before} = File.stat!(abs)
     entries = dir_entries(vault, "bike")
 
-    assert {:ok, _} = Commit.write(git, vault, path, "# Replaced\n", "update: #{path}")
+    assert {:ok, _} = Commit.write(git, vault, "main", path, "# Replaced\n", "update: #{path}")
 
     assert File.read!(abs) == "# Replaced\n"
     assert %File.Stat{inode: after_write} = File.stat!(abs)
@@ -56,7 +56,7 @@ defmodule Vigil.CommitTest do
     entries = dir_entries(vault, "bike")
 
     assert {:error, "Could not write file " <> reason} =
-             Commit.write(git, vault, "bike/a-directory.md", "# X\n", "create")
+             Commit.write(git, vault, "main", "bike/a-directory.md", "# X\n", "create")
 
     assert reason =~ "directory"
     assert dir_entries(vault, "bike") == entries
@@ -75,6 +75,7 @@ defmodule Vigil.CommitTest do
                Commit.move(
                  git,
                  vault,
+                 "main",
                  "bike/terra-speed.md",
                  "bike/terra-40c.md",
                  "move",
@@ -94,7 +95,7 @@ defmodule Vigil.CommitTest do
     end
 
     test "a failed commit leaves every file as it was", %{vault: vault} do
-      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      git = %{CommitLog.new(vault) | commit: fn _, _, _, _ -> {:error, "boom"} end}
       paths = ["bike/terra-speed.md", "bike/via-carolina.md", "training/note-without-anything.md"]
       before = Map.new(paths, &{&1, File.read!(Path.join(vault, &1))})
 
@@ -108,6 +109,7 @@ defmodule Vigil.CommitTest do
                Commit.move(
                  git,
                  vault,
+                 "main",
                  "bike/terra-speed.md",
                  "gear/terra-40c.md",
                  "move",

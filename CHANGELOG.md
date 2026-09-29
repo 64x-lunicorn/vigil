@@ -217,6 +217,10 @@ read it afterwards.
 
 - A failed commit leaves the working tree and the index as they were, for
   every write, including `delete_note` and `move_note`.
+- A write while another branch is checked out in the vault's clone — a
+  `git switch` there after boot — is refused, and so is the update before it,
+  naming `VIGIL_GIT_BRANCH` and the branch found; it used to commit on that
+  branch, push `VIGIL_GIT_BRANCH` and answer `pushed: true`.
 - `replace_section` refuses a replacement that opens a code fence and never
   closes it; `append`'s `heading` is one non-empty line.
 - Heading parsing and the link rewrite of `move_note` take linear time on long

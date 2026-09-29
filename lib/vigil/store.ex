@@ -1099,14 +1099,15 @@ defmodule Vigil.Store do
   # the commit's metadata, which the reparse needs; a delete has no note left
   # to put metadata on.
   defp perform({:write, path, content}, message, state),
-    do: Commit.write(state.git, state.vault_path, path, content, message)
+    do: Commit.write(state.git, state.vault_path, state.git_branch, path, content, message)
 
   defp perform({:delete, path}, message, state) do
-    with :ok <- Commit.delete(state.git, state.vault_path, path, message), do: {:ok, nil}
+    with :ok <- Commit.delete(state.git, state.vault_path, state.git_branch, path, message),
+         do: {:ok, nil}
   end
 
   defp perform({:move, from, to, rewrites}, message, state),
-    do: Commit.move(state.git, state.vault_path, from, to, message, rewrites)
+    do: Commit.move(state.git, state.vault_path, state.git_branch, from, to, message, rewrites)
 
   # The index after the effect: the note as it now stands on disk, at the path
   # it now has — or gone. A move reparses every note whose links it rewrote as
