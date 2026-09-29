@@ -222,6 +222,20 @@ else
 fi
 record_done "installed packages, held every Erlang package and elixir"
 
+# Debian's erlang-base ships epmd.socket, enabled: systemd then listens on
+# port 4369 on every interface and starts epmd for whoever connects. vigil
+# runs without epmd (rel/vm.args.eex), and `-start_epmd false` closes nothing
+# systemd holds open — so the socket and the service are stopped and masked,
+# and nothing listens on 4369 whatever a later package upgrade enables.
+if [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] systemctl disable --now epmd.socket epmd.service && systemctl mask epmd.socket epmd.service"
+else
+  systemctl disable --now epmd.socket epmd.service >/dev/null 2>&1 || true
+  systemctl mask epmd.socket epmd.service >/dev/null
+  ok "epmd.socket and epmd.service stopped and masked: nothing listens on port 4369."
+fi
+record_done "masked epmd.socket and epmd.service"
+
 check_tool_versions() {
   local file="/opt/vigil/repo/.tool-versions"
   if [ ! -f "$file" ]; then

@@ -345,6 +345,11 @@ jobs:
       - name: init.sh writes the tunnel's proxy settings
         run: bash scripts/test/proxy_settings_test.sh
 
+      # Debian's epmd.socket listens on 4369 on every interface; setup.sh
+      # stops and masks it.
+      - name: setup.sh leaves nothing listening on epmd's port
+        run: bash scripts/test/setup_test.sh
+
       # No token in curl's arguments, no secret in a --verbose trace, an
       # operator's answer kept a value, and one secret rotated at a time.
       - name: The operator scripts never expose a secret

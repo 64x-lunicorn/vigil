@@ -87,6 +87,10 @@ read it afterwards.
   without the flag the old unit stays and `update.sh` says so. The release node
   now listens on loopback only (`vigil@127.0.0.1`, no epmd, port 4370) and its
   cookie is `0400`.
+- **Mask epmd on a host set up before this.** Debian's `erlang-base` enables
+  `epmd.socket`, which listens on port 4369 on every interface; `setup.sh` now
+  stops and masks it. On an existing host:
+  `sudo systemctl disable --now epmd.socket epmd.service && sudo systemctl mask epmd.socket epmd.service`.
 - **The OAuth state is rekeyed on first boot.** Codes and tokens are kept
   under their SHA-256 digest instead of their value; the first boot rewrites
   the files and logs how many rows it moved, and every client stays connected.
