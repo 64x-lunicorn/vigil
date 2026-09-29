@@ -30,6 +30,7 @@ folder of Markdown files and their full history.
 - [Security model](#security-model)
 - [Configuration](#configuration)
 - [Operations](#operations)
+- [Editing by hand](#editing-by-hand)
 - [Adopting an existing vault](#adopting-an-existing-vault)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
@@ -521,6 +522,51 @@ exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
   running service
 - **Add a domain:** create the directory, add it to `_domains.yml`, call
   `reload`. No code change, no restart.
+
+---
+
+## Editing by hand
+
+vigil is the only writer of the vault on the server. You can still change
+notes yourself — in Obsidian or any editor — as long as the change reaches the
+server as a commit through the remote, not as a file edited in
+`/var/lib/vigil/vault`.
+
+1. **Work in a clone of your own.** Clone the vault's remote (the one vigil
+   pushes to, e.g. GitHub) and open that directory as an Obsidian vault.
+   Obsidian's `.obsidian/` stays local — the adoption phase already put it in
+   `.gitignore`.
+2. **Start from the current state:** `git pull --rebase`.
+3. **Edit, commit under your own name, push:**
+
+   ```bash
+   git add -A
+   git commit -m "Rework the training plan"
+   git push
+   ```
+
+   A rejected push means vigil wrote something in the meantime —
+   `git pull --rebase` and push again.
+4. **Call `reload`.** The server pulls `--ff-only` and rebuilds its index. A
+   `vault:read` token is enough.
+5. **Optionally call `lint`** to catch frontmatter or naming problems the edit
+   introduced.
+
+Your commits keep your identity, so `git log --author=vigil` still separates
+what the assistant wrote from what you wrote.
+
+**Mind the chunk ids.** Renaming a heading changes its chunk id, and links to
+the old id break. `links` and `lint` show what broke.
+
+**If `reload` answers `pull_failed`**, the server has a commit the remote does
+not, almost always a write whose push failed. vigil does not merge. Reconcile
+on the server as the service user, then call `reload` again:
+
+```bash
+sudo -u vigil git -C /var/lib/vigil/vault log --oneline github/main..main
+sudo -u vigil git -C /var/lib/vigil/vault pull --rebase github main
+sudo -u vigil git -C /var/lib/vigil/vault push github main
+```
 
 ---
 
