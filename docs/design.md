@@ -1080,6 +1080,21 @@ across an append, that a push failure is reported in the words the operation
 deserves. Those are claims about `Vigil.Markdown`, `Vigil.Index` and
 `Vigil.Store`, and each of them now fails for one reason instead of two.
 
+**No hook in the clone runs, and nothing is signed.** Every call that
+commits, moves a ref or talks to the remote — `commit`, `push`, `fetch`,
+`fast_forward`, `rebase` and `abort_rebase` — carries `-c
+core.hooksPath=/dev/null`. The vault is a human's clone too, and a
+`pre-commit`, `commit-msg`, `pre-push` or `reference-transaction` hook
+installed there for their own work is not vigil's to satisfy: one that fails
+would fail every write, the fetch before it and the push after it, and one
+that succeeds may still rewrite what vigil committed. Signing is forced off
+the same way — `commit.gpgsign=false` on every commit and rebase,
+`push.gpgSign=false` on every push — because the service user has no key and
+an inherited setting would otherwise refuse every write. `add`, `remove`,
+`move` and the index snapshots move no ref and run no hook, so they carry
+neither. The repository half of the contract suite installs a failing hook of
+every kind that could fire and asks each of those calls to succeed.
+
 The speed is a consequence and not the argument. The argument is that
 `Vigil.Store`'s order — perform, commit, reparse, push — was the one part of
 the write path with no test that could fail on it, because exercising it meant
@@ -1090,7 +1105,7 @@ order they came in.
 
 ## A failed commit leaves the vault as it was
 
-A commit can fail — a hook refuses it, a lock is held, the disk is full — after
+A commit can fail — `HEAD` is detached, a lock is held, the disk is full — after
 the working tree and git's staging area have already been changed: the file
 written and added, `git rm` or `git mv` already run. A change that did not
 commit must not stay behind. The index still describes the vault before it, and
@@ -1206,7 +1221,8 @@ the vault adopts it and the index is rebuilt from the result — so the write is
 decided against the vault as it now stands, lands on top of the human's
 commit, and its push goes through. With no unpushed commits of its own the
 vault fast-forwards. With some, they are rebased onto the remote (principle
-2): git runs the rebase non-interactively, with the clone's hooks disabled,
+2): git runs the rebase non-interactively, with the clone's hooks disabled
+(see "Git is reached through a value"),
 and commits the replayed commits as vigil, unsigned, like every other. A
 rebase that conflicts is aborted, and the vault stays as it was.
 

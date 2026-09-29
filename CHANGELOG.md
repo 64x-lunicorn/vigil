@@ -161,6 +161,8 @@ read it afterwards.
   a human's work is never merged or overwritten. Only vigil's own commits are
   replayed: what a force-push took off the remote leaves the vault too, and no
   push puts it back.
+- No hook in the vault clone runs for vigil's commits, pushes, fetches,
+  fast-forwards or rebases, and its pushes are never signed.
 - `read` of a note returns its preamble, the text before the first `##`, as
   `body`.
 - `update_frontmatter` edits only `type`, `starts` and `ends` and keeps every

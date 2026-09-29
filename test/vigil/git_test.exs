@@ -828,18 +828,59 @@ defmodule Vigil.GitTest do
     end
 
     # The failure the value simulates, as a repository produces it.
-    test "a commit refused by a hook leaves the vault as it was", %{git: git, vault: vault} do
-      hook = Path.join(vault, ".git/hooks/pre-commit")
-      File.write!(hook, "#!/bin/sh\necho refused by hook\nexit 1\n")
-      File.chmod!(hook, 0o755)
+    test "a commit refused on a detached HEAD leaves the vault as it was", %{
+      git: git,
+      vault: vault
+    } do
+      {_out, 0} = System.cmd("git", ["checkout", "-q", "--detach"], cd: vault)
       before = tree(vault)
 
-      assert {:error, "git rm/commit failed: refused by hook" <> _} =
+      assert {:error, "git rm/commit failed: HEAD is detached" <> _} =
                Commit.delete(git, vault, "bike/via-carolina.md", "delete")
 
       assert tree(vault) == before
       {out, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
       assert out == ""
+    end
+
+    # docs/design.md, "Git is reached through a value": a hook in the vault's
+    # clone is not vigil's to satisfy. Every one here fails, and
+    # `reference-transaction` runs for every ref any of these calls moves.
+    test "no hook in the clone runs for a commit, a push, a fetch, a fast-forward or a rebase",
+         %{git: git, vault: vault, remote: remote} do
+      for hook <- ~w(pre-commit commit-msg post-commit pre-push post-merge post-checkout
+                     post-rewrite pre-rebase reference-transaction) do
+        path = Path.join(vault, ".git/hooks/#{hook}")
+        File.write!(path, "#!/bin/sh\necho refused by #{hook}\nexit 1\n")
+        File.chmod!(path, 0o755)
+      end
+
+      path = note(vault, "bike/hooked.md", "Hooked")
+      assert {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      assert :ok = git.push.(vault, "origin", "main")
+
+      push_from_elsewhere(%{remote: remote, vault: vault}, "bike/first-elsewhere.md")
+      assert :ok = git.fetch.(vault, "origin", "main")
+      assert :ok = git.fast_forward.(vault, "origin", "main")
+
+      push_from_elsewhere(%{remote: remote, vault: vault}, "bike/second-elsewhere.md")
+      mine = note(vault, "bike/mine.md", "Mine")
+      {:ok, _} = add_commit(git, vault, mine, "create: #{mine}")
+      assert :ok = git.fetch.(vault, "origin", "main")
+      assert :ok = git.rebase.(vault, "origin", "main")
+      assert :ok = git.push.(vault, "origin", "main")
+    end
+
+    test "a push succeeds when the clone's configuration asks for signed pushes", %{
+      git: git,
+      vault: vault
+    } do
+      {_, 0} = System.cmd("git", ["config", "push.gpgSign", "true"], cd: vault)
+      {_, 0} = System.cmd("git", ["config", "gpg.program", "/bin/false"], cd: vault)
+      path = note(vault, "bike/signed.md", "Signed")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+      assert :ok = git.push.(vault, "origin", "main")
     end
 
     test "delete and move are git operations, not filesystem calls", %{git: git, vault: vault} do

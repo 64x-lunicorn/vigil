@@ -156,6 +156,13 @@ defmodule Vigil.Git do
     "commit.gpgsign=false"
   ]
 
+  # No hook in the vault's clone runs for anything vigil does to it: a
+  # `pre-commit`, `pre-push` or `reference-transaction` hook a human installed
+  # for their own work is not vigil's to satisfy, and one that fails would
+  # fail every write, the fetch before it and the push after it. Every call
+  # that commits, moves a ref or talks to the remote carries this.
+  @no_hooks ["-c", "core.hooksPath=/dev/null"]
+
   # The three calls that leave the machine are bounded. Every write waits on the
   # push inside the single writer, so an SSH connection that stalls without
   # closing would otherwise hold every read and write behind it until the
@@ -383,8 +390,11 @@ defmodule Vigil.Git do
   # asked, and its last commit is its metadata.
   defp commit_if_changed(vault_path, paths, message) do
     case run(vault_path, ["diff", "--cached", "--quiet", "--" | paths]) do
-      {:ok, _} -> {:ok, :unchanged}
-      {:error, _} -> run(vault_path, @commit_identity ++ ["commit", "-m", message, "--" | paths])
+      {:ok, _} ->
+        {:ok, :unchanged}
+
+      {:error, _} ->
+        run(vault_path, @no_hooks ++ @commit_identity ++ ["commit", "-m", message, "--" | paths])
     end
   end
 
@@ -426,6 +436,11 @@ defmodule Vigil.Git do
   defp update_index(path, {mode, sha}),
     do: ["update-index", "--add", "--cacheinfo", "#{mode},#{sha},#{path}"]
 
+  # Unsigned like every commit vigil makes: a `push.gpgSign` inherited from
+  # the ambient configuration asks for a signature the service user has no
+  # key for, and most remotes do not accept signed pushes anyway.
+  @push_config @no_hooks ++ ["-c", "push.gpgSign=false"]
+
   @doc """
   git push <remote> <branch>. Returns :ok | {:error, reason}.
 
@@ -436,7 +451,7 @@ defmodule Vigil.Git do
   """
   def push(vault_path, remote, branch) do
     with :ok <- nothing_rewritten(vault_path, remote, branch),
-         {:ok, _} <- run(vault_path, ["push", remote, branch], @network_env),
+         {:ok, _} <- run(vault_path, @push_config ++ ["push", remote, branch], @network_env),
          do: :ok
   end
 
@@ -517,7 +532,11 @@ defmodule Vigil.Git do
   def fetch(vault_path, remote, branch) do
     refspec = "+refs/heads/#{branch}:#{tracking_ref(remote, branch)}"
 
-    case run(vault_path, ["fetch", "--quiet", "--no-tags", remote, refspec], @network_env) do
+    case run(
+           vault_path,
+           @no_hooks ++ ["fetch", "--quiet", "--no-tags", remote, refspec],
+           @network_env
+         ) do
       {:ok, _} -> :ok
       {:error, out} -> {:error, out}
     end
@@ -530,18 +549,21 @@ defmodule Vigil.Git do
   """
   def fast_forward(vault_path, remote, branch) do
     with {:ok, _} <-
-           run(vault_path, ["merge", "--ff-only", "--quiet", tracking_ref(remote, branch)]),
+           run(
+             vault_path,
+             @no_hooks ++ ["merge", "--ff-only", "--quiet", tracking_ref(remote, branch)]
+           ),
          do: :ok
   end
 
   defp tracking_ref(remote, branch), do: "refs/remotes/#{remote}/#{branch}"
 
-  # A rebase answers nobody: no hook runs (a `pre-rebase` or `post-rewrite`
-  # hook in the vault's clone is not vigil's to satisfy), no editor opens, and
+  # A rebase answers nobody: no hook runs (@no_hooks — a `pre-rebase` or
+  # `post-rewrite` hook in the vault's clone included), no editor opens, and
   # the commits it rewrites are committed as vigil and unsigned, like every
   # commit vigil makes. `--no-autosquash` and `--no-update-refs` keep an
   # ambient `rebase.*` setting from turning it into something else.
-  @rebase_config ["-c", "core.hooksPath=/dev/null" | @commit_identity]
+  @rebase_config @no_hooks ++ @commit_identity
   @rebase_env [{"GIT_EDITOR", "true"}, {"GIT_SEQUENCE_EDITOR", "true"}]
 
   @doc """
