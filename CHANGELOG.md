@@ -44,8 +44,8 @@ read it afterwards.
 - **Add `VIGIL_SKILLKEY_SECRET` to `/etc/vigil/env`.** The SkillKey now has a
   secret of its own instead of the consent password, and the service refuses to
   boot without one. `update.sh` checks for the line before it changes anything
-  (exit 2) and prints the command:
-  `echo "VIGIL_SKILLKEY_SECRET=$(openssl rand -base64 48)" >> /etc/vigil/env`.
+  (exit 2) and prints the command that adds it, with the checkout already on
+  this version: `sudo ./scripts/rotate_secret.sh skillkey`.
   Every SkillKey a client holds is invalid after the switch; the next
   `skill_read('vigil-vault-conventions')` hands out a new one.
 - **Check `VIGIL_GIT_REMOTE`.** Its default is now `github`, the remote

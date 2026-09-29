@@ -366,8 +366,9 @@ jobs:
         run: bash scripts/test/package_release_test.sh
 
   # A recorded contract (test/fixtures/contracts/) is what connected clients
-  # are handed, and docs/compatibility.md says every change to one is named in
-  # CHANGELOG.md. A pull request or a merge group that changes one without
+  # are handed, and the slug table (test/fixtures/slug_examples.json) what
+  # every stored reference is made of; docs/compatibility.md says every change
+  # to either is named in CHANGELOG.md. A pull request or a merge group that changes one without
   # touching CHANGELOG.md fails here. A push to main and a release run have no
   # base to compare against; they passed this as a pull request.
   contracts:

@@ -282,9 +282,13 @@ cuts a release:
 }
 ```
 
-A `v*` tag can be created, but only signed, and once pushed it can be neither
-moved nor deleted. A published release therefore always names the commit it
-was built from.
+A `v*` tag can be created only on a commit with a verified signature, and
+once pushed it can be neither moved nor deleted. A published release therefore
+always names the commit it was built from. What `required_signatures` checks
+is the commits the push brings, the tagged one among them — not the tag
+object: an unsigned tag on a signed commit is accepted, and every commit on
+`main` is signed, since GitHub signs the squash merges it makes. So a release
+is tagged on `main`, and a tag on anything unsigned is refused.
 
 ### How to apply
 
@@ -344,16 +348,21 @@ gh api repos/64x-lunicorn/vigil/rules/branches/main
 gh api repos/64x-lunicorn/vigil/rulesets
 
 # A direct push to main is rejected, for the admin too (on an up-to-date main).
-git commit --allow-empty -m "ruleset check" && git push origin HEAD:main
+# The commit is deliberately unsigned; the tag below needs it to be.
+git commit --allow-empty --no-gpg-sign -m "ruleset check" && git push origin HEAD:main
 
-# An unsigned v* tag is rejected.
+# A v* tag on an unsigned commit is rejected. It has to be this commit, not
+# main's HEAD: the rule checks the tagged commit's signature, and main's
+# commits are signed, so a tag there would be accepted — and kept for good.
 git tag -a --no-sign v0.0.0-rulecheck -m check && git push origin v0.0.0-rulecheck
 ```
 
 Both pushes must fail; delete the local commit and tag afterwards
 (`git reset --hard HEAD~1`, `git tag -d v0.0.0-rulecheck`). Run them only
-after the read-back shows the rules: a tag that got through could not be
-deleted, and would start a release run that stops at the version check.
+after the read-back shows the rules, and check that the tag is on the unsigned
+commit (`git log -1 --format=%G? v0.0.0-rulecheck` prints `N`): a tag that got
+through could not be deleted, and would start a release run that stops at the
+version check.
 
 **gitleaks** in CI catches a leaked credential after it is pushed; secret
 scanning's push protection catches it before, and the non-provider patterns

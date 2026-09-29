@@ -505,11 +505,19 @@ assert_eq "exits 2 — nothing was touched" "2" "$RC"
 assert_eq "current still points at the old release" "v0" "$(current_release)"
 assert_eq "the service was never stopped" "yes" "$(service_running)"
 if grep -q "VIGIL_SKILLKEY_SECRET" "${WORK}/out.log" &&
-  grep -q "openssl rand -base64 48" "${WORK}/out.log"; then
-  pass "names the variable and how to generate one"
+  grep -q "sudo ./scripts/rotate_secret.sh skillkey" "${WORK}/out.log"; then
+  pass "names the variable and the command that adds it"
 else
-  fail "names the variable and how to generate one" "$(tail -3 "${WORK}/out.log")"
+  fail "names the variable and the command that adds it" "$(tail -3 "${WORK}/out.log")"
 fi
+
+# A line that sets it to nothing is read as the service reads it: missing.
+build_host
+sed -i.bak 's/^VIGIL_SKILLKEY_SECRET=.*/VIGIL_SKILLKEY_SECRET=""/' "$ENV_FILE"
+rm -f "${ENV_FILE}.bak"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "an empty value: exits 2" "2" "$RC"
+assert_eq "an empty value: the service was never stopped" "yes" "$(service_running)"
 
 ## ── 5c. Persisted auth state survives the delivery ───────────────────────
 

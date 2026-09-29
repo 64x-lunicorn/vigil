@@ -5,7 +5,7 @@
 # It drives the real script against a throwaway repository with a base branch
 # and a head branch per case: a contract changed alone, a contract changed
 # with CHANGELOG.md, no contract changed, a leftover .actual file, and the
-# refusals of its arguments. The base moving on after the head left it must
+# refusals of its arguments, and the slug table. The base moving on after the head left it must
 # not count as the head's change.
 #
 # Usage: bash scripts/test/check_changelog_test.sh [--keep]
@@ -118,6 +118,19 @@ echo "- list" >>"${REPO}/CHANGELOG.md"
 commit_all "main moves on"
 git -C "$REPO" checkout -q behind
 assert_eq "exits 0" "0" "$(run_check main)"
+
+section "5b   The slug table counts as a contract"
+
+# test/fixtures/slug_examples.json records how a heading becomes a slug and a
+# chunk id, which every stored reference is made of (docs/compatibility.md).
+branch slug-table
+echo '[]' >"${REPO}/test/fixtures/slug_examples.json"
+commit_all "change the slug table"
+assert_eq "exits 1 without an entry" "1" "$(run_check main)"
+out_has "names the slug table" "test/fixtures/slug_examples.json"
+echo "- slugs" >>"${REPO}/CHANGELOG.md"
+commit_all "and say so"
+assert_eq "exits 0 with one" "0" "$(run_check main)"
 
 section "6/6  Arguments"
 

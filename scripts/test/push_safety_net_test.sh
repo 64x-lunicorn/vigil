@@ -236,6 +236,23 @@ env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master"
 RC="$(push)"
 assert_eq "once the push goes through: exits 0, whatever the age" "0" "$RC"
 
+section "5b   A timeout or a wait that is not a number in range fails the run"
+
+for setting in "VIGIL_PUSH_TIMEOUT=abc" "VIGIL_PUSH_TIMEOUT=0" "VIGIL_PUSH_TIMEOUT=300" \
+  "VIGIL_PUSH_TIMEOUT=-5" "VIGIL_PUSH_ALERT_AFTER=an hour" "VIGIL_PUSH_ALERT_AFTER=08" \
+  "VIGIL_PUSH_ALERT_AFTER=20000"; do
+  env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master" "$setting"
+  commit_pending
+  before="$(upstream_head)"
+  RC="$(push)"
+  assert_eq "${setting}: exits 2" "2" "$RC"
+  says "${setting}: names the setting" "${setting%%=*} must be a whole number"
+  assert_eq "${setting}: pushes nothing" "$before" "$(upstream_head)"
+done
+env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master" "VIGIL_PUSH_TIMEOUT=280" "VIGIL_PUSH_ALERT_AFTER=10080"
+RC="$(push)"
+assert_eq "the largest values in range are taken" "0" "$RC"
+
 ## ── 6. The settings the unit hands over ──────────────────────────────────
 
 section "6/7  An env file only root can read is read from the environment"

@@ -676,8 +676,8 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_CONSENT_FAILURES_PER_HOUR` | `50` | max wrong consent passwords per hour from every address together; past it the consent form answers 429 until the hour is up |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
-| `VIGIL_PUSH_TIMEOUT` | `120` | seconds the [push safety net](#the-push-safety-net)'s push is given before it is stopped and the run fails |
-| `VIGIL_PUSH_ALERT_AFTER` | `60` | minutes vault commits may wait unpushed before the push safety net's run fails on that alone |
+| `VIGIL_PUSH_TIMEOUT` | `120` | seconds the [push safety net](#the-push-safety-net)'s push is given before it is stopped and the run fails; 1 to 280, so it ends inside the unit's five minutes |
+| `VIGIL_PUSH_ALERT_AFTER` | `60` | minutes vault commits may wait unpushed before the push safety net's run fails on that alone; 1 to 10080 (a week) |
 
 Every setting the service reads — each one above but the push safety net's
 two, which `scripts/push_pending.sh` reads — is checked once, when the service
@@ -733,7 +733,9 @@ vault on `master`, or a remote called `origin`, is two lines there and nothing
 else.
 
 `VIGIL_PUSH_TIMEOUT` and `VIGIL_PUSH_ALERT_AFTER` are read by the push safety
-net only; the server does not check them.
+net only; the server does not check them. `push_pending.sh` does: a value that
+is not a whole number in its range fails the run (and so starts the
+notification) with a message naming the setting.
 
 `VIGIL_VAULT_OWNER` and `VIGIL_VAULT_LANGUAGE` only affect the instructions
 handed to the MCP client on connect.
@@ -1097,18 +1099,20 @@ asks it too. A push that fails also emits the telemetry event
 
 **Updating a host set up before `VIGIL_SKILLKEY_SECRET` existed.** Its env file
 has no such line, and a release that needs it refuses to start, naming the
-variable. `update.sh` checks for the line in its preflight and stops there
-(exit 2, nothing changed, the old release still running), printing the command
-below. Add the secret once, then update:
+variable. `update.sh` checks for the line — one that sets it to nothing counts
+as missing — in its preflight and stops there (exit 2, nothing changed, the
+old release still running), printing the command below. Add the secret once,
+then update:
 
 ```bash
-echo "VIGIL_SKILLKEY_SECRET=$(openssl rand -base64 48)" | sudo tee -a /etc/vigil/env >/dev/null
+sudo ./scripts/rotate_secret.sh skillkey
 sudo ./scripts/update.sh
 ```
 
-`sudo ./scripts/rotate_secret.sh skillkey` adds the line too, and restarts the
-running release on it. Outstanding SkillKeys stop working with the switch; an
-assistant gets a new one from `skill_read`, as after any rotation. The consent password and every OAuth
+`rotate_secret.sh` generates the secret, adds the line, keeps every other one,
+and restarts the running release, which does not read it yet. Outstanding
+SkillKeys stop working with the switch; an assistant gets a new one from
+`skill_read`, as after any rotation. The consent password and every OAuth
 token are untouched.
 
 ---

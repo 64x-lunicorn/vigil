@@ -66,6 +66,29 @@ PUSH_TIMEOUT="${PUSH_TIMEOUT:-120}"
 ALERT_AFTER="$(env_file_value VIGIL_PUSH_ALERT_AFTER)"
 ALERT_AFTER="${ALERT_AFTER:-60}"
 
+# The two settings the server does not check, so they are checked here, and a
+# bad one fails the run — which starts the notification — rather than being
+# read as something else: a word in VIGIL_PUSH_ALERT_AFTER made the alert's
+# comparison fail silently, so it never fired, and a timeout past the unit's
+# TimeoutStartSec= (5 min) was cut short by systemd instead. The push's
+# timeout leaves room for timeout's own --kill-after (10 s) inside those five
+# minutes; the alert may wait up to a week.
+PUSH_TIMEOUT_MAX=280
+ALERT_AFTER_MAX=10080
+# in_range <value> <max> — a whole number from 1 to max, without a sign or a
+# leading zero, which $(( )) would read as octal.
+in_range() {
+  [[ "$1" =~ ^[1-9][0-9]{0,5}$ ]] && [ "$1" -le "$2" ]
+}
+if ! in_range "$PUSH_TIMEOUT" "$PUSH_TIMEOUT_MAX"; then
+  err "VIGIL_PUSH_TIMEOUT must be a whole number of seconds from 1 to ${PUSH_TIMEOUT_MAX} (below the unit's TimeoutStartSec of 5 minutes), got \"${PUSH_TIMEOUT}\"."
+  exit 2
+fi
+if ! in_range "$ALERT_AFTER" "$ALERT_AFTER_MAX"; then
+  err "VIGIL_PUSH_ALERT_AFTER must be a whole number of minutes from 1 to ${ALERT_AFTER_MAX} (a week), got \"${ALERT_AFTER}\"."
+  exit 2
+fi
+
 # How many commits wait, or "?" when git cannot say (a remote-tracking branch
 # that does not exist, say) — which is not nothing, so the push is tried and
 # says what is wrong.

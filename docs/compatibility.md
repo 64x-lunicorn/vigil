@@ -134,8 +134,10 @@ before refused now; a variable newly required. Minor: a new variable whose
 default keeps today's behaviour. When a minor release needs the operator to add
 a line anyway — a required secret, say — that is a major change unless it
 fixes a vulnerability (see above), and "Upgrading" says what to add.
-`update.sh` checks for such lines before it switches, so a release that would
-not boot is never switched to.
+`update.sh` checks for the one line of that kind so far, `VIGIL_SKILLKEY_SECRET`,
+before it changes anything, and stops (exit 2) when it is missing. Any other
+setting a release refuses stops that release at boot instead: the switch's
+health wait fails, and `update.sh` rolls back to the release that ran before.
 
 ---
 
@@ -201,7 +203,8 @@ vigil, and no version number can promise it away.
 Covered: the commands and flags of `scripts/setup.sh`, `init.sh`,
 `update.sh`, `grants.sh`, `rotate_secret.sh` and `init_vault.sh`, as their
 `--help` lists them, and their exit codes, which all of them share
-(`scripts/lib.sh`):
+(`scripts/lib.sh`; `init_vault.sh`, which creates a vault and nothing else,
+uses `0`, `1` and `2`):
 
 | Code | Meaning |
 |---|---|
@@ -250,7 +253,9 @@ changelog says so when it does.
   changes" job refuses a pull request that changes a recorded contract without
   an entry in `CHANGELOG.md` (`scripts/check_changelog.sh`).
 - **Slugs and chunk ids.** `test/fixtures/slug_examples.json` is checked
-  against the Elixir and the Obsidian template's JavaScript copy, and
+  against the Elixir and the Obsidian template's JavaScript copy, a change to
+  it without an entry in `CHANGELOG.md` is refused like a contract's
+  (`scripts/check_changelog.sh`), and
   `update.sh` compares the running and the target release's chunk ids on the
   real vault before every switch.
 - **The state dir.** `test/vigil/oauth/store_schema_version_test.exs` reads a

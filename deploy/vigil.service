@@ -41,8 +41,11 @@ RestartSec=1
 # about vigil: another unit that runs as the vigil user against the same state
 # dir takes this block unchanged.
 #
-# Target: `systemd-analyze security vigil` at 3.0 or lower (docs/guide.md,
-# Security model). setup.sh and update.sh --update-unit refuse a unit above it.
+# Target: `systemd-analyze security <this unit>` at 3.0 or lower
+# (docs/guide.md, Security model). The scripts that install a unit with this
+# block score it first and refuse it above the target: setup.sh and
+# update.sh --update-unit for vigil.service, init.sh and update.sh for
+# vigil-push.service.
 
 # Files. ReadWritePaths is the critical one: without it the service can write
 # nowhere under ProtectSystem=strict, which produces exactly the

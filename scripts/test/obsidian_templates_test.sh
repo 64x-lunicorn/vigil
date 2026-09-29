@@ -98,4 +98,26 @@ fi
 assert_eq "and committed" "_templates/reference.md" \
   "$(git -C "$VAULT" show --name-only --format= HEAD)"
 
+section "Its options"
+
+# --help used to be taken for the vault directory, and a vault was created
+# under that name.
+mkdir -p "${WORK}/options"
+set +e
+(cd "${WORK}/options" && bash "${REPO_ROOT}/scripts/init_vault.sh" --help >"${WORK}/help.txt" 2>&1)
+RC=$?
+set -e
+assert_eq "--help exits 0" "0" "$RC"
+if grep -q "Usage\|init_vault.sh \[<vault dir>\]" "${WORK}/help.txt"; then
+  pass "--help prints the usage"
+else
+  fail "--help prints the usage" "$(head -3 "${WORK}/help.txt")"
+fi
+set +e
+(cd "${WORK}/options" && bash "${REPO_ROOT}/scripts/init_vault.sh" --vault x >/dev/null 2>&1)
+RC=$?
+set -e
+assert_eq "an unknown option exits 2" "2" "$RC"
+assert_eq "neither created anything" "" "$(ls -A "${WORK}/options")"
+
 report

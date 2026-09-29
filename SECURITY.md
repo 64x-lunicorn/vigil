@@ -74,8 +74,11 @@ the maintainer when you will.
 
 - Use HTTPS and the documented Cloudflare Access setup for internet-facing
   deployments. Do not expose the application port directly.
-- Set a unique, strong `VIGIL_AUTH_PASSWORD`. The application requires at least
-  12 characters; this password also supplies the SkillKey HMAC secret.
+- Set a unique, strong `VIGIL_AUTH_PASSWORD`, the consent password. The
+  application requires at least 12 characters; `init.sh` generates one.
+- Set `VIGIL_SKILLKEY_SECRET`, the SkillKey's own HMAC secret, to at least 32
+  random bytes, and never to the consent password; `init.sh` generates it, and
+  `scripts/rotate_secret.sh skillkey` replaces it.
 - Prefer the `vault:read` scope unless a client genuinely needs write access.
 - Treat the SkillKey as a writing-conventions check, **not** an authorization
   boundary. OAuth scopes control access.

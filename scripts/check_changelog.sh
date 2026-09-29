@@ -6,8 +6,10 @@
 # tool list, the initialize result, the shape of every tool's result and the
 # two OAuth metadata documents (test/support/contract_snapshot.ex). Changing
 # one changes what connected clients are handed, and docs/compatibility.md
-# says every such change is named in CHANGELOG.md, under "Unreleased". This
-# holds a range of commits to that: when it touches a contract file and not
+# says every such change is named in CHANGELOG.md, under "Unreleased". So is
+# test/fixtures/slug_examples.json, the record of how a heading becomes a slug
+# and a chunk id: every stored reference into a vault is made of those. This
+# holds a range of commits to that: when it touches a recorded file and not
 # CHANGELOG.md, it fails and names the files.
 #
 # CI runs it on a pull request against the base branch, and on a merge-group
@@ -23,6 +25,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 CONTRACTS_DIR="test/fixtures/contracts/"
+SLUG_EXAMPLES="test/fixtures/slug_examples.json"
 CHANGELOG="CHANGELOG.md"
 
 if [ $# -lt 1 ] || [ $# -gt 2 ] || [ "${1:-}" = "--help" ]; then
@@ -43,7 +46,7 @@ done
 # gained in the meantime.
 changed="$(git diff --name-only "${BASE}...${HEAD}")"
 
-contracts="$(printf '%s\n' "$changed" | grep "^${CONTRACTS_DIR}" | grep -v '\.actual$' || true)"
+contracts="$(printf '%s\n' "$changed" | grep -e "^${CONTRACTS_DIR}" -e "^${SLUG_EXAMPLES}\$" | grep -v '\.actual$' || true)"
 if [ -z "$contracts" ]; then
   echo "check_changelog: no recorded contract changed."
   exit 0

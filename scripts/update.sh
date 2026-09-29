@@ -401,11 +401,17 @@ fi
 # A setting every release from here on refuses to boot without, and that an
 # init.sh older than it never wrote. Checked here rather than left to boot:
 # a release that does not come up fails step 6's health wait and is rolled
-# back, but only after the service was stopped for it. The value is only
-# tested for being there — the boot check judges it — and never printed.
-if ! grep -qE '^VIGIL_SKILLKEY_SECRET=.' "$ENV_FILE" 2>/dev/null; then
-  err "${ENV_FILE} has no VIGIL_SKILLKEY_SECRET, which vigil now requires (the SkillKey's own HMAC secret). Add it once, then run update.sh again:"
-  err "  echo \"VIGIL_SKILLKEY_SECRET=\$(openssl rand -base64 48)\" >> ${ENV_FILE}"
+# back, but only after the service was stopped for it. The value is read as
+# the service reads it (env_file_value, quotes and all), so a line that sets
+# it to nothing counts as missing; it is only tested for being there — the
+# boot check judges it — and never printed or traced.
+hide_trace
+SKILLKEY_SECRET_SET=0
+[ -n "$(env_file_value VIGIL_SKILLKEY_SECRET)" ] && SKILLKEY_SECRET_SET=1
+show_trace
+if [ "$SKILLKEY_SECRET_SET" != "1" ]; then
+  err "${ENV_FILE} sets no VIGIL_SKILLKEY_SECRET, which vigil now requires (the SkillKey's own HMAC secret). Generate one, then run update.sh again:"
+  err "  sudo ./scripts/rotate_secret.sh skillkey"
   exit 2
 fi
 
