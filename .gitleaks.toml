@@ -1,0 +1,22 @@
+# gitleaks configuration: the default rules, plus the few literals the test
+# suite pins on purpose. Each one keys nothing outside the suite — no server,
+# vault or client ever sees it — and each is listed by value, so a real secret
+# in the same files is still reported. CI scans the full history, which is why
+# values that have since moved (config/runtime.exs → config/test.exs) stay here.
+title = "vigil"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test-suite secrets that key nothing outside the suite"
+regexTarget = "secret"
+regexes = [
+  # The suite's SkillKey secret (config/test.exs, test/support/oauth_case.ex).
+  '''^y7CI4lMs8Utr4o5rIo2N2TqzaVmvCH4X6yjvDaLpVnzq4k5LCvhFQIPj3KnhnyKq$''',
+  # The settings check's example of a valid secret (its tests only).
+  '''^itTnVnZk/sC37IrApqZhoUWOfli819Xl7zZx6DSYKPrXRrOsez\+p930plUaYNzV6$''',
+  # Markers scripts/test/operator_secrets_test.sh searches the output for.
+  '''^pw-SECRET-7a1e0b99c4$''',
+  '''^sk-SECRET-2d6f5a81e3$''',
+]

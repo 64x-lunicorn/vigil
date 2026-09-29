@@ -367,7 +367,10 @@ version check.
 **gitleaks** in CI catches a leaked credential after it is pushed; secret
 scanning's push protection catches it before, and the non-provider patterns
 extend it to generic secrets such as private keys and connection strings that
-no provider registers a pattern for.
+no provider registers a pattern for. gitleaks runs its default rules plus
+[`.gitleaks.toml`](../.gitleaks.toml), which lets through only the few
+literals the test suite pins on purpose, each by its exact value: the same
+files with any other secret in them still fail the scan.
 
 ### The same gate, locally
 
