@@ -697,10 +697,10 @@ defmodule Vigil.Git do
     end)
   end
 
-  # Sobelow: a file inside the clone's own git directory, named by git.
-  # sobelow_skip ["Traversal.FileModule"]
   defp rebasing_branch(nil), do: nil
 
+  # Sobelow: a file inside the clone's own git directory, named by git.
+  # sobelow_skip ["Traversal.FileModule"]
   defp rebasing_branch(dir) do
     case File.read(Path.join(dir, "head-name")) do
       {:ok, "refs/heads/" <> name} -> String.trim(name)

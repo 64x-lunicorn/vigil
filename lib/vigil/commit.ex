@@ -322,6 +322,10 @@ defmodule Vigil.Commit do
   end
 
   defp keep_mode(_tmp, nil), do: :ok
+
+  # Sobelow: tmp is the temp name write_file/2 built beside a note whose path
+  # passed Vigil.Slug.safe_path/1.
+  # sobelow_skip ["Traversal.FileModule"]
   defp keep_mode(tmp, mode), do: File.chmod(tmp, mode)
 
   defp sync_directory(dir) do
