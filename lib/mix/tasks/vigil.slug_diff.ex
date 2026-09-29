@@ -32,6 +32,7 @@ defmodule Mix.Tasks.Vigil.SlugDiff do
     # a Mix task does not evaluate it unless asked: without this the task
     # walked excluded directories on every real run.
     Mix.Task.run("app.config")
+    Vigil.Stdio.utf8()
 
     case args do
       # The vault is this task's argument and the exclusions are the

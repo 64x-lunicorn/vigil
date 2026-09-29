@@ -29,6 +29,7 @@ defmodule Vigil.Release do
     # The parser warns about a note without frontmatter, and under `eval` a
     # warning is printed to the same stdout as the ids.
     Logger.put_process_level(self(), :none)
+    Vigil.Stdio.utf8()
 
     vault_path = System.fetch_env!("VIGIL_VAULT_PATH")
 

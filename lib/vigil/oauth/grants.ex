@@ -216,6 +216,8 @@ defmodule Vigil.OAuth.Grants do
         :error -> []
       end
 
+    Vigil.Stdio.utf8()
+
     case command(persistence, now, argv) do
       {:ok, text} -> IO.puts(text)
       {:error, text} -> IO.puts("error: " <> text)
