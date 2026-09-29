@@ -1,7 +1,7 @@
 defmodule Vigil.GitTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.Git
+  alias Vigil.{Commit, Git}
   alias Vigil.Git.CommitLog
 
   @moduledoc """
@@ -38,6 +38,23 @@ defmodule Vigil.GitTest do
     path
   end
 
+  # What a write asks for, as one step: stage the path, commit it.
+  defp add_commit(git, vault, path, message) do
+    :ok = git.add.(vault, [path])
+    git.commit.(vault, [path], message)
+  end
+
+  defp remove_commit(git, vault, path, message) do
+    with :ok <- git.remove.(vault, [path]),
+         {:ok, _} <- git.commit.(vault, [path], message),
+         do: :ok
+  end
+
+  defp move_commit(git, vault, from, to, message) do
+    :ok = git.move.(vault, from, to)
+    git.commit.(vault, [from, to], message)
+  end
+
   # One body per claim, run against the repository and against the commit log.
   # The two agreeing is what lets every other test in the suite stay off git;
   # the two drifting apart is the one thing that could go wrong with a second
@@ -56,11 +73,11 @@ defmodule Vigil.GitTest do
                  meta["bike/terra-speed.md"]
       end
 
-      test "add_commit authors as vigil and push succeeds", %{git: git, vault: vault} do
+      test "add and commit author as vigil and push succeeds", %{git: git, vault: vault} do
         path = note(vault, "bike/new.md", "New")
 
         assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
-                 git.add_commit.(vault, path, "create: #{path}")
+                 add_commit(git, vault, path, "create: #{path}")
 
         assert :ok = git.push.(vault, "origin")
       end
@@ -73,7 +90,7 @@ defmodule Vigil.GitTest do
       } do
         path = note(vault, "bike/fresh.md", "Fresh")
 
-        {:ok, commit_meta} = git.add_commit.(vault, path, "create: #{path}")
+        {:ok, commit_meta} = add_commit(git, vault, path, "create: #{path}")
 
         assert %{created_at: created_at, updated_at: updated_at, last_author: "vigil"} =
                  git.log_metadata.(vault)[path]
@@ -84,12 +101,26 @@ defmodule Vigil.GitTest do
 
       test "push failure is reported without losing the local commit", %{git: git, vault: vault} do
         path = note(vault, "bike/new2.md", "New2")
-        {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
         assert {:error, _reason} = git.push.(vault, "nonexistent-remote")
 
         assert %{last_author: "vigil"} = git.log_metadata.(vault)[path]
         assert File.exists?(Path.join(vault, path))
+      end
+
+      # A path is a path, never a pattern: a note a human named `*.md` is one
+      # note, and removing it removes nothing else.
+      test "a note named like a glob is removed alone", %{git: git, vault: vault} do
+        glob = note(vault, "bike/*.md", "Glob")
+        {:ok, _} = add_commit(git, vault, glob, "create: #{glob}")
+
+        assert :ok = Commit.delete(git, vault, glob, "delete: #{glob}")
+
+        refute File.exists?(Path.join(vault, glob))
+        assert File.exists?(Path.join(vault, "bike/terra-speed.md"))
+        assert File.exists?(Path.join(vault, "bike/via-carolina.md"))
+        assert %{last_author: "Daniel"} = git.log_metadata.(vault)["bike/terra-speed.md"]
       end
 
       test "pull fast-forwards from the vault's remote", %{git: git, vault: vault} do
@@ -100,21 +131,22 @@ defmodule Vigil.GitTest do
         assert {:error, _reason} = git.pull.(vault, "nonexistent-remote")
       end
 
-      test "remove_commit removes the file", %{git: git, vault: vault} do
+      test "remove and commit remove the file", %{git: git, vault: vault} do
         assert :ok =
-                 git.remove_commit.(vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
+                 remove_commit(git, vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
 
         refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
       end
 
-      test "move_commit renames the file and commits it at its new path", %{
+      test "move and commit rename the file and commits it at its new path", %{
         git: git,
         vault: vault
       } do
         before = git.log_metadata.(vault)
 
         assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
-                 git.move_commit.(
+                 move_commit(
+                   git,
                    vault,
                    "bike/terra-speed.md",
                    "bike/terra-speed-new.md",
@@ -139,6 +171,133 @@ defmodule Vigil.GitTest do
     end
   end
 
+  # Everything on disk under the vault but git's own directory, with its
+  # content: a rollback that leaves a file, a directory or a temporary file
+  # behind differs here from the vault it started with.
+  defp tree(vault) do
+    Path.join(vault, "**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&String.contains?(Path.relative_to(&1, vault), ".git"))
+    |> Map.new(fn abs ->
+      {Path.relative_to(abs, vault), if(File.dir?(abs), do: :dir, else: File.read!(abs))}
+    end)
+  end
+
+  defp failing_commit(git), do: %{git | commit: fn _, _, _ -> {:error, "boom"} end}
+
+  # docs/design.md, "A failed commit leaves the vault as it was". The commit is
+  # made to fail through the value, after the staging it follows has happened,
+  # and what the working tree and the staging area hold afterwards is compared
+  # with what they held before.
+  for {adapter, setup_fun} <- [
+        {"the repository", :real_git},
+        {"the commit log", :commit_log}
+      ] do
+    describe "#{adapter}, when the commit fails" do
+      setup(setup_fun)
+
+      setup %{git: git, vault: vault} do
+        {:ok, failing: failing_commit(git), before: tree(vault)}
+      end
+
+      test "a write to an existing note leaves it as it was", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        path = "bike/terra-speed.md"
+        {:ok, index} = git.snapshot_index.(vault, [path])
+
+        assert {:error, "git commit failed: boom"} =
+                 Commit.write(failing, vault, path, "# Replaced\n", "update: #{path}")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, [path]) == {:ok, index}
+      end
+
+      test "a new note in a new directory leaves neither behind", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        path = "bike/archive/2026/new.md"
+        {:ok, index} = git.snapshot_index.(vault, [path])
+
+        assert {:error, "git commit failed: boom"} =
+                 Commit.write(failing, vault, path, "# New\n", "create: #{path}")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, [path]) == {:ok, index}
+      end
+
+      test "a removal leaves the note where it was", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        path = "bike/via-carolina.md"
+        {:ok, index} = git.snapshot_index.(vault, [path])
+
+        assert {:error, "git rm/commit failed: boom"} =
+                 Commit.delete(failing, vault, path, "delete: #{path}")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, [path]) == {:ok, index}
+      end
+
+      # `git rm` takes a directory it empties with it.
+      test "a removal that empties its directory leaves both where they were", %{
+        git: git,
+        failing: failing,
+        vault: vault
+      } do
+        path = note(vault, "garden/beds/only.md", "Only")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        before = tree(vault)
+
+        assert {:error, "git rm/commit failed: boom"} =
+                 Commit.delete(failing, vault, path, "delete: #{path}")
+
+        assert tree(vault) == before
+      end
+
+      test "a move leaves the note at its old path and nothing at the new one", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        paths = ["bike/via-carolina.md", "bike/archive/via-carolina.md"]
+        {:ok, index} = git.snapshot_index.(vault, paths)
+
+        assert {:error, "git mv/commit failed: boom"} =
+                 Commit.move(failing, vault, hd(paths), List.last(paths), "move: via-carolina")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, paths) == {:ok, index}
+      end
+
+      # What the failure would otherwise have left staged is swept into the
+      # next commit under that commit's message.
+      test "the next commit carries only its own change", %{
+        git: git,
+        failing: failing,
+        vault: vault
+      } do
+        {:error, _} = Commit.delete(failing, vault, "bike/via-carolina.md", "delete")
+
+        assert {:ok, _} =
+                 Commit.write(git, vault, "bike/next.md", "# Next\n", "create: bike/next.md")
+
+        assert File.exists?(Path.join(vault, "bike/via-carolina.md"))
+        assert git.log_metadata.(vault)["bike/via-carolina.md"].last_author == "Daniel"
+      end
+    end
+  end
+
   # What only a repository can be asked. The identity a commit carries down to
   # its email address, the ambient configuration it has to survive, and a pull
   # that actually brings something back.
@@ -147,7 +306,7 @@ defmodule Vigil.GitTest do
 
     test "a commit carries vigil's full identity", %{git: git, vault: vault} do
       path = note(vault, "bike/new.md", "New")
-      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
       {out, 0} = System.cmd("git", ["log", "-1", "--format=%an <%ae>"], cd: vault)
       assert String.trim(out) == "vigil <vigil@local>"
@@ -167,15 +326,15 @@ defmodule Vigil.GitTest do
       note(vault, "bike/signed.md", "S")
 
       assert {:ok, %{last_author: "vigil"}} =
-               git.add_commit.(vault, "bike/signed.md", "create: bike/signed.md")
+               add_commit(git, vault, "bike/signed.md", "create: bike/signed.md")
 
       note(vault, "bike/signed2.md", "S2")
-      {:ok, _} = git.add_commit.(vault, "bike/signed2.md", "create: bike/signed2.md")
+      {:ok, _} = add_commit(git, vault, "bike/signed2.md", "create: bike/signed2.md")
 
       assert {:ok, _} =
-               git.move_commit.(vault, "bike/signed2.md", "bike/signed3.md", "move: s2 -> s3")
+               move_commit(git, vault, "bike/signed2.md", "bike/signed3.md", "move: s2 -> s3")
 
-      assert :ok = git.remove_commit.(vault, "bike/signed3.md", "delete: bike/signed3.md")
+      assert :ok = remove_commit(git, vault, "bike/signed3.md", "delete: bike/signed3.md")
     end
 
     # git quotes every non-ASCII path under the default core.quotePath=true;
@@ -185,25 +344,60 @@ defmodule Vigil.GitTest do
       vault: vault
     } do
       path = note(vault, "home/Übersicht Heizöl.md", "Übersicht")
-      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
       assert %{created_at: %DateTime{}, last_author: "vigil"} = git.log_metadata.(vault)[path]
     end
 
-    test "add_commit of unchanged content succeeds without a new commit", %{
+    test "committing unchanged content succeeds without a new commit", %{
       git: git,
       vault: vault
     } do
       {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
 
       assert {:ok, %{updated_at: %DateTime{}, last_author: "Daniel"}} =
-               git.add_commit.(vault, "bike/terra-speed.md", "update: unchanged")
+               add_commit(git, vault, "bike/terra-speed.md", "update: unchanged")
 
       assert {^head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
     end
 
+    # What git's own staging area says, beyond what the value hands back: the
+    # whole of `git status`, and the index entries of every path, unchanged.
+    test "a failed commit leaves git status and the index as they were", %{
+      git: git,
+      vault: vault
+    } do
+      failing = failing_commit(git)
+      status = fn -> System.cmd("git", ["status", "--porcelain"], cd: vault) end
+      stage = fn -> System.cmd("git", ["ls-files", "--stage"], cd: vault) end
+      {status_before, stage_before} = {status.(), stage.()}
+
+      {:error, _} = Commit.write(failing, vault, "bike/terra-speed.md", "# X\n", "update")
+      {:error, _} = Commit.write(failing, vault, "bike/new/x.md", "# X\n", "create")
+      {:error, _} = Commit.delete(failing, vault, "bike/via-carolina.md", "delete")
+      {:error, _} = Commit.move(failing, vault, "bike/via-carolina.md", "bike/b/v.md", "move")
+
+      assert status.() == status_before
+      assert stage.() == stage_before
+    end
+
+    # The failure the value simulates, as a repository produces it.
+    test "a commit refused by a hook leaves the vault as it was", %{git: git, vault: vault} do
+      hook = Path.join(vault, ".git/hooks/pre-commit")
+      File.write!(hook, "#!/bin/sh\necho refused by hook\nexit 1\n")
+      File.chmod!(hook, 0o755)
+      before = tree(vault)
+
+      assert {:error, "git rm/commit failed: refused by hook" <> _} =
+               Commit.delete(git, vault, "bike/via-carolina.md", "delete")
+
+      assert tree(vault) == before
+      {out, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
+      assert out == ""
+    end
+
     test "delete and move are git operations, not filesystem calls", %{git: git, vault: vault} do
-      assert :ok = git.remove_commit.(vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
+      assert :ok = remove_commit(git, vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
 
       {out, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: vault)
       assert String.trim(out) == "delete: bike/terra-speed.md"
@@ -260,11 +454,12 @@ defmodule Vigil.GitTest do
       log: log
     } do
       path = note(vault, "bike/new.md", "New")
-      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
       :ok = git.push.(vault, "origin")
 
       assert CommitLog.calls(log) == [
-               {:add_commit, path, "create: #{path}"},
+               {:add, [path]},
+               {:commit, [path], "create: #{path}"},
                {:push, "origin"}
              ]
     end

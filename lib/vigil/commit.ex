@@ -24,6 +24,8 @@ defmodule Vigil.Commit do
   access to everything else.
   """
 
+  require Logger
+
   alias Vigil.Git
 
   @doc """
@@ -32,36 +34,24 @@ defmodule Vigil.Commit do
 
   `git` is the adapter its caller holds (`docs/design.md`, "Git is reached
   through a value") — this module touches the filesystem itself and asks that
-  value for the commit.
+  value for the staging and the commit.
 
   Returns the commit metadata on success — the caller decides what to do
-  between the commit and the push.
+  between the commit and the push. On failure the vault is left as it was.
   """
   @spec write(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
   def write(%Git{} = git, vault_path, rel_path, content, message) do
     abs_path = Path.join(vault_path, rel_path)
+    prefix = "git commit failed"
 
-    previous = File.read(abs_path)
-
-    with :ok <- mkdir_p(Path.dirname(abs_path)),
-         :ok <- write_file(abs_path, content) do
-      case git.add_commit.(vault_path, rel_path, message) do
-        {:ok, commit_meta} ->
-          {:ok, commit_meta}
-
-        {:error, out} ->
-          restore(abs_path, previous)
-          {:error, "git commit failed: #{out}"}
+    change(git, vault_path, [rel_path], message, prefix, fn ->
+      with :ok <- mkdir_p(Path.dirname(abs_path)),
+           :ok <- write_file(abs_path, content) do
+        git_step(git.add.(vault_path, [rel_path]), prefix)
       end
-    end
+    end)
   end
-
-  # A write that did not commit must not stay on disk: the index still holds
-  # the old note, and the next write's commit would sweep the stray content in
-  # under its own message.
-  defp restore(abs_path, {:ok, previous}), do: File.write(abs_path, previous)
-  defp restore(abs_path, {:error, _}), do: File.rm(abs_path)
 
   @doc """
   Removes `rel_path` from the vault and commits the removal under `message`.
@@ -71,10 +61,13 @@ defmodule Vigil.Commit do
   """
   @spec delete(Git.t(), String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
   def delete(%Git{} = git, vault_path, rel_path, message) do
-    case git.remove_commit.(vault_path, rel_path, message) do
-      :ok -> :ok
-      {:error, out} -> {:error, "git rm/commit failed: #{out}"}
-    end
+    prefix = "git rm/commit failed"
+
+    with {:ok, _commit_meta} <-
+           change(git, vault_path, [rel_path], message, prefix, fn ->
+             git_step(git.remove.(vault_path, [rel_path]), prefix)
+           end),
+         do: :ok
   end
 
   @doc """
@@ -85,11 +78,102 @@ defmodule Vigil.Commit do
   @spec move(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
           {:ok, map()} | {:error, String.t()}
   def move(%Git{} = git, vault_path, from, to, message) do
-    case git.move_commit.(vault_path, from, to, message) do
-      {:ok, commit_meta} -> {:ok, commit_meta}
-      {:error, out} -> {:error, "git mv/commit failed: #{out}"}
+    prefix = "git mv/commit failed"
+
+    change(git, vault_path, [from, to], message, prefix, fn ->
+      with :ok <- mkdir_p(Path.dirname(Path.join(vault_path, to))) do
+        git_step(git.move.(vault_path, from, to), prefix)
+      end
+    end)
+  end
+
+  # One change to the vault, all of it or none of it (docs/design.md, "A
+  # failed commit leaves the vault as it was"). `paths` is every path the
+  # change touches; `perform` changes the working tree and stages it, answering
+  # `:ok` or a finished sentence, and the commit follows. What the working
+  # tree and the staging area hold for those paths is taken first, and put
+  # back if anything after it fails — a write, a `git rm`, a `git mv`, the
+  # commit itself. A change that did not commit
+  # must not stay behind: the next write's commit would sweep it in under its
+  # own message.
+  #
+  # A git failure reads as `prefix: <what git said>`.
+  defp change(git, vault_path, paths, message, prefix, perform) do
+    tree = snapshot_tree(vault_path, paths)
+
+    with {:ok, index} <- git_step(git.snapshot_index.(vault_path, paths), prefix) do
+      with :ok <- perform.(),
+           {:ok, commit_meta} <- git_step(git.commit.(vault_path, paths, message), prefix) do
+        {:ok, commit_meta}
+      else
+        {:error, msg} ->
+          roll_back(git, vault_path, tree, index)
+          {:error, msg}
+      end
     end
   end
+
+  # What git answered, with the operation's name in front of it.
+  defp git_step({:error, out}, prefix), do: {:error, "#{prefix}: #{out}"}
+  defp git_step(ok, _prefix), do: ok
+
+  # Every touched path's content — or that it was not there — and every
+  # directory above it that did not exist yet, so a directory the change
+  # created goes again with it.
+  defp snapshot_tree(vault_path, paths) do
+    Enum.map(paths, fn rel_path ->
+      abs_path = Path.join(vault_path, rel_path)
+      {abs_path, File.read(abs_path), missing_dirs(vault_path, Path.dirname(rel_path))}
+    end)
+  end
+
+  defp missing_dirs(_vault_path, "."), do: []
+
+  defp missing_dirs(vault_path, rel_dir) do
+    abs_dir = Path.join(vault_path, rel_dir)
+
+    if File.dir?(abs_dir),
+      do: [],
+      else: [abs_dir | missing_dirs(vault_path, Path.dirname(rel_dir))]
+  end
+
+  # Best effort, and loud when it falls short: the change has already failed,
+  # and a rollback that fails too is not something the caller can act on, but
+  # it is something the operator has to know about.
+  defp roll_back(git, vault_path, tree, index) do
+    Enum.each(tree, fn {abs_path, previous, created_dirs} ->
+      restore_file(abs_path, previous)
+      Enum.each(created_dirs, &File.rmdir/1)
+    end)
+
+    case git.restore_index.(vault_path, index) do
+      :ok -> :ok
+      {:error, out} -> Logger.error("vigil: could not restore the git index: #{out}")
+    end
+  end
+
+  # `git rm` takes a directory it empties with it, so the parent may have to
+  # come back before the file can.
+  defp restore_file(abs_path, {:ok, previous}) do
+    with :ok <- mkdir_p(Path.dirname(abs_path)),
+         :ok <- write_file(abs_path, previous) do
+      :ok
+    else
+      {:error, msg} -> Logger.error("vigil: could not restore #{abs_path}: #{msg}")
+    end
+  end
+
+  defp restore_file(abs_path, {:error, :enoent}) do
+    case File.rm(abs_path) do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
+      {:error, reason} -> Logger.error("vigil: could not remove #{abs_path}: #{fs_error(reason)}")
+    end
+  end
+
+  # A file that could not be read beforehand is one this change never
+  # replaced: the write in front of the commit would have failed the same way.
+  defp restore_file(_abs_path, {:error, _reason}), do: :ok
 
   @doc """
   Pushes the vault's commits to `remote`.
@@ -132,10 +216,23 @@ defmodule Vigil.Commit do
   def fs_error(:erofs), do: "filesystem is read-only"
   def fs_error(reason), do: inspect(reason)
 
+  # Into a temporary file beside the target, then renamed over it: a crash
+  # mid-write leaves the note as it was and a stray dotfile, never a truncated
+  # note. The rename is atomic because both names are in one directory.
   defp write_file(path, content) do
-    case File.write(path, content) do
-      :ok -> :ok
-      {:error, reason} -> {:error, "Could not write file #{path}: #{fs_error(reason)}"}
+    tmp =
+      Path.join(
+        Path.dirname(path),
+        ".#{Path.basename(path)}.#{System.unique_integer([:positive])}.tmp"
+      )
+
+    with :ok <- File.write(tmp, content),
+         :ok <- File.rename(tmp, path) do
+      :ok
+    else
+      {:error, reason} ->
+        File.rm(tmp)
+        {:error, "Could not write file #{path}: #{fs_error(reason)}"}
     end
   end
 end

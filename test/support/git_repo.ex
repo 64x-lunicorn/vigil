@@ -29,7 +29,7 @@ defmodule Vigil.GitRepo do
     git!(path, ["config", "user.name", @author])
     git!(path, ["config", "user.email", @email])
     # Repo-level, not just for the initial commit: Vigil.Git's own
-    # add_commit/move_commit/remove_commit inherit the caller's global git
+    # add/move/remove/commit inherit the caller's global git
     # config, and Daniel's global config signs commits via a 1Password
     # SSH-agent. That agent is flaky/unavailable in a plain test run and has
     # no bearing on what's under test here — production disables signing for

@@ -696,7 +696,9 @@ links before against the rebuilt index after — is asked before the effect and
 answered against the index it left behind, so that no action has to be a
 special case of the sequence. If the push fails the local commit stays and the
 tool returns an error naming what is committed locally but not pushed — the
-change, the deletion, or the move. Nothing is rolled back.
+change, the deletion, or the move. Nothing is rolled back. A failed *commit* is
+the opposite case: everything is (see "A failed commit leaves the vault as it
+was").
 
 **Confirm is the last gate, not the first.** `delete_note` and `move_note`
 resolve their paths before asking for confirmation, so a path naming `skills/`,
@@ -770,9 +772,11 @@ deletion, a move, a skill.
 the filesystem and it commits. The filesystem half stays where it is. The git
 half is a value its callers hold rather than a module they name.
 
-**The value is the whole of `Vigil.Git`, not the write half.** Six questions:
-`add_commit`, `remove_commit`, `move_commit`, `push` — and `pull` and
-`log_metadata`, which no write ever asks. Those two belong to the load, and
+**The value is the whole of `Vigil.Git`, not the write half.** Nine questions:
+`add`, `remove`, `move`, `commit`, `snapshot_index`, `restore_index`, `push` —
+and `pull` and `log_metadata`, which no write ever asks. Staging and committing
+are separate questions, which is what lets a test make a commit fail *after*
+its `git rm` has happened (see "A failed commit leaves the vault as it was"). Those two belong to the load, and
 `Vigil.Store` asks them directly. A seam drawn around the write effect alone
 would leave every load reaching for a repository, and `log_metadata` answering
 `%{}` for a directory that is not one — which is a `created_at` of `nil` on
@@ -821,6 +825,48 @@ The speed is a consequence and not the argument. The argument is that
 the write path with no test that could fail on it, because exercising it meant
 building a repository. An adapter that records its calls can be asked what
 order they came in.
+
+---
+
+## A failed commit leaves the vault as it was
+
+A commit can fail — a hook refuses it, a lock is held, the disk is full — after
+the working tree and git's staging area have already been changed: the file
+written and added, `git rm` or `git mv` already run. A change that did not
+commit must not stay behind. The index still describes the vault before it, and
+the next write's commit would sweep the stray change in under its own message.
+`write` used to put the file back and leave the staged blob; `delete_note` and
+`move_note` put nothing back at all, so the note was gone or moved on disk
+while vigil's index still held the old path.
+
+**One change is all of it or none of it, for every path it touches.**
+`Vigil.Commit` takes, before anything happens, what the working tree holds for
+each path the change touches — its content, or that it was not there, and
+every directory above it that did not exist yet — and asks the git value what
+the staging area holds for them (`snapshot_index`). Then it changes the
+working tree, stages, and commits. If any step after the snapshot fails, the
+files are put back, the directories the change created are removed again, and
+the staging area is restored path by path (`restore_index`), and the tool
+returns the error. The mechanism takes a list of paths, not one: a move
+already touches two, and a change that touches several files in one commit
+rolls back the same way. A restore that itself fails is logged as an error
+rather than reported: the change has already failed, and the caller cannot act
+on a second failure, but the operator has to know about it.
+
+The index is restored to what it held, not reset to `HEAD`. Nothing but vigil
+touches the working tree, so the two are the same in practice; restoring the
+snapshot is what makes "as it was" true without that assumption.
+
+**Paths are paths, never patterns.** Every `git` call runs with
+`GIT_LITERAL_PATHSPECS=1`. A note a human named `*.md` is otherwise a
+pathspec, and `git rm -- bike/*.md` removes every note in the directory.
+
+**A note is written beside itself and renamed into place.** The content goes
+to a temporary dotfile in the same directory, which is then renamed over the
+note. A rename within one directory is atomic, so a crash mid-write leaves the
+old note and a stray dotfile — never a truncated note. Dotfiles are not notes
+(`Vigil.Vault.Layout` does not list them), so a leftover one is never indexed,
+and vigil stages only the paths it names, so it is never committed either.
 
 ---
 

@@ -103,8 +103,9 @@ answer. If only the push fails, the write still succeeded: the answer says
 `pushed: false` and carries the reason in `push_error`, so the client knows
 without being invited to retry — a retried `append` would append twice. The
 commit goes out with the next successful push, or within 15 minutes through the
-safety-net cron job. A write whose *commit* fails is an error, and the file is
-restored as it was.
+safety-net cron job. A write whose *commit* fails is an error, and the vault is
+left as it was: a deleted note is back, a moved note is at its old path, and
+nothing is left staged for the next commit to pick up.
 
 ```mermaid
 sequenceDiagram

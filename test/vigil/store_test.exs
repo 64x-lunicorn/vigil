@@ -984,9 +984,9 @@ defmodule Vigil.StoreTest do
       # first?".
       git = %{
         git
-        | add_commit: fn vault_path, path, message ->
+        | add: fn vault_path, [path] = paths ->
             send(test_process, {:on_disk, File.read(Path.join(vault_path, path))})
-            git.add_commit.(vault_path, path, message)
+            git.add.(vault_path, paths)
           end
       }
 
@@ -1006,7 +1006,8 @@ defmodule Vigil.StoreTest do
 
       assert [
                {:pull, "nonexistent-remote"},
-               {:add_commit, "bike/ordered.md", "create: bike/ordered.md — # Ordered"},
+               {:add, ["bike/ordered.md"]},
+               {:commit, ["bike/ordered.md"], "create: bike/ordered.md — # Ordered"},
                {:push, "nonexistent-remote"}
              ] = CommitLog.calls(log)
 
@@ -1051,7 +1052,8 @@ defmodule Vigil.StoreTest do
 
       assert [
                {:pull, "nonexistent-remote"},
-               {:remove_commit, "bike/via-carolina.md", "delete: bike/via-carolina.md"},
+               {:remove, ["bike/via-carolina.md"]},
+               {:commit, ["bike/via-carolina.md"], "delete: bike/via-carolina.md"},
                {:push, "nonexistent-remote"}
              ] = CommitLog.calls(log)
 
@@ -1073,7 +1075,8 @@ defmodule Vigil.StoreTest do
 
       assert [
                {:pull, "nonexistent-remote"},
-               {:move_commit, "bike/via-carolina.md", "bike/via-carolina-2026.md",
+               {:move, "bike/via-carolina.md", "bike/via-carolina-2026.md"},
+               {:commit, ["bike/via-carolina.md", "bike/via-carolina-2026.md"],
                 "move: bike/via-carolina.md -> bike/via-carolina-2026.md"},
                {:push, "nonexistent-remote"}
              ] = CommitLog.calls(log)
@@ -1085,7 +1088,7 @@ defmodule Vigil.StoreTest do
   describe "write-path robustness" do
     test "a write whose commit fails leaves the file as it was", %{vault: vault} do
       :ok = stop_supervised(Store)
-      git = %{CommitLog.new(vault) | add_commit: fn _, _, _ -> {:error, "boom"} end}
+      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
       start_store(vault, git: git)
 
       path = Path.join(vault, "bike/terra-speed.md")
@@ -1104,6 +1107,33 @@ defmodule Vigil.StoreTest do
                })
 
       refute File.exists?(Path.join(vault, "bike/brand-new.md"))
+    end
+
+    test "a delete or a move whose commit fails leaves the note where it was", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      start_store(vault, git: git)
+
+      path = Path.join(vault, "bike/via-carolina.md")
+      before = File.read!(path)
+
+      assert {:error, "git rm/commit failed: boom"} =
+               Store.call(@store, :delete_note, %{path: "bike/via-carolina.md", confirm: true})
+
+      assert File.read!(path) == before
+
+      assert {:error, "git mv/commit failed: boom"} =
+               Store.call(@store, :move_note, %{
+                 from: "bike/via-carolina.md",
+                 to: "bike/via-carolina-2026.md",
+                 confirm: true
+               })
+
+      assert File.read!(path) == before
+      refute File.exists?(Path.join(vault, "bike/via-carolina-2026.md"))
+
+      assert {:ok, %{path: "bike/via-carolina.md"}} =
+               Store.call(@store, :read, %{id: "bike/via-carolina.md", backlinks: false})
     end
 
     test "push failure is a success that says it was not pushed; read and search keep working", %{
