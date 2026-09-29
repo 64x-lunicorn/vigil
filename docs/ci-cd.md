@@ -13,7 +13,7 @@ hopeful ones.
 | I want to... | Do this |
 | :--- | :--- |
 | Know if my change passes | `mix ci` |
-| Ship a version | `git tag vX.Y.Z && git push origin vX.Y.Z` |
+| Ship a version | `git tag -s vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z` |
 | Deploy it | `sudo ./scripts/update.sh --to vX.Y.Z` on the vault host |
 | Undo a bad deploy | `sudo ./scripts/update.sh --rollback` |
 
@@ -23,10 +23,15 @@ Shipping is a tag. Nothing else.
 
 ```bash
 # 1. Bump the version in mix.exs, commit, merge to main.
-# 2. Tag the merged commit and push the tag.
-git tag v0.2.0
+# 2. Tag the merged commit with a signed tag and push it.
+git tag -s v0.2.0 -m v0.2.0
 git push origin v0.2.0
 ```
+
+The tag must be signed: the tag ruleset below requires signatures on
+`refs/tags/v*`, and it forbids moving or deleting a `v*` tag once it is
+pushed. A tag that went out wrong is fixed with the next version, not by
+re-tagging.
 
 The tag triggers [`release.yml`](../.github/workflows/release.yml), which:
 
@@ -155,18 +160,187 @@ anything other than `success`, adding or renaming a job never means editing
 branch protection again — and a job that was skipped or cancelled cannot slip
 through as green.
 
-Recommended ruleset for `main`:
+### Recommended ruleset
 
-- Require a pull request before merging, with at least one approval
-- Require review from Code Owners ([`CODEOWNERS`](../.github/CODEOWNERS))
-- Require status checks to pass: **`CI gate`**
-- Require branches to be up to date before merging
-- Block force pushes and deletions
-- Require conversation resolution
+vigil has one maintainer ([GOVERNANCE.md](../GOVERNANCE.md)), so the rules
+follow the **Solo** model: a pull request is required but no approval, and
+nobody can bypass the rules, so the CI gate binds the admin exactly as it
+binds everyone else. One required approval with an admin bypass would
+describe a review that never takes place: a sole maintainer cannot approve
+their own pull request, so every merge would go through the bypass, and the
+bypass skips the gate along with the approval.
 
-Enable **secret scanning with push protection** in the repository's security
-settings as well. gitleaks in CI catches a leaked credential after it is
-pushed; push protection catches it before.
+Code-owner review is therefore **not enforced**.
+[`CODEOWNERS`](../.github/CODEOWNERS) still requests the maintainer's review
+on pull requests from anyone else, and becomes a requirement only once a second
+maintainer exists (the **Two maintainers** model: one approval, code-owner
+review, stale-review dismissal and approval of the last push).
+
+> [!IMPORTANT]
+> This is the **target** configuration. It is applied by the maintainer with
+> the commands under [How to apply](#how-to-apply); until then the repository
+> may still run the previous rules. After applying, replace these blocks with
+> the export (`gh api repos/64x-lunicorn/vigil/rulesets/<id>`) if they
+> differ.
+
+**`main`** — the default-branch ruleset (`Master_Branch`, id `22632000`):
+
+```json
+{
+  "name": "Master_Branch",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["~DEFAULT_BRANCH"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    { "type": "required_linear_history" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": false,
+        "required_reviewers": [],
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": false,
+        "allowed_merge_methods": ["squash"]
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "CI gate", "integration_id": 15368 }
+        ]
+      }
+    }
+  ]
+}
+```
+
+What it means:
+
+- Every change reaches `main` through a pull request — for admins too, since
+  `bypass_actors` is empty. A direct push is rejected.
+- **`CI gate`** must pass, reported by GitHub Actions (integration id
+  `15368`), so another app cannot post a green status of the same name.
+- The branch must be up to date with `main` before merging, and every review
+  conversation resolved.
+- Squash merges only, which keeps the history linear and gives one commit per
+  pull request; no force pushes, no deletion of `main`.
+- No approval is required, for the reason above.
+
+**Release tags** — a new ruleset for `refs/tags/v*`, since pushing a `v*` tag
+cuts a release:
+
+```json
+{
+  "name": "Release_Tags",
+  "target": "tag",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/v*"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "update" },
+    { "type": "non_fast_forward" },
+    { "type": "required_signatures" }
+  ]
+}
+```
+
+A `v*` tag can be created, but only signed, and once pushed it can be neither
+moved nor deleted. A published release therefore always names the commit it
+was built from.
+
+### How to apply
+
+Run these as the repository admin. The JSON above goes into two files,
+`main-ruleset.json` and `tag-ruleset.json`.
+
+```bash
+# Replace the default-branch ruleset (PUT replaces rules and bypass actors).
+gh api --method PUT repos/64x-lunicorn/vigil/rulesets/22632000 \
+  --input main-ruleset.json
+
+# Create the tag ruleset.
+gh api --method POST repos/64x-lunicorn/vigil/rulesets \
+  --input tag-ruleset.json
+
+# Squash merges only; delete the branch on merge.
+gh api --method PATCH repos/64x-lunicorn/vigil \
+  -F allow_squash_merge=true -F allow_merge_commit=false \
+  -F allow_rebase_merge=false -F delete_branch_on_merge=true
+
+# Secret scanning: non-provider patterns and validity checks.
+gh api --method PATCH repos/64x-lunicorn/vigil --input - <<'JSON'
+{
+  "security_and_analysis": {
+    "secret_scanning_non_provider_patterns": { "status": "enabled" },
+    "secret_scanning_validity_checks": { "status": "enabled" }
+  }
+}
+JSON
+
+# Actions may only run actions pinned to a full commit SHA.
+gh api --method PUT repos/64x-lunicorn/vigil/actions/permissions \
+  -F enabled=true -f allowed_actions=all -F sha_pinning_required=true
+```
+
+The same settings as a checklist, for the web UI:
+
+- [ ] **Rules → Rulesets → `Master_Branch`**: no bypass list; require a pull
+      request with 0 approvals, squash as the only merge method, conversation
+      resolution on; `CI gate` required from GitHub Actions, up to date before
+      merging; linear history; block force pushes and deletions.
+- [ ] **Rules → Rulesets → New tag ruleset `Release_Tags`**: target
+      `refs/tags/v*`, no bypass list; restrict updates and deletions, block
+      force pushes, require signed commits.
+- [ ] **General → Pull Requests**: allow squash merging only; automatically
+      delete head branches.
+- [ ] **Advanced Security → Secret Protection**: secret scanning and push
+      protection (already on), plus non-provider patterns and validity checks.
+- [ ] **Actions → General**: require actions to be pinned to a full-length
+      commit SHA.
+
+Then confirm what the rules are for. First read back the rules that now
+apply, then try what they forbid:
+
+```bash
+gh api repos/64x-lunicorn/vigil/rules/branches/main
+gh api repos/64x-lunicorn/vigil/rulesets
+
+# A direct push to main is rejected, for the admin too (on an up-to-date main).
+git commit --allow-empty -m "ruleset check" && git push origin HEAD:main
+
+# An unsigned v* tag is rejected.
+git tag -a --no-sign v0.0.0-rulecheck -m check && git push origin v0.0.0-rulecheck
+```
+
+Both pushes must fail; delete the local commit and tag afterwards
+(`git reset --hard HEAD~1`, `git tag -d v0.0.0-rulecheck`). Run them only
+after the read-back shows the rules: a tag that got through could not be
+deleted, and would start a release run that stops at the version check.
+
+**gitleaks** in CI catches a leaked credential after it is pushed; secret
+scanning's push protection catches it before, and the non-provider patterns
+extend it to generic secrets such as private keys and connection strings that
+no provider registers a pattern for.
 
 ### The same gate, locally
 
