@@ -518,8 +518,13 @@ defmodule Vigil.Parser do
   # The whitespace around a target is the writer's, and stays.
   defp splice_target(line, start, len, target) do
     written = binary_part(line, start, len)
-    [leading] = Regex.run(~r/^\s*/, written)
-    [trailing] = Regex.run(~r/\s*$/, written)
+    # Measured by trimming, not by a `\s*$` search: an unanchored search
+    # restarts at every whitespace run inside the target, which is quadratic.
+    leading =
+      binary_part(written, 0, byte_size(written) - byte_size(String.trim_leading(written)))
+
+    kept = String.trim_trailing(written)
+    trailing = binary_part(written, byte_size(kept), byte_size(written) - byte_size(kept))
 
     binary_part(line, 0, start) <>
       leading <>

@@ -482,6 +482,17 @@ defmodule Vigil.ParserTest do
              """
     end
 
+    test "splices a target holding a long run of whitespace in linear time" do
+      spaces = String.duplicate(" ", 100_000)
+      content = "See [[terra#{spaces}speed|Terra]].\n"
+
+      {micros, rewritten} =
+        :timer.tc(fn -> Parser.rewrite_links(content, fn _link -> "bike/terra-40c" end) end)
+
+      assert rewritten == "See [[bike/terra-40c|Terra]].\n"
+      assert micros < 500_000
+    end
+
     test "the rewrite function sees what extract_links/1 would have returned" do
       body = "See [[terra-speed#dimensions|dims]] and [t](bike/terra-speed.md)."
       test_pid = self()
