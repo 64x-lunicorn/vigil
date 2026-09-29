@@ -32,3 +32,7 @@ vigil-*.tar
 
 # What a failing contract snapshot wrote out for comparison (test/support/contract_snapshot.ex).
 /test/fixtures/contracts/*.actual
+
+# Agent skills are installed per developer, not vendored into the repo.
+/.agents/
+skills-lock.json
