@@ -1657,6 +1657,36 @@ defmodule Vigil.StoreTest do
       }
     end
 
+    # The refusal that asks for a fresh read does not depend on which call
+    # adopted the change: a read in between took the section away first, and
+    # the write's own update then found nothing new.
+    test "an edit whose section a read in between took away is still refused and asks for a fresh read",
+         %{vault: vault} do
+      {log, clock} = freshening_store(vault)
+      path = "bike/via-carolina.md"
+      theirs = "---\ntype: reference\n---\n# Via Carolina\n\n## Wheels\nRenamed.\n"
+      CommitLog.push_from_elsewhere(log, path, theirs)
+      advance(clock, 60)
+      _ = search(%{query: "renamed"})
+
+      assert {:error, msg} =
+               Store.call(@store, :replace_section, %{id: "#{path}#gear", content: "x"})
+
+      assert msg =~ "#{path}#gear no longer resolves"
+      assert msg =~ "Read it again"
+    end
+
+    # An id that never resolved is not one the remote took away.
+    test "an edit whose section never existed is refused as not found", %{vault: vault} do
+      freshening_store(vault)
+      path = "bike/via-carolina.md"
+
+      assert {:error, msg} =
+               Store.call(@store, :replace_section, %{id: "#{path}#no-such", content: "x"})
+
+      refute msg =~ "no longer resolves"
+    end
+
     test "a commit pushed from another clone shows up in search within one interval, with no reload",
          %{vault: vault} do
       {log, clock} = freshening_store(vault)

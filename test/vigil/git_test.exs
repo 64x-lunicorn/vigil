@@ -883,6 +883,24 @@ defmodule Vigil.GitTest do
       assert :ok = git.push.(vault, "origin", "main")
     end
 
+    # One test of "is this a clone", asked by the boot check (tracking) and by
+    # the writer that builds this adapter alike: a worktree's `.git` is a
+    # file, not a directory, and it is a clone all the same.
+    test "a worktree of a clone is a clone, and a directory inside one is not", %{
+      git: git,
+      vault: vault
+    } do
+      worktree = vault <> "_worktree"
+      {_out, 0} = System.cmd("git", ["worktree", "add", "-q", "-b", "side", worktree], cd: vault)
+      on_exit(fn -> File.rm_rf(worktree) end)
+
+      assert Git.clone?(vault)
+      assert Git.clone?(worktree)
+      assert {:ok, %{head: "side"}} = git.tracking.(worktree)
+      refute Git.clone?(Path.join(vault, "bike"))
+      assert {:error, _reason} = git.tracking.(Path.join(vault, "bike"))
+    end
+
     test "delete and move are git operations, not filesystem calls", %{git: git, vault: vault} do
       assert :ok = remove_commit(git, vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
 

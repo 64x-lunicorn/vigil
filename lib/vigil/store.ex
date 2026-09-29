@@ -245,7 +245,10 @@ defmodule Vigil.Store do
       # update, whatever asked for it and however it ended.
       fetched_at: nil,
       # nil while the last update succeeded; otherwise when it failed and why.
-      stale: nil
+      stale: nil,
+      # The chunk ids each of the last reloads of the index took away, newest
+      # first (changed_under/3).
+      vanished: []
     }
 
     abort_left_rebase(git, vault_path)
@@ -282,7 +285,7 @@ defmodule Vigil.Store do
   end
 
   defp over_repository!(vault_path) do
-    unless File.dir?(Path.join(vault_path, ".git")) do
+    unless Git.clone?(vault_path) do
       raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
     end
 
@@ -433,10 +436,9 @@ defmodule Vigil.Store do
   # the meantime is rebased and tried again, and the push it ends with is
   # noted for `status`.
   defp in_step(params, state, perform) do
-    before = state.index
     state = bring_up_to_date(state)
     {result, state} = perform.(params, state)
-    result = changed_under(result, params, before, state.index)
+    result = changed_under(result, params, state)
     {result, state} = push_again(result, state, @push_retries)
     {result, note_push(state, result)}
   end
@@ -455,7 +457,7 @@ defmodule Vigil.Store do
   defp bring_up_to_date(state, fetch_timeout \\ :infinity) do
     case update(state, fetch_timeout) do
       {:moved, state} ->
-        load(state)
+        reload_index(state)
 
       {:in_step, state} ->
         state
@@ -522,9 +524,14 @@ defmodule Vigil.Store do
     do: state.git.fetch.(state.vault_path, state.git_remote, state.git_branch)
 
   defp fetch(state, timeout) do
+    %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
     writer = self()
     tag = make_ref()
-    {pid, ref} = spawn_monitor(fn -> send(writer, {tag, fetch(state, :infinity)}) end)
+
+    # The closure binds only what the fetch needs: the process it runs in
+    # gets a copy of everything it captures, and the state holds the index.
+    {pid, ref} =
+      spawn_monitor(fn -> send(writer, {tag, git.fetch.(vault_path, remote, branch)}) end)
 
     receive do
       {^tag, result} ->
@@ -532,7 +539,7 @@ defmodule Vigil.Store do
         result
 
       {:DOWN, ^ref, :process, ^pid, reason} ->
-        {:error, "fetch from #{state.git_remote}/#{state.git_branch} failed: #{inspect(reason)}"}
+        {:error, "fetch from #{remote}/#{branch} failed: #{inspect(reason)}"}
     after
       timeout ->
         Process.demonitor(ref, [:flush])
@@ -545,8 +552,7 @@ defmodule Vigil.Store do
           0 -> :ok
         end
 
-        {:error,
-         "fetch from #{state.git_remote}/#{state.git_branch} did not answer within #{timeout} ms"}
+        {:error, "fetch from #{remote}/#{branch} did not answer within #{timeout} ms"}
     end
   end
 
@@ -656,7 +662,7 @@ defmodule Vigil.Store do
   defp push_again({:ok, %{pushed: false} = report} = result, state, retries) do
     case update(state) do
       {:moved, state} ->
-        state = load(state)
+        state = reload_index(state)
 
         case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
           :ok -> {{:ok, report |> Map.put(:pushed, true) |> Map.delete(:push_error)}, state}
@@ -676,12 +682,19 @@ defmodule Vigil.Store do
   defp more_push_error(report, sentence),
     do: %{report | push_error: "#{String.trim_trailing(report.push_error)}. #{sentence}."}
 
-  # A section id that resolved before the update and does not after it names
-  # a section the remote changed underneath the caller: what it read is gone.
-  # "Not found" would be true and would not say what to do about it.
-  defp changed_under({:error, "Not found: " <> id} = result, %{id: id}, before, now)
-       when before != now do
-    if Index.find_chunk(before, id) != nil and Index.find_chunk(now, id) == nil do
+  # A section id that does not resolve now and did before one of the last
+  # reloads of the index names a section the remote changed underneath the
+  # caller: what it read is gone. "Not found" would be true and would not say
+  # what to do about it. Which call adopted the change does not matter — the
+  # write's own update, or a read in between that already took the section
+  # away — so the ids each reload took away are remembered (vanished/2),
+  # rather than the index before this write compared with the one after.
+  #
+  # Only an id that vanished is caught. A positional id that now resolves to
+  # another section than the caller read — a heading renamed into the name
+  # of one that was removed — resolves, and only `if_match` refuses the edit.
+  defp changed_under({:error, _reason} = result, %{id: id}, state) when is_binary(id) do
+    if Index.find_chunk(state.index, id) == nil and Enum.any?(state.vanished, &(id in &1)) do
       {:error,
        "#{id} no longer resolves: the note changed on the remote since it was read. " <>
          "Read it again before editing it."}
@@ -690,7 +703,33 @@ defmodule Vigil.Store do
     end
   end
 
-  defp changed_under(result, _params, _before, _now), do: result
+  defp changed_under(result, _params, _state), do: result
+
+  # How many reloads of the index the ids they took away are remembered for:
+  # enough to span the reads and writes between a client's read and its edit,
+  # bounded so a vault that churns does not grow the writer without end.
+  @remembered_reloads 16
+
+  # The index read again from disk — after an update moved the vault, and at
+  # boot and on `reload` — and which chunk ids that took away remembered for
+  # changed_under/3.
+  defp reload_index(state) do
+    before = state.index
+    state = load(state)
+    vanished(state, before)
+  end
+
+  defp vanished(state, before) do
+    gone =
+      before.chunks
+      |> Map.keys()
+      |> Enum.reject(&Map.has_key?(state.index.chunks, &1))
+      |> MapSet.new()
+
+    if MapSet.size(gone) == 0,
+      do: state,
+      else: %{state | vanished: Enum.take([gone | state.vanished], @remembered_reloads)}
+  end
 
   # A write that got as far as its push says so in its result, as `pushed:`
   # and `push_error:` — a note write and a skill write alike. A write refused
@@ -788,7 +827,7 @@ defmodule Vigil.Store do
         _moved_or_in_step -> :ok
       end
 
-    {load(state), pull_result}
+    {reload_index(state), pull_result}
   end
 
   # The vault as it now stands on disk, read into a new index: at boot and on

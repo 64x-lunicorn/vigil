@@ -1227,10 +1227,24 @@ and commits the replayed commits as vigil, unsigned, like every other. A
 rebase that conflicts is aborted, and the vault stays as it was.
 
 The edit is resolved only after that, against the note as it now is. A section
-id that resolved before the update and no longer does is refused with "no
-longer resolves: the note changed on the remote since it was read. Read it
-again before editing it" rather than "Not found"; an `if_match` or a heading
-line that no longer matches is refused the same way it always was.
+id that no longer resolves, and that one of the last sixteen reloads of the
+index took away, is refused with "no longer resolves: the note changed on the
+remote since it was read. Read it again before editing it" rather than "Not
+found"; an `if_match` or a heading line that no longer matches is refused the
+same way it always was. The writer remembers which ids each reload took away
+rather than comparing the index before the write with the one after it,
+because the update that adopted the change need not be the write's own: a read
+in between, fetching once per interval, may have taken the section away
+first, and the write's update then finds nothing new. Sixteen reloads bound
+what is kept; an id older than that is "Not found".
+
+That refusal covers only ids that vanished. Chunk ids are positional — a
+heading's slug, numbered when it repeats — so an update can also leave an id
+resolving to a different section than the one the caller read: a heading
+renamed into the name of one that was removed, a repeated heading inserted
+above. Such an edit resolves, and only an `if_match` against the `hash` the
+read handed out refuses it. A client that edits after a read long ago should
+send one.
 
 **A push the remote refuses because it moved is rebased and tried again.** A
 human can push between vigil's update and vigil's push. After a failed push the

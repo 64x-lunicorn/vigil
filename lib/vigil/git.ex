@@ -178,6 +178,16 @@ defmodule Vigil.Git do
   ]
 
   @doc """
+  Whether `vault_path` is the top of a git clone: it holds `.git` — a
+  directory in a clone, a file in a worktree. The one test the boot check
+  (`tracking/1`) and `Vigil.Store`, which builds this adapter, both put to a
+  vault path, so a vault inside another repository is not answered for by
+  that repository, and neither accepts what the other refuses.
+  """
+  @spec clone?(Path.t()) :: boolean()
+  def clone?(vault_path), do: File.exists?(Path.join(vault_path, ".git"))
+
+  @doc """
   One-shot metadata scan for the whole vault: returns a map
   `path => %{created_at:, updated_at:, last_author:}`.
 
@@ -636,12 +646,11 @@ defmodule Vigil.Git do
   behind when it stopped in the middle of it. While one is, `HEAD` is
   detached and `head` is the branch being rebased: the one aborting it puts
   `HEAD` back on.
-  `{:error, reason}` when `vault_path` is not the top of a git clone — the same
-  test `Vigil.Store` puts to it, so that a vault inside another repository is
-  not answered for by that repository.
+  `{:error, reason}` when `vault_path` is not the top of a git clone
+  (`clone?/1`).
   """
   def tracking(vault_path) do
-    with true <- File.exists?(Path.join(vault_path, ".git")),
+    with true <- clone?(vault_path),
          {:ok, remotes} <- run(vault_path, ["remote"]),
          {:ok, refs} <-
            run(vault_path, [
