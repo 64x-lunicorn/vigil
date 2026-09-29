@@ -103,8 +103,19 @@ defmodule Vigil.MixProject do
   defp releases do
     [
       vigil: [
-        include_executables_for: [:unix]
+        include_executables_for: [:unix],
+        steps: [:assemble, &restrict_cookie/1]
       ]
     ]
+  end
+
+  # The cookie is all that distribution checks: whoever reads it can run code
+  # as the service user through the node's loopback port. Mix writes it under
+  # the umask, which leaves it readable by every account on the host, and
+  # rewrites it only when it is missing — so a rebuild with --overwrite keeps
+  # this mode, and the owner, who is the only reader bin/vigil needs, keeps it.
+  defp restrict_cookie(release) do
+    File.chmod!(Path.join([release.path, "releases", "COOKIE"]), 0o400)
+    release
   end
 end

@@ -353,6 +353,28 @@ wait_until_healthy() {
   ok "Service is up and answering."
 }
 
+## ── The systemd unit's sandbox (shared by setup.sh/update.sh) ────────────
+
+# The highest exposure `systemd-analyze security` may give the unit, in the
+# tenths --threshold counts in: 30 is 3.0. The target is recorded in
+# docs/guide.md (Security model); a unit above it is not installed.
+UNIT_EXPOSURE_THRESHOLD=30
+
+# check_unit_exposure <unit file> — scores the file itself (--offline), so a
+# unit can be judged before it replaces the installed one. Returns 1, and
+# prints the report's worst lines, when the score is above the threshold or
+# systemd-analyze cannot score it at all.
+check_unit_exposure() {
+  local unit="$1" report
+  if report="$(systemd-analyze security --offline=true --threshold="$UNIT_EXPOSURE_THRESHOLD" "$unit" 2>&1)"; then
+    ok "systemd-analyze security: $(echo "$report" | tail -1)"
+    return 0
+  fi
+  err "systemd-analyze security scores the unit above $((UNIT_EXPOSURE_THRESHOLD / 10)).$((UNIT_EXPOSURE_THRESHOLD % 10)):"
+  echo "$report" | tail -25 >&2
+  return 1
+}
+
 ## ── Token bootstrap (shared by init.sh/update.sh) ────────────────────────
 
 # vigil_seed_token <resource> <scope>  — prints the new token on stdout.

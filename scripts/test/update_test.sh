@@ -120,6 +120,29 @@ MIX
   chmod +x "${BIN}/mix"
 }
 
+# A `systemd-analyze` that accepts every unit it is asked to verify and scores
+# every sandbox as within the target, unless the test says otherwise. What
+# update.sh asked it is logged, so the test can see which file was judged
+# against which threshold.
+build_fake_systemd_analyze() {
+  mkdir -p "$BIN"
+  cat >"${BIN}/systemd-analyze" <<'SA'
+#!/usr/bin/env bash
+echo "$*" >>"${FAKE_SA_LOG}"
+case "${1:-}" in
+  security)
+    if [ -f "${FAKE_SA_EXPOSED:-/nonexistent}" ]; then
+      echo "→ Overall exposure level for vigil.service: 9.6 UNSAFE"
+      exit 1
+    fi
+    echo "→ Overall exposure level for vigil.service: 2.0 OK"
+    ;;
+esac
+exit 0
+SA
+  chmod +x "${BIN}/systemd-analyze"
+}
+
 # A code repo with two commits, so `--to` has something real to move between.
 build_repo() {
   local repo="${PREFIX}/repo"
@@ -249,6 +272,8 @@ run_update() {
     FAKE_MIX_LOG="$FAKE_MIX_LOG" \
     FAKE_MIX_TEST_FAILS="${FAKE_MIX_TEST_FAILS:-/nonexistent}" \
     FAKE_MIX_AUDIT_CRITICAL="${FAKE_MIX_AUDIT_CRITICAL:-/nonexistent}" \
+    FAKE_SA_LOG="${WORK}/systemd-analyze.log" \
+    FAKE_SA_EXPOSED="${FAKE_SA_EXPOSED:-/nonexistent}" \
     bash "$UPDATE_SH" "$@" >"${WORK}/out.log" 2>&1
   local rc=$?
   set -e
@@ -271,10 +296,11 @@ systemctl_calls() {
 service_running() { [ -f "${PREFIX}/.service-active" ] && echo yes || echo no; }
 
 build_fake_mix
+build_fake_systemd_analyze
 
 ## ── 1. The happy path ────────────────────────────────────────────────────
 
-section "1/7  A healthy release is switched to"
+section "1/8  A healthy release is switched to"
 
 build_host
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
@@ -296,7 +322,7 @@ fi
 
 ## ── 2. A release that does not come up is rolled back ────────────────────
 
-section "2/7  A red verify() rolls back automatically"
+section "2/8  A red verify() rolls back automatically"
 
 build_host
 # The release update.sh is about to build is the one that will not come up.
@@ -314,7 +340,7 @@ assert_eq "the service was cycled twice, ending on the old release" \
 
 ## ── 3. When the rollback does not come up either ─────────────────────────
 
-section "3/7  A rollback that is also red is reported as such"
+section "3/8  A rollback that is also red is reported as such"
 
 build_host
 rm -rf "${PREFIX}/releases/v0"
@@ -335,7 +361,7 @@ fi
 
 ## ── 4. --rollback ────────────────────────────────────────────────────────
 
-section "4/7  --rollback returns to the recorded release"
+section "4/8  --rollback returns to the recorded release"
 
 # `.previous_release` is produced by a real update rather than written by hand,
 # so the round trip an operator actually performs is the one under test.
@@ -373,7 +399,7 @@ fi
 
 ## ── 5. Refusals leave the running service alone ──────────────────────────
 
-section "5/7  A red suite does not reach the switchover"
+section "5/8  A red suite does not reach the switchover"
 
 build_host
 FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
@@ -447,7 +473,7 @@ assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 
-section "6/7  Cleanup keeps three releases and never the running one"
+section "6/8  Cleanup keeps three releases and never the running one"
 
 build_host
 for old in old1 old2 old3; do
@@ -497,7 +523,7 @@ fi
 
 ## ── 7. A prefix reached through a symlink ────────────────────────────────
 
-section "7/7  Cleanup keeps the running release behind a symlinked prefix"
+section "7/8  Cleanup keeps the running release behind a symlinked prefix"
 
 # The regression this pins: the cleanup compared `readlink -f` output against
 # the unresolved directory listing, so with any symlink in the prefix nothing
@@ -522,6 +548,111 @@ if [ -d "${PREFIX}/releases/v0" ]; then
   pass "the previous release survived the cleanup"
 else
   fail "the previous release survived the cleanup"
+fi
+
+## ── 8. --update-unit ships the unit ──────────────────────────────────────
+
+section "8/8  --update-unit installs the unit the target revision carries"
+
+SHIPPED_UNIT="${REPO_ROOT}/deploy/vigil.service"
+
+# A third commit whose deploy/vigil.service is the real one from this
+# checkout, so what the test sees installed is the unit this change ships.
+commit_shipped_unit() {
+  local repo="${PREFIX}/repo"
+  git -C "$repo" checkout -q main
+  cp "$SHIPPED_UNIT" "${repo}/deploy/vigil.service"
+  git -C "$repo" commit -qam "hardened unit"
+  UNIT_SHA="$(git -C "$repo" rev-parse --short HEAD)"
+  git -C "$repo" checkout -q "$OLD_SHA"
+}
+
+build_host
+commit_shipped_unit
+: >"${WORK}/systemd-analyze.log"
+RC="$(run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if cmp -s "$SHIPPED_UNIT" "${WORK}/etc/vigil.service"; then
+  pass "the installed unit is deploy/vigil.service of the target revision"
+else
+  fail "the installed unit is deploy/vigil.service of the target revision"
+fi
+assert_eq "the installed unit is 0644" "644" "$(mode_of "${WORK}/etc/vigil.service")"
+if grep -qE "^security --offline=true --threshold=30 .*/vigil\.service$" "${WORK}/systemd-analyze.log"; then
+  pass "its sandbox was scored against the 3.0 target before it was installed"
+else
+  fail "its sandbox was scored against the 3.0 target before it was installed" \
+    "systemd-analyze calls: $(paste -sd'|' "${WORK}/systemd-analyze.log")"
+fi
+
+section "8b   Without --update-unit the unit is left alone"
+
+build_host
+commit_shipped_unit
+RC="$(run_update --to "$UNIT_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if [ -e "${WORK}/etc/vigil.service" ]; then
+  fail "no unit was installed"
+else
+  pass "no unit was installed"
+fi
+if grep -q -- "--update-unit" "${WORK}/out.log"; then
+  pass "says how to adopt the changed unit"
+else
+  fail "says how to adopt the changed unit" "$(tail -3 "${WORK}/out.log")"
+fi
+
+section "8c   A unit above the exposure target is refused"
+
+build_host
+commit_shipped_unit
+FAKE_SA_EXPOSED="${WORK}/unit-is-exposed"
+touch "$FAKE_SA_EXPOSED"
+RC="$(run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+FAKE_SA_EXPOSED=""
+
+assert_eq "exits 1" "1" "$RC"
+if [ -e "${WORK}/etc/vigil.service" ]; then
+  fail "the exposed unit was not installed"
+else
+  pass "the exposed unit was not installed"
+fi
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+
+section "8d   The shipped unit carries the sandbox"
+
+# The options #217 asked for, one line each. `systemd-analyze security` on a
+# host is the judgement; this is what keeps one of them from quietly going
+# missing in between.
+for directive in \
+  "UMask=0077" \
+  "Environment=ERL_CRASH_DUMP_SECONDS=0" \
+  "LimitCORE=0" \
+  "ReadOnlyPaths=-/var/lib/vigil/.ssh" \
+  "ReadWritePaths=/var/lib/vigil" \
+  "CapabilityBoundingSet=" \
+  "AmbientCapabilities=" \
+  "ProtectKernelTunables=true" \
+  "ProtectKernelModules=true" \
+  "ProtectKernelLogs=true" \
+  "ProtectControlGroups=true" \
+  "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" \
+  "SystemCallFilter=@system-service" \
+  "StartLimitIntervalSec=300" \
+  "StartLimitBurst=5"; do
+  if grep -qxF "$directive" "$SHIPPED_UNIT"; then
+    pass "deploy/vigil.service sets ${directive}"
+  else
+    fail "deploy/vigil.service sets ${directive}"
+  fi
+done
+if grep -q "^MemoryDenyWriteExecute=" "$SHIPPED_UNIT"; then
+  fail "MemoryDenyWriteExecute stays off for the JIT"
+else
+  pass "MemoryDenyWriteExecute stays off for the JIT"
 fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────

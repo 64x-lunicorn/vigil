@@ -1,0 +1,8 @@
+## Flags for the node `bin/vigil start` boots. The name, the cookie and the
+## distribution port come from rel/env.sh.eex.
+
+## Distribution listens on loopback only, and without epmd: the node listens
+## on the port rel/env.sh.eex passes as -erl_epmd_port, and nothing else is
+## opened for it. Anything beyond loopback would reach around Cloudflare Access.
+-start_epmd false
+-kernel inet_dist_use_interface {127,0,0,1}

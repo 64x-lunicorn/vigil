@@ -1821,6 +1821,31 @@ operator backs up and rotates, and a fallback to the password would keep
 exactly the exposure this closes. The operator adds one line, once
 (`docs/guide.md`, "Operations").
 
+**Nothing the node opens listens beyond loopback.** The HTTP listener is bound
+by `VIGIL_BIND`; Erlang distribution is bound by the release itself. Of
+binding distribution to loopback and switching it off (stopping through
+SIGTERM alone), binding is the one kept: `bin/vigil stop`, `bin/vigil rpc` and
+the operator scripts that seed a token into the running node all reach it over
+distribution, and without it each of them would need a second way in. So the
+node is `vigil@127.0.0.1`, its listener is on 127.0.0.1 only, and it runs
+without epmd — the port is fixed (4370), and the short-lived node behind `rpc`
+dials it directly and listens on nothing (`rel/`). No epmd means no second
+daemon to bind, and none started under a different environment by whoever
+called first. The cookie is distribution's only credential, so the release
+writes it `0400`. A full name rather than a short one because a short name
+goes through the host name, which Debian maps to 127.0.1.1.
+
+**The unit is sandboxed to a recorded exposure.** `deploy/vigil.service`
+carries kernel and cgroup protections, three address families, a system-call
+filter, empty capability sets, `UMask=0077`, no crash dump and no core file
+(a dump is the node's memory, secrets included), a read-only `.ssh` and start
+limits. The target is `systemd-analyze security vigil` at 3.0 or lower, and it
+is enforced where a unit is installed: `setup.sh` and
+`update.sh --update-unit` score the file offline and refuse one above it.
+`MemoryDenyWriteExecute` stays off because the BEAM's JIT writes the code it
+runs; it goes on only after a boot and a write under it in the target
+container.
+
 ---
 
 ## Deliberate non-goals

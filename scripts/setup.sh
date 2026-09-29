@@ -455,6 +455,7 @@ else
   else
     ok "systemd-analyze verify: no problems."
   fi
+  check_unit_exposure /etc/systemd/system/vigil.service || exit 2
 
   systemctl daemon-reload
   systemctl enable vigil >/dev/null

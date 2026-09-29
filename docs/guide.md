@@ -486,9 +486,34 @@ reachable at all on this deployment; the limits are the defence behind it.
 Which address the per-address limits count against is a configured question,
 not a guess: see [the two proxy settings](#the-two-proxy-settings-and-why-they-default-to-unset).
 
-The systemd unit runs with `ProtectSystem=strict`, `ProtectHome=true`,
-`PrivateTmp=true`, `NoNewPrivileges=true`, and `/var/lib/vigil` as the only
-writable path.
+Nothing vigil opens listens beyond loopback: the HTTP listener on
+`VIGIL_BIND`, and Erlang distribution — what `bin/vigil stop` and
+`bin/vigil rpc` use — on `127.0.0.1:4370`, with no epmd. The node is
+`vigil@127.0.0.1`, and the release cookie is `0400`, readable by the service
+user only. To check a host:
+
+```bash
+sudo ss -ltnp | grep -E 'beam|epmd'    # every line on 127.0.0.1 or [::1], no epmd
+```
+
+The systemd unit runs sandboxed: `ProtectSystem=strict` with `/var/lib/vigil`
+as the only writable path and `/var/lib/vigil/.ssh` read-only, a private
+`/tmp` and `/dev`, kernel and cgroup protections, only `AF_UNIX`, `AF_INET` and
+`AF_INET6` sockets, the `@system-service` system-call set without its
+privileged and resource-control calls, no capabilities, `UMask=0077`, no crash
+dump or core file, and at most five failed starts in five minutes.
+`MemoryDenyWriteExecute` is off, because the BEAM's JIT writes the code it
+runs.
+
+The target for the sandbox is an exposure of **3.0 or lower**:
+
+```bash
+systemd-analyze security vigil                    # "Overall exposure level … OK"
+systemd-analyze security --threshold=30 vigil     # exits non-zero above 3.0
+```
+
+`setup.sh` and `update.sh --update-unit` score the unit against the same
+target before installing it, and refuse one above it.
 
 ---
 
@@ -646,6 +671,10 @@ exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
   on the host (see below), or the `status` tool from a client
 - **Add a domain:** create the directory, add it to `_domains.yml`, call
   `reload`. No code change, no restart.
+- **A changed unit:** `update.sh` says so when `deploy/vigil.service` differs
+  from the installed one, and keeps the old one until it is run with
+  `--update-unit`, which verifies the new unit, scores its sandbox and then
+  installs it.
 
 ### `/healthz` and `status`
 

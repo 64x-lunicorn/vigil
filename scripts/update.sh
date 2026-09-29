@@ -375,19 +375,28 @@ if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
       # Verified before it replaces the installed unit: a rejected unit left
       # in /etc/systemd/system would be picked up by the next daemon-reload.
       # Same filter as setup.sh — a release binary that does not exist yet is
-      # expected, anything else is not.
-      UNIT_CANDIDATE="$(mktemp --suffix=.service)"
+      # expected, anything else is not. Then its sandbox is scored against the
+      # recorded target, so a unit that loosened it is not adopted either.
+      # A directory rather than `mktemp --suffix`: the candidate keeps the
+      # unit's own name, and GNU's --suffix is the one flag here macOS lacks.
+      UNIT_CANDIDATE_DIR="$(mktemp -d)"
+      UNIT_CANDIDATE="${UNIT_CANDIDATE_DIR}/$(basename "$UNIT_FILE")"
       cp "$UNIT_SOURCE" "$UNIT_CANDIDATE"
       ANALYSIS="$(systemd-analyze verify "$UNIT_CANDIDATE" 2>&1 || true)"
       UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
       if [ -n "$UNEXPECTED" ]; then
-        rm -f "$UNIT_CANDIDATE"
+        rm -rf "$UNIT_CANDIDATE_DIR"
         err "systemd-analyze verify reports problems with the new unit:"
         echo "$UNEXPECTED" >&2
         exit 1
       fi
+      if ! check_unit_exposure "$UNIT_CANDIDATE"; then
+        rm -rf "$UNIT_CANDIDATE_DIR"
+        err "Not adopting the new unit; the running service is untouched."
+        exit 1
+      fi
       install -m 0644 "$UNIT_CANDIDATE" "$UNIT_FILE"
-      rm -f "$UNIT_CANDIDATE"
+      rm -rf "$UNIT_CANDIDATE_DIR"
       systemctl daemon-reload
       ok "systemd unit adopted."
     fi

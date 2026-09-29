@@ -58,8 +58,7 @@ SERVER_PID=""
 # keeps holding the port and the dets files, and every later run then fails
 # with a confusing 401 against the *previous* run's vault. Owning the PID
 # directly (rather than `bin/vigil daemon` + `bin/vigil stop`) keeps shutdown
-# independent of Erlang distribution, which needs epmd and a resolvable
-# hostname — neither guaranteed on a CI runner.
+# independent of Erlang distribution, which section 3b checks on its own.
 cleanup() {
   local exit_code=$?
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -174,6 +173,15 @@ else
   exit 1
 fi
 
+# The cookie is all Erlang distribution checks; readable, it hands anyone on
+# the host code execution as the service user.
+if stat -c '%a' "${RELEASE}/releases/COOKIE" >/dev/null 2>&1; then
+  cookie_mode="$(stat -c '%a' "${RELEASE}/releases/COOKIE")"
+else
+  cookie_mode="$(stat -f '%Lp' "${RELEASE}/releases/COOKIE")"
+fi
+assert_eq "the release cookie is readable by its owner only" "400" "$cookie_mode"
+
 ## ── 2. Throwaway vault with a real git remote ────────────────────────────
 
 section "2/6  Provision a throwaway vault"
@@ -253,6 +261,12 @@ export VIGIL_RESOURCE="$RESOURCE"
 # not answer for each other.
 export RELEASE_NODE="vigil_smoke_${PORT}"
 
+# The distribution port, off the default so this run can sit beside another
+# node. With no epmd the port, not the name, is what a node is found by, so
+# it is also what keeps two runs from answering for each other.
+DIST_PORT=$((PORT + 1000))
+export VIGIL_DIST_PORT="$DIST_PORT"
+
 # A remote or a branch the clone does not have stops boot, and says which
 # setting is wrong. Checked against the release because that is where the
 # check runs: in the application's start, before any child.
@@ -317,6 +331,60 @@ fi
 
 assert_eq "/healthz is not there for a forwarded request" "404" \
   "$(curl -o /dev/null -s -w '%{http_code}' -H 'X-Forwarded-For: 203.0.113.9' "${BASE_URL}/healthz")"
+
+## ── 3b. Loopback only ────────────────────────────────────────────────────
+
+section "3b/6  Nothing listens beyond loopback"
+
+# The node and everything it spawned. `bin/vigil start` execs its way down to
+# the BEAM, so the PID started above is the node's; its children are the port
+# programs.
+node_pids() {
+  local all="$SERVER_PID" frontier="$SERVER_PID" next pid
+  while [ -n "$frontier" ]; do
+    next=""
+    for pid in $frontier; do
+      next="${next}$(pgrep -P "$pid" 2>/dev/null || true)"$'\n'
+    done
+    frontier="$(echo "$next" | grep -v '^$' || true)"
+    [ -n "$frontier" ] && all="${all}"$'\n'"${frontier}"
+  done
+  echo "$all"
+}
+
+if command -v lsof >/dev/null 2>&1; then
+  # One "address:port" per listening TCP socket the node holds.
+  listeners="$(lsof -nP -a -iTCP -sTCP:LISTEN -p "$(node_pids | paste -sd, -)" -Fn 2>/dev/null |
+    sed -n 's/^n//p' | sort -u || true)"
+
+  if echo "$listeners" | grep -qE "^(127\.0\.0\.1|\[::1\]):${PORT}$"; then
+    pass "the HTTP listener is on loopback"
+  else
+    fail "the HTTP listener is on loopback" "listening: $(echo "$listeners" | paste -sd' ' -)"
+  fi
+  if echo "$listeners" | grep -qE "^127\.0\.0\.1:${DIST_PORT}$"; then
+    pass "Erlang distribution listens on 127.0.0.1:${DIST_PORT}"
+  else
+    fail "Erlang distribution listens on 127.0.0.1:${DIST_PORT}" "listening: $(echo "$listeners" | paste -sd' ' -)"
+  fi
+  wide="$(echo "$listeners" | grep -vE '^(127\.0\.0\.1|\[::1\]):[0-9]+$' | grep -v '^$' || true)"
+  if [ -z "$wide" ]; then
+    pass "no socket of the node listens beyond loopback"
+  else
+    fail "no socket of the node listens beyond loopback" "$(echo "$wide" | paste -sd' ' -)"
+  fi
+else
+  fail "no socket of the node listens beyond loopback" "lsof is not installed"
+fi
+
+# The path operator tooling takes into the running node, and the one
+# vigil_seed_token takes once the service is up: over loopback, with the cookie.
+rpc_out="$("$RELEASE_BIN" rpc 'IO.puts("rpc-" <> Atom.to_string(node()))' 2>&1 || true)"
+if echo "$rpc_out" | grep -qx "rpc-${RELEASE_NODE}@127.0.0.1"; then
+  pass "bin/vigil rpc reaches the running node"
+else
+  fail "bin/vigil rpc reaches the running node" "$(echo "$rpc_out" | tail -3)"
+fi
 
 ## ── 4. Read path ─────────────────────────────────────────────────────────
 
