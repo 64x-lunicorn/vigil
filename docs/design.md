@@ -470,13 +470,31 @@ one write including a complete index rebuild ~115 ms.
 
 ## MCP tool schemas are authoritative
 
-`Vigil.MCP.Tools` declares each tool once — name, description, the `write`
-flag, the `Store` operation it calls, and its parameters' names, types and
-required-ness — in a single table. Three things are generated from it: the
-JSON schema published on `tools/list`, the argument validation `dispatch/5`
-runs on `tools/call`, and the `Vigil.Store.call/3` that follows. They cannot
-drift out of agreement the way hand-written twins do, and adding a tool is
-adding a row.
+`Vigil.MCP.Tools` declares each tool once — name, title, description, the
+`write` flag, the `Store` operation it calls, its four MCP hints, and its
+parameters' names, types and required-ness — in a single table. Three things
+are generated from it: the JSON schema and annotations published on
+`tools/list`, the argument validation `dispatch/5` runs on `tools/call`, and
+the `Vigil.Store.call/3` that follows. They cannot drift out of agreement the
+way hand-written twins do, and adding a tool is adding a row.
+
+**Every row states all four hints.** `readOnlyHint`, `destructiveHint`,
+`idempotentHint` and `openWorldHint` are published as the tool's
+`annotations`, beside a human-readable `title`. The spec's default for a hint
+left out is the cautious one — destructive and open-world — so a server that
+declares nothing tells a client that `search` is as dangerous as
+`delete_note`, and its user learns to approve everything. A row that omits a
+hint, or the title, is a compile error rather than a tool quietly described by
+those defaults. The read tools are read-only. `delete_note`, `move_note`,
+`rewrite_note`, `delete_section`, `replace_section`, `update_frontmatter` and
+`skill_write` are destructive — each can take away what the vault already
+says — while `create` and `append` only add. The hints are not derived from
+`write:`, because the two say different things: `write:` is what a token needs
+the `vault` scope for, the hints are what the tool does. `reload` keeps them
+apart. It stays callable with `vault:read` (see "Security model"), yet it is
+not read-only and it is the one open-world tool: it moves the vault to
+whatever the remote holds. The same `write:` flag decides what `tools/list`
+shows — a token that may not write is listed only the tools it may call.
 
 **The call is the table's third product.** A row's `call:` names the
 operation; its parameters travel under the names the table gives them.
@@ -1274,18 +1292,31 @@ Five layers, each doing one job:
    unless the public endpoint answers 403.
 2. **OAuth 2.1 + PKCE** — vigil is its own authorization server. See
    [oauth.md](oauth.md).
-3. **Scope** — `vault` (full) or `vault:read` (read-only tools). A
-   `vault:read` token cannot change what a note says. It can make the server
-   catch up with the remote: `reload` takes no content from the caller and
-   adopts, `--ff-only`, commits already pushed there — so a pull can move the
-   vault under a reader, whoever calls it.
+3. **Scope** — `vault` (full) or `vault:read` (read-only tools). The check is
+   an allow-list: a write needs exactly `vault`, and any other scope — the
+   empty string, one this server never issued — is refused as `vault:read`
+   is, rather than only `vault:read` being refused and everything else let
+   through. `tools/list` shows such a token only the tools it may call. An
+   empty `scope` at the authorization endpoint means "no scope asked for",
+   and the token endpoint issues `vault` for it, never `""`; it decides this
+   for a refresh token too, so a family redeemed before the rule carries
+   `vault` from its next rotation on. A `vault:read` token cannot change what
+   a note says. It can make the server catch up with the remote: `reload`
+   takes no content from the caller and adopts, `--ff-only`, commits already
+   pushed there — so a pull can move the vault under a reader, whoever calls
+   it.
 4. **SkillKey** — a rotating HMAC required by every write tool. Not access
    control (the token already did that): it is proof that the assistant has
    *read the writing conventions* in this session. It can only be obtained by
    calling `skill_read`.
 5. **Rate limiting** — fixed window, in three places that are easy to
    confuse. `/mcp` is limited per access token, so it is unreachable without
-   one. The authorization server's own endpoints — `register`, `authorize`,
+   one. `reload` is counted a second time there, per access token under a key
+   of its own and against a much smaller budget (`VIGIL_RELOAD_RATE_LIMIT_RPM`,
+   default 6), because each call pulls and reparses the whole vault inside the
+   single writer. Past it, `reload` answers a tool error saying so rather than
+   a 429: the request was within the budget every request spends, the session
+   goes on, and the caller is told which call to stop repeating. The authorization server's own endpoints — `register`, `authorize`,
    `token` — are limited per **client address**, because they are reachable
    with no token at all and each one costs something: an outbound CIMD fetch
    to an address the caller chose, a `:dets` row and an fsync, or the work of

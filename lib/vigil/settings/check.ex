@@ -36,6 +36,7 @@ defmodule Vigil.Settings.Check do
     {:auth_password, "VIGIL_AUTH_PASSWORD", :password},
     {:skillkey_ttl_seconds, "VIGIL_SKILLKEY_TTL", :positive_integer},
     {:rate_limit_rpm, "VIGIL_RATE_LIMIT_RPM", :positive_integer},
+    {:reload_rate_limit_rpm, "VIGIL_RELOAD_RATE_LIMIT_RPM", :positive_integer},
     {:oauth_rate_limit_rpm, "VIGIL_OAUTH_RATE_LIMIT_RPM", :positive_integer},
     {:oauth_register_rate_limit_rpm, "VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", :positive_integer}
   ]

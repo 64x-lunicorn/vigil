@@ -119,7 +119,7 @@ defmodule Vigil.RateLimit do
 
   `key` is taken for that warning and nothing else, and this is where it
   belongs: the function that decides to ignore what a deployment configured is
-  the one that has to say so, and a deployment configures three budgets, so it
+  the one that has to say so, and a deployment configures four budgets, so it
   has to say which. A caller that warned on this function's behalf would leave
   every other caller falling back in silence.
   """

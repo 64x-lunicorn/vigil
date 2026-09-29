@@ -202,6 +202,33 @@ defmodule Vigil.OAuth.FlowTest do
       )
     end
 
+    # `scope=""` is an accepted request, and "no scope asked for" means the
+    # default one. The token endpoint issues `vault` rather than the empty
+    # string, which no allow-list would ever let write.
+    test "a code consented with an empty scope issues vault", %{persistence: persistence} do
+      client_id = client!(persistence)
+
+      {:ok, ctx} =
+        Flow.authorize_request(
+          server(persistence),
+          authorize_params(client_id, %{"scope" => ""})
+        )
+
+      code = Code.issue(persistence, ctx)
+
+      assert {:ok, tokens} =
+               Flow.grant(persistence, code_grant(%{"code" => code, "client_id" => client_id}))
+
+      assert tokens.scope == "vault"
+
+      assert {:ok, "vault"} =
+               Vigil.OAuth.Token.validate_access(
+                 persistence,
+                 tokens.access_token,
+                 @settings.resource
+               )
+    end
+
     test "a correct verifier yields an access and a refresh token", %{
       persistence: persistence,
       client_id: client_id,
@@ -498,6 +525,41 @@ defmodule Vigil.OAuth.FlowTest do
                })
 
       assert fresh.scope == tokens.scope
+    end
+
+    # A refresh family whose code was redeemed with `scope=""` before the token
+    # endpoint said otherwise. Only `vault` writes, so carrying the empty
+    # string forward would quietly turn a full-access client into a reader.
+    test "a refresh token carrying an empty scope rotates into vault", %{
+      persistence: persistence
+    } do
+      client_id = client!(persistence)
+      legacy = Vigil.OAuth.Token.random()
+
+      persistence.put_token.(legacy, %{
+        type: :refresh,
+        grant_id: Vigil.Uuid.v4(),
+        client_id: client_id,
+        aud: @settings.resource,
+        scope: "",
+        expires_at: System.system_time(:second) + 3600
+      })
+
+      assert {:ok, fresh} =
+               Flow.grant(persistence, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => legacy,
+                 "client_id" => client_id
+               })
+
+      assert fresh.scope == "vault"
+
+      assert {:ok, "vault"} =
+               Vigil.OAuth.Token.validate_access(
+                 persistence,
+                 fresh.access_token,
+                 @settings.resource
+               )
     end
   end
 

@@ -113,6 +113,72 @@ defmodule Vigil.MCP.ToolsTest do
     end
   end
 
+  describe "every tool says what it does" do
+    # The seven writes that can take away what is already in the vault. The
+    # other two, `create` and `append`, only add to it.
+    @destructive ~w(delete_note move_note rewrite_note delete_section replace_section update_frontmatter skill_write)
+
+    # Under the MCP spec's defaults a tool that declares nothing is destructive
+    # and open-world, so every hint is stated, on every tool.
+    test "every tool publishes a title and all four hints" do
+      for tool <- Tools.definitions() do
+        assert is_binary(tool.title) and tool.title != "", "#{tool.name} has no title"
+
+        assert Map.keys(tool.annotations) |> Enum.sort() ==
+                 [:destructiveHint, :idempotentHint, :openWorldHint, :readOnlyHint],
+               "#{tool.name} does not state all four hints"
+
+        assert Enum.all?(Map.values(tool.annotations), &is_boolean/1)
+      end
+    end
+
+    test "exactly the seven writes that can take something away are destructive" do
+      destructive =
+        for %{name: name, annotations: %{destructiveHint: true}} <- Tools.definitions(),
+            do: name
+
+      assert Enum.sort(destructive) == Enum.sort(@destructive)
+    end
+
+    test "the read tools are read-only; every write, and reload, is not" do
+      for %{name: name, annotations: annotations} <- Tools.definitions() do
+        expected = name not in @write_tools and name != "reload"
+        assert annotations.readOnlyHint == expected, "#{name}: readOnlyHint"
+      end
+    end
+
+    # reload stays callable with vault:read (#177), yet it moves the vault to
+    # whatever the remote holds: not read-only, and the one tool that reaches
+    # outside the vault's own state.
+    test "reload is neither read-only nor closed-world" do
+      [reload] = Enum.filter(Tools.definitions(), &(&1.name == "reload"))
+
+      assert reload.annotations.readOnlyHint == false
+      assert reload.annotations.openWorldHint == true
+      assert reload.annotations.destructiveHint == false
+      refute Tools.write_tool?("reload")
+
+      open_world =
+        for %{name: n, annotations: %{openWorldHint: true}} <- Tools.definitions(), do: n
+
+      assert open_world == ["reload"]
+    end
+  end
+
+  describe "definitions/1" do
+    test "without writes, no write tool is listed and every other tool is" do
+      names = for %{name: name} <- Tools.definitions(writes: false), do: name
+
+      assert Enum.filter(names, &(&1 in @write_tools)) == []
+      assert length(names) == length(Tools.definitions()) - length(@write_tools)
+      assert "reload" in names
+    end
+
+    test "with writes, it is the whole list" do
+      assert Tools.definitions(writes: true) == Tools.definitions()
+    end
+  end
+
   describe "dispatch/5 validates before the Store is reached" do
     test "an unknown tool is rejected without touching the Store" do
       assert Tools.dispatch("does_not_exist", %{}, @now, @key) ==

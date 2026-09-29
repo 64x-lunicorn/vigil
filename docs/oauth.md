@@ -218,6 +218,7 @@ they cover different things:
 | Limit | Keyed on | Budget | Covers |
 |---|---|---|---|
 | `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM`/min | every `/mcp` request, and only once the token has validated |
+| `Vigil.RateLimit` for `reload` | access token | `VIGIL_RELOAD_RATE_LIMIT_RPM`/min | `reload` calls, counted again under a key of their own |
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
 | OAuth persistence's `rate_limited?` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
 
@@ -597,8 +598,14 @@ what makes audience mismatch, expiry, refresh-presented-as-access and the
 old-record defaults answerable in a test with no `Plug.Conn`
 (`test/vigil/oauth/token_test.exs`).
 
-Scope decides what the token may call: `vault` allows everything, `vault:read`
-rejects every write tool with an explicit error rather than an HTTP-level 403.
+Scope decides what the token may call, as an allow-list: `vault` allows
+everything, and a token with any other scope — `vault:read`, or anything else
+a record might hold — is shown only the tools it may call on `tools/list`, and
+has every write tool rejected with an explicit error rather than an
+HTTP-level 403. An empty `scope` is accepted at the authorization endpoint as
+"no scope asked for", and the token endpoint issues `vault` for it — for a
+code and for a refresh token alike, so a family redeemed before that rule
+carries `vault` from its next rotation on.
 A record written before scopes existed names none, and is read as the full
 `vault` scope — it was minted when that was the only thing a token could be,
 and reading it as `vault:read` would silently take write access away from a

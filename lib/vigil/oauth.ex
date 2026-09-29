@@ -18,8 +18,19 @@ defmodule Vigil.OAuth do
   @doc "Full read/write scope."
   def scope, do: @scope
 
-  @doc "Read-only scope (AP-6): the write tools are refused for a token holding it."
+  @doc "Read-only scope (AP-6): the write tools are neither listed nor callable with it."
   def read_scope, do: @read_scope
+
+  @doc """
+  Whether a token holding `scope` may call a write tool.
+
+  An allow-list of one: `vault` writes, and nothing else does — not
+  `vault:read`, not the empty string, not a scope this server has never
+  heard of. A refusal list would let through whatever it did not think to
+  name.
+  """
+  @spec may_write?(term()) :: boolean()
+  def may_write?(scope), do: scope == @scope
 
   @doc "Every scope this server issues."
   def scopes, do: [@scope, @read_scope]

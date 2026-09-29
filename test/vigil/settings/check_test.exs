@@ -24,6 +24,7 @@ defmodule Vigil.Settings.CheckTest do
     auth_password: "correct-horse-battery-staple",
     skillkey_ttl_seconds: 3600,
     rate_limit_rpm: 60,
+    reload_rate_limit_rpm: 6,
     oauth_rate_limit_rpm: 30,
     oauth_register_rate_limit_rpm: 5,
     https_required: true
@@ -46,6 +47,7 @@ defmodule Vigil.Settings.CheckTest do
     @integers [
       port: "VIGIL_PORT",
       rate_limit_rpm: "VIGIL_RATE_LIMIT_RPM",
+      reload_rate_limit_rpm: "VIGIL_RELOAD_RATE_LIMIT_RPM",
       oauth_rate_limit_rpm: "VIGIL_OAUTH_RATE_LIMIT_RPM",
       oauth_register_rate_limit_rpm: "VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM",
       skillkey_ttl_seconds: "VIGIL_SKILLKEY_TTL"

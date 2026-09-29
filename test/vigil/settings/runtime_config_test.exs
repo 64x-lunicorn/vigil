@@ -23,7 +23,8 @@ defmodule Vigil.Settings.RuntimeConfigTest do
 
   @touched Map.keys(@prod_env) ++
              ~w(VIGIL_PORT VIGIL_TZ VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
-                VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM)
+                VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
+                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM)
 
   setup do
     previous = Map.new(@touched, &{&1, System.get_env(&1)})
@@ -49,7 +50,7 @@ defmodule Vigil.Settings.RuntimeConfigTest do
 
   test "a non-integer reaches the check as written and is refused by name" do
     for var <-
-          ~w(VIGIL_PORT VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
+          ~w(VIGIL_PORT VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM VIGIL_RELOAD_RATE_LIMIT_RPM
              VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM) do
       System.put_env(var, "12abc")
 

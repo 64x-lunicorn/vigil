@@ -174,6 +174,11 @@ defmodule Vigil.MCP.ServerTest do
     body = Jason.decode!(conn.resp_body)
     assert body["result"]["instructions"] =~ "Voice:"
     assert body["result"]["protocolVersion"] == "2025-11-25"
+
+    server_info = body["result"]["serverInfo"]
+    assert server_info["name"] == "vigil"
+    assert server_info["title"] == "Vigil"
+    assert server_info["websiteUrl"] == "https://github.com/64x-lunicorn/vigil"
   end
 
   test "unknown method returns JSON-RPC -32601", %{persistence: persistence, token: token} do
@@ -239,6 +244,27 @@ defmodule Vigil.MCP.ServerTest do
 
     body = Jason.decode!(conn.resp_body)
     assert length(body["result"]["tools"]) == 17
+  end
+
+  # A reader is shown what it may call. Offering it the writes only to refuse
+  # every one of them is how users learn to approve without reading.
+  test "tools/list for a vault:read token lists no write tool", %{
+    persistence: persistence,
+    oauth: oauth
+  } do
+    read_token = seed_token(oauth, OAuth.read_scope())
+
+    conn =
+      post(persistence, read_token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
+        {"mcp-session-id", "abc"}
+      ])
+
+    names = for tool <- Jason.decode!(conn.resp_body)["result"]["tools"], do: tool["name"]
+
+    assert names != []
+    assert Enum.filter(names, &Tools.write_tool?/1) == []
+    assert "reload" in names
+    assert length(names) == length(Tools.definitions(writes: false))
   end
 
   test "tools/call search returns an envelope alongside the result", %{
@@ -847,6 +873,46 @@ defmodule Vigil.MCP.ServerTest do
       assert hd(body["result"]["content"])["text"] =~ "Read-only token"
     end
 
+    # The scope is an allow-list: `vault` writes, and nothing else does. The
+    # empty string is what a code consented with `scope=""` used to carry; an
+    # unknown scope cannot be minted by the flow, but a record is a record.
+    test "a token with any scope other than vault cannot write", %{
+      persistence: persistence,
+      oauth: oauth
+    } do
+      for scope <- [OAuth.read_scope(), "", "vault:admin", "VAULT"] do
+        token = seed_token(oauth, scope)
+
+        conn =
+          post(
+            persistence,
+            token,
+            %{
+              jsonrpc: "2.0",
+              id: 1,
+              method: "tools/call",
+              params: %{
+                name: "create",
+                arguments: %{path: "bike/new.md", type: "reference", content: "# New\ntext"}
+              }
+            },
+            [{"mcp-session-id", "session-scope"}]
+          )
+
+        body = Jason.decode!(conn.resp_body)
+        assert body["result"]["isError"] == true, "scope #{inspect(scope)} was let write"
+        assert hd(body["result"]["content"])["text"] =~ "write access denied"
+
+        listed =
+          post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
+            {"mcp-session-id", "session-scope"}
+          ])
+
+        names = for t <- Jason.decode!(listed.resp_body)["result"]["tools"], do: t["name"]
+        assert Enum.filter(names, &Tools.write_tool?/1) == []
+      end
+    end
+
     test "a vault:read token can call reload without a skill_key", %{
       persistence: persistence,
       oauth: oauth
@@ -932,6 +998,54 @@ defmodule Vigil.MCP.ServerTest do
         )
 
       assert conn.status == 429
+    end
+
+    # Each reload pulls and reparses inside the writer, so it has a budget of
+    # its own, well below the one every request is counted against. Past it,
+    # reload answers a rate-limit error; the session and every other tool go
+    # on as before.
+    test "reload past its own budget answers a rate-limit error", %{
+      persistence: persistence,
+      token: token
+    } do
+      limiter = RateLimit.Counter.new()
+
+      call = fn id, name ->
+        conn =
+          conn(
+            :post,
+            "/mcp",
+            Jason.encode!(%{
+              jsonrpc: "2.0",
+              id: id,
+              method: "tools/call",
+              params: %{name: name, arguments: %{}}
+            })
+          )
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("authorization", "Bearer #{token}")
+          |> put_req_header("mcp-session-id", "session-reload-rl")
+          |> Server.call(
+            opts(persistence,
+              rate_limit_budget: 100,
+              reload_rate_limit_budget: 2,
+              limiter: limiter
+            )
+          )
+
+        assert conn.status == 200
+        Jason.decode!(conn.resp_body)["result"]
+      end
+
+      for id <- 1..2 do
+        refute Map.get(call.(id, "reload"), "isError")
+      end
+
+      limited = call.(3, "reload")
+      assert limited["isError"] == true
+      assert Jason.decode!(hd(limited["content"])["text"])["error"] =~ "Rate limit"
+
+      refute Map.get(call.(4, "current"), "isError")
     end
   end
 

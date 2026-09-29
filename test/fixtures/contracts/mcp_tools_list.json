@@ -1,5 +1,11 @@
 [
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Searches chunk bodies and headings for a phrase.",
     "inputSchema": {
       "properties": {
@@ -42,9 +48,16 @@
       ],
       "type": "object"
     },
-    "name": "search"
+    "name": "search",
+    "title": "Search the vault"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
     "inputSchema": {
       "properties": {
@@ -63,9 +76,16 @@
       ],
       "type": "object"
     },
-    "name": "read"
+    "name": "read",
+    "title": "Read a note or section"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
     "inputSchema": {
       "properties": {
@@ -95,9 +115,16 @@
       ],
       "type": "object"
     },
-    "name": "links"
+    "name": "links",
+    "title": "Show links"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
     "inputSchema": {
       "properties": {
@@ -150,9 +177,16 @@
       ],
       "type": "object"
     },
-    "name": "create"
+    "name": "create",
+    "title": "Create a note"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Appends content to an existing note.",
     "inputSchema": {
       "properties": {
@@ -183,9 +217,16 @@
       ],
       "type": "object"
     },
-    "name": "append"
+    "name": "append",
+    "title": "Append to a note"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Replaces the body of exactly one chunk.",
     "inputSchema": {
       "properties": {
@@ -212,9 +253,16 @@
       ],
       "type": "object"
     },
-    "name": "replace_section"
+    "name": "replace_section",
+    "title": "Replace a section"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
     "inputSchema": {
       "properties": {
@@ -245,9 +293,16 @@
       ],
       "type": "object"
     },
-    "name": "rewrite_note"
+    "name": "rewrite_note",
+    "title": "Rewrite a note"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Removes a chunk including its heading.",
     "inputSchema": {
       "properties": {
@@ -268,9 +323,16 @@
       ],
       "type": "object"
     },
-    "name": "delete_section"
+    "name": "delete_section",
+    "title": "Delete a section"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
     "inputSchema": {
       "properties": {
@@ -309,9 +371,16 @@
       ],
       "type": "object"
     },
-    "name": "update_frontmatter"
+    "name": "update_frontmatter",
+    "title": "Update frontmatter"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Permanently deletes a note. Destructive — requires confirm: true.",
     "inputSchema": {
       "properties": {
@@ -336,9 +405,16 @@
       ],
       "type": "object"
     },
-    "name": "delete_note"
+    "name": "delete_note",
+    "title": "Delete a note"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
     "inputSchema": {
       "properties": {
@@ -369,41 +445,76 @@
       ],
       "type": "object"
     },
-    "name": "move_note"
+    "name": "move_note",
+    "title": "Move a note"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "lint"
+    "name": "lint",
+    "title": "Check the vault"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Returns the current time plus active and nearby events.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "current"
+    "name": "current",
+    "title": "Current time and events"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
     "description": "Runs git pull and reparses the vault.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "reload"
+    "name": "reload",
+    "title": "Reload from the remote"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Lists available skills with their description, without bodies.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "skill_list"
+    "name": "skill_list",
+    "title": "List skills"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Reads the full content of a skill.",
     "inputSchema": {
       "properties": {
@@ -418,9 +529,16 @@
       ],
       "type": "object"
     },
-    "name": "skill_read"
+    "name": "skill_read",
+    "title": "Read a skill"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Creates or replaces a skill; only on explicit instruction.",
     "inputSchema": {
       "properties": {
@@ -447,6 +565,7 @@
       ],
       "type": "object"
     },
-    "name": "skill_write"
+    "name": "skill_write",
+    "title": "Write a skill"
   }
 ]

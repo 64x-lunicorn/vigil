@@ -12,6 +12,15 @@ defmodule Vigil.MCP.Server do
   @protocol_version "2025-11-25"
   @default_rpm 60
 
+  # `reload` pulls and reparses the whole vault inside the writer, so it is
+  # counted a second time, against a budget of its own well below the one
+  # every request spends.
+  @default_reload_rpm 6
+
+  # Who this server says it is on `initialize`, beside its name and version.
+  @server_title "Vigil"
+  @website_url "https://github.com/64x-lunicorn/vigil"
+
   # What this router and the authorization server it forwards to must decide
   # against the same values: where the records are kept, where the windows are
   # counted, and what this deployment says it is. Named once, so handing one
@@ -56,6 +65,9 @@ defmodule Vigil.MCP.Server do
     |> Keyword.put_new_lazy(:rate_limit_budget, fn ->
       RateLimit.configured_budget(:rate_limit_rpm, @default_rpm)
     end)
+    |> Keyword.put_new_lazy(:reload_rate_limit_budget, fn ->
+      RateLimit.configured_budget(:reload_rate_limit_rpm, @default_reload_rpm)
+    end)
     |> Keyword.put(:oauth, oauth)
     |> Keyword.merge(shared_with_oauth!(oauth))
   end
@@ -73,6 +85,7 @@ defmodule Vigil.MCP.Server do
     |> put_private(:store, opts[:store])
     |> put_private(:sessions, opts[:sessions])
     |> put_private(:rate_limit_budget, opts[:rate_limit_budget])
+    |> put_private(:reload_rate_limit_budget, opts[:reload_rate_limit_budget])
     |> put_private(:rate_limiter, opts[:limiter])
     |> put_private(:oauth_persistence, opts[:persistence])
     |> put_private(:oauth_opts, opts[:oauth])
@@ -111,7 +124,7 @@ defmodule Vigil.MCP.Server do
         if conn.private.rate_limiter.limited?.(token, budget, now) do
           send_resp(conn, 429, "")
         else
-          handle_mcp_authenticated(conn, scope)
+          handle_mcp_authenticated(conn, %{scope: scope, token: token})
         end
 
       {:error, :challenge} ->
@@ -153,12 +166,14 @@ defmodule Vigil.MCP.Server do
     |> send_resp(401, "")
   end
 
-  defp handle_mcp_authenticated(conn, scope) do
+  # `auth` is what the validated token says about the caller: its scope, and
+  # the token itself, which is what every budget here is counted against.
+  defp handle_mcp_authenticated(conn, auth) do
     with {:ok, protocol_version_ok?, conn} <- check_protocol_version(conn),
          true <- protocol_version_ok?,
          {:ok, body, conn} <- Plug.Conn.read_body(conn),
          {:ok, msg} <- Jason.decode(body) do
-      if is_map(msg), do: handle_message(conn, msg, scope), else: invalid_request(conn)
+      if is_map(msg), do: handle_message(conn, msg, auth), else: invalid_request(conn)
     else
       false ->
         send_resp(conn, 400, "")
@@ -199,12 +214,17 @@ defmodule Vigil.MCP.Server do
     })
   end
 
-  defp handle_message(conn, %{"method" => "initialize"} = msg, _scope) do
+  defp handle_message(conn, %{"method" => "initialize"} = msg, _auth) do
     session_id = Vigil.Uuid.v4()
 
     result = %{
       protocolVersion: @protocol_version,
-      serverInfo: %{name: "vigil", version: Application.spec(:vigil, :vsn) |> to_string()},
+      serverInfo: %{
+        name: "vigil",
+        title: @server_title,
+        version: Application.spec(:vigil, :vsn) |> to_string(),
+        websiteUrl: @website_url
+      },
       capabilities: %{tools: %{}},
       instructions: instructions_text(conn.private.store, settings(conn))
     }
@@ -214,23 +234,27 @@ defmodule Vigil.MCP.Server do
     |> send_json(200, %{jsonrpc: "2.0", id: msg["id"], result: result})
   end
 
-  defp handle_message(conn, %{"method" => "notifications/initialized"}, _scope) do
+  defp handle_message(conn, %{"method" => "notifications/initialized"}, _auth) do
     send_resp(conn, 202, "")
   end
 
-  defp handle_message(conn, %{"method" => "ping"} = msg, _scope) do
+  defp handle_message(conn, %{"method" => "ping"} = msg, _auth) do
     with_session(conn, fn _session_id ->
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{}})
     end)
   end
 
-  defp handle_message(conn, %{"method" => "tools/list"} = msg, _scope) do
+  # A token that may not write is shown only the tools it may call. Listing the
+  # writes to refuse each of them on the call is how users learn to approve
+  # whatever is asked.
+  defp handle_message(conn, %{"method" => "tools/list"} = msg, auth) do
     with_session(conn, fn _session_id ->
-      send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{tools: Tools.definitions()}})
+      tools = Tools.definitions(writes: OAuth.may_write?(auth.scope))
+      send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{tools: tools}})
     end)
   end
 
-  defp handle_message(conn, %{"method" => "tools/call", "params" => params} = msg, _scope)
+  defp handle_message(conn, %{"method" => "tools/call", "params" => params} = msg, _auth)
        when not is_map(params) and not is_nil(params) do
     send_json(conn, 200, %{
       jsonrpc: "2.0",
@@ -239,7 +263,7 @@ defmodule Vigil.MCP.Server do
     })
   end
 
-  defp handle_message(conn, %{"method" => "tools/call"} = msg, scope) do
+  defp handle_message(conn, %{"method" => "tools/call"} = msg, auth) do
     with_session(conn, fn session_id ->
       params = msg["params"] || %{}
       name = params["name"]
@@ -253,10 +277,16 @@ defmodule Vigil.MCP.Server do
         Envelope.for_tool(conn.private.sessions, session_id, name, store, settings(conn).tz)
 
       result =
-        if scope == OAuth.read_scope() and Tools.write_tool?(name) do
-          {:error, "Read-only token: write access denied."}
-        else
-          Tools.dispatch(store, name, arguments, now, SkillKey.key(settings(conn)))
+        cond do
+          Tools.write_tool?(name) and not OAuth.may_write?(auth.scope) ->
+            {:error, "Read-only token: write access denied."}
+
+          reload_limited?(conn, name, auth.token) ->
+            {:error,
+             "Rate limit exceeded for reload: at most #{conn.private.reload_rate_limit_budget} per minute. Try again in #{RateLimit.window_seconds()} seconds."}
+
+          true ->
+            Tools.dispatch(store, name, arguments, now, SkillKey.key(settings(conn)))
         end
 
       body = build_tool_call_result(result, envelope)
@@ -264,7 +294,7 @@ defmodule Vigil.MCP.Server do
     end)
   end
 
-  defp handle_message(conn, msg, _scope) do
+  defp handle_message(conn, msg, _auth) do
     if Map.has_key?(msg, "id") do
       send_json(conn, 200, %{
         jsonrpc: "2.0",
@@ -275,6 +305,21 @@ defmodule Vigil.MCP.Server do
       send_resp(conn, 202, "")
     end
   end
+
+  # `reload`'s own window, per access token, in the same limiter as every
+  # other budget and under a key of its own, so the two are counted apart. It
+  # answers as a tool error rather than a 429: the request itself was within
+  # its budget, the session goes on, and the caller is told which call to
+  # stop repeating.
+  defp reload_limited?(conn, "reload", token) do
+    conn.private.rate_limiter.limited?.(
+      {:reload, token},
+      conn.private.reload_rate_limit_budget,
+      System.system_time(:second)
+    )
+  end
+
+  defp reload_limited?(_conn, _name, _token), do: false
 
   defp with_session(conn, fun) do
     case get_req_header(conn, "mcp-session-id") do

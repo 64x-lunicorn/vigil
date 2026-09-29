@@ -226,7 +226,7 @@ defmodule Vigil.OAuth.Flow do
     aud = Code.audience_of(record)
 
     if target_ok?(params, aud) do
-      {:ok, Token.issue_pair(persistence, record, now)}
+      {:ok, Token.issue_pair(persistence, scope_defaulted(record), now)}
     else
       {:error, 400, "invalid_target"}
     end
@@ -249,7 +249,7 @@ defmodule Vigil.OAuth.Flow do
         # deleted, recognised as a replay rather than mistaken for a token that
         # never existed.
         Token.spend_refresh(persistence, refresh_token, data, now)
-        {:ok, Token.issue_pair(persistence, data, now)}
+        {:ok, Token.issue_pair(persistence, scope_defaulted(data), now)}
     end
   end
 
@@ -272,6 +272,16 @@ defmodule Vigil.OAuth.Flow do
     persistence.revoke_grant.(Token.grant_of(data))
     {:error, 400, "invalid_grant"}
   end
+
+  # `scope=""` is accepted at the authorization endpoint as "no scope asked
+  # for", and no scope asked for is the default one. The token endpoint is
+  # where that is decided, for a code and for a refresh token alike: a pair is
+  # never issued with the empty string, which the allow-list at `/mcp` would
+  # read as a scope that may not write. Deciding it here rather than at
+  # consent also carries a family redeemed before this rule into `vault` on
+  # its next rotation.
+  defp scope_defaulted(%{scope: ""} = record), do: %{record | scope: OAuth.scope()}
+  defp scope_defaulted(record), do: record
 
   defp target_ok?(params, expected) do
     is_nil(params["resource"]) or params["resource"] == expected

@@ -254,9 +254,10 @@ vault has none.
 
 ## Tools
 
-Seventeen tools. "RW" means the token needs the `vault` scope; a `vault:read`
-token gets an explicit error. "Key" means the call must carry a current
-`skill_key`.
+Seventeen tools. "RW" means the token needs the `vault` scope; a token with
+any other scope, `vault:read` included, is not shown them on `tools/list` and
+gets an explicit error if it calls one anyway. "Key" means the call must carry
+a current `skill_key`.
 
 | Tool | Parameters | Returns | Role | Key |
 |---|---|---|---|:--:|
@@ -277,6 +278,15 @@ token gets an explicit error. "Key" means the call must carry a current
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content | `{name, pushed}` | RW | ✓ |
+
+Every tool also publishes a title and the four MCP hints, so a client can tell
+`delete_note` from `read` before asking you to approve it. The read tools are
+read-only. `delete_note`, `move_note`, `rewrite_note`, `delete_section`,
+`replace_section`, `update_frontmatter` and `skill_write` are destructive;
+`create` and `append` only add. `reload` is callable with `vault:read` and is
+still neither read-only nor closed-world: it moves the vault to whatever the
+remote holds, and has its own, smaller rate limit
+(`VIGIL_RELOAD_RATE_LIMIT_RPM`), since each call pulls and reparses the vault.
 
 `limit` is 1–25 (default 10) and `depth` is 1 or 2. A value outside the range
 is a tool error naming the range, not a silently clamped result: a caller told
@@ -409,6 +419,7 @@ cover different things:
 | Limit | Keyed on | Budget | Covers |
 |---|---|---|---|
 | `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM` per minute | every `/mcp` request, and only after the token validates |
+| `Vigil.RateLimit` for `reload` | access token | `VIGIL_RELOAD_RATE_LIMIT_RPM` per minute | `reload` calls, on top of the row above; past it `reload` answers a rate-limit error |
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` per minute | `/oauth/register`, `/oauth/authorize`, `/oauth/token` — all reachable without a token |
 | `Vigil.OAuth.Store` | client address | 5 per 15 minutes | wrong passwords on the consent form, and nothing else |
 
@@ -448,6 +459,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
 | `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
+| `VIGIL_RELOAD_RATE_LIMIT_RPM` | `6` | max `reload` per minute per access token, on top of the budget above |
 | `VIGIL_OAUTH_RATE_LIMIT_RPM` | `30` | max `/oauth/authorize` and `/oauth/token` per minute per client address |
 | `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` | `5` | max `/oauth/register` per minute per client address |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
@@ -458,9 +470,9 @@ else does. A bad one stops the start, and the journal names every variable that
 failed and what it expected, all in one message:
 
 - `VIGIL_PORT` must be an integer from 1 to 65535.
-- `VIGIL_SKILLKEY_TTL`, `VIGIL_RATE_LIMIT_RPM` and the two OAuth budgets must
-  be positive integers. `0`, `-5` or `60rpm` is refused, not replaced by the
-  default.
+- `VIGIL_SKILLKEY_TTL`, `VIGIL_RATE_LIMIT_RPM`, `VIGIL_RELOAD_RATE_LIMIT_RPM`
+  and the two OAuth budgets must be positive integers. `0`, `-5` or `60rpm` is
+  refused, not replaced by the default.
 - `VIGIL_TZ` must be a timezone name the timezone database knows, such as
   `Europe/Berlin`. An unknown one is refused rather than quietly becoming UTC.
 - `VIGIL_BIND` must be an IP address.
@@ -632,7 +644,7 @@ editing the vault in another tool.
 | `create` fails with "does not match the schema for domain" | the domain has a `naming.pattern` the path does not satisfy | the error contains a valid suggestion; or adjust `naming` in `_domains.yml` |
 | Chunk ids change unexpectedly after a deploy | the slug logic changed without checking the migration diff | run `mix vigil.slug_diff <vault>` *before* deploying |
 | Client gets 401 | token wrong or expired | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
-| A write tool answers "Read-only token: write access denied." | the token has scope `vault:read` | connect with a `vault` token |
+| A write tool answers "Read-only token: write access denied." | the token's scope is not `vault` (for example `vault:read`) | connect with a `vault` token |
 | Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client | fix the Access configuration — never disable Access to "solve" this |
 | Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | the safety-net cron retries every 15 minutes; check `journalctl -t vigil-push` and `git -C /var/lib/vigil/vault rev-list --count github/main..main` |
 

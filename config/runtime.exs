@@ -46,6 +46,9 @@ config :vigil,
   auth_password: System.get_env("VIGIL_AUTH_PASSWORD"),
   skillkey_ttl_seconds: integer.("VIGIL_SKILLKEY_TTL", "3600"),
   rate_limit_rpm: integer.("VIGIL_RATE_LIMIT_RPM", "60"),
+  # `reload` is counted a second time, per access token, against a budget of
+  # its own: each call pulls and reparses the whole vault inside the writer.
+  reload_rate_limit_rpm: integer.("VIGIL_RELOAD_RATE_LIMIT_RPM", "6"),
   # The authorization server's own budgets, per client address per minute.
   # Registration gets the tighter one: it is rare, and each call writes a
   # `:dets` row and fsyncs it.

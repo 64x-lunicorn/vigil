@@ -2,14 +2,24 @@ defmodule Vigil.MCP.Tools do
   @moduledoc """
   Every MCP tool's contract, declared once.
 
-  `@tools` is the single source of truth: name, description, the `write`
-  flag, the `call` the tool makes, whether that call resolves an instant
-  (`now:`), and each parameter's name, type, and whether it is required. Three things are generated from it — `definitions/0`
-  (the JSON schema handed to the client on `tools/list`), the argument
-  validation `dispatch/5` runs on `tools/call`, and the `Store.call/3` that
-  follows it. A schema, its validation and the call they describe cannot drift
+  `@tools` is the single source of truth: name, title, description, the
+  `write` flag, the `call` the tool makes, whether that call resolves an
+  instant (`now:`), the four MCP hints (`hints:`), and each parameter's name,
+  type, and whether it is required. Three things are generated from it —
+  `definitions/1` (the JSON schema and annotations handed to the client on
+  `tools/list`), the argument validation `dispatch/5` runs on `tools/call`,
+  and the `Store.call/3` that follows it. A schema, its validation and the call they describe cannot drift
   out of agreement when they are the same table. Adding a tool is adding a
   row.
+
+  `hints:` is what `tools/list` publishes as the tool's annotations —
+  `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — and
+  every row states all four. They are not derived from `write:`, because the
+  two say different things: `write:` is what a token needs the `vault` scope
+  for, the hints are what the tool does to the vault. `reload` is the case
+  that keeps them apart — callable with `vault:read`, and still neither
+  read-only nor closed-world, because it moves the vault to what the remote
+  holds.
 
   The call is a row's `call:` and its parameters: every declared parameter
   travels under the name the table gives it, except `skill_key`, which
@@ -85,6 +95,13 @@ defmodule Vigil.MCP.Tools do
           required(:description) => String.t(),
           required(:write) => boolean(),
           required(:call) => atom(),
+          required(:title) => String.t(),
+          required(:hints) => %{
+            read_only: boolean(),
+            destructive: boolean(),
+            idempotent: boolean(),
+            open_world: boolean()
+          },
           required(:params) => [param_spec],
           optional(:now) => boolean()
         }
@@ -92,9 +109,11 @@ defmodule Vigil.MCP.Tools do
   @tools [
     %{
       name: "search",
+      title: "Search the vault",
       description: "Searches chunk bodies and headings for a phrase.",
       write: false,
       call: :search,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
         %{name: "query", type: :string, required: true, description: "Exact search phrase."},
         %{name: "domain", type: :string, description: "Restrict results to this domain."},
@@ -114,10 +133,12 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "read",
+      title: "Read a note or section",
       description:
         "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
       write: false,
       call: :read,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
         %{
           name: "id",
@@ -135,10 +156,12 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "links",
+      title: "Show links",
       description:
         "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
       write: false,
       call: :links,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
         %{name: "id", type: :string, required: true, description: "path, or path#heading-slug."},
         %{
@@ -157,10 +180,12 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "create",
+      title: "Create a note",
       description:
         "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
       write: true,
       call: :create,
+      hints: %{read_only: false, destructive: false, idempotent: false, open_world: false},
       now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
@@ -198,9 +223,11 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "append",
+      title: "Append to a note",
       description: "Appends content to an existing note.",
       write: true,
       call: :append,
+      hints: %{read_only: false, destructive: false, idempotent: false, open_world: false},
       now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
@@ -219,9 +246,11 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "replace_section",
+      title: "Replace a section",
       description: "Replaces the body of exactly one chunk.",
       write: true,
       call: :replace_section,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
         %{name: "id", type: :string, required: true, description: "path#heading-slug."},
@@ -235,10 +264,12 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "rewrite_note",
+      title: "Rewrite a note",
       description:
         "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
       write: true,
       call: :rewrite_note,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
@@ -259,9 +290,11 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "delete_section",
+      title: "Delete a section",
       description: "Removes a chunk including its heading.",
       write: true,
       call: :delete_section,
+      hints: %{read_only: false, destructive: true, idempotent: false, open_world: false},
       now: true,
       params: [
         %{name: "id", type: :string, required: true, description: "path#heading-slug."}
@@ -269,10 +302,12 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "update_frontmatter",
+      title: "Update frontmatter",
       description:
         "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
       write: true,
       call: :update_frontmatter,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
@@ -288,9 +323,11 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "delete_note",
+      title: "Delete a note",
       description: "Permanently deletes a note. Destructive — requires confirm: true.",
       write: true,
       call: :delete_note,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
         %{name: "path", type: :string, required: true, description: "domain/filename.md."},
@@ -304,10 +341,12 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "move_note",
+      title: "Move a note",
       description:
         "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
       write: true,
       call: :move_note,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
         %{name: "from", type: :string, required: true, description: "Existing path."},
@@ -322,40 +361,50 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "lint",
+      title: "Check the vault",
       description:
         "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
       write: false,
       call: :lint,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       now: true,
       params: []
     },
     %{
       name: "current",
+      title: "Current time and events",
       description: "Returns the current time plus active and nearby events.",
       write: false,
       call: :current,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       now: true,
       params: []
     },
     %{
       name: "reload",
+      title: "Reload from the remote",
       description: "Runs git pull and reparses the vault.",
       write: false,
       call: :reload,
+      hints: %{read_only: false, destructive: false, idempotent: true, open_world: true},
       params: []
     },
     %{
       name: "skill_list",
+      title: "List skills",
       description: "Lists available skills with their description, without bodies.",
       write: false,
       call: :skill_list,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: []
     },
     %{
       name: "skill_read",
+      title: "Read a skill",
       description: "Reads the full content of a skill.",
       write: false,
       call: :skill_read,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
         %{
           name: "name",
@@ -367,9 +416,11 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "skill_write",
+      title: "Write a skill",
       description: "Creates or replaces a skill; only on explicit instruction.",
       write: true,
       call: :skill_write,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       params: [
         %{
           name: "name",
@@ -396,16 +447,50 @@ defmodule Vigil.MCP.Tools do
                   into: %{},
                   do: {value, String.to_atom(value)}
 
-  @doc "Tool definitions for `tools/list`, generated from `@tools`."
-  @spec definitions() :: [map()]
-  def definitions do
-    Enum.map(@tools, fn tool ->
-      %{
-        name: tool.name,
-        description: tool.description,
-        inputSchema: input_schema(param_specs(tool))
+  # Every row states all four hints. The spec's default for a hint left out is
+  # the cautious one — destructive, open-world — which is also what a row that
+  # forgot one would publish, so a missing hint is a compile error rather than
+  # a tool quietly described as the opposite of what it is.
+  @hint_keys [:destructive, :idempotent, :open_world, :read_only]
+
+  for tool <- @tools do
+    unless is_binary(tool[:title]) and tool.title != "" do
+      raise ArgumentError, "tool #{tool.name} declares no title"
+    end
+
+    unless is_map(tool[:hints]) and Enum.sort(Map.keys(tool.hints)) == @hint_keys and
+             Enum.all?(Map.values(tool.hints), &is_boolean/1) do
+      raise ArgumentError,
+            "tool #{tool.name} must declare each of #{inspect(@hint_keys)} as a boolean"
+    end
+  end
+
+  @doc """
+  Tool definitions for `tools/list`, generated from `@tools`.
+
+  `writes: false` leaves out every tool whose row says `write: true` — the
+  list a token that may not write is shown, so it is offered only what it can
+  call. The default is the whole table.
+  """
+  @spec definitions(keyword()) :: [map()]
+  def definitions(opts \\ []) do
+    writes? = Keyword.get(opts, :writes, true)
+    for tool <- @tools, writes? or not tool.write, do: definition(tool)
+  end
+
+  defp definition(tool) do
+    %{
+      name: tool.name,
+      title: tool.title,
+      description: tool.description,
+      inputSchema: input_schema(param_specs(tool)),
+      annotations: %{
+        readOnlyHint: tool.hints.read_only,
+        destructiveHint: tool.hints.destructive,
+        idempotentHint: tool.hints.idempotent,
+        openWorldHint: tool.hints.open_world
       }
-    end)
+    }
   end
 
   # A row's parameters, plus the one its `write:` flag implies. Last, where it
@@ -443,7 +528,7 @@ defmodule Vigil.MCP.Tools do
 
   @doc """
   True for tools that write to the vault — gated by both AP-4's SkillKey and
-  AP-6's read-only (`vault:read`) scope. `skill_write` requires a SkillKey
+  AP-6's scope, which lets only a `vault` token write. `skill_write` requires a SkillKey
   same as any other write tool; the bootstrap deadlock this could cause on a
   brand-new vault (no `vigil-vault-conventions` skill yet to read a key from)
   is resolved in `Vigil.Skills.read/3`, which reveals the current key even
