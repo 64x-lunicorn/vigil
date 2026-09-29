@@ -199,7 +199,11 @@ section "3/6  Seed tokens and start the release"
 # Seeding must happen BEFORE the daemon starts: dets is single-writer, and a
 # second process opening the same files writes into a copy the running node
 # never sees (see the comment on vigil_seed_token in scripts/lib.sh).
-RESOURCE="${BASE_URL}/mcp"
+# In prod the issuer and resource must be https (the boot-time settings
+# check refuses anything else), so the release is given the public URL a
+# tunnel would serve, while this script talks to its loopback listener.
+ISSUER="https://vault.smoke.test"
+RESOURCE="${ISSUER}/mcp"
 AUTH_PASSWORD="smoke-test-password-not-a-secret"
 
 RW_TOKEN="$(MIX_ENV=prod mix vigil.seed_token \
@@ -223,7 +227,7 @@ VIGIL_SKILLKEY_SECRET="$(openssl rand -base64 48)"
 export VIGIL_SKILLKEY_SECRET
 export VIGIL_PORT="$PORT"
 export VIGIL_GIT_REMOTE="origin"
-export VIGIL_ISSUER="$BASE_URL"
+export VIGIL_ISSUER="$ISSUER"
 export VIGIL_RESOURCE="$RESOURCE"
 
 "$RELEASE_BIN" start > "${WORK}/server.log" 2>&1 &
