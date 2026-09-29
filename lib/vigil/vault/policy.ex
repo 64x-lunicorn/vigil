@@ -150,6 +150,7 @@ defmodule Vigil.Vault.Policy do
     with {:ok, from_candidate, _changed?} <- canonical(from),
          {:ok, normalized_from} <- existing_note(from_candidate, facts),
          content = note_content(normalized_from, facts),
+         :ok <- utf8(normalized_from, content),
          {:ok, normalized_to, _changed?} <- canonical(to),
          {:ok, domain, _create_dir} <- writable_path(normalized_to, facts, false),
          :ok <- naming_convention(normalized_to, domain, content, facts),
@@ -297,6 +298,20 @@ defmodule Vigil.Vault.Policy do
     case facts.read_note.(path) do
       {:ok, content} -> content
       _ -> ""
+    end
+  end
+
+  # A note the load skipped for not being UTF-8 is not moved: the index would
+  # be handed it at its new path, and it cannot be parsed there either
+  # (docs/design.md, "A note that is not UTF-8 is skipped"). Deleting it is
+  # allowed — that is one way of fixing it.
+  defp utf8(path, content) do
+    if String.valid?(content) do
+      :ok
+    else
+      {:error,
+       "#{path} is not valid UTF-8, so vigil does not index or move it. " <>
+         "Re-save it as UTF-8, then reload."}
     end
   end
 

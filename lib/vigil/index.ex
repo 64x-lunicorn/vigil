@@ -55,20 +55,30 @@ defmodule Vigil.Index do
     ]
   end
 
-  defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}
+  # `invalid_utf8` is the paths the load skipped for not being UTF-8
+  # (docs/design.md, "A note that is not UTF-8 is skipped") — no note, no
+  # chunk, only a `lint` finding.
+  defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}, invalid_utf8: []
 
   @typedoc "The whole index as one value: the notes, their chunks, and the links between them."
   @type t :: %__MODULE__{}
 
-  @doc "Builds an index from the vault's parsed files."
-  def build(parsed_files) do
+  @doc """
+  Builds an index from the vault's parsed files, and the paths of the notes the
+  load skipped because they are not UTF-8.
+  """
+  def build(parsed_files, invalid_utf8 \\ []) do
     {notes, chunks} =
       Enum.reduce(parsed_files, {%{}, %{}}, fn file, {notes, chunks} ->
         {note, file_chunks} = index_file(file)
         {Map.put(notes, note.path, note), Map.merge(chunks, file_chunks)}
       end)
 
-    rebuild_links(%__MODULE__{notes: notes, chunks: chunks})
+    rebuild_links(%__MODULE__{
+      notes: notes,
+      chunks: chunks,
+      invalid_utf8: Enum.sort(invalid_utf8)
+    })
   end
 
   @doc """
@@ -145,11 +155,14 @@ defmodule Vigil.Index do
   defp drop_source(index, path, path), do: index
   defp drop_source(index, from, _to), do: drop(index, from)
 
+  # A note the load skipped is only a path here, and deleting it is how it
+  # leaves `lint`'s findings before the next load.
   defp drop(index, path) do
     %{
       index
       | notes: Map.delete(index.notes, path),
-        chunks: Map.drop(index.chunks, old_chunk_ids(index, path))
+        chunks: Map.drop(index.chunks, old_chunk_ids(index, path)),
+        invalid_utf8: List.delete(index.invalid_utf8, path)
     }
   end
 
@@ -771,10 +784,10 @@ defmodule Vigil.Index do
   end
 
   @doc """
-  Answers the `lint` tool's five findings: duplicate headings, sentence-like
-  headings, orphaned links (broken outgoing links, labelled with their
-  fragment where present), overlong notes and decision notes stale relative to
-  `now`. The three note-hygiene definitions — duplicate headings,
+  Answers the `lint` tool's six findings: notes the load skipped for not being
+  UTF-8, duplicate headings, sentence-like headings, orphaned links (broken
+  outgoing links, labelled with their fragment where present), overlong notes
+  and decision notes stale relative to `now`. The three note-hygiene definitions — duplicate headings,
   sentence-like headings, overlong notes — come from `Vigil.Vault.Rules`, so
   `mix vigil.vault_check` reports the same notes for the same reasons. The
   other two are this module's own: a broken link is the link index's verdict,
@@ -789,6 +802,7 @@ defmodule Vigil.Index do
     chunks = Map.values(index.chunks)
 
     %{
+      invalid_utf8: index.invalid_utf8,
       duplicate_headings: lint_duplicate_headings(chunks),
       sentence_headings: lint_sentence_headings(chunks),
       orphaned_links: lint_orphaned_links(index),

@@ -34,15 +34,30 @@ defmodule Vigil.VaultCheck do
     domain_dirs = layout.domains
     files = Layout.note_paths(layout)
 
-    entries =
-      Enum.map(files, fn rel_path ->
+    # A note that is not UTF-8 is one the server skips (docs/design.md, "A
+    # note that is not UTF-8 is skipped"), so it is reported as that and
+    # checked for nothing else: the other findings are about notes the server
+    # reads.
+    {entries, invalid_utf8} =
+      files
+      |> Enum.map(fn rel_path ->
         content = File.read!(Path.join(vault_path, rel_path))
-        {:ok, parsed} = Parser.parse(rel_path, content)
-        {rel_path, content, parsed}
+
+        case Parser.parse(rel_path, content) do
+          {:ok, parsed} -> {:ok, {rel_path, Markdown.normalize(content), parsed}}
+          {:error, :invalid_utf8} -> {:invalid_utf8, rel_path}
+        end
       end)
+      |> Enum.split_with(&match?({:ok, _entry}, &1))
+
+    entries = Enum.map(entries, fn {:ok, entry} -> entry end)
 
     %{
       overview: overview(vault_path, domain_dirs, entries),
+      b0_encoding:
+        Enum.map(invalid_utf8, fn {:invalid_utf8, path} ->
+          %{path: path, message: "not valid UTF-8, so the server skips this note"}
+        end),
       b1_frontmatter:
         Enum.flat_map(entries, fn {path, content, _} -> b1_checks(path, content) end),
       b2_filenames: b2_checks(files),

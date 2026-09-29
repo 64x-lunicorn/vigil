@@ -395,7 +395,7 @@ defmodule Vigil.MCP.Tools do
       name: "lint",
       title: "Check the vault",
       description:
-        "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+        "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
       write: false,
       call: :lint,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},

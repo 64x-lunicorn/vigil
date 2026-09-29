@@ -499,7 +499,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+    "description": "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
     "inputSchema": {
       "properties": {},
       "type": "object"

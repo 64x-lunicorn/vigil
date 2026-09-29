@@ -294,7 +294,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `update_frontmatter` | path, type, starts?, ends? | `{path, pushed}` | RW | ✓ |
 | `delete_note` | path, confirm | `{path, deleted, pushed, broken_backlinks}` | RW | ✓ |
 | `move_note` | from, to, confirm, update_links? | `{from, to, pushed, broken_backlinks, updated_links?}` | RW | ✓ |
-| `lint` | – | duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
+| `lint` | – | notes that are not UTF-8, duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
 | `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push}` | RO/RW | – |

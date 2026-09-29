@@ -97,6 +97,10 @@ type: reference
 Text.
 EOF
 
+# A note saved as Windows-1252 (0xE9 is "é" there, and no UTF-8 on its
+# own): the server skips it, and the report names it with the fix.
+printf -- '---\ntype: reference\n---\n# Caf\351\n\nText.\n' >"${VAULT}/bike/windows-note.md"
+
 # Missing .gitignore entry: no .gitignore at all yet.
 
 # On `master`, with no upstream yet, and the env file naming a remote that is
@@ -160,6 +164,8 @@ assert_eq "local git user.email was not changed" "$BEFORE_USER_EMAIL" "$AFTER_US
 assert_eq "vault directory ownership/permissions were not touched" "$BEFORE_VAULT_LS" "$AFTER_VAULT_LS"
 assert_eq "exit code reports findings (3) rather than an error" "3" "$EXIT_CODE"
 
+assert_contains "names the note that is not UTF-8, with its fix" "$OUTPUT" \
+  "bike/windows-note.md: not valid UTF-8, so the server skips this note"
 assert_contains "reports the .gitignore fix as pending, not applied" "$OUTPUT" \
   "gitignore: add .obsidian/"
 assert_contains "reports the git identity fix as pending, not applied" "$OUTPUT" \

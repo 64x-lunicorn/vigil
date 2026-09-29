@@ -584,4 +584,40 @@ defmodule Vigil.VaultCheckTest do
       assert Enum.any?(report.b6_consolidation, &(&1.path == note))
     end
   end
+
+  # docs/design.md, "A note that is not UTF-8 is skipped".
+  describe "encoding" do
+    test "a note that is not UTF-8 is named, and checked for nothing else", %{vault: vault} do
+      path = "domaina/windows-note.md"
+      File.write!(Path.join(vault, path), "# Caf\xE9\n\n## Gr\xF6\xDFe\nSee [[caf\xE9]].\n")
+
+      report = VaultCheck.run(vault)
+
+      assert report.b0_encoding == [
+               %{path: path, message: "not valid UTF-8, so the server skips this note"}
+             ]
+
+      refute Enum.any?(report.b1_frontmatter, &(&1.path == path))
+      refute Enum.any?(report.b3_chunk_diff.changes, &(&1.path == path))
+      assert Jason.encode!(report)
+    end
+
+    test "the frontmatter of a CRLF note and of a note with a byte order mark is read", %{
+      vault: vault
+    } do
+      File.write!(
+        Path.join(vault, "domaina/crlf-note.md"),
+        "---\r\ntype: reference\r\n---\r\n# C\r\n"
+      )
+
+      File.write!(
+        Path.join(vault, "domaina/bom-note.md"),
+        "\uFEFF---\ntype: reference\n---\n# B\n"
+      )
+
+      findings = VaultCheck.run(vault).b1_frontmatter
+
+      refute Enum.any?(findings, &(&1.path in ["domaina/crlf-note.md", "domaina/bom-note.md"]))
+    end
+  end
 end

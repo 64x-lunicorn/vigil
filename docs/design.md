@@ -1441,7 +1441,7 @@ question.
 ## How a file is written
 
 Vigil is the only writer (principle 2), so the shape of a file on disk is
-vigil's to define. Three rules, and they hold on every write path.
+vigil's to define. Four rules, and they hold on every write path.
 
 **A file ends with exactly one newline.** `Vigil.Markdown` owns this rule and is
 the only place that states it. The whole-file writes (`create`, `rewrite_note`,
@@ -1476,9 +1476,52 @@ heading, the body, and exactly one following blank line — the slot the section
 occupied. Not every following blank line: a wider gap someone set deliberately
 survives, one line narrower.
 
+**A note is written back in the style it was read in.** A note saved on
+Windows ends its lines with CRLF, and some editors put a UTF-8 byte order mark
+in front of it. Neither is part of what the note says, and both used to hide
+its frontmatter: the first line was `---\r` or `\uFEFF---`, not `---`, so the
+note was read as having no block and `update_frontmatter` put a second one in
+front of the first. `Vigil.Markdown.decode/1` is the one reading of those
+bytes: every reader — the parser, `Vigil.Vault.Plan`, the doctor — works on
+text with `\n` endings and no mark, so chunk bodies, hashes and responses
+never carry a `\r`. What `decode/1` also returns is the note's style, and
+`Vigil.Vault.Plan` writes every edit of an existing note back in it through
+`Vigil.Markdown.encode/2`: a CRLF note stays CRLF, a note with a mark keeps it,
+and a `move_note` that rewrites links does the same for each note it touches.
+Normalising to LF on the first edit was the alternative, and was rejected: it
+turns a one-line edit into a whole-file diff in the author's history, on a
+file they chose to write that way. A note is CRLF when its first line break is; a file that
+mixes the two is written back in that one. A note vigil creates is LF with no
+mark, because there is no author's style to keep.
+
 These rules say nothing about repairing notes written before them. Files that
 already lost a separator stay as they are; principle 5 says the server reports
 and does not fix on its own initiative.
+
+---
+
+## A note that is not UTF-8 is skipped
+
+A note saved as Windows-1252 or Latin-1 is not UTF-8, and nothing in it can be
+read honestly: a heading or a link with such a byte in it has no slug, so the
+load raised — at boot a restart loop, and the server stayed down for one file
+— and a chunk holding one could not be encoded into a JSON response.
+Guessing the encoding was the alternative, and was rejected: a guess is right
+often enough to be trusted and wrong often enough to mangle a note, silently.
+
+So `Vigil.Parser.parse/3` answers `{:error, :invalid_utf8}` for such content,
+and the load skips the file with a warning that names it. The vault loads
+without it; one note costs one note (principle 5: report, do not fix). The
+skipped paths stay in the index as paths only, and `lint` lists them under
+`invalid_utf8`; `mix vigil.vault_check` reports them under `b0_encoding` and
+checks them for nothing else, because every other finding is about a note the
+server reads. The fix is the author's: re-save the file as UTF-8, then
+`reload`.
+
+Until then vigil does not write to it. An edit of the note is refused in
+`Vigil.Vault.Plan` and a move in `Vigil.Vault.Policy`, both naming the file,
+because either would hand the index a note it cannot parse. Deleting it is
+allowed — that is one way of fixing it — and takes it out of `lint`.
 
 ---
 

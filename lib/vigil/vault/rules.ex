@@ -130,9 +130,12 @@ defmodule Vigil.Vault.Rules do
   end
 
   defp heading_changes(vault_path, rel_path) do
+    # A note that is not UTF-8 has no chunk ids to change: the server skips it
+    # (docs/design.md, "A note that is not UTF-8 is skipped").
     case File.read(Path.join(vault_path, rel_path)) do
       {:ok, content} ->
         content
+        |> utf8_text()
         |> heading_slug_changes()
         |> Enum.map(fn %{text: text, old: old, new: new} ->
           %{kind: :heading, path: rel_path, heading: text, old: old, new: new}
@@ -141,6 +144,10 @@ defmodule Vigil.Vault.Rules do
       {:error, _reason} ->
         []
     end
+  end
+
+  defp utf8_text(content) do
+    if String.valid?(content), do: Markdown.normalize(content), else: ""
   end
 
   @doc """

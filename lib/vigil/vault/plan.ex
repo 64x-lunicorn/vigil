@@ -80,11 +80,30 @@ defmodule Vigil.Vault.Plan do
   shaped: an edit whose chunk is gone, a note whose frontmatter block never
   closes, or a rewrite of a note that has no block to preserve. Each is the
   caller's message to hand back verbatim.
-  """
-  @spec build(op, Decision.t(), map, String.t() | nil) :: {:ok, t} | {:error, String.t()}
-  def build(op, decision, request, current)
 
-  def build(:create, %Decision.Create{} = resolved, request, _current) do
+  A note's `current` content is shaped as `Vigil.Markdown.decode/1` reads it,
+  and what comes back is written in the note's own style — the byte order mark
+  and the line endings it had (docs/design.md, "How a file is written"). A
+  note that is not UTF-8 at all is refused: the load skipped it, and a write
+  would hand the index a note it cannot parse.
+  """
+  @spec build(op, Decision.t(), map, String.t() | list | nil) ::
+          {:ok, t} | {:error, String.t()}
+  def build(op, decision, request, current) when is_binary(current) do
+    if String.valid?(current) do
+      {text, style} = Markdown.decode(current)
+
+      with {:ok, plan} <- shape(op, decision, request, text) do
+        {:ok, in_style(plan, style)}
+      end
+    else
+      {:error, not_utf8(decision.path)}
+    end
+  end
+
+  def build(op, decision, request, current), do: shape(op, decision, request, current)
+
+  defp shape(:create, %Decision.Create{} = resolved, request, _current) do
     content = Map.fetch!(request, :content)
     frontmatter = frontmatter(resolved.type, resolved.starts, resolved.ends)
 
@@ -97,7 +116,7 @@ defmodule Vigil.Vault.Plan do
      }}
   end
 
-  def build(:append, %Decision.Append{} = resolved, request, current) do
+  defp shape(:append, %Decision.Append{} = resolved, request, current) do
     content = Map.fetch!(request, :content)
 
     with {:ok, new_content} <- Edit.append(current, resolved.target, content) do
@@ -105,7 +124,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:replace_section, %Decision.Section{} = resolved, request, current) do
+  defp shape(:replace_section, %Decision.Section{} = resolved, request, current) do
     chunk = resolved.chunk
 
     with {:ok, new_content} <- Edit.replace_body(current, chunk, Map.fetch!(request, :content)) do
@@ -113,7 +132,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:delete_section, %Decision.Section{} = resolved, _request, current) do
+  defp shape(:delete_section, %Decision.Section{} = resolved, _request, current) do
     chunk = resolved.chunk
 
     with {:ok, new_content} <- Edit.delete_section(current, chunk) do
@@ -128,7 +147,7 @@ defmodule Vigil.Vault.Plan do
   # The split does not end there when the note has no block. A rewrite has no
   # type to write and preserves the block it finds, so it has nothing to
   # preserve and refuses, naming the tool that can give the note one.
-  def build(:rewrite_note, %Decision.RewriteNote{} = resolved, request, current) do
+  defp shape(:rewrite_note, %Decision.RewriteNote{} = resolved, request, current) do
     case Markdown.split_frontmatter(current) do
       {:ok, frontmatter, _old_body} ->
         content = frontmatter <> Map.fetch!(request, :content)
@@ -156,7 +175,7 @@ defmodule Vigil.Vault.Plan do
   # front of it. That is an explicit call to write frontmatter, not the server
   # repairing a note on its own initiative (docs/design.md, "Frontmatter —
   # exactly one required field").
-  def build(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
+  defp shape(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
     case Markdown.split_frontmatter(current) do
       {:ok, _old_frontmatter, body} -> {:ok, frontmatter_plan(resolved, body)}
       :none -> {:ok, frontmatter_plan(resolved, current)}
@@ -166,7 +185,7 @@ defmodule Vigil.Vault.Plan do
 
   # The backlinks are the policy's answer, looked up before anything is
   # deleted — after the effect there is nothing left to ask about.
-  def build(:delete_note, %Decision.DeleteNote{} = resolved, _request, _current) do
+  defp shape(:delete_note, %Decision.DeleteNote{} = resolved, _request, _current) do
     {:ok,
      %__MODULE__{
        action: {:delete, resolved.path},
@@ -180,7 +199,7 @@ defmodule Vigil.Vault.Plan do
   # not: every linking note's content and what to write in place of each
   # target are in hand, and a note that links to itself is rewritten where it
   # lands.
-  def build(:move_note, %Decision.MoveNote{} = resolved, _request, current) do
+  defp shape(:move_note, %Decision.MoveNote{} = resolved, _request, current) do
     %Decision.MoveNote{from: from, to: to} = resolved
     rewrites = rewrites(current || [], from, to)
 
@@ -192,11 +211,14 @@ defmodule Vigil.Vault.Plan do
      }}
   end
 
+  # Each linking note is rewritten in its own style, as `build/4` writes the
+  # one note it is handed.
   defp rewrites(linking, from, to) do
     for {path, content, relinks} <- linking,
-        rewritten = Parser.rewrite_links(content, &Map.get(relinks, &1.raw)),
-        rewritten != content,
-        do: {if(path == from, do: to, else: path), rewritten}
+        {text, style} = Markdown.decode(content),
+        rewritten = Parser.rewrite_links(text, &Map.get(relinks, &1.raw)),
+        rewritten != text,
+        do: {if(path == from, do: to, else: path), Markdown.encode(rewritten, style)}
   end
 
   defp updated_links(false, _rewrites), do: %{}
@@ -219,6 +241,14 @@ defmodule Vigil.Vault.Plan do
     {:error,
      "Unterminated frontmatter in #{path}: the block opened by its first line never closes " <>
        "with ---, so where the body starts is unknown."}
+  end
+
+  defp in_style(%__MODULE__{action: {:write, path, content}} = plan, style),
+    do: %{plan | action: {:write, path, Markdown.encode(content, style)}}
+
+  defp not_utf8(path) do
+    "#{path} is not valid UTF-8, so vigil does not index or edit it. " <>
+      "Re-save it as UTF-8, then reload."
   end
 
   defp plan(path, content, message) do

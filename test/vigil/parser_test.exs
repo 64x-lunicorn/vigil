@@ -580,4 +580,29 @@ defmodule Vigil.ParserTest do
       assert Chunk.body_end_index(pre) == 3
     end
   end
+
+  # docs/design.md, "A note that is not UTF-8 is skipped" and "How a file is
+  # written".
+  describe "encoding" do
+    test "the frontmatter of a CRLF note is parsed, and its chunks carry no carriage return" do
+      content = "---\r\ntype: decision\r\n---\r\n# Crlf\r\n\r\n## Setup\r\nBody.\r\n"
+
+      assert {:ok, file} = Parser.parse("bike/crlf.md", content)
+      assert file.type == :decision
+      assert file.title == "Crlf"
+      assert [%Chunk{id: "bike/crlf.md#setup", heading: "Setup", body: "Body."}] = file.chunks
+    end
+
+    test "the frontmatter of a note with a byte order mark is parsed" do
+      content = "\uFEFF---\ntype: decision\n---\n# Bom\n\n## Setup\nBody.\n"
+
+      assert {:ok, %{type: :decision, title: "Bom"}} = Parser.parse("bike/bom.md", content)
+    end
+
+    test "content that is not UTF-8 is refused rather than raising" do
+      content = "---\ntype: reference\n---\n# Caf\xE9\n\n## Gr\xF6\xDFe\nSee [[caf\xE9]].\n"
+
+      assert Parser.parse("bike/cp1252.md", content) == {:error, :invalid_utf8}
+    end
+  end
 end

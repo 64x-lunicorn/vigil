@@ -486,13 +486,15 @@ defmodule Vigil.Store do
 
     log_warnings(Domains.mismatches(domains, layout.domains))
 
-    parsed_files =
+    loaded =
       layout
       |> Layout.note_paths()
       |> Enum.map(&load_file(state.vault_path, &1, git_meta))
-      |> Enum.reject(&is_nil/1)
 
-    index = Index.build(parsed_files)
+    parsed_files = for {:ok, file} <- loaded, do: file
+    invalid_utf8 = for {:invalid_utf8, path} <- loaded, do: path
+
+    index = Index.build(parsed_files, invalid_utf8)
     sizes = Index.size(index)
 
     Logger.info(
@@ -502,18 +504,25 @@ defmodule Vigil.Store do
     put_index(%{state | domains: domains}, index)
   end
 
+  # One file that cannot be read or is not UTF-8 costs that file, never the
+  # load: a raise here is a restart loop at boot (docs/design.md, "A note that
+  # is not UTF-8 is skipped"). The skipped path is kept for `lint`.
   defp load_file(vault_path, rel_path, git_meta) do
     abs_path = Path.join(vault_path, rel_path)
 
-    case File.read(abs_path) do
-      {:ok, content} ->
-        meta = Map.get(git_meta, rel_path, %{created_at: nil, updated_at: nil, last_author: nil})
-        {:ok, file} = Parser.parse(rel_path, content, meta)
-        file
+    with {:ok, content} <- File.read(abs_path),
+         meta =
+           Map.get(git_meta, rel_path, %{created_at: nil, updated_at: nil, last_author: nil}),
+         {:ok, file} <- Parser.parse(rel_path, content, meta) do
+      {:ok, file}
+    else
+      {:error, :invalid_utf8} ->
+        Logger.warning("skipping #{rel_path}: not valid UTF-8")
+        {:invalid_utf8, rel_path}
 
       {:error, reason} ->
         Logger.warning("cannot read #{rel_path}: #{inspect(reason)}")
-        nil
+        :unreadable
     end
   end
 

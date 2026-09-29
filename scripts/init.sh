@@ -394,6 +394,8 @@ run_vault_adoption() {
   local b_lines
   b_lines="$(
     {
+      echo "$findings_json" | jq -r '.b0_encoding[] |
+        "  ! \(.path): \(.message)\n      Fix: re-save the file as UTF-8, then reload"'
       echo "$findings_json" | jq -r '.b1_frontmatter[] |
         "  ! \(.path): \(.message)\n      Fix: update_frontmatter"'
       echo "$findings_json" | jq -r '.b2_filenames[] | select(has("normalized") and has("path")) |
@@ -416,6 +418,7 @@ run_vault_adoption() {
   local b_count
   b_count="$(
     echo "$findings_json" | jq '
+      (.b0_encoding | length) +
       (.b1_frontmatter | length) +
       (.b2_filenames | length) +
       ([.b4_domain_drift[] | select(.message | contains("is configured but does not exist in the vault"))] | length) +

@@ -360,4 +360,52 @@ defmodule Vigil.Vault.PlanTest do
       assert {:error, "no such section"} = Plan.build(:delete_section, section, %{}, @note)
     end
   end
+
+  # docs/design.md, "How a file is written": a note's own style — CRLF, a
+  # byte order mark — is how it is read and how it is written back.
+  describe "a note written on Windows" do
+    test "update_frontmatter on a CRLF note replaces its block instead of adding a second" do
+      request = %{path: @path, type: "decision"}
+      crlf = String.replace(@note, "\n", "\r\n")
+
+      assert {:ok, plan} =
+               Plan.build(
+                 :update_frontmatter,
+                 decide(:update_frontmatter, request),
+                 request,
+                 crlf
+               )
+
+      assert written(plan) == String.replace(crlf, "type: reference", "type: decision")
+    end
+
+    test "update_frontmatter on a note with a byte order mark keeps the mark, in front of one block" do
+      request = %{path: @path, type: "decision"}
+
+      assert {:ok, plan} =
+               Plan.build(
+                 :update_frontmatter,
+                 decide(:update_frontmatter, request),
+                 request,
+                 "\uFEFF" <> @note
+               )
+
+      assert written(plan) ==
+               "\uFEFF" <> String.replace(@note, "type: reference", "type: decision")
+    end
+
+    test "a note that is not UTF-8 is refused" do
+      request = %{path: @path, type: "decision"}
+
+      assert {:error, message} =
+               Plan.build(
+                 :update_frontmatter,
+                 decide(:update_frontmatter, request),
+                 request,
+                 "---\ntype: reference\n---\n# Caf\xE9\n"
+               )
+
+      assert message =~ "#{@path} is not valid UTF-8"
+    end
+  end
 end

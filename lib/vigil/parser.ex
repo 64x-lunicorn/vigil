@@ -101,8 +101,27 @@ defmodule Vigil.Parser do
 
   `git_meta` is `%{created_at: DateTime.t() | nil, updated_at: DateTime.t() | nil, last_author: String.t() | nil}`.
   Warnings are logged with `path` and reason; the function never raises.
+
+  `content` is read as `Vigil.Markdown.decode/1` reads it: a byte order mark
+  in front and CRLF line endings are how the note was written, not what it
+  says, so a Windows note's frontmatter is its frontmatter.
+
+  `{:error, :invalid_utf8}` for content that is not UTF-8 at all — a note
+  saved as Windows-1252, say. Nothing in it can be parsed honestly: a heading
+  with such a byte in it has no slug, and a chunk holding one cannot be
+  encoded into a response. What to do with the file is the caller's to say
+  (docs/design.md, "A note that is not UTF-8 is skipped").
   """
+  @spec parse(String.t(), binary(), map()) :: {:ok, struct()} | {:error, :invalid_utf8}
   def parse(path, content, git_meta \\ %{}) do
+    if String.valid?(content) do
+      {:ok, parse_text(path, Markdown.normalize(content), git_meta)}
+    else
+      {:error, :invalid_utf8}
+    end
+  end
+
+  defp parse_text(path, content, git_meta) do
     created_at = Map.get(git_meta, :created_at)
     updated_at = Map.get(git_meta, :updated_at)
 
@@ -113,7 +132,7 @@ defmodule Vigil.Parser do
     {title, chunks} =
       build_chunks(path, body_lines_with_offset, type, starts, ends, created_at, updated_at)
 
-    file = %File_{
+    %File_{
       path: path,
       title: title || fallback_title(path),
       type: type,
@@ -123,8 +142,6 @@ defmodule Vigil.Parser do
       created_at: created_at,
       updated_at: updated_at
     }
-
-    {:ok, file}
   end
 
   defp extract_frontmatter(path, content) do

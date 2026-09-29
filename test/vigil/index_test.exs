@@ -464,6 +464,17 @@ defmodule Vigil.IndexTest do
   end
 
   describe "lint/2" do
+    # docs/design.md, "A note that is not UTF-8 is skipped".
+    test "names the notes the load skipped for not being UTF-8, until one is deleted" do
+      index = Index.build([], ["bike/windows-note.md", "bike/another.md"])
+      now = %{now: ~U[2026-01-01 10:00:00Z]}
+
+      assert Index.lint(index, now).invalid_utf8 == ["bike/another.md", "bike/windows-note.md"]
+
+      assert Index.lint(Index.remove(index, "bike/windows-note.md"), now).invalid_utf8 ==
+               ["bike/another.md"]
+    end
+
     test "duplicate headings", %{index: index} do
       {:ok, file} =
         Parser.parse(
