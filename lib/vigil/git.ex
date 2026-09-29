@@ -186,9 +186,19 @@ defmodule Vigil.Git do
   """
   def add_commit(vault_path, path, message) do
     with {:ok, _} <- run(vault_path, ["add", "--", path]),
-         {:ok, _} <-
-           run(vault_path, @commit_identity ++ ["commit", "-m", message, "--", path]) do
+         {:ok, _} <- commit_if_changed(vault_path, path, message) do
       last_commit_meta(vault_path, path)
+    end
+  end
+
+  # A write whose content is what the file already holds — the same type set
+  # again, a skill written back unchanged — has nothing to commit, and `git
+  # commit` says so with exit 1. That is not a failure: the note is exactly as
+  # asked, and its last commit is its metadata.
+  defp commit_if_changed(vault_path, path, message) do
+    case run(vault_path, ["diff", "--cached", "--quiet", "--", path]) do
+      {:ok, _} -> {:ok, :unchanged}
+      {:error, _} -> run(vault_path, @commit_identity ++ ["commit", "-m", message, "--", path])
     end
   end
 

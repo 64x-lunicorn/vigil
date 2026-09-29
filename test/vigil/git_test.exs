@@ -190,6 +190,18 @@ defmodule Vigil.GitTest do
       assert %{created_at: %DateTime{}, last_author: "vigil"} = git.log_metadata.(vault)[path]
     end
 
+    test "add_commit of unchanged content succeeds without a new commit", %{
+      git: git,
+      vault: vault
+    } do
+      {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
+
+      assert {:ok, %{updated_at: %DateTime{}, last_author: "Daniel"}} =
+               git.add_commit.(vault, "bike/terra-speed.md", "update: unchanged")
+
+      assert {^head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
+    end
+
     test "delete and move are git operations, not filesystem calls", %{git: git, vault: vault} do
       assert :ok = git.remove_commit.(vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
 
