@@ -128,11 +128,17 @@ defmodule Vigil.Skills do
   # The push is Vigil.Commit's, like the write above it; the sentence in front
   # of the failure is this module's. The push-failure messages in the project
   # describe different objects — a skill, and a change, a deletion or a move to
-  # the vault — and saying so is the point of having four.
+  # the vault — and saying so is the point of having four. As in Vigil.Store, a
+  # failed push is a success with `pushed: false`: the skill is committed, and
+  # an error would only invite a retry.
   defp push(git, name, vault_path, git_remote) do
     case Commit.push(git, vault_path, git_remote) do
-      :ok -> {:ok, %{name: name, pushed: true}}
-      {:error, out} -> {:error, "Skill saved locally, but push failed: #{out}"}
+      :ok ->
+        {:ok, %{name: name, pushed: true}}
+
+      {:error, out} ->
+        {:ok,
+         %{name: name, pushed: false, push_error: "Skill saved locally, but push failed: #{out}"}}
     end
   end
 
