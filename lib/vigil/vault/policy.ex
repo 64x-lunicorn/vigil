@@ -158,7 +158,12 @@ defmodule Vigil.Vault.Policy do
       # No project directory to create: the move asks `writable_path/3` with
       # directory creation switched off, and `Vigil.Store` creates one for
       # `:create` alone.
-      {:ok, %Decision.MoveNote{from: normalized_from, to: normalized_to}}
+      {:ok,
+       %Decision.MoveNote{
+         from: normalized_from,
+         to: normalized_to,
+         update_links: Map.get(request, :update_links, false) == true
+       }}
     end
   end
 

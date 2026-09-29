@@ -14,8 +14,10 @@ defmodule Vigil.Vault.Plan do
 
     * `{:write, path, content}` — the six content-shaped operations, which
       differ only in the bytes they produce.
-    * `{:delete, path}` and `{:move, from, to}` — the two git-level
-      operations, which produce no content at all.
+    * `{:delete, path}` and `{:move, from, to, rewrites}` — the two git-level
+      operations. A move produces no content of its own; `rewrites` is the
+      `{path, content}` of every note whose links `update_links` rewrote,
+      committed with it, and empty without it.
 
   A plan performs no effect: it reads no file, touches no git, and knows
   nothing about `Vigil.Store`'s state. `Vigil.Store` reads the note, hands the
@@ -27,23 +29,27 @@ defmodule Vigil.Vault.Plan do
   A plan's `report` carries what only this operation knows about its own
   result — `path_normalized_from` on a create whose path was normalized, the
   backlinks a delete is about to break — merged into the success map by
-  whoever executes it. What only the *effect* knows stays with the executor.
+  whoever executes it. What only the *effect* knows stays with the executor;
+  `observe` names such a question when the operation, not the action, is what
+  asks it — `:broken_chunk_links` on a `rewrite_note`, whose action is the same
+  `{:write, path, content}` every content-shaped operation has.
   """
 
-  alias Vigil.{Markdown, Vault.Decision, Vault.Edit}
+  alias Vigil.{Markdown, Parser, Vault.Decision, Vault.Edit}
 
   @enforce_keys [:action, :message]
-  defstruct [:action, :message, report: %{}]
+  defstruct [:action, :message, report: %{}, observe: nil]
 
   @type action ::
           {:write, String.t(), String.t()}
           | {:delete, String.t()}
-          | {:move, String.t(), String.t()}
+          | {:move, String.t(), String.t(), [{String.t(), String.t()}]}
 
   @type t :: %__MODULE__{
           action: action,
           message: String.t(),
-          report: map()
+          report: map(),
+          observe: nil | :broken_chunk_links
         }
 
   @type op ::
@@ -60,7 +66,10 @@ defmodule Vigil.Vault.Plan do
   Builds the plan for `op` from the policy's `decision`, the caller's
   `request`, and `current` — the note's content as it stands on disk, or `nil`
   for the operations that do not read it: `:create`, which has no current
-  content by definition, and the two git-level ones, which never look at it.
+  content by definition, and `:delete_note`, which never looks at it. A
+  `:move_note` with `update_links` is handed, in place of one note's content,
+  every linking note's: a list of `{path, content, relinks}`, where `relinks`
+  is `Vigil.Index.relinks/3`'s answer for that note — and `nil` without it.
 
   Each clause matches the `Vigil.Vault.Decision` shape its operation is
   decided in, rather than reaching into the keys it hopes are there: an
@@ -124,12 +133,14 @@ defmodule Vigil.Vault.Plan do
       {:ok, frontmatter, _old_body} ->
         content = frontmatter <> Map.fetch!(request, :content)
 
-        {:ok,
-         plan(
-           resolved.path,
-           Markdown.normalize_trailing_newline(content),
-           "rewrite_note: #{resolved.path}"
-         )}
+        plan =
+          plan(
+            resolved.path,
+            Markdown.normalize_trailing_newline(content),
+            "rewrite_note: #{resolved.path}"
+          )
+
+        {:ok, %{plan | observe: :broken_chunk_links}}
 
       :none ->
         {:error,
@@ -165,14 +176,31 @@ defmodule Vigil.Vault.Plan do
   end
 
   # Which references the move actually broke is a diff across the effect, so
-  # it belongs to whoever performs it, not here.
-  def build(:move_note, %Decision.MoveNote{} = resolved, _request, _current) do
+  # it belongs to whoever performs it, not here. Which links it rewrites is
+  # not: every linking note's content and what to write in place of each
+  # target are in hand, and a note that links to itself is rewritten where it
+  # lands.
+  def build(:move_note, %Decision.MoveNote{} = resolved, _request, current) do
+    %Decision.MoveNote{from: from, to: to} = resolved
+    rewrites = rewrites(current || [], from, to)
+
     {:ok,
      %__MODULE__{
-       action: {:move, resolved.from, resolved.to},
-       message: "move: #{resolved.from} -> #{resolved.to}"
+       action: {:move, from, to, rewrites},
+       message: "move: #{from} -> #{to}",
+       report: updated_links(resolved.update_links, rewrites)
      }}
   end
+
+  defp rewrites(linking, from, to) do
+    for {path, content, relinks} <- linking,
+        rewritten = Parser.rewrite_links(content, &Map.get(relinks, &1.raw)),
+        rewritten != content,
+        do: {if(path == from, do: to, else: path), rewritten}
+  end
+
+  defp updated_links(false, _rewrites), do: %{}
+  defp updated_links(true, rewrites), do: %{updated_links: Enum.map(rewrites, &elem(&1, 0))}
 
   defp frontmatter_plan(resolved, body) do
     content = frontmatter(resolved.type, resolved.starts, resolved.ends) <> body

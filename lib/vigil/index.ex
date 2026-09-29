@@ -170,6 +170,88 @@ defmodule Vigil.Index do
   def backlinks(index, key), do: backlinks_for(index, key)
 
   @doc """
+  The links a move of `from` to `to` has to rewrite for every link to the
+  note to keep leading to it: `%{source_path => %{raw => new_raw}}`, keyed by
+  the linking note's path before the move — `from` itself for a note that
+  links to itself.
+
+  Only links that resolve to `from` now and would not resolve to `to` after
+  the move are named, so a basename link that still finds the note is left as
+  it was written. The new target keeps the link's style where that still
+  leads to `to` from where the linking note will stand: a basename stays a
+  basename unless the cascade would pick another note or none, and then it
+  becomes the vault-relative path, which cannot be ambiguous. A path keeps a
+  `.md` it was written with.
+  """
+  @spec relinks(t(), String.t(), String.t()) :: %{String.t() => %{String.t() => String.t()}}
+  def relinks(index, from, to) do
+    resolve = LinkIndex.resolver(files_after_move(index, from, to))
+
+    index
+    |> backlinks_for(from)
+    |> Enum.group_by(&Map.fetch!(index.chunks, &1).path)
+    |> Enum.map(fn {source_path, chunk_ids} ->
+      source_after = if source_path == from, do: to, else: source_path
+
+      rewrites =
+        for chunk_id <- chunk_ids,
+            %{status: :ok, target_note: ^from, raw: raw} <-
+              Map.get(index.links_out, chunk_id, []),
+            new_raw = retarget(raw, source_after, to, resolve),
+            new_raw != nil,
+            into: %{},
+            do: {raw, new_raw}
+
+      {source_path, rewrites}
+    end)
+    |> Enum.reject(fn {_source_path, rewrites} -> rewrites == %{} end)
+    |> Map.new()
+  end
+
+  defp files_after_move(index, from, to) do
+    moved = %{path: to, domain: domain_of(to)}
+
+    index.notes
+    |> Map.delete(from)
+    |> Map.values()
+    |> Enum.map(&%{path: &1.path, domain: &1.domain})
+    |> then(&[moved | &1])
+  end
+
+  defp retarget(raw, source_after, to, resolve) do
+    basename = Path.basename(to, ".md")
+
+    cond do
+      resolve.(raw, source_after) == {:ok, to} -> nil
+      not String.contains?(raw, "/") and resolve.(basename, source_after) == {:ok, to} -> basename
+      String.ends_with?(raw, ".md") -> to
+      true -> Path.rootname(to, ".md")
+    end
+  end
+
+  @doc """
+  Every link from another note into one of `path`'s sections:
+  `[%{from: source_chunk_id, to: chunk_id}]`. The note's own links into
+  itself are not counted, and neither are links to the note as a whole —
+  those survive anything but a delete or a move. What `rewrite_note` asks
+  before it writes, to report the ones it broke.
+  """
+  @spec inbound_chunk_links(t(), String.t()) :: [%{from: String.t(), to: String.t()}]
+  def inbound_chunk_links(index, path) do
+    case note(index, path) do
+      nil ->
+        []
+
+      note ->
+        for chunk_id <- note.chunk_ids,
+            chunk_id != path,
+            source <- backlinks_for(index, chunk_id),
+            Map.fetch!(index.chunks, source).path != path,
+            do: %{from: source, to: chunk_id}
+    end
+  end
+
+  @doc """
   The chunk a section id resolves to, or `nil` — through `resolve/2`, the same
   function `read/2` and `links/2` go through, so an id that reads is an id
   that writes by construction rather than by two walks agreeing. The record

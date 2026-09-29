@@ -22,7 +22,7 @@ defmodule Vigil.Vault.DecisionTest do
     {Decision.RewriteNote, [path: "bike/x.md"]},
     {Decision.UpdateFrontmatter, [path: "bike/x.md", type: :reference, starts: nil, ends: nil]},
     {Decision.DeleteNote, [path: "bike/x.md", backlinks: []]},
-    {Decision.MoveNote, [from: "bike/a.md", to: "bike/b.md"]}
+    {Decision.MoveNote, [from: "bike/a.md", to: "bike/b.md", update_links: false]}
   ]
 
   test "every shape builds from a complete answer" do
@@ -41,7 +41,12 @@ defmodule Vigil.Vault.DecisionTest do
 
   test "a field the shape does not have raises" do
     assert_raise KeyError, fn ->
-      struct!(Decision.MoveNote, from: "bike/a.md", to: "bike/b.md", domain: "bike")
+      struct!(Decision.MoveNote,
+        from: "bike/a.md",
+        to: "bike/b.md",
+        update_links: false,
+        domain: "bike"
+      )
     end
   end
 end

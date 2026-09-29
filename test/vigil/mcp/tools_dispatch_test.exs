@@ -116,6 +116,28 @@ defmodule Vigil.MCP.ToolsDispatchTest do
       assert_receive {:store_call, {:move_note, params}}
       assert params.from == "training/a.md"
       assert params.to == "training/b.md"
+      assert params.update_links == false
+    end
+
+    test "move_note's update_links travels as the boolean it was sent" do
+      store = start_store({:ok, %{moved: true}})
+
+      assert {:ok, %{moved: true}} =
+               Tools.dispatch(
+                 store,
+                 "move_note",
+                 %{
+                   "from" => "training/a.md",
+                   "to" => "training/b.md",
+                   "confirm" => true,
+                   "update_links" => true,
+                   "skill_key" => skill_key()
+                 },
+                 @now,
+                 @key
+               )
+
+      assert_receive {:store_call, {:move_note, %{update_links: true}}}
     end
   end
 

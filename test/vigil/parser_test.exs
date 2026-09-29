@@ -413,6 +413,93 @@ defmodule Vigil.ParserTest do
     end
   end
 
+  describe "rewrite_links/2" do
+    @retarget %{"terra-speed" => "terra-40c", "bike/terra-speed" => "bike/terra-40c"}
+    defp retarget(content), do: Parser.rewrite_links(content, &Map.get(@retarget, &1.raw))
+
+    test "rewrites wiki and Markdown link targets, keeping fragment, alias and link text" do
+      content = """
+      ---
+      type: reference
+      ---
+      # Title
+
+      See [[terra-speed]], [[ terra-speed #dimensions | the dims]] and [[terra-speed|Terra]].
+      Also [the tyre](bike/terra-speed.md#gravel-experience) and [[bike/terra-speed.md]].
+      Not [[via-carolina]] nor [x](bike/via-carolina.md).
+      """
+
+      assert retarget(content) == """
+             ---
+             type: reference
+             ---
+             # Title
+
+             See [[terra-40c]], [[ terra-40c #dimensions | the dims]] and [[terra-40c|Terra]].
+             Also [the tyre](bike/terra-40c.md#gravel-experience) and [[bike/terra-speed.md]].
+             Not [[via-carolina]] nor [x](bike/via-carolina.md).
+             """
+    end
+
+    test "the rewrite function sees what extract_links/1 would have returned" do
+      body = "See [[terra-speed#dimensions|dims]] and [t](bike/terra-speed.md)."
+      test_pid = self()
+
+      Parser.rewrite_links(body, fn link ->
+        send(test_pid, {:link, link})
+        nil
+      end)
+
+      assert_received {:link, %{raw: "terra-speed", fragment: "dimensions"}}
+      assert_received {:link, %{raw: "bike/terra-speed", fragment: nil}}
+
+      assert Parser.extract_links(body) |> Enum.sort() ==
+               [
+                 %{raw: "bike/terra-speed", fragment: nil},
+                 %{raw: "terra-speed", fragment: "dimensions"}
+               ]
+    end
+
+    test "leaves code, headings and the frontmatter block alone" do
+      content = """
+      ---
+      related: "[[terra-speed]]"
+      ---
+      # About [[terra-speed]]
+
+      ## Also [[terra-speed]]
+      Inline `[[terra-speed]]` stays, [[terra-speed]] goes.
+
+      ```
+      [[terra-speed]]
+      ```
+      """
+
+      assert retarget(content) == """
+             ---
+             related: "[[terra-speed]]"
+             ---
+             # About [[terra-speed]]
+
+             ## Also [[terra-speed]]
+             Inline `[[terra-speed]]` stays, [[terra-40c]] goes.
+
+             ```
+             [[terra-speed]]
+             ```
+             """
+    end
+
+    test "a second H1 is body text, and its link is rewritten" do
+      assert retarget("# [[terra-speed]]\n# Again [[terra-speed]]\n") ==
+               "# [[terra-speed]]\n# Again [[terra-40c]]\n"
+    end
+
+    test "a note without frontmatter and without a trailing newline keeps its shape" do
+      assert retarget("Straight to [[terra-speed]]") == "Straight to [[terra-40c]]"
+    end
+  end
+
   describe "extract_links/1" do
     test "links inside fenced code blocks and inline code are not extracted" do
       body = """

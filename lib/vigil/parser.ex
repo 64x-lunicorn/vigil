@@ -420,6 +420,87 @@ defmodule Vigil.Parser do
     |> Enum.map(fn {target, fragment} -> %{raw: target, fragment: fragment} end)
   end
 
+  @doc """
+  `content` with the targets of its links rewritten — the other half of
+  `extract_links/1`, and the one `move_note`'s `update_links` goes through.
+
+  `rewrite` is asked once per link with the `%{raw:, fragment:}` that
+  `extract_links/1` would have returned for it, and answers the new target or
+  `nil` to leave the link alone. Only the target changes: the `#fragment`, a
+  wiki link's `|alias`, a Markdown link's text and the `.md` behind its path
+  stay as they were written.
+
+  A link is rewritten exactly where it would have been extracted: not in the
+  frontmatter block, not in the title, not on a heading line (a heading is no
+  chunk's body, and rewriting it would change the chunk's id), and not in
+  fenced or inline code, read the same way `extract_links/1` reads them.
+  """
+  @spec rewrite_links(String.t(), (%{raw: String.t(), fragment: String.t() | nil} ->
+                                     String.t() | nil)) :: String.t()
+  def rewrite_links(content, rewrite) do
+    {block, body} =
+      case Markdown.split_frontmatter(content) do
+        {:ok, block, body} -> {block, body}
+        _none_or_unterminated -> {"", content}
+      end
+
+    lines = String.split(body, "\n")
+
+    # The first H1 is the title and no body; a second one is body text like
+    # any other line (`build_chunks/7`).
+    {rewritten, _title_seen?} =
+      lines
+      |> Markdown.read()
+      |> Enum.map_reduce(false, fn
+        %{kind: :content, line: line}, seen -> {rewrite_line(line, rewrite), seen}
+        %{kind: {:h1, _}, line: line}, true -> {rewrite_line(line, rewrite), true}
+        %{kind: {:h1, _}, line: line}, false -> {line, true}
+        %{line: line}, seen -> {line, seen}
+      end)
+
+    # `split_frontmatter/1` hands the body back newline-terminated; a note
+    # without a block keeps whatever ending it had, because `lines` did.
+    block <> Enum.join(rewritten, "\n")
+  end
+
+  # Positions are taken from the line with its inline code blanked, which
+  # keeps every byte where it was, so they apply to the line as written.
+  defp rewrite_line(line, rewrite) do
+    masked = blank_matches(line, @inline_code_re)
+
+    [@wikilink_re, @mdlink_re]
+    |> Enum.flat_map(&Regex.scan(&1, masked, return: :index))
+    |> Enum.map(&link_span(line, &1))
+    |> Enum.sort_by(fn {start, _len, _link} -> start end, :desc)
+    |> Enum.reduce(line, fn {start, len, link}, acc ->
+      case rewrite.(link) do
+        nil -> acc
+        target -> splice_target(acc, start, len, target)
+      end
+    end)
+  end
+
+  defp link_span(line, [_whole, {start, len} | fragment]) do
+    fragment =
+      case fragment do
+        [{f_start, f_len}] when f_start >= 0 -> String.trim(binary_part(line, f_start, f_len))
+        _ -> nil
+      end
+
+    {start, len, %{raw: String.trim(binary_part(line, start, len)), fragment: fragment}}
+  end
+
+  # The whitespace around a target is the writer's, and stays.
+  defp splice_target(line, start, len, target) do
+    written = binary_part(line, start, len)
+    [leading] = Regex.run(~r/^\s*/, written)
+    [trailing] = Regex.run(~r/\s*$/, written)
+
+    binary_part(line, 0, start) <>
+      leading <>
+      target <> trailing <> binary_part(line, start + len, byte_size(line) - start - len)
+  end
+
   defp trim_or_nil(nil), do: nil
   defp trim_or_nil(text), do: String.trim(text)
 

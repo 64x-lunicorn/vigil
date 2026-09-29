@@ -289,7 +289,7 @@ defmodule Vigil.MCP.Tools do
       name: "rewrite_note",
       title: "Rewrite a note",
       description:
-        "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
+        "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold. The result lists the links from other notes into its sections that the rewrite broke.",
       write: true,
       call: :rewrite_note,
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
@@ -367,7 +367,7 @@ defmodule Vigil.MCP.Tools do
       name: "move_note",
       title: "Move a note",
       description:
-        "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
+        "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true. With update_links: true, the links that point at the note are rewritten in the same commit.",
       write: true,
       call: :move_note,
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
@@ -380,6 +380,13 @@ defmodule Vigil.MCP.Tools do
           type: :boolean,
           default: false,
           description: "Must be true, otherwise the call is rejected."
+        },
+        %{
+          name: "update_links",
+          type: :boolean,
+          default: false,
+          description:
+            "Rewrites the wiki links and Markdown links in every note that links to the moved one, keeping each link's text and #fragment."
         }
       ]
     },

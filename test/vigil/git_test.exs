@@ -189,6 +189,26 @@ defmodule Vigil.GitTest do
     end
   end
 
+  describe "the repository, a move with rewrites" do
+    setup :real_git
+
+    test "is one commit holding the rename and every rewritten note", %{git: git, vault: vault} do
+      assert {:ok, _} =
+               Commit.move(git, vault, "bike/terra-speed.md", "bike/terra-40c.md", "move", [
+                 {"bike/via-carolina.md", "# Via\n[[terra-40c]]\n"}
+               ])
+
+      {out, 0} =
+        System.cmd("git", ["show", "--name-status", "--format=%s", "HEAD"], cd: vault)
+
+      assert out =~ "move"
+      assert out =~ ~r/R\d+\tbike\/terra-speed.md\tbike\/terra-40c.md/
+      assert out =~ "M\tbike/via-carolina.md"
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
+      assert status == ""
+    end
+  end
+
   # Everything on disk under the vault but git's own directory, with its
   # content: a rollback that leaves a file, a directory or a temporary file
   # behind differs here from the vault it started with.
@@ -298,6 +318,34 @@ defmodule Vigil.GitTest do
         assert git.snapshot_index.(vault, paths) == {:ok, index}
       end
 
+      test "a move with rewrites leaves the note and every linking note as they were", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        paths = ["bike/via-carolina.md", "bike/terra-speed.md", "bike/archive/via-carolina.md"]
+        {:ok, index} = git.snapshot_index.(vault, paths)
+
+        rewrites = [
+          {"bike/terra-speed.md", "# Rewritten\n"},
+          {"bike/archive/via-carolina.md", "# Rewritten too\n"}
+        ]
+
+        assert {:error, "git mv/commit failed: boom"} =
+                 Commit.move(
+                   failing,
+                   vault,
+                   "bike/via-carolina.md",
+                   "bike/archive/via-carolina.md",
+                   "move: via-carolina",
+                   rewrites
+                 )
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, paths) == {:ok, index}
+      end
+
       # What the failure would otherwise have left staged is swept into the
       # next commit under that commit's message.
       test "the next commit carries only its own change", %{
@@ -394,6 +442,11 @@ defmodule Vigil.GitTest do
       {:error, _} = Commit.write(failing, vault, "bike/new/x.md", "# X\n", "create")
       {:error, _} = Commit.delete(failing, vault, "bike/via-carolina.md", "delete")
       {:error, _} = Commit.move(failing, vault, "bike/via-carolina.md", "bike/b/v.md", "move")
+
+      {:error, _} =
+        Commit.move(failing, vault, "bike/via-carolina.md", "bike/b/v.md", "move", [
+          {"bike/terra-speed.md", "# X\n"}
+        ])
 
       assert status.() == status_before
       assert stage.() == stage_before

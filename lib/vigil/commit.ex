@@ -71,21 +71,41 @@ defmodule Vigil.Commit do
   end
 
   @doc """
-  Moves `from` to `to` inside the vault and commits both paths under `message`.
+  Moves `from` to `to` inside the vault and commits it under `message`,
+  together with `rewrites` — `{path, content}` pairs written after the move,
+  in the same commit. `move_note`'s `update_links` is what hands some over: the
+  notes whose links it rewrote, and `to` itself when the note links to itself.
+  The move and every rewrite are one change: a failure anywhere leaves every
+  one of those files as it was.
 
   Returns the commit metadata for the note at its new path.
   """
-  @spec move(Git.t(), String.t(), String.t(), String.t(), String.t()) ::
+  @spec move(Git.t(), String.t(), String.t(), String.t(), String.t(), [{String.t(), String.t()}]) ::
           {:ok, map()} | {:error, String.t()}
-  def move(%Git{} = git, vault_path, from, to, message) do
+  def move(%Git{} = git, vault_path, from, to, message, rewrites \\ []) do
     prefix = "git mv/commit failed"
+    rewritten = Enum.map(rewrites, &elem(&1, 0))
 
-    change(git, vault_path, [from, to], message, prefix, fn ->
-      with :ok <- mkdir_p(Path.dirname(Path.join(vault_path, to))) do
-        git_step(git.move.(vault_path, from, to), prefix)
+    change(git, vault_path, Enum.uniq([from, to | rewritten]), message, prefix, fn ->
+      with :ok <- mkdir_p(Path.dirname(Path.join(vault_path, to))),
+           :ok <- git_step(git.move.(vault_path, from, to), prefix),
+           :ok <- write_all(vault_path, rewrites) do
+        stage(git, vault_path, rewritten, prefix)
       end
     end)
   end
+
+  defp write_all(vault_path, rewrites) do
+    Enum.reduce_while(rewrites, :ok, fn {rel_path, content}, :ok ->
+      case write_file(Path.join(vault_path, rel_path), content) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp stage(_git, _vault_path, [], _prefix), do: :ok
+  defp stage(git, vault_path, paths, prefix), do: git_step(git.add.(vault_path, paths), prefix)
 
   # One change to the vault, all of it or none of it (docs/design.md, "A
   # failed commit leaves the vault as it was"). `paths` is every path the

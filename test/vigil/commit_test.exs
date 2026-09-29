@@ -47,4 +47,61 @@ defmodule Vigil.CommitTest do
     assert reason =~ "directory"
     assert dir_entries(vault, "bike") == entries
   end
+
+  describe "a move with rewrites" do
+    test "moves the note and writes every rewrite in one commit", %{vault: vault} do
+      {git, log} = CommitLog.recording(vault)
+
+      rewrites = [
+        {"bike/via-carolina.md", "# Via\n[[terra-40c]]\n"},
+        {"bike/terra-40c.md", "# T\n"}
+      ]
+
+      assert {:ok, _} =
+               Commit.move(
+                 git,
+                 vault,
+                 "bike/terra-speed.md",
+                 "bike/terra-40c.md",
+                 "move",
+                 rewrites
+               )
+
+      refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
+      assert File.read!(Path.join(vault, "bike/terra-40c.md")) == "# T\n"
+      assert File.read!(Path.join(vault, "bike/via-carolina.md")) == "# Via\n[[terra-40c]]\n"
+
+      assert [
+               {:move, "bike/terra-speed.md", "bike/terra-40c.md"},
+               {:add, ["bike/via-carolina.md", "bike/terra-40c.md"]},
+               {:commit, ["bike/terra-speed.md", "bike/terra-40c.md", "bike/via-carolina.md"],
+                "move"}
+             ] = CommitLog.calls(log)
+    end
+
+    test "a failed commit leaves every file as it was", %{vault: vault} do
+      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      paths = ["bike/terra-speed.md", "bike/via-carolina.md", "training/note-without-anything.md"]
+      before = Map.new(paths, &{&1, File.read!(Path.join(vault, &1))})
+
+      rewrites = [
+        {"bike/via-carolina.md", "rewritten"},
+        {"training/note-without-anything.md", "rewritten"},
+        {"gear/terra-40c.md", "rewritten"}
+      ]
+
+      assert {:error, "git mv/commit failed: boom"} =
+               Commit.move(
+                 git,
+                 vault,
+                 "bike/terra-speed.md",
+                 "gear/terra-40c.md",
+                 "move",
+                 rewrites
+               )
+
+      assert Map.new(paths, &{&1, File.read!(Path.join(vault, &1))}) == before
+      refute File.exists?(Path.join(vault, "gear"))
+    end
+  end
 end

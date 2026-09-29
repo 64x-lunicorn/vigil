@@ -277,11 +277,11 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `create` | path, type, content, starts?, ends?, force?, create_dirs? | `{path, pushed, path_normalized_from?}` | RW | ✓ |
 | `append` | path, heading?, content | `{path, pushed}` | RW | ✓ |
 | `replace_section` | id, content, if_match? | `{path, pushed}` | RW | ✓ |
-| `rewrite_note` | path, content, confirm? | `{path, pushed}` | RW | ✓ |
+| `rewrite_note` | path, content, confirm? | `{path, pushed, broken_chunk_links}` | RW | ✓ |
 | `delete_section` | id, if_match? | `{path, pushed}` | RW | ✓ |
 | `update_frontmatter` | path, type, starts?, ends? | `{path, pushed}` | RW | ✓ |
 | `delete_note` | path, confirm | `{path, deleted, pushed, broken_backlinks}` | RW | ✓ |
-| `move_note` | from, to, confirm | `{from, to, pushed, broken_backlinks}` | RW | ✓ |
+| `move_note` | from, to, confirm, update_links? | `{from, to, pushed, broken_backlinks, updated_links?}` | RW | ✓ |
 | `lint` | – | duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
@@ -352,6 +352,19 @@ Beyond that:
 - **`delete_note` reports the damage.** Without `confirm`, the error lists the
   notes that currently link to the target; a confirmed call returns the same
   list as `broken_backlinks`.
+- **`move_note` can take its links along.** A move reports the links it broke
+  as `broken_backlinks` and leaves them as they are. With `update_links: true`
+  it rewrites them instead, in the same commit as the move: every wiki link and
+  Markdown link that pointed at the note now points at its new path, with its
+  link text, alias and `#fragment` unchanged, and `updated_links` lists the
+  notes it changed. A basename link stays a basename where that still finds
+  the note, and becomes the note's path where it would not. Links in code, in
+  headings and in frontmatter are left alone, as the link index ignores them
+  too.
+- **`rewrite_note` reports the section links it broke.** A rewrite that drops
+  or renames a section another note links into lists those links as
+  `broken_chunk_links`, each as `{from, to}` — the linking chunk and the
+  section it pointed at.
 - **A retried write is applied once.** A write can outlive the client's
   timeout and still complete, and the client retries. Pass a `request_id`,
   unique per write: a retry with the same one answers the first result with

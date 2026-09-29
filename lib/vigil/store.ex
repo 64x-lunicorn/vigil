@@ -490,8 +490,21 @@ defmodule Vigil.Store do
   defp ensure_directories(_op, _decision, _state), do: :ok
 
   # A create has no current content by definition, and the two git-level
-  # operations never look at it; every other operation is a transformation of
-  # what the note already says.
+  # operations never look at their own note; every other operation is a
+  # transformation of what the note already says. A move that updates links
+  # reads the notes that link to it instead, each with what the index says
+  # its links have to become.
+  defp current_content(:move_note, %Decision.MoveNote{update_links: true} = move, state) do
+    state.index
+    |> Index.relinks(move.from, move.to)
+    |> Enum.reduce_while({:ok, []}, fn {path, relinks}, {:ok, acc} ->
+      case read_existing_file(abs(state, path)) do
+        {:ok, content} -> {:cont, {:ok, [{path, content, relinks} | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
   defp current_content(op, _resolved, _state) when op in [:create, :delete_note, :move_note],
     do: {:ok, nil}
 
@@ -518,7 +531,7 @@ defmodule Vigil.Store do
   # against the index it left behind, so that no action has to be a special
   # case of the sequence.
   defp execute(%Plan{action: action} = plan, state) do
-    report_after = observe(action, state)
+    report_after = observe(plan, state)
 
     case perform(action, plan.message, state) do
       {:ok, commit_meta} ->
@@ -544,25 +557,33 @@ defmodule Vigil.Store do
     with :ok <- Commit.delete(state.git, state.vault_path, path, message), do: {:ok, nil}
   end
 
-  defp perform({:move, from, to}, message, state),
-    do: Commit.move(state.git, state.vault_path, from, to, message)
+  defp perform({:move, from, to, rewrites}, message, state),
+    do: Commit.move(state.git, state.vault_path, from, to, message, rewrites)
 
   # The index after the effect: the note as it now stands on disk, at the path
-  # it now has — or gone.
+  # it now has — or gone. A move reparses every note whose links it rewrote as
+  # well; the moved note's own rewrite is already what stands at `to`.
   defp reindex(state, {:write, path, _content}, commit_meta),
     do: put_reparsed(state, path, commit_meta, "write")
 
   defp reindex(state, {:delete, path}, _commit_meta),
     do: put_index(state, Index.remove(state.index, path))
 
-  defp reindex(state, {:move, from, to}, commit_meta),
-    do: move_reparsed(state, from, to, commit_meta)
+  defp reindex(state, {:move, from, to, rewrites}, commit_meta) do
+    rewrites
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.reject(&(&1 == to))
+    |> Enum.reduce(
+      move_reparsed(state, from, to, commit_meta),
+      &put_reparsed(&2, &1, commit_meta, "move")
+    )
+  end
 
   # What the action itself puts in the success map. The plan's own report — what
   # only the *operation* knows about its result — is merged on top of it.
   defp reported({:write, path, _content}), do: %{path: path, pushed: true}
   defp reported({:delete, path}), do: %{path: path, deleted: true, pushed: true}
-  defp reported({:move, from, to}), do: %{from: from, to: to, pushed: true}
+  defp reported({:move, from, to, _rewrites}), do: %{from: from, to: to, pushed: true}
 
   # The part of a report that is a diff across the effect rather than a fact
   # either side of it could answer alone. The reading is taken here, before,
@@ -572,16 +593,40 @@ defmodule Vigil.Store do
   # A move is the one action with such a report — which references it broke. A
   # source chunk that resolved to the note before and does not show up in the
   # (rebuilt) incoming references of the target afterwards now points nowhere,
-  # for example because it named an explicit path instead of a basename.
-  defp observe({:move, from, to}, state) do
+  # for example because it named an explicit path instead of a basename. A
+  # source inside the moved note has moved with it, and is looked for under
+  # its new id.
+  defp observe(%Plan{action: {:move, from, to, _rewrites}}, state) do
     resolved_before = Index.backlinks(state.index, from)
 
     fn after_effect ->
-      %{broken_backlinks: resolved_before -- Index.backlinks(after_effect.index, to)}
+      resolved_after = Index.backlinks(after_effect.index, to)
+
+      %{
+        broken_backlinks:
+          Enum.reject(resolved_before, &(moved_id(&1, from, to) in resolved_after))
+      }
     end
   end
 
-  defp observe(_action, _state), do: fn _after_effect -> %{} end
+  # A rewrite can drop or rename a section another note links into, and says
+  # which links it broke (docs/design.md, "The write path"): an inbound link
+  # into one of the note's sections before that no longer resolves after.
+  defp observe(%Plan{action: {:write, path, _content}, observe: :broken_chunk_links}, state) do
+    before = Index.inbound_chunk_links(state.index, path)
+
+    fn after_effect ->
+      %{
+        broken_chunk_links:
+          Enum.reject(before, &(&1.from in Index.backlinks(after_effect.index, &1.to)))
+      }
+    end
+  end
+
+  defp observe(_plan, _state), do: fn _after_effect -> %{} end
+
+  defp moved_id(from, from, to), do: to
+  defp moved_id(id, from, to), do: String.replace_prefix(id, from <> "#", to <> "#")
 
   # What a push failure names as committed locally but not pushed: a change, a
   # deletion, a move. The sentence git wrote comes after it (Vigil.Commit), and
@@ -590,7 +635,7 @@ defmodule Vigil.Store do
     do: "Change saved and committed locally, but push failed"
 
   defp push_failure({:delete, _path}), do: "Deletion committed locally, but push failed"
-  defp push_failure({:move, _from, _to}), do: "Move committed locally, but push failed"
+  defp push_failure({:move, _from, _to, _rewrites}), do: "Move committed locally, but push failed"
 
   # A failed push is not a failed write. The change is on disk, committed and
   # in the index, so the answer is a success that says it was not pushed —

@@ -32,6 +32,23 @@ defmodule Vigil.LinkIndex do
     %{out: out, in: in_}
   end
 
+  @doc """
+  Where a link target would lead from `source_path` in a vault of `files` —
+  the resolution `build/2` applies, for a caller asking about a vault that is
+  not built yet. `move_note`'s `update_links` asks it about the vault as it
+  will be after the move, to write each link in a form that still leads to
+  the note.
+
+  The resolution index is built once, here, and the returned function asks it
+  per target: `{:ok, path}`, `{:ambiguous, candidates}` or `:broken`.
+  """
+  @spec resolver([%{path: String.t(), domain: String.t()}]) ::
+          (String.t(), String.t() -> {:ok, String.t()} | {:ambiguous, [String.t()]} | :broken)
+  def resolver(files) do
+    index = build_resolution_index(files)
+    fn raw, source_path -> resolve_target_note(raw, source_path, index) end
+  end
+
   # Built once per build rather than once per link. `slugify/1` is
   # expensive (NFC, transliteration, several regex passes). Without this
   # index every link would re-slugify every filename — O(links × files) — and

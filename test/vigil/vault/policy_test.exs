@@ -845,20 +845,31 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:move_note, %{from: "bike/a.md", to: "work/a.md", confirm: true}, f)
     end
 
-    # The decision says where the note comes from and where it goes, and
-    # nothing else: a move creates no project directory, and no writer ever
-    # read the domain it resolved.
-    test "an ordinary move is allowed, and resolves to nothing but from and to" do
+    # The decision says where the note comes from, where it goes and whether
+    # its links go with it, and nothing else: a move creates no project
+    # directory, and no writer ever read the domain it resolved.
+    test "an ordinary move is allowed, and resolves to nothing but from, to and update_links" do
       f = facts(path_exists?: fn p -> p == "bike/a.md" end)
 
-      assert {:ok, %{from: "bike/a.md", to: "training/b.md"} = resolved} =
+      assert {:ok, %{from: "bike/a.md", to: "training/b.md", update_links: false} = resolved} =
                Policy.check(
                  :move_note,
                  %{from: "bike/a.md", to: "training/b.md", confirm: true},
                  f
                )
 
-      assert Enum.sort(Map.keys(Map.from_struct(resolved))) == [:from, :to]
+      assert Enum.sort(Map.keys(Map.from_struct(resolved))) == [:from, :to, :update_links]
+    end
+
+    test "update_links: true is carried into the decision" do
+      f = facts(path_exists?: fn p -> p == "bike/a.md" end)
+
+      assert {:ok, %{update_links: true}} =
+               Policy.check(
+                 :move_note,
+                 %{from: "bike/a.md", to: "training/b.md", confirm: true, update_links: true},
+                 f
+               )
     end
   end
 end

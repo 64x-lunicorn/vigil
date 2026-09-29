@@ -279,7 +279,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
+    "description": "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold. The result lists the links from other notes into its sections that the rewrite broke.",
     "inputSchema": {
       "properties": {
         "confirm": {
@@ -451,7 +451,7 @@
       "openWorldHint": false,
       "readOnlyHint": false
     },
-    "description": "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
+    "description": "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true. With update_links: true, the links that point at the note are rewritten in the same commit.",
     "inputSchema": {
       "properties": {
         "confirm": {
@@ -476,6 +476,10 @@
           "description": "New path.",
           "minLength": 1,
           "type": "string"
+        },
+        "update_links": {
+          "description": "Rewrites the wiki links and Markdown links in every note that links to the moved one, keeping each link's text and #fragment.",
+          "type": "boolean"
         }
       },
       "required": [

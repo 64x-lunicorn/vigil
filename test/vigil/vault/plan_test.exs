@@ -300,9 +300,37 @@ defmodule Vigil.Vault.PlanTest do
 
       assert {:ok, plan} = Plan.build(:move_note, decide(:move_note, request), request, nil)
 
-      assert plan.action == {:move, @path, "bike/terra-40c.md"}
+      assert plan.action == {:move, @path, "bike/terra-40c.md", []}
       assert plan.message == "move: #{@path} -> bike/terra-40c.md"
       assert plan.report == %{}
+    end
+
+    test "move_note with update_links rewrites every linking note it is handed, in the one move" do
+      request = %{from: @path, to: "bike/terra-40c.md", confirm: true, update_links: true}
+
+      linking = [
+        {"bike/via-carolina.md", "# Via Carolina\n\nTires: [[terra-speed|Terra Speed]].\n",
+         %{"terra-speed" => "terra-40c"}},
+        # The note links to itself, and is rewritten where it lands.
+        {@path, "# Terra\n\nSee [dims](bike/terra-speed.md#dimensions).\n",
+         %{"bike/terra-speed" => "bike/terra-40c"}},
+        # Nothing in it matches: not a rewrite.
+        {"bike/other.md", "# Other\n\nNo link.\n", %{"terra-speed" => "terra-40c"}}
+      ]
+
+      assert {:ok, plan} =
+               Plan.build(:move_note, decide(:move_note, request), request, linking)
+
+      assert plan.action ==
+               {:move, @path, "bike/terra-40c.md",
+                [
+                  {"bike/via-carolina.md",
+                   "# Via Carolina\n\nTires: [[terra-40c|Terra Speed]].\n"},
+                  {"bike/terra-40c.md", "# Terra\n\nSee [dims](bike/terra-40c.md#dimensions).\n"}
+                ]}
+
+      assert plan.message == "move: #{@path} -> bike/terra-40c.md"
+      assert plan.report == %{updated_links: ["bike/via-carolina.md", "bike/terra-40c.md"]}
     end
 
     test "neither reads the note's content" do

@@ -682,8 +682,8 @@ room for.
 decision plus the note's current content becomes a `Vigil.Vault.Plan`: the
 action to perform and the commit message to perform it under. Three actions,
 because there are three shapes of write — `{:write, path, content}` for the
-six content-shaped operations, `{:delete, path}` and `{:move, from, to}` for
-the two git-level ones. Building a plan performs no effect and reads no file,
+six content-shaped operations, `{:delete, path}` and `{:move, from, to,
+rewrites}` for the two git-level ones. Building a plan performs no effect and reads no file,
 so every write operation can be exercised without a vault, a git repository or
 a running GenServer. `Vigil.Store` is left with the sequence — ask the policy,
 read the note, build the plan, execute it — and the effect.
@@ -701,6 +701,35 @@ tool returns an error naming what is committed locally but not pushed — the
 change, the deletion, or the move. Nothing is rolled back. A failed *commit* is
 the opposite case: everything is (see "A failed commit leaves the vault as it
 was").
+
+**A move can take its links along, in its own commit.** `move_note` with
+`update_links: true` rewrites every link that resolved to the note so it
+resolves to the new path, and the rewrites travel in the move's action as
+`{path, content}` pairs that `Vigil.Commit` writes after the `git mv` and
+commits with it — one change, rolled back as a whole (see "A failed commit
+leaves the vault as it was"). What each link becomes is the index's answer
+(`Vigil.Index.relinks/3`): only links that resolve to the note now and would
+not after the move are touched; a basename stays a basename where
+`Vigil.LinkIndex`'s cascade, asked about the vault as it will be, still finds
+the note, and becomes the vault-relative path where it would find another
+note or none — a path cannot be ambiguous. The rewrite itself is the link
+parser's other half (`Vigil.Parser.rewrite_links/2`): the same two patterns,
+the same reading of fenced and inline code, and only the target changes —
+link text, alias and `#fragment` stay as written. It skips the frontmatter
+block, the title and heading lines too: none of them is a chunk body, so neither holds a link
+the index knows, and a rewritten heading would change a chunk id. Without the
+flag a move changes nothing but the note and reports `broken_backlinks` as
+before; a note's links to itself are looked for under their new ids in that
+report, so a self-link that still resolves is not reported as broken.
+
+**A rewrite says which section links it broke.** `rewrite_note` can drop or
+rename a section another note links into. Which links that broke is a diff
+across the effect, so it is observed the way a move's is: the links into the
+note's sections from other notes are asked before the write, and each one that
+no longer resolves afterwards is reported as `broken_chunk_links`. The plan
+asks for the observation (`observe: :broken_chunk_links`), because the action
+is the same `{:write, path, content}` every content-shaped operation has; the
+other section edits keep the result they had.
 
 **Confirm is the last gate, not the first.** `delete_note` and `move_note`
 resolve their paths before asking for confirmation, so a path naming `skills/`,

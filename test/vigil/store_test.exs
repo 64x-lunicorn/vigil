@@ -1371,6 +1371,128 @@ defmodule Vigil.StoreTest do
       refute "bike/via-carolina.md" in result.broken_backlinks
     end
 
+    test "move_note with update_links rewrites every linking note in the move's commit", %{
+      vault: vault
+    } do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault)
+      start_store(vault, git: git)
+
+      explicit = "# Explicit\nSee [the dims](bike/terra-speed.md#dimensions).\n"
+      File.write!(Path.join(vault, "bike/explicit.md"), "---\ntype: reference\n---\n" <> explicit)
+      assert %{reloaded: true} = Store.call(@store, :reload, %{})
+
+      assert {:ok, result} =
+               Store.call(@store, :move_note, %{
+                 from: "bike/terra-speed.md",
+                 to: "training/terra-40c.md",
+                 confirm: true,
+                 update_links: true
+               })
+
+      assert result.broken_backlinks == []
+      assert Enum.sort(result.updated_links) == ["bike/explicit.md", "bike/via-carolina.md"]
+
+      assert File.read!(Path.join(vault, "bike/via-carolina.md")) =~
+               "Tires: [[terra-40c|Terra Speed]]."
+
+      assert File.read!(Path.join(vault, "bike/explicit.md")) =~
+               "See [the dims](training/terra-40c.md#dimensions)."
+
+      assert [{:commit, committed, "move: bike/terra-speed.md -> training/terra-40c.md"}] =
+               Enum.filter(CommitLog.calls(log), &match?({:commit, _, _}, &1))
+
+      assert Enum.sort(committed) ==
+               [
+                 "bike/explicit.md",
+                 "bike/terra-speed.md",
+                 "bike/via-carolina.md",
+                 "training/terra-40c.md"
+               ]
+
+      # The index agrees with the vault: both notes link to the note at its new path.
+      assert {:ok, incoming} =
+               Store.call(@store, :links, %{id: "training/terra-40c.md", direction: :in, depth: 1})
+
+      sources = Enum.map(incoming.incoming, & &1.source) |> Enum.uniq() |> Enum.sort()
+      assert sources == ["bike/explicit.md", "bike/via-carolina.md"]
+
+      assert {:ok, out} =
+               Store.call(@store, :links, %{id: "bike/explicit.md", direction: :out, depth: 1})
+
+      assert [%{status: "ok", target: "training/terra-40c.md#dimensions"}] = out.outgoing
+    end
+
+    test "move_note without update_links leaves the linking notes as they were", %{vault: vault} do
+      before = File.read!(Path.join(vault, "bike/via-carolina.md"))
+
+      assert {:ok, result} =
+               Store.call(@store, :move_note, %{
+                 from: "bike/terra-speed.md",
+                 to: "training/terra-40c.md",
+                 confirm: true
+               })
+
+      assert result.broken_backlinks == ["bike/via-carolina.md"]
+      refute Map.has_key?(result, :updated_links)
+      assert File.read!(Path.join(vault, "bike/via-carolina.md")) == before
+    end
+
+    test "move_note with update_links whose commit fails leaves every file as it was", %{
+      vault: vault
+    } do
+      :ok = stop_supervised(Store)
+      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      start_store(vault, git: git)
+
+      paths = ["bike/terra-speed.md", "bike/via-carolina.md"]
+      before = Map.new(paths, &{&1, File.read!(Path.join(vault, &1))})
+
+      assert {:error, "git mv/commit failed: boom"} =
+               Store.call(@store, :move_note, %{
+                 from: "bike/terra-speed.md",
+                 to: "training/terra-40c.md",
+                 confirm: true,
+                 update_links: true
+               })
+
+      assert Map.new(paths, &{&1, File.read!(Path.join(vault, &1))}) == before
+      refute File.exists?(Path.join(vault, "training/terra-40c.md"))
+
+      assert {:ok, links} =
+               Store.call(@store, :links, %{id: "bike/terra-speed.md", direction: :in, depth: 1})
+
+      assert Enum.any?(links.incoming, &(&1.source == "bike/via-carolina.md"))
+    end
+
+    test "rewrite_note lists the inbound chunk links it broke" do
+      assert {:ok, _} =
+               Store.call(@store, :create, %{
+                 path: "bike/deep-links.md",
+                 type: "reference",
+                 content:
+                   "# Deep Links\nSee [[terra-speed#dimensions]], [[terra-speed#gravel-experience]] and [[terra-speed]]."
+               })
+
+      assert {:ok, result} =
+               Store.call(@store, :rewrite_note, %{
+                 path: "bike/terra-speed.md",
+                 content:
+                   "# WTB Terra Speed 40C\n\n## Gravel Experience\nStill quiet.\n\n## Size\n40mm.",
+                 confirm: true
+               })
+
+      assert result.broken_chunk_links == [
+               %{from: "bike/deep-links.md", to: "bike/terra-speed.md#dimensions"}
+             ]
+
+      assert {:ok, %{broken_chunk_links: []}} =
+               Store.call(@store, :rewrite_note, %{
+                 path: "bike/terra-speed.md",
+                 content: "# WTB Terra Speed 40C\n\n## Gravel Experience\nQuieter."
+               })
+    end
+
     test "delete_note's confirm-required message lists current backlinks" do
       assert {:error, msg} = Store.call(@store, :delete_note, %{path: "bike/terra-speed.md"})
       assert msg =~ "incoming references"

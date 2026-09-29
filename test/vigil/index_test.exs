@@ -618,6 +618,82 @@ defmodule Vigil.IndexTest do
     end
   end
 
+  describe "relinks/3" do
+    defp note_file(path, content) do
+      {:ok, file} = Parser.parse(path, content, @git_meta)
+      file
+    end
+
+    defp with_notes(index, notes) do
+      Enum.reduce(notes, index, fn {path, content}, acc ->
+        Index.put(acc, note_file(path, content))
+      end)
+    end
+
+    test "names every link to the moved note, per linking note, with what it has to become",
+         %{index: index} do
+      index =
+        with_notes(index, [
+          {"bike/explicit.md", "# Explicit\nSee [t](bike/terra-speed.md#dimensions)."},
+          {"training/basename.md", "# Basename\nSee [[terra-speed]]."}
+        ])
+
+      assert Index.relinks(index, "bike/terra-speed.md", "gear/terra-40c.md") == %{
+               "bike/via-carolina.md" => %{"terra-speed" => "terra-40c"},
+               "bike/explicit.md" => %{"bike/terra-speed" => "gear/terra-40c"},
+               "training/basename.md" => %{"terra-speed" => "terra-40c"}
+             }
+    end
+
+    test "a link that still leads to the note after the move is left alone", %{index: index} do
+      # Same basename, same domain: [[terra-speed]] from via-carolina still finds it.
+      assert Index.relinks(index, "bike/terra-speed.md", "bike/tyres/terra-speed.md") == %{}
+    end
+
+    test "a basename the cascade would send elsewhere becomes the note's path", %{index: index} do
+      # After the move, [[terra-40c]] from bike/ finds bike/terra-40c.md first.
+      index = with_notes(index, [{"bike/terra-40c.md", "# Another Terra 40c"}])
+
+      assert Index.relinks(index, "bike/terra-speed.md", "training/terra-40c.md") == %{
+               "bike/via-carolina.md" => %{"terra-speed" => "training/terra-40c"}
+             }
+    end
+
+    test "a note linking to itself is named under the path it had", %{index: index} do
+      index =
+        with_notes(index, [
+          {"bike/terra-speed.md",
+           "# Terra\nSee [[bike/terra-speed.md#dimensions]].\n\n## Dimensions\n40mm."}
+        ])
+
+      assert %{"bike/terra-speed.md" => %{"bike/terra-speed.md" => "gear/terra-40c.md"}} =
+               Index.relinks(index, "bike/terra-speed.md", "gear/terra-40c.md")
+    end
+  end
+
+  describe "inbound_chunk_links/2" do
+    test "links from other notes into the note's sections, not to the note as a whole",
+         %{index: index} do
+      index =
+        index
+        |> Index.put(
+          note_file("bike/deep.md", "# Deep\nSee [[terra-speed#dimensions]] and [[terra-speed]].")
+        )
+        |> Index.put(
+          note_file(
+            "bike/terra-speed.md",
+            "# Terra\nSelf: [[terra-speed#dimensions]].\n\n## Dimensions\n40mm."
+          )
+        )
+
+      assert Index.inbound_chunk_links(index, "bike/terra-speed.md") == [
+               %{from: "bike/deep.md", to: "bike/terra-speed.md#dimensions"}
+             ]
+
+      assert Index.inbound_chunk_links(index, "bike/unknown.md") == []
+    end
+  end
+
   describe "put/2 and move/3 own created_at" do
     @later %{
       created_at: ~U[2026-06-01 09:00:00Z],
