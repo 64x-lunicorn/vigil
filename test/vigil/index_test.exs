@@ -383,6 +383,24 @@ defmodule Vigil.IndexTest do
       assert apart.score > phrase.score
     end
 
+    # A one-letter word is in nearly every chunk, inside longer words too:
+    # as a word it would narrow nothing and cap a hit's score at its own
+    # handful of stray letters. It is left out of the words — never out of
+    # the phrase.
+    test "a word of one letter is not one of the words a hit must hold" do
+      index =
+        ranking_index([
+          ranking_chunk(%{id: "x/plan.md", file_title: "Plan", body: "nothing here"}),
+          ranking_chunk(%{id: "x/letters.md", body: "xylophone yard"}),
+          ranking_chunk(%{id: "x/phrase.md", body: "the letter x y"})
+        ])
+
+      assert [%{id: "x/plan.md", score: score}] = search(index, %{query: "Plan B"})
+      assert score == Index.strength(:title)
+      assert Enum.map(search(index, %{query: "x y"}), & &1.id) == ["x/phrase.md"]
+      assert Enum.map(search(index, %{query: "y"}), & &1.id) == ["x/letters.md", "x/phrase.md"]
+    end
+
     test "a chunk missing one of the query's words is not found" do
       index = ranking_index([ranking_chunk(%{body: "raised beds of tomatoes"})])
 

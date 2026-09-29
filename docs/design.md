@@ -437,6 +437,21 @@ result shape.
   queries are keyword lists, and a phrase-only search left memories that hold
   every word unfindable, so they were written a second time. This reverses
   the earlier rule that the query is only a phrase, with no token split.
+  A word of one character is not one of them (`C#`, `Plan B`): it is in
+  nearly every chunk, inside longer words too, so it would narrow nothing
+  and cap a hit's score at a few stray letters. It stays in the phrase, and a
+  one-letter query is matched as the phrase it is.
+- **Every word must be in the one chunk**, not merely somewhere in its note.
+  The ticket that brought the words in (#211) asked for them "anywhere in the
+  chunk or note"; that was narrowed, deliberately. A result is a chunk, and
+  its title, headings and body are what the words are looked for in (the
+  note's title is part of every chunk of it, so a word in the title counts
+  everywhere in the note). A note-wide match would return a chunk that holds
+  one word for a query whose other words sit in a sibling section — a hit
+  the caller then reads and finds nothing in — and would rank every chunk of
+  a long note alike. A query whose words are spread over a note's sections
+  finds each section by its own words, and `read` of the note gives the
+  whole.
 - Filters apply *before* matching: `domain`, `type`. `journal/` is hidden
   unless it is the `domain` asked for.
 - Ranking is a simple additive score, deliberately not BM25 and deliberately

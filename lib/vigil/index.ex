@@ -534,11 +534,21 @@ defmodule Vigil.Index do
     end
   end
 
-  # The words of a folded query: its runs of letters and digits, each once.
-  # A query that is one word and nothing else has no words beyond its phrase,
-  # and is not matched a second time.
+  # The words of a folded query: its runs of letters and digits, each once,
+  # of two characters or more. A one-letter word (`C#`, `Plan B`) is in
+  # nearly every chunk, inside longer words too, so as a word it narrows
+  # nothing and caps a hit's score at a handful of stray letters; it stays in
+  # the phrase. A query that is one word and nothing else has no words beyond
+  # its phrase, and is not matched a second time.
   defp query_words(phrase) do
-    case @word |> Regex.scan(phrase) |> List.flatten() |> Enum.uniq() do
+    words =
+      @word
+      |> Regex.scan(phrase)
+      |> List.flatten()
+      |> Enum.filter(&(String.length(&1) >= 2))
+      |> Enum.uniq()
+
+    case words do
       [^phrase] -> []
       words -> words
     end
