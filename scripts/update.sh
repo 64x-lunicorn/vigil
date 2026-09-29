@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/update.sh — switch to a different code revision. Runs as root, any
-# number of times, idempotent. Does not touch secrets, vault content or
+# number of times, idempotent. Never touches secrets or vault content; touches
 # the systemd unit only with --update-unit.
 #
 # Usage: sudo ./scripts/update.sh [--to <ref>] [--skip-tests --force]
@@ -169,9 +169,9 @@ source_env_for_verify() {
   # shellcheck disable=SC2034
   VIGIL_ALLOW_UNPROTECTED=0
   # shellcheck disable=SC2034
-  VIGIL_RW_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault)"
+  VIGIL_RW_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault 900)"
   # shellcheck disable=SC2034
-  VIGIL_RO_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault:read)"
+  VIGIL_RO_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault:read 900)"
 }
 
 ## ── Rollback mode: short, separate path ──────────────────────────────────
@@ -301,17 +301,22 @@ step "3/8  Dependency audit"
 as_vigil git -C "$REPO" checkout -q "$TARGET_SHA"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] mix deps.get --only prod && mix hex.audit"
+  log "[DRY RUN] mix deps.get && mix hex.audit && mix deps.audit"
 else
+  # All environments' deps, not --only prod: `mix test` below needs the test
+  # deps, and a lock that bumped one of them would otherwise fail it with a
+  # lock mismatch. The verdict is the exit status — hex.audit fails on a
+  # retired package, deps.audit on a known vulnerability; neither prints a
+  # severity word to grep for.
   # shellcheck disable=SC2016 # $1 is expanded by the inner bash -c, not here
-  AUDIT_OUTPUT="$(as_vigil bash -c 'cd "$1" && mix deps.get --only prod && mix hex.audit' _ "$REPO" 2>&1)" || true
-  echo "$AUDIT_OUTPUT"
-  if echo "$AUDIT_OUTPUT" | grep -qiE '\b(high|critical)\b'; then
-    err "mix hex.audit reports HIGH/CRITICAL advisories. Aborting (no override in update.sh)."
+  if ! AUDIT_OUTPUT="$(as_vigil bash -c 'cd "$1" && mix deps.get && mix hex.audit && mix deps.audit' _ "$REPO" 2>&1)"; then
+    echo "$AUDIT_OUTPUT"
+    err "Dependency audit failed (retired package or known vulnerability). Aborting (no override in update.sh)."
     as_vigil git -C "$REPO" checkout -q "$CURRENT_SHA"
     exit 2
   fi
-  ok "No HIGH/CRITICAL advisory."
+  echo "$AUDIT_OUTPUT"
+  ok "Dependency audit clean."
 fi
 record_done "ran the dependency audit"
 
@@ -356,13 +361,22 @@ if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
     if [ "$DRY_RUN" = "1" ]; then
       log "[DRY RUN] adopt the changed systemd unit"
     else
-      cp "$UNIT_SOURCE" "$UNIT_FILE"
-      ANALYSIS="$(systemd-analyze verify "$UNIT_FILE" 2>&1 || true)"
-      if [ -n "$ANALYSIS" ]; then
+      # Verified before it replaces the installed unit: a rejected unit left
+      # in /etc/systemd/system would be picked up by the next daemon-reload.
+      # Same filter as setup.sh — a release binary that does not exist yet is
+      # expected, anything else is not.
+      UNIT_CANDIDATE="$(mktemp --suffix=.service)"
+      cp "$UNIT_SOURCE" "$UNIT_CANDIDATE"
+      ANALYSIS="$(systemd-analyze verify "$UNIT_CANDIDATE" 2>&1 || true)"
+      UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
+      if [ -n "$UNEXPECTED" ]; then
+        rm -f "$UNIT_CANDIDATE"
         err "systemd-analyze verify reports problems with the new unit:"
-        echo "$ANALYSIS" >&2
+        echo "$UNEXPECTED" >&2
         exit 1
       fi
+      install -m 0644 "$UNIT_CANDIDATE" "$UNIT_FILE"
+      rm -f "$UNIT_CANDIDATE"
       systemctl daemon-reload
       ok "systemd unit adopted."
     fi

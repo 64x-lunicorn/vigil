@@ -316,16 +316,21 @@ wait_until_healthy() {
 # reads, so it also names the production persistence itself, the way
 # `mix vigil.seed_token` does — and `Vigil.ScriptCallsTest` holds its arity to
 # the one `Vigil.OAuth.Token` exports, which is how it fell behind once already.
+#
+# An optional third argument is the lifetime in seconds, ten years by default.
+# The tokens init.sh prints for the owner keep the default; the pair update.sh
+# mints only to run verify() gets minutes, so updates do not pile up live
+# full-access tokens nobody holds.
 vigil_seed_token() {
-  local resource="$1" scope="$2"
+  local resource="$1" scope="$2" ttl_seconds="${3:-315360000}"
   if systemctl is-active --quiet "$SERVICE"; then
     local ausdruck
-    ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(Vigil.OAuth.Store.over_tables(), \"${resource}\", \"${scope}\", 3650 * 86400, System.system_time(:second)))"
+    ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(Vigil.OAuth.Store.over_tables(), \"${resource}\", \"${scope}\", String.to_integer(\"${ttl_seconds}\"), System.system_time(:second)))"
     as_vigil "${CURRENT}/bin/vigil" rpc "$ausdruck" | tail -1
   else
-    # shellcheck disable=SC2016 # $1..$3 are expanded by the inner bash -c, not here
-    as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix vigil.seed_token --state-dir "$2" --resource "$3" --scope "$4" --ttl-days 3650' \
-      _ "$REPO" "$STATE_DIR" "$resource" "$scope" | tail -1
+    # shellcheck disable=SC2016 # $1..$5 are expanded by the inner bash -c, not here
+    as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix vigil.seed_token --state-dir "$2" --resource "$3" --scope "$4" --ttl-seconds "$5"' \
+      _ "$REPO" "$STATE_DIR" "$resource" "$scope" "$ttl_seconds" | tail -1
   fi
 }
 
@@ -501,7 +506,10 @@ verify_chunk_count() {
       warn "verify() [6]: chunk count dropped from ${chunks_before} to ${chunks_now} — possible parser regression."
     fi
     if [ "$DRY_RUN" != "1" ]; then
-      echo "$chunks_now" >"$last_chunks_file"
+      # As the service user: written as root (umask 077) it is the one file
+      # under the state dir the next update.sh refuses on "wrong ownership".
+      # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c
+      as_vigil bash -c 'printf "%s\n" "$1" >"$2"' _ "$chunks_now" "$last_chunks_file"
     fi
   else
     warn "verify() [6]: could not read the chunk count from journalctl."
