@@ -452,7 +452,8 @@ flowchart TB
 
 1. **Cloudflare Access** sits in front of the service. `init.sh` aborts if the
    public endpoint answers with anything other than 403 — that is, unless
-   Access is actually in place.
+   Access is actually in place. Put the consent page behind a person, too:
+   see [an Access policy for the consent page](#an-access-policy-for-the-consent-page).
 2. **OAuth 2.1** with Authorization Code + PKCE. Dynamic Client Registration
    and Client-ID Metadata Documents are both supported. No static bearer token.
 3. **Scopes.** `vault` for full access, `vault:read` for read-only clients.
@@ -467,15 +468,16 @@ Before layers 2 to 5, every request to `/mcp` and every POST to the
 authorization server has its `Origin` checked, and one sent by a page on
 another site is refused with 403 — see [browser origins](#browser-origins).
 
-Layer 5 is the one to read carefully, because there are three limits and they
-cover different things:
+Layer 5 is the one to read carefully, because there are several limits and
+they cover different things:
 
 | Limit | Keyed on | Budget | Covers |
 |---|---|---|---|
 | `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM` per minute | every `/mcp` request, and only after the token validates |
 | `Vigil.RateLimit` for `reload` | access token | `VIGIL_RELOAD_RATE_LIMIT_RPM` per minute | `reload` calls, on top of the row above; past it `reload` answers a rate-limit error |
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` per minute | `/oauth/register`, `/oauth/authorize`, `/oauth/token` — all reachable without a token |
-| `Vigil.OAuth.Store` | client address | 5 per 15 minutes | wrong passwords on the consent form, and nothing else |
+| consent lockout | client address | 5 per 15 minutes | wrong passwords on the consent form, and nothing else |
+| consent budget | every address together | `VIGIL_CONSENT_FAILURES_PER_HOUR` per hour | wrong passwords on the consent form; past it the form answers 429 for everyone until the hour is up, and a warning is logged |
 
 The middle row is what bounds an unauthenticated caller: without it, `/authorize`
 would fetch a CIMD document from an address the caller chose as often as it
@@ -485,6 +487,34 @@ reachable at all on this deployment; the limits are the defence behind it.
 
 Which address the per-address limits count against is a configured question,
 not a guess: see [the two proxy settings](#the-two-proxy-settings-and-why-they-default-to-unset).
+An IPv6 client is counted per /64, not per address: a /64 is what one line or
+one host is handed, and counted per address its holder would get a fresh budget
+for each of 2^64 addresses. An IPv4 address a dual-stack socket reports in its
+IPv6 form (`::ffff:198.51.100.9`) is counted as the IPv4 address it is.
+
+The consent budget is what the lockout cannot be: a guesser with many
+addresses stays under five per address forever. Past the budget the consent
+form refuses every address, the owner's included, until the hour is up — a
+spent budget is a denial of consent for an hour, never a guessed password. The
+journal says so once per hour it happens. Every counter here is updated
+atomically, and a consent attempt is counted before the password is compared,
+so a burst of requests in parallel is held to the same budget as one after the
+other. The password is compared as two SHA-256 digests, so how fast a guess is
+refused does not depend on how long the password is.
+
+#### An Access policy for the consent page
+
+`/oauth/authorize` is where a person types the consent password, so it is the
+one path worth putting behind a person in Cloudflare Access as well: add an
+Access application for `vault.example.org/oauth/authorize` whose Allow policy
+requires a login through an identity provider such as GitHub or Google
+**with MFA** — Cloudflare's `Authentication method` rule set to `mfa`, with
+the provider enforcing a second factor. Only the owner can then reach the form at all, and the consent
+password becomes the second factor instead of the only one. The browser is the
+one opening that page, so the login is a redirect the owner clicks through
+once per session; the paths an MCP client calls itself (`/mcp`,
+`/oauth/token`, `/oauth/register`, the discovery documents) keep the policy
+they already have.
 
 Nothing vigil opens listens beyond loopback: the HTTP listener on
 `VIGIL_BIND`, and Erlang distribution — what `bin/vigil stop` and
@@ -537,13 +567,14 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_SKILLKEY_SECRET` | — | SkillKey HMAC secret, **required, at least 32 random bytes**, base64 or hex (`openssl rand -base64 48`); never the consent password |
 | `VIGIL_STATE_DIR` | **required in prod**; `tmp/oauth_state` in dev | directory for the three `:dets` files |
 | `VIGIL_ALLOWED_ORIGINS` | empty | comma-separated browser origins, besides the issuer's own, that may send a request to `/mcp` and the OAuth endpoints, e.g. `http://localhost:6274`. See [browser origins](#browser-origins) |
-| `VIGIL_TRUSTED_PROXY_HEADER` | unset | header carrying the real client address, e.g. `CF-Connecting-IP` |
-| `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
+| `VIGIL_TRUSTED_PROXY_HEADER` | unset; `init.sh` writes `CF-Connecting-IP` | header carrying the real client address |
+| `VIGIL_TRUSTED_PROXIES` | empty; `init.sh` writes `127.0.0.1/32,::1/128` | addresses or CIDR blocks whose forwarded header is believed — for the tunnel, the loopback cloudflared connects from |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
 | `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
 | `VIGIL_RELOAD_RATE_LIMIT_RPM` | `6` | max `reload` per minute per access token, on top of the budget above |
 | `VIGIL_OAUTH_RATE_LIMIT_RPM` | `30` | max `/oauth/authorize` and `/oauth/token` per minute per client address |
 | `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` | `5` | max `/oauth/register` per minute per client address |
+| `VIGIL_CONSENT_FAILURES_PER_HOUR` | `50` | max wrong consent passwords per hour from every address together; past it the consent form answers 429 until the hour is up |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
 
@@ -552,8 +583,9 @@ else does. A bad one stops the start, and the journal names every variable that
 failed and what it expected, all in one message:
 
 - `VIGIL_PORT` must be an integer from 1 to 65535.
-- `VIGIL_SKILLKEY_TTL`, `VIGIL_RATE_LIMIT_RPM`, `VIGIL_RELOAD_RATE_LIMIT_RPM`
-  and the two OAuth budgets must be positive integers. `0`, `-5` or `60rpm` is
+- `VIGIL_SKILLKEY_TTL`, `VIGIL_RATE_LIMIT_RPM`, `VIGIL_RELOAD_RATE_LIMIT_RPM`,
+  the two OAuth budgets and `VIGIL_CONSENT_FAILURES_PER_HOUR` must be positive
+  integers. `0`, `-5` or `60rpm` is
   refused, not replaced by the default.
 - `VIGIL_TZ` must be a timezone name the timezone database knows, such as
   `Europe/Berlin`. An unknown one is refused rather than quietly becoming UTC.
@@ -616,31 +648,44 @@ vigil's rate limits are keyed per client address, and `conn.remote_ip` — the
 peer of the TCP connection — is the proxy, not the client, in the deployment
 above. Left alone, that makes every limit one global bucket: stricter than
 intended rather than weaker, and exhaustible by anyone who can reach
-`/oauth/authorize`.
+`/oauth/authorize` — anyone can then lock the owner out of consenting.
 
 Reading `X-Forwarded-For` is not the fix on its own. The header is written by
 whoever sent the request unless something in front of vigil overwrites it, so
 believing it unconditionally turns a global limit into no limit at all — every
 attempt simply claims a new address. So vigil believes a header only when told
-which one and told which peers may set it:
+which one and told which peers may set it.
+
+For the deployment this guide sets up — cloudflared on the same host, vigil
+bound to loopback — the peer of every request is cloudflared, on loopback, and
+the header to name is `CF-Connecting-IP`, which Cloudflare overwrites rather
+than appends to. `init.sh` writes exactly this into `/etc/vigil/env`:
 
 ```
 VIGIL_TRUSTED_PROXY_HEADER=CF-Connecting-IP
-VIGIL_TRUSTED_PROXIES=173.245.48.0/20,103.21.244.0/22
+VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128
 ```
+
+Cloudflare's own edge ranges are the wrong list here: vigil never sees an edge
+address, only the tunnel's loopback connection, so a list of edge ranges never
+matches and every request stays in the one global bucket. They are the right
+list only when Cloudflare's edge connects to vigil directly, with no tunnel —
+then name the published [IP ranges](https://www.cloudflare.com/ips/) instead.
+A host set up before `init.sh` wrote these adds the two lines to
+`/etc/vigil/env` once and restarts the service.
 
 **Set both or neither.** A header name without a trusted peer is ignored, and
 a trusted peer without a header name has nothing to read. With neither set,
-behaviour is exactly what it was before the settings existed.
+every request counts against the peer's one bucket.
 
 **Setting them wrong is worse than leaving them unset.** If `VIGIL_TRUSTED_PROXIES`
 includes an address that is not in fact a sanitizing proxy — the whole of
 `0.0.0.0/0`, say, or a range vigil is reachable from directly — then any caller
 in that range gets a fresh rate-limit bucket per request just by naming a new
-address. Put the proxy's own addresses there and nothing else. For Cloudflare
-that is the published
-[IP ranges](https://www.cloudflare.com/ips/), and the header to name is
-`CF-Connecting-IP`, which Cloudflare overwrites rather than appends to.
+address. Put the proxy's own addresses there and nothing else. Trusting
+loopback is safe for as long as nothing but cloudflared on the host sends vigil
+requests: a local process could name any address it liked, but a local process
+already has the host.
 
 When several hops are listed, vigil takes the rightmost one it did not add
 itself: proxies append what they saw, so anything further left is a claim from

@@ -26,7 +26,8 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   @touched Map.keys(@prod_env) ++
              ~w(VIGIL_PORT VIGIL_TZ VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
                 VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
-                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_ALLOWED_ORIGINS
+                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_CONSENT_FAILURES_PER_HOUR
+                VIGIL_ALLOWED_ORIGINS
                 VIGIL_GIT_REMOTE VIGIL_GIT_BRANCH)
 
   setup do
@@ -54,12 +55,14 @@ defmodule Vigil.Settings.RuntimeConfigTest do
     assert {:ok, checked} = check(prod_config())
     assert checked.port == 4000
     assert checked.rate_limit_rpm == 60
+    assert checked.consent_failures_per_hour == 50
   end
 
   test "a non-integer reaches the check as written and is refused by name" do
     for var <-
           ~w(VIGIL_PORT VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM VIGIL_RELOAD_RATE_LIMIT_RPM
-             VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM) do
+             VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM
+             VIGIL_CONSENT_FAILURES_PER_HOUR) do
       System.put_env(var, "12abc")
 
       assert {:error, [message]} = check(prod_config())

@@ -712,6 +712,10 @@ VAULT_TZ="$(ask_value "Time zone of the vault" "Europe/Berlin")"
 VAULT_OWNER="${VAULT_OWNER//\"/}"
 VAULT_LANGUAGE="${VAULT_LANGUAGE//\"/}"
 
+# cloudflared runs on this host and reaches vigil over loopback, so loopback
+# is the peer whose CF-Connecting-IP is believed — the rate limits and the
+# consent lockout then count the real client, not one bucket for everyone.
+#
 # The domain list is deliberately NOT written here: it is read at runtime
 # from _domains.yml, never maintained as a regex or list in code. A list kept
 # in two places always drifts.
@@ -731,6 +735,8 @@ VIGIL_SKILLKEY_SECRET=${SKILLKEY_SECRET}
 VIGIL_STATE_DIR=/var/lib/vigil
 VIGIL_SKILLKEY_TTL=3600
 VIGIL_RATE_LIMIT_RPM=60
+VIGIL_TRUSTED_PROXY_HEADER=CF-Connecting-IP
+VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128
 VIGIL_VAULT_OWNER="${VAULT_OWNER}"
 VIGIL_VAULT_LANGUAGE="${VAULT_LANGUAGE}"
 EOF

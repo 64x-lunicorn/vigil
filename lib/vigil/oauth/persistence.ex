@@ -8,7 +8,7 @@ defmodule Vigil.OAuth.Persistence do
   OAuth modules ask of storage. A registered client written, read, counted,
   listed and deleted, an authorization code written and taken, a token
   written, read, listed, deleted and revoked by family or all at once, the
-  consent password attempts counted per address, the CIMD cache read and
+  consent password attempts counted, given back and forgotten, the CIMD cache read and
   written — and the janitor's sweep, which is part of this surface rather than
   a concern of its own: it asks persistence to drop what has expired, and
   every expiry it drops belongs to one of the tables above — a registered
@@ -29,7 +29,7 @@ defmodule Vigil.OAuth.Persistence do
   shape and the same rule as `Vigil.Git` and `Vigil.Vault.Facts`: a question
   added here and left unwired fails at construction rather than answering.
   Answering is what it must not do: a `get_token` that answers `:error` turns
-  every token into an unknown one, and a `rate_limited?` that answers `false`
+  every token into an unknown one, and a `take_attempt` that answers `1`
   turns the consent lockout off — every plausible answer to a question nobody
   wired sits on the wrong side of a gate.
   """
@@ -89,13 +89,24 @@ defmodule Vigil.OAuth.Persistence do
     # :ok.
     :revoke_all,
 
-    ## Consent password attempts, per address
-    # Whether this address is locked out at `now`. boolean.
-    :rate_limited?,
-    # Count one wrong password against it. :ok.
-    :record_failure,
-    # Forget an address's attempts — the right password did. :ok.
-    :reset_rate_limit,
+    ## Consent password attempts
+    #
+    # Counted under a key the caller chooses — a client address, or one key
+    # for every address at once — each in a fixed window whose length the
+    # caller names and which opens at the key's first attempt. The budgets
+    # are `Vigil.OAuth.Flow`'s; what is stored here is only the counting.
+    #
+    # Count one attempt against `key` at `now` — in a fresh window of
+    # `window` seconds if the key has none still open at `now` — and answer
+    # the count including this one. Atomic: of any number of callers at once,
+    # each is answered a different count, so none can read a free slot
+    # another has already taken. (key, window, now) -> pos_integer.
+    :take_attempt,
+    # Give one attempt back — it was counted before it turned out not to be
+    # a wrong password. Never below zero. :ok.
+    :return_attempt,
+    # Forget a key's attempts — the right password did. :ok.
+    :forget_attempts,
 
     ## The CIMD cache
     # {:ok, doc} | :error. Answers :error for an entry whose hour is up.
@@ -114,27 +125,18 @@ defmodule Vigil.OAuth.Persistence do
 
   @type t :: %__MODULE__{}
 
-  # What the answers above are measured against: two numbers for the consent
-  # lockout, one for the cache's hour. They live with the contract rather than
-  # with either adapter because both have to agree on them — "the lockout
-  # expires with its window" is a claim the suite runs against both, and a
-  # window each adapter picked for itself would make that claim mean two
-  # different things.
+  # What the cache's answers are measured against. It lives with the contract
+  # rather than with either adapter because both have to agree on it — "the
+  # cache honours its hour" is a claim the suite runs against both, and an
+  # hour each adapter picked for itself would make that claim mean two
+  # different things. The consent budgets and their windows are not here:
+  # they are handed in with every attempt, by the one caller that decides on
+  # them.
   #
-  # The *rules* applied under them are deliberately not shared: each adapter
+  # The *rules* applied under it are deliberately not shared: each adapter
   # decides for itself what a window is made of and when it rolls over, which
   # is what leaves the contract suite something to catch.
-  @rate_limit_window 900
-  @rate_limit_max_attempts 5
   @cimd_ttl 3600
-
-  @doc "How long an address's failed-password window lasts, in seconds."
-  @spec rate_limit_window() :: pos_integer()
-  def rate_limit_window, do: @rate_limit_window
-
-  @doc "How many wrong passwords an address may spend inside one window."
-  @spec rate_limit_max_attempts() :: pos_integer()
-  def rate_limit_max_attempts, do: @rate_limit_max_attempts
 
   @doc "How long a cached CIMD document stays good for, in seconds."
   @spec cimd_ttl() :: pos_integer()

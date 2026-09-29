@@ -59,6 +59,11 @@ config :vigil,
   issuer: System.get_env("VIGIL_ISSUER", "http://localhost:4000"),
   resource: System.get_env("VIGIL_RESOURCE", "http://localhost:4000/mcp"),
   auth_password: System.get_env("VIGIL_AUTH_PASSWORD"),
+  # Wrong consent passwords per hour from every address together. Past it the
+  # consent form answers 429 for everyone until the hour is up, and a warning
+  # is logged: many addresses each staying under their own lockout is what
+  # this catches.
+  consent_failures_per_hour: integer.("VIGIL_CONSENT_FAILURES_PER_HOUR", "50"),
   # The AP-4 SkillKey HMAC secret: random bytes of its own, never the consent
   # password. No default anywhere, like the password.
   skillkey_secret: System.get_env("VIGIL_SKILLKEY_SECRET"),

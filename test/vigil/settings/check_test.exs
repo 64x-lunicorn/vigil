@@ -25,6 +25,7 @@ defmodule Vigil.Settings.CheckTest do
     issuer: "https://vault.example.org",
     resource: "https://vault.example.org/mcp",
     auth_password: "correct-horse-battery-staple",
+    consent_failures_per_hour: 50,
     allowed_origins: [],
     skillkey_secret: "itTnVnZk/sC37IrApqZhoUWOfli819Xl7zZx6DSYKPrXRrOsez+p930plUaYNzV6",
     skillkey_ttl_seconds: 3600,
@@ -64,6 +65,7 @@ defmodule Vigil.Settings.CheckTest do
       reload_rate_limit_rpm: "VIGIL_RELOAD_RATE_LIMIT_RPM",
       oauth_rate_limit_rpm: "VIGIL_OAUTH_RATE_LIMIT_RPM",
       oauth_register_rate_limit_rpm: "VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM",
+      consent_failures_per_hour: "VIGIL_CONSENT_FAILURES_PER_HOUR",
       skillkey_ttl_seconds: "VIGIL_SKILLKEY_TTL"
     ]
 

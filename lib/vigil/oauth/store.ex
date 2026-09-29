@@ -41,12 +41,10 @@ defmodule Vigil.OAuth.Store do
   @rate_limits :oauth_rate_limits
   @cimd_cache :oauth_cimd_cache
 
-  # The lockout's budget and window and the cache's hour belong to the
-  # contract, not to this adapter: the in-memory one has to measure them the
-  # same way for the claims in `test/vigil/oauth/persistence_test.exs` to mean
-  # one thing. How they are counted is this adapter's own.
-  @rate_limit_window Persistence.rate_limit_window()
-  @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
+  # The cache's hour belongs to the contract, not to this adapter: the
+  # in-memory one has to measure it the same way for the claims in
+  # `test/vigil/oauth/persistence_test.exs` to mean one thing. How it is
+  # counted is this adapter's own.
   @cimd_ttl Persistence.cimd_ttl()
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -202,9 +200,9 @@ defmodule Vigil.OAuth.Store do
       revoke_grant: &revoke_grant/1,
       list_tokens: &list_tokens/0,
       revoke_all: &revoke_all/0,
-      rate_limited?: &rate_limited?/2,
-      record_failure: &record_failure/2,
-      reset_rate_limit: &reset_rate_limit/1,
+      take_attempt: &take_attempt/3,
+      return_attempt: &return_attempt/1,
+      forget_attempts: &forget_attempts/1,
       cimd_cache_get: &cimd_cache_get/2,
       cimd_cache_put: &cimd_cache_put/3,
       sweep_expired: &sweep_expired/1
@@ -316,39 +314,39 @@ defmodule Vigil.OAuth.Store do
     :dets.sync(table)
   end
 
-  ## Rate limiting (consent password attempts, per IP)
+  ## Consent password attempts
+  #
+  # One row per key: `{key, count, closes_at}`, the last instant the window
+  # still counts at. Every change is one atomic ETS operation, never a lookup
+  # followed by an insert: that let parallel attempts all read the same count
+  # and all be answered as if they were the only one.
 
-  defp rate_limited?(ip, now) do
-    case :ets.lookup(@rate_limits, ip) do
-      [{^ip, count, window_start}] ->
-        count >= @rate_limit_max_attempts and now - window_start <= @rate_limit_window
+  # An elapsed window is first replaced by an empty one. `select_replace/2`
+  # matches on the old window's end, so of two attempts racing to open the new
+  # window only the first does; the second finds it open and counts in it.
+  # Then the attempt is counted, and the count it is answered is its own.
+  defp take_attempt(key, window, now) do
+    :ets.select_replace(@rate_limits, [
+      {{key, :_, :"$1"}, [{:<, :"$1", now}], [{{{:const, key}, 0, now + window}}]}
+    ])
 
-      [] ->
-        false
-    end
+    :ets.update_counter(@rate_limits, key, {2, 1}, {key, 0, now + window})
   end
 
-  defp record_failure(ip, now) do
-    case :ets.lookup(@rate_limits, ip) do
-      [{^ip, count, window_start}] when now - window_start <= @rate_limit_window ->
-        :ets.insert(@rate_limits, {ip, count + 1, window_start})
-
-      _ ->
-        :ets.insert(@rate_limits, {ip, 1, now})
-    end
-
+  # Floored at zero. A row the sweep took in the meantime is recreated as one
+  # that has already closed, which the next sweep takes again.
+  defp return_attempt(key) do
+    :ets.update_counter(@rate_limits, key, {2, -1, 0, 0}, {key, 0, 0})
     :ok
   end
 
-  defp reset_rate_limit(ip) do
-    :ets.delete(@rate_limits, ip)
+  defp forget_attempts(key) do
+    :ets.delete(@rate_limits, key)
     :ok
   end
 
   defp sweep_rate_limits(now) do
-    sweep_table(@rate_limits, fn {_ip, _count, window_start} ->
-      now - window_start > @rate_limit_window
-    end)
+    :ets.select_delete(@rate_limits, [{{:_, :_, :"$1"}, [{:<, :"$1", now}], [true]}])
   end
 
   ## CIMD cache (1h TTL, ephemeral)

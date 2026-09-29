@@ -839,6 +839,37 @@ defmodule Vigil.OAuth.EndpointTest do
     assert List.last(results) == 429
   end
 
+  # A /64 is one line or one host. Counted per /128, its holder would get a
+  # fresh lockout for every address it picked.
+  test "two IPv6 addresses in the same /64 share a lockout", %{endpoint: endpoint} do
+    params = wrong_password_params(endpoint)
+
+    for n <- 1..5 do
+      peer = {0x2001, 0xDB8, 1, 2, 0, 0, 0, n}
+      assert consent_as(endpoint, params, peer, "ignored").status == 200
+    end
+
+    same_64 = {0x2001, 0xDB8, 1, 2, 0xDEAD, 0xBEEF, 0, 1}
+    assert consent_as(endpoint, params, same_64, "ignored").status == 429
+
+    next_64 = {0x2001, 0xDB8, 1, 3, 0, 0, 0, 1}
+    assert consent_as(endpoint, params, next_64, "ignored").status == 200
+  end
+
+  test "past the hourly budget every address is answered 429", %{persistence: persistence} do
+    endpoint =
+      endpoint(persistence: persistence, settings: %{@settings | consent_failures_per_hour: 2})
+
+    params = wrong_password_params(endpoint)
+
+    assert consent_as(endpoint, params, {192, 0, 2, 1}, "ignored").status == 200
+    assert consent_as(endpoint, params, {192, 0, 2, 2}, "ignored").status == 200
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert consent_as(endpoint, params, {192, 0, 2, 3}, "ignored").status == 429
+    end)
+  end
+
   ## Issuer identification (RFC 9207)
 
   test "the authorization response says which server issued it", %{endpoint: endpoint} do

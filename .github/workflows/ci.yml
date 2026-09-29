@@ -252,6 +252,11 @@ jobs:
       - name: grants.sh lists and revokes through the running node
         run: bash scripts/test/grants_test.sh
 
+      # The tunnel's peer is loopback, so that is the proxy whose
+      # CF-Connecting-IP is believed; init.sh writes both lines.
+      - name: init.sh writes the tunnel's proxy settings
+        run: bash scripts/test/proxy_settings_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest

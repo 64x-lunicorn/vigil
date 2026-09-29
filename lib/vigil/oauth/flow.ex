@@ -30,6 +30,8 @@ defmodule Vigil.OAuth.Flow do
   nothing, so they still take the persistence alone.
   """
 
+  require Logger
+
   alias Vigil.OAuth
   alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Server, Token}
 
@@ -40,6 +42,16 @@ defmodule Vigil.OAuth.Flow do
   @max_client_name 200
   @max_redirect_uris 10
   @max_redirect_uri_bytes 2_000
+
+  # The consent lockout (`docs/oauth.md`, "Is the rate limit per client, per
+  # address, or global"): five wrong passwords per address in fifteen
+  # minutes, and a budget per hour for every address together, which the
+  # deployment sets. The shared one is counted under a key no address can
+  # be: every address key is a string.
+  @lockout_window 900
+  @lockout_attempts 5
+  @all_addresses :all_addresses
+  @all_addresses_window 3600
 
   @doc """
   Dynamic client registration. Returns the registration response, or one of:
@@ -189,12 +201,23 @@ defmodule Vigil.OAuth.Flow do
   end
 
   @doc """
-  Decides an "allow" on the consent page for a client at `ip`.
+  Decides an "allow" on the consent page for a client at `ip` — the key
+  `Vigil.OAuth.ClientAddr` counts it under, an IPv6 client's /64.
 
   `:rate_limited` once too many wrong passwords have come from that address,
-  `:wrong_password` otherwise, and `{:ok, code}` with a fresh one-time
-  authorization code when the password is right. Recording the attempt is part
-  of the decision, so the caller cannot forget to.
+  or once every address together has spent the deployment's hourly budget of
+  wrong passwords (`consent_failures_per_hour`) — the second logs a warning
+  when it is first reached. `:wrong_password` otherwise, and `{:ok, code}`
+  with a fresh one-time authorization code when the password is right.
+  Counting the attempt is part of the decision, so the caller cannot forget
+  to.
+
+  The attempt is counted *before* the password is compared, not after it
+  turned out wrong. Counted after, every request in flight at once would
+  have been compared against a budget none of them had spent yet; counted
+  first, each is handed its own place in the window, and the one past the
+  budget is refused without a comparison. A right password gives back what
+  it took.
 
   `:unavailable` when the right password was given but the code could not be
   stored: a code that was never written is not handed to the client.
@@ -208,19 +231,65 @@ defmodule Vigil.OAuth.Flow do
         ctx,
         now \\ System.system_time(:second)
       ) do
-    cond do
-      persistence.rate_limited?.(ip, now) ->
-        :rate_limited
-
-      Plug.Crypto.secure_compare(password || "", settings.auth_password) ->
-        persistence.reset_rate_limit.(ip)
+    with :ok <- take_attempt(persistence, ip, now, settings) do
+      if password_matches?(password, settings.auth_password) do
+        persistence.forget_attempts.(ip)
+        persistence.return_attempt.(@all_addresses)
         issue_code(persistence, ctx, now)
-
-      true ->
-        persistence.record_failure.(ip, now)
+      else
         :wrong_password
+      end
     end
   end
+
+  # The address's own window first: an address already locked out spends
+  # nothing of the budget every address shares. An attempt refused by the
+  # shared budget gives back what it took from the address's, since no
+  # password was compared.
+  defp take_attempt(persistence, ip, now, settings) do
+    budget = settings.consent_failures_per_hour
+
+    cond do
+      persistence.take_attempt.(ip, @lockout_window, now) > @lockout_attempts ->
+        :rate_limited
+
+      (spent = persistence.take_attempt.(@all_addresses, @all_addresses_window, now)) > budget ->
+        persistence.return_attempt.(ip)
+        if spent == budget + 1, do: warn_all_addresses_spent(budget)
+        :rate_limited
+
+      true ->
+        :ok
+    end
+  end
+
+  # Once per window, on the attempt that first finds the budget spent — every
+  # refusal after it would say the same thing, as often as it is asked.
+  defp warn_all_addresses_spent(budget) do
+    Logger.warning(
+      "consent: #{budget} wrong passwords within the hour from all addresses together " <>
+        "(VIGIL_CONSENT_FAILURES_PER_HOUR); the consent form answers 429 until the hour is up"
+    )
+  end
+
+  @doc """
+  Whether `given` is the consent password, in time that does not depend on
+  either one's length.
+
+  `Plug.Crypto.secure_compare/2` is constant-time only between two values of
+  the same length: it answers `false` at once when the lengths differ, so how
+  fast a guess is refused says whether the guess had the password's length.
+  Both values are hashed first, and it is the two digests — always 32 bytes
+  each — that are compared. Hashing the guess takes time in the guess's
+  length, which the guesser already knows; nothing about the password's
+  length reaches the answer.
+  """
+  @spec password_matches?(String.t() | nil, String.t()) :: boolean()
+  def password_matches?(given, password) when is_binary(password) do
+    Plug.Crypto.secure_compare(digest(given || ""), digest(password))
+  end
+
+  defp digest(value), do: :crypto.hash(:sha256, value)
 
   # The client's first code is recorded before the code is minted, so a code
   # never reaches a client the unused-client sweep would still take.

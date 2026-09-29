@@ -14,7 +14,7 @@ defmodule Vigil.OAuth.PersistenceTest do
   than through an endpoint, and asserted against both adapters: that a code is
   single-use, that rotation marks a refresh token spent rather than deleting
   it, that revoking a grant takes down a family, that the consent lockout
-  counts per address and expires with its window, that the CIMD cache honours
+  counts per key, atomically, and expires with its window, that the CIMD cache honours
   its hour, and that a sweep drops exactly what has expired. Two adapters
   drifting apart is the one thing that can go wrong with a second one, which
   is why the contract is tested rather than assumed.
@@ -26,6 +26,10 @@ defmodule Vigil.OAuth.PersistenceTest do
   alias Vigil.OAuthCase
 
   @now 1_700_000_000
+
+  # A window for the consent attempts below. Its length is the caller's to
+  # choose; this is the one `Vigil.OAuth.Flow` counts an address in.
+  @window 900
 
   # The audience the token records below carry. Persistence stores it and
   # gives it back; what it says is nothing this seam decides, so the test
@@ -49,9 +53,9 @@ defmodule Vigil.OAuth.PersistenceTest do
     revoke_grant: 1,
     list_tokens: 0,
     revoke_all: 0,
-    rate_limited?: 2,
-    record_failure: 2,
-    reset_rate_limit: 1,
+    take_attempt: 3,
+    return_attempt: 1,
+    forget_attempts: 1,
     cimd_cache_get: 2,
     cimd_cache_put: 3,
     sweep_expired: 1
@@ -315,63 +319,71 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert {:ok, _} = persistence.get_token.("no-family")
       end
 
-      test "the consent lockout counts wrong passwords per address", %{persistence: persistence} do
-        attempts = Persistence.rate_limit_max_attempts()
+      test "consent attempts are counted per key", %{persistence: persistence} do
+        for n <- 1..5, do: assert(persistence.take_attempt.("198.51.100.1", @window, @now) == n)
 
-        for _ <- 1..(attempts - 1) do
-          assert :ok = persistence.record_failure.("198.51.100.1", @now)
-          refute persistence.rate_limited?.("198.51.100.1", @now)
+        # Per key: the neighbour has spent nothing.
+        assert persistence.take_attempt.("198.51.100.2", @window, @now) == 1
+      end
+
+      # Every caller at once is answered a count of its own. A count read and
+      # then written back hands two callers the same one, and a budget checked
+      # against it lets both through on one free slot.
+      test "parallel attempts are each answered a count of their own", %{
+        persistence: persistence
+      } do
+        for n <- 1..20 do
+          counts =
+            Vigil.AtOnce.run(100, fn -> persistence.take_attempt.({:key, n}, @window, @now) end)
+
+          assert Enum.sort(counts) == Enum.to_list(1..100)
         end
-
-        assert :ok = persistence.record_failure.("198.51.100.1", @now)
-        assert persistence.rate_limited?.("198.51.100.1", @now)
-
-        # Per address: the neighbour has spent nothing.
-        refute persistence.rate_limited?.("198.51.100.2", @now)
       end
 
-      test "the consent lockout expires with its window", %{persistence: persistence} do
-        window = Persistence.rate_limit_window()
+      test "a window lasts the length it was opened with", %{persistence: persistence} do
+        for _ <- 1..3, do: persistence.take_attempt.("ip", @window, @now)
 
-        for _ <- 1..Persistence.rate_limit_max_attempts(),
-            do: persistence.record_failure.("ip", @now)
+        assert persistence.take_attempt.("ip", @window, @now + @window) == 4
+        assert persistence.take_attempt.("ip", @window, @now + 2 * @window + 1) == 1
 
-        assert persistence.rate_limited?.("ip", @now + window)
-        refute persistence.rate_limited?.("ip", @now + window + 1)
+        # Two keys, two lengths: the hour-long one outlives the short one.
+        assert persistence.take_attempt.("short", 10, @now) == 1
+        assert persistence.take_attempt.("long", 3600, @now) == 1
+        assert persistence.take_attempt.("short", 10, @now + 11) == 1
+        assert persistence.take_attempt.("long", 3600, @now + 11) == 2
       end
 
-      # A failure arriving after the window ran out opens a new one rather
-      # than topping up the old count — otherwise an address locked out once
-      # would stay locked out on one attempt an hour, and an address that had
-      # ever been locked out could never be locked out again.
-      #
-      # Asserted by spending the *new* window rather than by reading the old
-      # one: an elapsed window already answers "not limited", so `refute`
-      # alone passes whether the count rolled over or not.
-      test "a failure after the window opens a new one", %{persistence: persistence} do
-        attempts = Persistence.rate_limit_max_attempts()
-        later = @now + Persistence.rate_limit_window() + 1
+      # An attempt after the window ran out opens a new one rather than
+      # topping up the old count — otherwise an address locked out once would
+      # stay locked out on one attempt an hour.
+      test "an attempt after the window opens a new one", %{persistence: persistence} do
+        later = @now + @window + 1
 
-        for _ <- 1..attempts, do: persistence.record_failure.("ip", @now)
+        for _ <- 1..5, do: persistence.take_attempt.("ip", @window, @now)
 
-        assert :ok = persistence.record_failure.("ip", later)
-        refute persistence.rate_limited?.("ip", later)
-
-        for _ <- 1..(attempts - 2), do: persistence.record_failure.("ip", later)
-        refute persistence.rate_limited?.("ip", later)
-
-        assert :ok = persistence.record_failure.("ip", later)
-        assert persistence.rate_limited?.("ip", later)
+        assert persistence.take_attempt.("ip", @window, later) == 1
+        assert persistence.take_attempt.("ip", @window, later + @window) == 2
       end
 
-      test "the right password forgets an address's attempts", %{persistence: persistence} do
-        for _ <- 1..Persistence.rate_limit_max_attempts(),
-            do: persistence.record_failure.("ip", @now)
+      test "an attempt given back is no longer counted, and never below zero", %{
+        persistence: persistence
+      } do
+        for _ <- 1..3, do: persistence.take_attempt.("ip", @window, @now)
 
-        assert persistence.rate_limited?.("ip", @now)
+        assert :ok = persistence.return_attempt.("ip")
+        assert persistence.take_attempt.("ip", @window, @now) == 3
 
-        assert :ok = persistence.reset_rate_limit.("ip")
-        refute persistence.rate_limited?.("ip", @now)
+        for _ <- 1..5, do: assert(:ok = persistence.return_attempt.("ip"))
+        assert persistence.take_attempt.("ip", @window, @now) == 1
+
+        assert :ok = persistence.return_attempt.("never-counted")
+      end
+
+      test "forgetting a key's attempts starts it over", %{persistence: persistence} do
+        for _ <- 1..5, do: persistence.take_attempt.("ip", @window, @now)
+
+        assert :ok = persistence.forget_attempts.("ip")
+        assert persistence.take_attempt.("ip", @window, @now) == 1
       end
 
       test "the CIMD cache honours its TTL", %{persistence: persistence} do
@@ -413,11 +425,10 @@ defmodule Vigil.OAuth.PersistenceTest do
         # The two ephemeral tables are here for the "and nothing else" half.
         # Reclaiming an elapsed window or a stale cache entry is not
         # observable through the contract — both already read as absent before
-        # the sweep runs, and `record_failure` opens a new window over a stale
+        # the sweep runs, and `take_attempt` opens a new window over a stale
         # one by itself. Bounding their memory is the production adapter's,
         # asserted against its tables under "the :dets tables alone".
-        for _ <- 1..(Persistence.rate_limit_max_attempts() - 1),
-            do: persistence.record_failure.("ip-live", @now)
+        for _ <- 1..4, do: persistence.take_attempt.("ip-live", @window, @now)
 
         doc = %{client_id: "c", name: "C", redirect_uris: []}
         :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
@@ -432,10 +443,9 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert persistence.get_token.("spent-expired") == :error
         assert {:ok, _} = persistence.get_token.("spent-live")
 
-        # A live window keeps the attempts it had: one more failure locks the
-        # address out, which it would not if the sweep had taken the row.
-        assert :ok = persistence.record_failure.("ip-live", @now)
-        assert persistence.rate_limited?.("ip-live", @now)
+        # A live window keeps the attempts it had, which it would not if the
+        # sweep had taken the row.
+        assert persistence.take_attempt.("ip-live", @window, @now) == 5
 
         assert {:ok, ^doc} = persistence.cimd_cache_get.("https://fresh.example/m", @now)
       end
@@ -485,12 +495,11 @@ defmodule Vigil.OAuth.PersistenceTest do
     test "the sweep reclaims the ephemeral rows rather than only hiding them", %{
       persistence: persistence
     } do
-      window = Persistence.rate_limit_window()
       ttl = Persistence.cimd_ttl()
       doc = %{client_id: "c", name: "C", redirect_uris: []}
 
-      :ok = persistence.record_failure.("ip-stale", @now - window - 1)
-      :ok = persistence.record_failure.("ip-live", @now)
+      1 = persistence.take_attempt.("ip-stale", @window, @now - @window - 1)
+      1 = persistence.take_attempt.("ip-live", @window, @now)
       :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
       :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
 
@@ -619,12 +628,11 @@ defmodule Vigil.OAuth.PersistenceTest do
     # sweep entirely and the contract suite would stay green.
     test "the sweep reclaims the ephemeral rows rather than only hiding them" do
       {persistence, tables} = Persistence.Memory.holding()
-      window = Persistence.rate_limit_window()
       ttl = Persistence.cimd_ttl()
       doc = %{client_id: "c", name: "C", redirect_uris: []}
 
-      :ok = persistence.record_failure.("ip-stale", @now - window - 1)
-      :ok = persistence.record_failure.("ip-live", @now)
+      1 = persistence.take_attempt.("ip-stale", @window, @now - @window - 1)
+      1 = persistence.take_attempt.("ip-live", @window, @now)
       :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
       :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
 
@@ -635,7 +643,7 @@ defmodule Vigil.OAuth.PersistenceTest do
 
       assert Persistence.Memory.count(tables, :rate_limits) == 1
       assert Persistence.Memory.count(tables, :cimd_cache) == 1
-      assert persistence.rate_limited?.("ip-live", @now) == false
+      assert persistence.take_attempt.("ip-live", @window, @now) == 2
       assert {:ok, ^doc} = persistence.cimd_cache_get.("https://fresh.example/m", @now)
     end
 

@@ -1038,8 +1038,8 @@ endpoint tests.
 **The value is the whole of what those six ask.** Nineteen questions,
 declared in `Vigil.OAuth.Persistence`: a client written, read, counted, listed
 and deleted, a code written and taken, a token written, read, listed, deleted
-and revoked by family or all at once, the consent attempts counted per
-address, the CIMD cache read and written — and the sweep. The four that list
+and revoked by family or all at once, the consent attempts counted, given
+back and forgotten, the CIMD cache read and written — and the sweep. The four that list
 and delete are the operator's (`Vigil.OAuth.Grants`), asked only from the
 host. The sweep is part of this surface rather than a concern beside it:
 every expiry it drops belongs to one of the tables above, and the janitor asks
@@ -1050,7 +1050,7 @@ same rule as `Vigil.Git` and `Vigil.Vault.Facts`. Here the rule earns its keep
 twice over: every one of these questions guards something, and every plausible
 answer to a question nobody wired sits on the permissive side of the gate it
 feeds. A `get_token` answering `:error` makes every token unknown; a
-`rate_limited?` answering `false` turns the consent lockout off.
+`take_attempt` answering `1` turns the consent lockout off.
 
 The production adapter is `Vigil.OAuth.Store.over_tables/0`, a function beside
 the `:dets`/`:ets` implementation it wires. That module keeps the files'
@@ -1120,12 +1120,16 @@ record *is* it asks the same owners the `:dets` adapter asks —
 `Vigil.OAuth.Code` for a code's expiry, `Vigil.OAuth.Token` for a token's
 expiry and its grant.
 
-**The lockout's window and the cache's hour belong to the contract**, not to
-either adapter. They were `Vigil.OAuth.Store`'s private constants, which was
-fine while there was one adapter and wrong the moment there were two: "the
-lockout expires with its window" is a claim the suite runs against both, and a
-window each adapter picked for itself would make that claim mean two different
-things. `Vigil.OAuth.Persistence` states them once and both read them.
+**The cache's hour belongs to the contract**, not to either adapter. It was
+`Vigil.OAuth.Store`'s private constant, which was fine while there was one
+adapter and wrong the moment there were two: "the cache honours its hour" is a
+claim the suite runs against both, and an hour each adapter picked for itself
+would make that claim mean two different things. `Vigil.OAuth.Persistence`
+states it once and both read it. The consent lockout's numbers were there too,
+until there were two budgets with two windows (see "Consent guesses are
+bounded per address and in total"): now the caller hands each attempt the
+window it is counted in, and the numbers are `Vigil.OAuth.Flow`'s, the one
+module that decides on them.
 
 The *rules* applied under those numbers stay unshared, and that is the line:
 values both adapters must agree on move to the contract, logic both adapters
@@ -1139,7 +1143,7 @@ seam rather than through an endpoint: that an authorization code is
 single-use, that rotation marks a refresh token spent rather than deleting it
 — the distinction the RFC 9700 §4.14.2 replay defence rests on — that revoking
 a grant takes down the family minted from it and nothing else, that the
-consent lockout counts per address and expires with its window, that the CIMD
+consent attempts are counted per key, atomically, and expire with their window, that the CIMD
 cache honours its hour, and that a sweep drops exactly what has expired. What
 only the production adapter can be asked is asked there too: that a token
 outlives the process that stored it, and that the files it opens are readable
@@ -1206,7 +1210,7 @@ one map behind an `Agent`, no registered name and no table anything else can
 reach, so a test builds one per test and is isolated by construction.
 
 **The window's length belongs to the contract**, for the same reason the
-consent lockout's does: "the window is fixed rather than sliding" is a claim
+CIMD cache's hour does: "the window is fixed rather than sliding" is a claim
 the suite runs against both adapters, and a minute each adapter picked for
 itself would make that claim mean two different things. How a window is
 counted and how one is reclaimed stays each adapter's own — a match-spec
@@ -1722,7 +1726,8 @@ Five layers, each doing one job:
    with no token at all and each one costs something: an outbound CIMD fetch
    to an address the caller chose, a `:dets` row and an fsync, or the work of
    answering a guess. The consent form counts wrong passwords only, per
-   address, over a much longer window. One limiter, `Vigil.RateLimit`, serves
+   address over a much longer window, and every address together against an
+   hourly budget. One limiter, `Vigil.RateLimit`, serves
    the first two; the third is a lockout rather than a request limit and
    belongs to OAuth persistence. Every one of them is swept by
    `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
@@ -1739,7 +1744,38 @@ the request unless something overwrites it, so vigil believes one only when
 told its name *and* told which peers may set it, and takes the rightmost hop it
 did not add itself. Both settings are empty by default: unconfigured, the limit
 stays global, which is stricter than intended rather than weaker. Getting them
-wrong is the only way to make this worse than not having it.
+wrong is the only way to make this worse than not having it. The deployment
+`docs/guide.md` describes is configured, not left global: cloudflared runs on
+the same host, so the peer is always loopback, and `scripts/init.sh` writes
+`VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128` with `CF-Connecting-IP`. The
+guide used to show Cloudflare's edge ranges, which never match a loopback peer.
+An IPv6 address is keyed by its /64, not itself: a /64 is one line or one host,
+and a key per address would hand its holder 2^64 budgets. An IPv4 address in
+its IPv6-mapped form is keyed as the IPv4 address — `::ffff:0:0/96` lies inside
+`::/64`, and every IPv4 client would otherwise share one key.
+
+**Consent guesses are bounded per address and in total.** Five wrong
+passwords per address in fifteen minutes stop one guesser; they do nothing
+against one spread over many addresses. So every address together also has a
+budget, `VIGIL_CONSENT_FAILURES_PER_HOUR` (default 50), a setting in
+`Vigil.Settings` checked at boot like the other budgets. Past it the consent
+form answers 429 to every address until the hour is up, and a warning is
+logged once per hour it happens. The choice is deliberate: spending the
+budget denies the owner consent for up to an hour, and that is the price of
+guesses being bounded in total — a denial that ends, against a password that
+could otherwise be guessed at any rate enough addresses allow. The Cloudflare
+Access policy the guide recommends in front of `/oauth/authorize` is what keeps
+a stranger from spending it. The budgets are counted against, not checked
+against: an attempt is counted *before* the password is compared, every
+counter changes in one atomic operation (`:ets.update_counter/4` behind a
+`select_replace` that opens a fresh window, and a single `get_and_update` in
+the in-memory adapter), and each attempt is answered its own count, so
+requests in parallel cannot spend more than a budget between them. A right
+password gives its attempt back and forgets the address's; an address already
+locked out spends nothing of the shared budget. `Vigil.RateLimit` counts the
+same way. The password is compared as the SHA-256 digests of guess and
+password, because `Plug.Crypto.secure_compare/2` answers early on a length
+mismatch and so told a guesser the password's length.
 
 **A browser on another site is refused before anything else.** The Streamable
 HTTP transport says a server MUST validate `Origin` and answer 403 when it is

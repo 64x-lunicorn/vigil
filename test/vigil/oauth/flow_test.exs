@@ -775,6 +775,165 @@ defmodule Vigil.OAuth.FlowTest do
     end
   end
 
+  describe "consent/5 — the budget every address shares" do
+    import ExUnit.CaptureLog
+
+    setup %{persistence: persistence} do
+      {:ok, ctx} =
+        Flow.authorize_request(server(persistence), authorize_params(client!(persistence)))
+
+      # A budget of three, so that four addresses — each well inside its own
+      # lockout — are enough to spend it.
+      %{ctx: ctx, shared: Server.new(persistence, %{@settings | consent_failures_per_hour: 3})}
+    end
+
+    test "past the hourly budget every address is refused, and a warning is logged", %{
+      shared: shared,
+      ctx: ctx
+    } do
+      for n <- 1..3, do: assert(:wrong_password = Flow.consent(shared, "10.1.0.#{n}", "x", ctx))
+
+      log =
+        capture_log(fn ->
+          assert :rate_limited = Flow.consent(shared, "10.1.0.4", "x", ctx)
+        end)
+
+      assert log =~ "[warning]"
+      assert log =~ "3 wrong passwords within the hour"
+      assert log =~ "VIGIL_CONSENT_FAILURES_PER_HOUR"
+
+      # Refused before the password is compared: the right one fares no
+      # better, and an address that has guessed nothing yet neither.
+      assert :rate_limited = Flow.consent(shared, "10.1.0.5", @settings.auth_password, ctx)
+
+      # Said once, not once per refusal.
+      refute capture_log(fn -> Flow.consent(shared, "10.1.0.6", "x", ctx) end) =~ "warning"
+    end
+
+    test "the budget is an hour long", %{shared: shared, ctx: ctx} do
+      now = 1_700_000_000
+      for n <- 1..3, do: Flow.consent(shared, "10.2.0.#{n}", "x", ctx, now)
+
+      capture_log(fn ->
+        assert :rate_limited = Flow.consent(shared, "10.2.0.4", "x", ctx, now + 3600)
+      end)
+
+      assert {:ok, _} =
+               Flow.consent(shared, "10.2.0.4", @settings.auth_password, ctx, now + 3601)
+    end
+
+    test "a right password spends nothing of it", %{shared: shared, ctx: ctx} do
+      for _ <- 1..5,
+          do: assert({:ok, _} = Flow.consent(shared, "10.3.0.1", @settings.auth_password, ctx))
+
+      for n <- 1..3, do: assert(:wrong_password = Flow.consent(shared, "10.3.0.#{n}", "x", ctx))
+    end
+
+    # A locked-out address is refused on its own window and spends nothing of
+    # the shared one, so one noisy address cannot use it up alone.
+    test "an address already locked out spends nothing of it", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      shared = Server.new(persistence, %{@settings | consent_failures_per_hour: 6})
+
+      for _ <- 1..5, do: Flow.consent(shared, "10.4.0.1", "x", ctx)
+      for _ <- 1..10, do: assert(:rate_limited = Flow.consent(shared, "10.4.0.1", "x", ctx))
+
+      assert :wrong_password = Flow.consent(shared, "10.4.0.2", "x", ctx)
+    end
+  end
+
+  describe "consent/5 — at once" do
+    setup %{persistence: persistence} do
+      {:ok, ctx} =
+        Flow.authorize_request(server(persistence), authorize_params(client!(persistence)))
+
+      %{ctx: ctx}
+    end
+
+    # The attempt is counted before the password is compared. Counted after,
+    # every guess in flight at once was compared against a count none of them
+    # had added to yet.
+    test "parallel guesses from one address get five comparisons, no more", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      results =
+        Vigil.AtOnce.run(100, fn -> Flow.consent(server(persistence), "10.5.0.1", "x", ctx) end)
+
+      assert Enum.count(results, &(&1 == :wrong_password)) == 5
+      assert Enum.count(results, &(&1 == :rate_limited)) == 95
+    end
+
+    test "parallel guesses from many addresses get the shared budget, no more", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      shared = Server.new(persistence, %{@settings | consent_failures_per_hour: 10})
+
+      results =
+        ExUnit.CaptureLog.with_log(fn ->
+          Vigil.AtOnce.run(100, fn ->
+            Flow.consent(shared, "10.6.0.#{:erlang.unique_integer([:positive])}", "x", ctx)
+          end)
+        end)
+        |> elem(0)
+
+      assert Enum.count(results, &(&1 == :wrong_password)) == 10
+    end
+  end
+
+  describe "password_matches?/2" do
+    @password "correct-horse-battery-staple"
+
+    test "only the password itself matches" do
+      assert Flow.password_matches?(@password, @password)
+
+      for guess <- [
+            nil,
+            "",
+            "correct-horse-battery-stapl",
+            "correct-horse-battery-staplf",
+            @password <> "x",
+            String.upcase(@password)
+          ],
+          do: refute(Flow.password_matches?(guess, @password))
+    end
+
+    # `Plug.Crypto.secure_compare/2` on the raw values answers `false` at once
+    # for a guess of another length, and only walks the bytes of a guess of
+    # the password's own length — so how fast a guess was refused told the
+    # guesser the password's length. Timed here: a guess of the right length
+    # and one far shorter, both short enough that hashing them costs the same,
+    # must be refused in about the same time. The raw comparison is several
+    # times apart on these inputs; the margin is wide so a busy machine does
+    # not fail it.
+    test "a guess is refused in the same time whatever its length" do
+      password = String.duplicate("p", 48)
+      same_length = String.duplicate("q", 48)
+      short = "q"
+
+      # Interleaved, so a burst of load elsewhere lands on both alike.
+      {short_runs, same_runs} =
+        Enum.unzip(for _ <- 1..31, do: {time(short, password), time(same_length, password)})
+
+      ratio = median(short_runs) / median(same_runs)
+
+      assert ratio > 0.5 and ratio < 2.0,
+             "a one-byte guess took #{Float.round(ratio, 2)}x the time of a full-length one"
+    end
+
+    defp time(guess, password) do
+      {micros, _} =
+        :timer.tc(fn -> for _ <- 1..2_000, do: Flow.password_matches?(guess, password) end)
+
+      micros
+    end
+
+    defp median(runs), do: runs |> Enum.sort() |> Enum.at(div(length(runs), 2))
+  end
+
   describe "authorize_request/4 — CIMD" do
     # A client_id the flow cannot have registered via DCR, so resolving it
     # only succeeds by going out to `net` — the join `Vigil.OAuth.Client`

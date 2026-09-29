@@ -212,21 +212,33 @@ the consent page is about a different thing — that any local process can *ask*
 for consent while looking like the client. (§2.5, and RFC 8252 §8.3)
 
 **Is the rate limit per client, per address, or global — and what does an
-attacker gain by exhausting it for someone else?** There are three limits and
-they cover different things:
+attacker gain by exhausting it for someone else?** There are several limits
+and they cover different things:
 
 | Limit | Keyed on | Budget | Covers |
 |---|---|---|---|
 | `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM`/min | every `/mcp` request, and only once the token has validated |
 | `Vigil.RateLimit` for `reload` | access token | `VIGIL_RELOAD_RATE_LIMIT_RPM`/min | `reload` calls, counted again under a key of their own |
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
-| OAuth persistence's `rate_limited?` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+| consent lockout | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+| consent budget | every address together | `VIGIL_CONSENT_FAILURES_PER_HOUR`/hour (default 50) | wrong passwords on the consent form; past it the form answers 429 for everyone and a warning is logged |
 
-The first two rows are one table, `Vigil.RateLimit`'s, and the third is OAuth
-persistence's — the budget and the window are stated once, on the contract in
-`Vigil.OAuth.Persistence`, so both adapters behind it count the same way.
-`Vigil.OAuth.Janitor` sweeps both, on the schedule "Storage and cleanup" below
-sets out.
+The first three rows are one table, `Vigil.RateLimit`'s, and the last two are
+OAuth persistence's. Their budgets and windows are `Vigil.OAuth.Flow`'s, handed
+in with every attempt; persistence only counts. `Vigil.OAuth.Janitor` sweeps
+both tables, on the schedule "Storage and cleanup" below sets out.
+
+"Client address" is `Vigil.OAuth.ClientAddr`'s answer, and for IPv6 it is the
+/64 rather than the address: one line or one host is handed a /64, and a key
+per address would give its holder 2^64 budgets. Every counter is changed by one
+atomic operation, and a consent attempt is counted *before* the password is
+compared — each attempt in flight is handed its own place in the window, and
+the one past the budget is refused without a comparison — so parallel requests
+cannot spend more than a budget. A right password gives its attempt back. The
+comparison itself hashes both the guess and the password with SHA-256 and
+compares the digests with `Plug.Crypto.secure_compare/2`, which on the raw
+values would answer early for a guess of another length and so tell the
+guesser the password's length.
 
 The middle row is the one that bounds an unauthenticated caller, and it is
 checked *before* the handler runs rather than inside it, so a refusal costs
@@ -240,8 +252,14 @@ body for the two endpoints a program reads.
 What an attacker gains by exhausting someone else's budget is bounded by the
 key: with the proxy settings configured it is one address's budget, and
 without them it is the single global bucket described in the next answer. The
-consent limit is the one worth spending, and it locks out consenting for
-fifteen minutes rather than anything longer-lived.
+consent limits are the ones worth spending. One address's lockout locks that
+address out for fifteen minutes. The shared budget is there for the guesser
+spread over many addresses, which no per-address limit catches, and spending
+it locks *everyone* out of consenting — the owner included — until its hour is
+up: an hour's denial of consent is the price of bounding guesses to
+`VIGIL_CONSENT_FAILURES_PER_HOUR` an hour. The Cloudflare Access policy the
+guide recommends for `/oauth/authorize`, an identity-provider login with MFA,
+keeps a stranger from reaching the form to spend either.
 
 **Which address is a limit keyed on, behind a proxy?** Whatever
 `Vigil.OAuth.ClientAddr` says, which is `conn.remote_ip` until the deployment
@@ -257,7 +275,11 @@ hop it did not add itself, and falls back to the peer on anything it cannot
 account for — an untrusted peer, an unparseable hop, a list that is entirely
 its own proxies. Both settings are empty by default, so a deployment that has
 not been told about its proxy keeps the single global bucket it always had
-rather than silently getting worse. (§4.13)
+rather than silently getting worse. The deployment the guide describes is told:
+cloudflared runs on the same host and connects over loopback, so `init.sh`
+writes `VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128` with `CF-Connecting-IP` —
+Cloudflare's edge ranges would never match a peer that is always loopback.
+(§4.13)
 
 Two things the walk confirmed in passing: the authorization server never
 redirects to an unregistered `redirect_uri` — an untrusted client or URI gets a

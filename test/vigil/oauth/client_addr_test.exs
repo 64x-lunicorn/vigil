@@ -36,9 +36,45 @@ defmodule Vigil.OAuth.ClientAddrTest do
       assert ClientAddr.of(conn, header: nil, trusted: []) == "203.0.113.7"
     end
 
-    test "an IPv6 peer is formatted as IPv6" do
+    test "an IPv6 peer is keyed by its /64" do
       conn = conn_from({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1})
-      assert ClientAddr.of(conn, header: nil, trusted: []) == "2001:db8::1"
+      assert ClientAddr.of(conn, header: nil, trusted: []) == "2001:db8::/64"
+    end
+  end
+
+  # A /64 is what one line or one host is handed. Keyed per /128, a caller
+  # holding one would get 2^64 budgets by picking a new source per request.
+  describe "IPv6 is counted per /64" do
+    test "two addresses in the same /64 share a key" do
+      one = conn_from({0x2001, 0xDB8, 1, 2, 0, 0, 0, 1})
+      other = conn_from({0x2001, 0xDB8, 1, 2, 0xDEAD, 0xBEEF, 0xCAFE, 0xF00D})
+
+      assert ClientAddr.of(one, header: nil, trusted: []) == "2001:db8:1:2::/64"
+      assert ClientAddr.of(other, header: nil, trusted: []) == "2001:db8:1:2::/64"
+    end
+
+    test "the next /64 is a key of its own" do
+      conn = conn_from({0x2001, 0xDB8, 1, 3, 0, 0, 0, 1})
+      assert ClientAddr.of(conn, header: nil, trusted: []) == "2001:db8:1:3::/64"
+    end
+
+    test "a forwarded IPv6 client is keyed by its /64 too" do
+      conn = conn_from({203, 0, 113, 7}, [{"cf-connecting-ip", "2001:db8:1:2:aaaa::7"}])
+
+      assert ClientAddr.of(conn, header: "cf-connecting-ip", trusted: trusted()) ==
+               "2001:db8:1:2::/64"
+    end
+
+    # `::ffff:0:0/96` lies inside `::/64`: keyed as IPv6, every IPv4 client a
+    # dual-stack socket reports would share one bucket.
+    test "an IPv4 address carried in IPv6 is keyed as that IPv4 address" do
+      conn = conn_from({0, 0, 0, 0, 0, 0xFFFF, 0xC633, 0x6409})
+      assert ClientAddr.of(conn, header: nil, trusted: []) == "198.51.100.9"
+
+      conn = conn_from({203, 0, 113, 7}, [{"cf-connecting-ip", "::ffff:198.51.100.10"}])
+
+      assert ClientAddr.of(conn, header: "cf-connecting-ip", trusted: trusted()) ==
+               "198.51.100.10"
     end
   end
 
@@ -109,7 +145,9 @@ defmodule Vigil.OAuth.ClientAddrTest do
 
     test "a bracketed IPv6 hop is understood" do
       conn = conn_from({203, 0, 113, 7}, [{"x-forwarded-for", "[2001:db8::9]"}])
-      assert ClientAddr.of(conn, header: "x-forwarded-for", trusted: trusted()) == "2001:db8::9"
+
+      assert ClientAddr.of(conn, header: "x-forwarded-for", trusted: trusted()) ==
+               "2001:db8::/64"
     end
 
     test "a hop carrying a port is refused rather than guessed at" do
@@ -136,13 +174,15 @@ defmodule Vigil.OAuth.ClientAddrTest do
       assert ClientAddr.of(inside, header: "cf-connecting-ip", trusted: trusted) == "1.2.3.4"
 
       outside = conn_from({0x2001, 0xDB9, 0, 0, 0, 0, 0, 1}, [{"cf-connecting-ip", "1.2.3.4"}])
-      assert ClientAddr.of(outside, header: "cf-connecting-ip", trusted: trusted) == "2001:db9::1"
+
+      assert ClientAddr.of(outside, header: "cf-connecting-ip", trusted: trusted) ==
+               "2001:db9::/64"
     end
 
     test "an IPv4 prefix never matches an IPv6 peer" do
       trusted = ClientAddr.parse_trusted(["0.0.0.0/0"])
       conn = conn_from({0x2001, 0xDB8, 0, 0, 0, 0, 0, 1}, [{"cf-connecting-ip", "1.2.3.4"}])
-      assert ClientAddr.of(conn, header: "cf-connecting-ip", trusted: trusted) == "2001:db8::1"
+      assert ClientAddr.of(conn, header: "cf-connecting-ip", trusted: trusted) == "2001:db8::/64"
     end
 
     test "a malformed entry is dropped rather than trusted" do

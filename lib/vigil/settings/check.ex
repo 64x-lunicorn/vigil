@@ -46,6 +46,7 @@ defmodule Vigil.Settings.Check do
     {:issuer, "VIGIL_ISSUER", :issuer},
     {:resource, "VIGIL_RESOURCE", :resource},
     {:auth_password, "VIGIL_AUTH_PASSWORD", :password},
+    {:consent_failures_per_hour, "VIGIL_CONSENT_FAILURES_PER_HOUR", :positive_integer},
     {:allowed_origins, "VIGIL_ALLOWED_ORIGINS", :origins},
     {:skillkey_secret, "VIGIL_SKILLKEY_SECRET", :skillkey_secret},
     {:skillkey_ttl_seconds, "VIGIL_SKILLKEY_TTL", :positive_integer},

@@ -39,9 +39,20 @@ defmodule Vigil.OAuth.ClientAddr do
     * when every hop is trusted there is no client hop to find, and the peer —
       which the caller cannot choose — is the answer, not the leftmost claim.
 
+  What comes back is a **key**, not always a single host. An IPv4 address is
+  its own key. An IPv6 address is keyed by the /64 it sits in, written
+  `2001:db8:1:2::/64`: a /64 is what one subscriber line or one server is
+  handed, so a caller holding one has 2^64 addresses to rotate through, and a
+  key per /128 would hand it a fresh budget per request. An IPv4 address
+  carried in IPv6 (`::ffff:198.51.100.9`, what a dual-stack socket reports for
+  an IPv4 peer) is keyed as the IPv4 address it is — as a /64 it would share
+  one bucket with every IPv4 client there is.
+
   Both configuration values are also arguments, so a test can state a
   deployment rather than install one.
   """
+
+  import Bitwise
 
   require Logger
 
@@ -49,7 +60,7 @@ defmodule Vigil.OAuth.ClientAddr do
   @type cidr :: {:inet.ip_address(), non_neg_integer()}
 
   @doc """
-  The address to key on for `conn`.
+  The key to count `conn` under: its address, or its /64 for IPv6.
 
   `:header` is the forwarded header's name (lowercase, as `Plug` stores them)
   or `nil`; `:trusted` is a list from `parse_trusted/1`. Both default to the
@@ -61,7 +72,7 @@ defmodule Vigil.OAuth.ClientAddr do
     trusted = Keyword.get_lazy(opts, :trusted, &configured_trusted/0)
 
     case forwarded(conn, header, trusted) do
-      nil -> format(conn.remote_ip)
+      nil -> key(conn.remote_ip)
       address -> address
     end
   end
@@ -95,7 +106,7 @@ defmodule Vigil.OAuth.ClientAddr do
   defp walk([hop | further_left], trusted) do
     case parse_address(hop) do
       {:ok, addr} ->
-        if trusted?(addr, trusted), do: walk(further_left, trusted), else: format(addr)
+        if trusted?(addr, trusted), do: walk(further_left, trusted), else: key(addr)
 
       :error ->
         nil
@@ -181,6 +192,15 @@ defmodule Vigil.OAuth.ClientAddr do
 
   defp bits({a, b, c, d, e, f, g, h}),
     do: <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+
+  # The one place an address becomes the key it is counted under. The mapped
+  # form is unwrapped before the /64 is taken, since `::ffff:0:0/96` sits
+  # inside `::/64`.
+  defp key({0, 0, 0, 0, 0, 0xFFFF, hi, lo}),
+    do: key({hi >>> 8, hi &&& 0xFF, lo >>> 8, lo &&& 0xFF})
+
+  defp key({a, b, c, d, _e, _f, _g, _h}), do: format({a, b, c, d, 0, 0, 0, 0}) <> "/64"
+  defp key(addr), do: format(addr)
 
   defp format(addr), do: addr |> :inet.ntoa() |> List.to_string()
 
