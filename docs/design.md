@@ -132,13 +132,14 @@ satisfy and no key to get wrong: a description is a description because it is
 in the file, not because the server parsed it into a field.
 
 **Three domain-shaped facts, three freshness policies.** Only the last of the
-three is read at startup and on `reload`:
+three is read when the vault is loaded — at startup, on `reload`, and when an
+update adopts what another clone pushed:
 
 | Fact | Source | Fresh as of |
 |---|---|---|
 | Domain names | live directory listing under the vault root | every call |
 | The raw text of `_domains.yml` | `File.read` per `Vigil.Store.instructions_domains_text/0` | every MCP `initialize` |
-| The parsed `naming` rules | `Vigil.Store` state | startup and `reload` |
+| The parsed `naming` rules | `Vigil.Store` state | startup, `reload`, and every update that adopts remote commits |
 
 Process state is therefore not the single source of truth for domains. Domain
 *identity* is a directory listing, taken fresh every time it is needed — the
@@ -646,9 +647,11 @@ shows — a token that may not write is listed only the tools it may call.
 
 **The call is the table's third product.** A row's `call:` names the
 operation; its parameters travel under the names the table gives them.
-`Vigil.Store` answers all but two of them — the two skill reads are answered
-against `Vigil.Skills` in the caller's process, for the reason under
-"`skills/` — one repository, two systems". The one
+`Vigil.Store` answers all but three of them — the two skill reads are
+answered against `Vigil.Skills` in the caller's process, for the reason under
+"`skills/` — one repository, two systems", and `status` by
+`Vigil.Store.status/2`, which asks the writer with a timeout of its own so a
+writer that does not answer cannot take the report down with it. The one
 exception is `skill_key`, which is a parameter of no operation — it carries the
 SkillKey of the Security model's layer 4, the gate reads it, and it does not
 travel.
@@ -699,7 +702,8 @@ list that unpacks the map back into the positional triple it replaced.
 
 The seven reads share a single `handle_call` clause and so do the eight writes,
 because in both groups the operation is the only difference: it names the
-`Vigil.Index` function that answers a read, and `Vigil.Vault.Policy` and
+function that answers a read — `Vigil.Index`'s, or for `history` and `read`
+at a revision `Vigil.History`'s — and `Vigil.Vault.Policy` and
 `Vigil.Vault.Plan` already take a write as an argument. What stays per
 operation is the contract — the head that matches what a call cannot do
 without.
@@ -733,7 +737,7 @@ them):
 | Parameter | `maxLength` |
 |---|---|
 | `content` (`create`, `append`, `replace_section`, `rewrite_note`, `skill_write`) | 1,000,000 |
-| every other string — `path`, `id`, `from`, `to`, `query`, `domain`, `heading`, `name`, `starts`, `ends`, `if_match`, `cursor`, `request_id`, `skill_key` | 1,024 |
+| every other string — `path`, `id`, `from`, `to`, `query`, `domain`, `heading`, `name`, `starts`, `ends`, `if_match`, `at`, `cursor`, `request_id`, `skill_key` | 1,024 |
 
 A million characters is a book rather than a note, and nothing a real vault
 holds comes near it; it exists to put a ceiling on the parse, not to shape how

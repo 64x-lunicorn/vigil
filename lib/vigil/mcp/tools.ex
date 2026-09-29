@@ -35,7 +35,7 @@ defmodule Vigil.MCP.Tools do
   unlike `skill_key` travels with the call: the writer is what remembers it
   (`docs/design.md`, "A retried write is applied once"). The
   `confirm` parameter is not derivable the same way and stays declared per
-  row: only three of the nine writes take one, and `write: true` does not
+  row: only four of the nine writes take one, and `write: true` does not
   say which.
 
   `Vigil.Store` answers all but three of the operations. `skill_list` and

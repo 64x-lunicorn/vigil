@@ -92,10 +92,11 @@ defmodule Vigil.Store do
 
   def call(store, :delete_note, %{} = params), do: request(store, :delete_note, params)
   def call(store, :move_note, %{} = params), do: request(store, :move_note, params)
-  # The two rows that resolve an instant. Vigil.MCP.Tools puts the response's
-  # envelope instant into the params of every row declaring `now:`, so in
-  # production nothing is resolved here; the fallback covers a caller with no
-  # envelope to share one, which is a test pinning a moment. It is resolved in
+  # The two reads among the ten rows that resolve an instant (the other eight
+  # are writes, and fall back in write/3). Vigil.MCP.Tools puts the
+  # response's envelope instant into the params of every row declaring
+  # `now:`, so in production nothing is resolved here; the fallback covers a
+  # caller with no envelope to share one, which is a test pinning a moment. It is resolved in
   # the caller's process rather than behind the writer's mailbox for the
   # reason bd7e842 removed the other one: a clock read on the far side of the
   # writer can land in a different minute than the response it belongs to.
@@ -268,11 +269,12 @@ defmodule Vigil.Store do
     Git.over_repository()
   end
 
-  # One message shape for all of them: {operation, params}. The six reads and
-  # the eight writes share one clause each, because in both groups the
-  # operation is the only difference: Vigil.Index names each read's answer,
-  # and Vigil.Vault.Policy and Vigil.Vault.Plan already take the write as an
-  # argument.
+  # One message shape for all of them: {operation, params}. The seven reads
+  # and the eight writes share one clause each, because in both groups the
+  # operation is the only difference: it names each read's answer (a
+  # Vigil.Index function, or for the two that read the Git history one of
+  # Vigil.History's), and Vigil.Vault.Policy and Vigil.Vault.Plan already
+  # take the write as an argument.
   #
   # A read makes no decision here: the params map is handed on exactly as the
   # tool table describes it, so a parameter added to a read tool is a change
@@ -829,8 +831,9 @@ defmodule Vigil.Store do
   # description, not configuration").
   #
   # First of two readers of _domains.yml, and deliberately the slower one: what
-  # this parses feeds the write policy, so it is refreshed at startup and on
-  # `reload` only and never shifts underneath a write. domains_yaml_raw/1 reads
+  # this parses feeds the write policy, so it is refreshed only when the vault
+  # is loaded — at startup, on `reload`, and when an update adopts what
+  # another clone pushed (load/1) — and never shifts underneath a write. domains_yaml_raw/1 reads
   # the same file per MCP `initialize`; that divergence is the decision recorded
   # in docs/design.md, "_domains.yml is a description, not configuration", not
   # an oversight.

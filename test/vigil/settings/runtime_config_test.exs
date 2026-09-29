@@ -52,6 +52,18 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   defp check(config),
     do: Check.check(config, CommitLog.new("/var/lib/vigil/vault", remote: "github"))
 
+  # config/runtime.exs and the release's `eval` read a comma list through
+  # the same function.
+  test "a comma list is comma-separated, trimmed, blanks dropped" do
+    assert Vigil.Settings.comma_list(" work, geheim ,,  ,private") == [
+             "work",
+             "geheim",
+             "private"
+           ]
+
+    assert Vigil.Settings.comma_list("") == []
+  end
+
   test "the prod defaults pass the check, with integers parsed" do
     assert {:ok, checked} = check(prod_config())
     assert checked.port == 4000

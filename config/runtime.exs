@@ -14,14 +14,10 @@ integer = fn var, default ->
 end
 
 # A comma-separated variable as the list of its entries, each trimmed, empty
-# ones dropped. Whether an entry is any good is the check's to say.
-list = fn var ->
-  var
-  |> System.get_env("")
-  |> String.split(",", trim: true)
-  |> Enum.map(&String.trim/1)
-  |> Enum.reject(&(&1 == ""))
-end
+# ones dropped — read by the function `Vigil.Release` reads VIGIL_EXCLUDE
+# with, so the two cannot differ. Whether an entry is any good is the check's
+# to say.
+list = fn var -> var |> System.get_env("") |> Vigil.Settings.comma_list() end
 
 config :vigil,
   # Whether `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be https and share an

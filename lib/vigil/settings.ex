@@ -56,6 +56,23 @@ defmodule Vigil.Settings do
         }
 
   @doc """
+  A comma-separated setting as the list of its entries, each trimmed, empty
+  ones dropped.
+
+  The one reading of such a variable: `config/runtime.exs` hands the
+  application its lists through it, and `Vigil.Release` reads
+  `VIGIL_EXCLUDE` through it where no configuration was evaluated, so the
+  release's walk and the server's cannot disagree about the boundary.
+  """
+  @spec comma_list(String.t()) :: [String.t()]
+  def comma_list(value) do
+    value
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  @doc """
   The deployment's settings, taken from what `Vigil.Settings.Check.check!/2`
   returned: the one resolution `Vigil.Application` builds the tree with.
   """

@@ -12,6 +12,7 @@ defmodule Vigil.Release do
 
   require Logger
 
+  alias Vigil.Settings
   alias Vigil.Vault.{Layout, Rules}
 
   @doc """
@@ -21,8 +22,8 @@ defmodule Vigil.Release do
   Both are read from the environment the script hands the command rather
   than from application configuration, so the answer does not depend on
   whether `eval` evaluated `config/runtime.exs`. Nothing else is printed:
-  the output is the list. `VIGIL_EXCLUDE` is read as
-  `config/runtime.exs` reads it: comma-separated, trimmed, blanks dropped.
+  the output is the list. `VIGIL_EXCLUDE` is read as `config/runtime.exs`
+  reads it, through `Vigil.Settings.comma_list/1`.
   """
   @spec chunk_ids() :: :ok
   def chunk_ids do
@@ -33,11 +34,7 @@ defmodule Vigil.Release do
 
     vault_path = System.fetch_env!("VIGIL_VAULT_PATH")
 
-    exclude =
-      System.get_env("VIGIL_EXCLUDE", "")
-      |> String.split(",", trim: true)
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
+    exclude = Settings.comma_list(System.get_env("VIGIL_EXCLUDE", ""))
 
     files = vault_path |> Layout.over_vault!(exclude) |> Layout.note_paths()
 
