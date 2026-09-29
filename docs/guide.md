@@ -31,6 +31,7 @@ folder of Markdown files and their full history.
 - [Configuration](#configuration)
 - [Operations](#operations)
 - [Revoking access](#revoking-access)
+- [Rotating secrets](#rotating-secrets)
 - [Editing by hand](#editing-by-hand)
 - [Adopting an existing vault](#adopting-an-existing-vault)
 - [Troubleshooting](#troubleshooting)
@@ -227,7 +228,9 @@ On a fresh Debian 13 server or container, as root. A Proxmox LXC needs the
 `nesting=1` feature — the unit's sandboxing (`ProtectSystem`, `PrivateTmp`)
 fails with `226/NAMESPACE` without it — and 2 GB of RAM for the build.
 `setup.sh` is idempotent; `init.sh` protects existing secrets and refuses to
-overwrite them unless explicitly forced.
+overwrite them unless explicitly forced. With `--force` it generates both
+secrets anew and keeps every other setting in `/etc/vigil/env`; to replace one
+secret, [rotate it](#rotating-secrets) instead.
 
 ```bash
 apt-get update && apt-get install -y git
@@ -258,7 +261,11 @@ over `ssh.github.com:443` with keepalives (`--github-ssh-port 22` or `auto` to
 change that), clones the code, installs
 Hex and rebar3 for the service user and the systemd unit, and creates the
 Cloudflare tunnel with its DNS record (`--tunnel-name` if a tunnel called
-`vigil` already belongs to another host). `init.sh` provisions the vault, generates secrets,
+`vigil` already belongs to another host). Once the tunnel is routed it removes
+the account certificate `cloudflared tunnel login` left in
+`/root/.cloudflared/cert.pem`, which could manage every tunnel in the account;
+the tunnel runs on its own credentials file, and running the step again logs
+in again. `init.sh` provisions the vault, generates secrets,
 audits dependencies, runs the test suite, builds a release, starts the service,
 seeds two OAuth tokens, and finishes with an acceptance check.
 
@@ -826,8 +833,9 @@ echo "VIGIL_SKILLKEY_SECRET=$(openssl rand -base64 48)" | sudo tee -a /etc/vigil
 sudo ./scripts/update.sh
 ```
 
-Outstanding SkillKeys stop working with the switch; an assistant gets a new one
-from `skill_read`, as after any rotation. The consent password and every OAuth
+`sudo ./scripts/rotate_secret.sh skillkey` adds the line too, and restarts the
+running release on it. Outstanding SkillKeys stop working with the switch; an
+assistant gets a new one from `skill_read`, as after any rotation. The consent password and every OAuth
 token are untouched.
 
 ---
@@ -917,8 +925,8 @@ sudo ./scripts/grants.sh delete-client <client-id>  # a client, and every grant 
 - **Revoking everything** also drops any authorization code not yet
   redeemed. Clients stay registered — a registration grants nothing without
   the consent password — and every client has to consent again. Do this after
-  **rotating the consent password**: a new password stops new consents and
-  revokes nothing already granted.
+  [**rotating the consent password**](#rotating-secrets): a new password
+  stops new consents and revokes nothing already granted.
 - **Deleting a client** deletes its registration and its outstanding codes
   and revokes every grant it holds. A client that named itself by a metadata
   URL has no registration; deleting it revokes its grants. Either can come
@@ -929,6 +937,50 @@ sudo ./scripts/grants.sh delete-client <client-id>  # a client, and every grant 
 Exit codes: 0 done, 1 refused by the service (an unknown id, printed behind
 `error:`) or `rpc` failed, 2 wrong arguments or the service is not running, 4
 `revoke-all` not confirmed.
+
+---
+
+## Rotating secrets
+
+`/etc/vigil/env` holds two secrets, and each is rotated on its own:
+
+```bash
+sudo ./scripts/rotate_secret.sh password    # a new consent password
+sudo ./scripts/rotate_secret.sh skillkey    # a new SkillKey secret
+```
+
+The script generates the new value (`openssl rand -base64 48`), replaces the
+one line that sets it — atomically, keeping the file's mode and owner and every
+other setting as it was — and restarts the service, which waits until
+`/healthz` answers. A file with no `VIGIL_SKILLKEY_SECRET` line gets one.
+`--dry-run` says what it would change; `--verbose` traces the run but never
+the secret.
+
+- **The consent password** is printed nowhere. Read it where it lives:
+  `sudo grep '^VIGIL_AUTH_PASSWORD=' /etc/vigil/env`. The old one stops
+  opening the consent page with the restart.
+- **The SkillKey secret** invalidates every SkillKey handed out. An assistant
+  mid-conversation gets a write refused and calls `skill_read` for a new key,
+  as after any rotation window.
+
+**Rotation revokes no token.** Every client that consented keeps its grant,
+and every access and refresh token keeps working, whichever secret changed.
+If the old password may have been seen, the grants it let someone get are
+what matters, and those are revoked separately:
+
+```bash
+sudo ./scripts/grants.sh revoke-all          # every client consents again, with the new password
+```
+
+Exit codes: 0 done, 1 the service did not come back up (the new value is in
+the file; `journalctl -u vigil -n 50` says why), 2 wrong arguments or no env
+file.
+
+The operator scripts handle secrets the same way throughout. A token reaches
+curl as a config on its standard input, never as an argument other users can
+read in `ps`; `--verbose` traces no secret and no token; and an answer typed
+into `init.sh` is written to the env file quoted, so a quote or a `$(…)` in it
+stays part of the value.
 
 ---
 
@@ -1115,8 +1167,11 @@ stray `VIGIL_VAULT_PATH` cannot make a green test run meaningless.
 `bash scripts/test/check_only_test.sh`, which exercises `init.sh --check-only`
 against a throwaway fixture vault without needing root or a real
 `/opt/vigil/repo` install (see the `VIGIL_INIT_TEST_STUBS` seam in `init.sh`),
-and by `bash scripts/test/grants_test.sh`, which drives `grants.sh` against a
-fake release (the `VIGIL_GRANTS_TEST_STUBS` seam).
+by `bash scripts/test/grants_test.sh`, which drives `grants.sh` against a
+fake release (the `VIGIL_GRANTS_TEST_STUBS` seam), and by
+`bash scripts/test/operator_secrets_test.sh`, which drives `rotate_secret.sh`
+against a throwaway env file (the `VIGIL_ROTATE_TEST_STUBS` seam) and checks
+that no script hands a token to curl as an argument or traces a secret.
 
 ```
 lib/vigil/

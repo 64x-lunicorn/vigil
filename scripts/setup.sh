@@ -291,8 +291,10 @@ case "$GITHUB_SSH_PORT" in
     ;;
 esac
 
+# Host and port are arguments to the fixed script, never spliced into it.
 tcp_reachable() {
-  timeout 5 bash -c "</dev/tcp/$1/$2" 2>/dev/null
+  # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c
+  timeout 5 bash -c '</dev/tcp/$1/$2' _ "$1" "$2" 2>/dev/null
 }
 
 # Scans <host>:<port>, refuses a key that is not GitHub's documented one, and
@@ -370,7 +372,7 @@ if [ -f "$DEPLOY_KEY" ]; then
   log "Deploy key already exists (${DEPLOY_KEY})."
 else
   run_step "generate deploy key" -- \
-    su -s /bin/bash -c "ssh-keygen -t ed25519 -N '' -C 'vigil@$(hostname)' -f ${DEPLOY_KEY}" vigil
+    as_vigil ssh-keygen -t ed25519 -N '' -C "vigil@$(hostname)" -f "$DEPLOY_KEY"
   if [ "$DRY_RUN" != "1" ]; then
     chmod 0700 "$SSH_DIR"
     chmod 0600 "$DEPLOY_KEY"
@@ -487,7 +489,7 @@ else
 
   if [ "$NON_INTERACTIVE" = "1" ]; then
     warn "Setting up the cloudflared tunnel needs an interactive 'cloudflared tunnel login' (browser) — skipped under --non-interactive."
-    record_next_step "cloudflared tunnel login && cloudflared tunnel create ${TUNNEL_NAME}, then create /etc/cloudflared/config.yml by hand"
+    record_next_step "cloudflared tunnel login && cloudflared tunnel create ${TUNNEL_NAME}, then create /etc/cloudflared/config.yml by hand and rm /root/.cloudflared/cert.pem"
   else
     if [ ! -f /root/.cloudflared/cert.pem ]; then
       log "cloudflared tunnel login — open the printed link in a browser."
@@ -532,7 +534,9 @@ EOF
         )"
         # The DNS record is what makes the hostname reach this tunnel. An
         # existing record for the hostname (the old tunnel's) is replaced.
+        DNS_ROUTED=0
         if cloudflared tunnel route dns --overwrite-dns "$TUNNEL_NAME" "$HOSTNAME_VALUE"; then
+          DNS_ROUTED=1
           ok "DNS: ${HOSTNAME_VALUE} → tunnel '${TUNNEL_NAME}'."
         else
           warn "Could not route ${HOSTNAME_VALUE} to tunnel '${TUNNEL_NAME}'."
@@ -541,9 +545,24 @@ EOF
         cloudflared service install >/dev/null 2>&1 || true
         systemctl enable --now cloudflared >/dev/null 2>&1 || true
         ok "Configured cloudflared tunnel '${TUNNEL_NAME}' (hostname ${HOSTNAME_VALUE}, no catch-all)."
+
+        # cert.pem is the account certificate `cloudflared tunnel login` left:
+        # it creates, routes and deletes tunnels anywhere in the Cloudflare
+        # account, and nothing on this host needs it once the tunnel exists —
+        # the tunnel runs on its own credentials file. Removed once the DNS
+        # route is in place; kept, with a next step saying to remove it, while
+        # the route still has to be made by hand. Running this step again logs
+        # in again.
+        if [ "$DNS_ROUTED" = "1" ]; then
+          rm -f /root/.cloudflared/cert.pem
+          ok "Removed the account certificate /root/.cloudflared/cert.pem (the tunnel runs on /root/.cloudflared/${TUNNEL_ID}.json)."
+        else
+          warn "The account certificate /root/.cloudflared/cert.pem is still on this host."
+          record_next_step "once the DNS route is made: rm /root/.cloudflared/cert.pem (it controls every tunnel in the Cloudflare account)"
+        fi
       else
         warn "Could not determine the tunnel ID — tunnel config not written."
-        record_next_step "check cloudflared tunnel list, create /etc/cloudflared/config.yml by hand"
+        record_next_step "check cloudflared tunnel list, create /etc/cloudflared/config.yml by hand, then rm /root/.cloudflared/cert.pem"
       fi
     fi
   fi

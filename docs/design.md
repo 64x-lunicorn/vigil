@@ -2220,6 +2220,44 @@ the three units; `update.sh` reinstalls them on every update rather than
 behind `--update-unit`, since the timer runs a script from the checkout the
 update has just moved, and removes the cron file on a host that still has it.
 
+**The operator scripts never expose a secret.** A secret reaches no argument
+vector, no trace and no journal line. `verify()` hands curl the bearer, the
+session id and the body (which carries the SkillKey) as a config on its stdin
+(`curl -K -`, `lib.sh`'s `mcp_post`), because every local user can read
+another process's arguments. `--verbose` is
+`set -x`, and a trace prints every word after expansion, so the stretches that
+hold a secret — generating one, writing the env file, `update.sh` sourcing it,
+seeding and using tokens, `verify()` — run between `hide_trace` and
+`show_trace`, which nest. An operator's answer is an argument, never spliced
+into a `bash -c` string, and the service account is reached with `runuser`,
+which takes the command as words rather than a string `su -c` hands a shell
+to parse again. In the env file an answer is written by `env_line`: bare when
+it is only characters nothing treats specially, otherwise double-quoted with
+`\`, `"`, `$` and `` ` `` escaped. Of that and `printf %q`, which the ticket
+named, the double quotes: the file has three readers — systemd's
+`EnvironmentFile=`, `source` as root, and `env_file_value` — and those four
+escapes inside double quotes are the ones all three read back the same, where
+`%q`'s `\ ` and `$'…'` forms are bash's alone. A value with a line break is
+refused. `setup.sh` removes the Cloudflare account certificate
+(`/root/.cloudflared/cert.pem`, which controls every tunnel in the account)
+once the tunnel is created and its DNS route made; the tunnel runs on its own
+credentials file. When the route has to be made by hand, the certificate stays
+and the next steps say to remove it.
+
+**A secret is rotated on its own, and rotating it revokes nothing.**
+`scripts/rotate_secret.sh password` or `skillkey` replaces that one line in
+`/etc/vigil/env` — atomically, keeping the file's mode, owner and every other
+line — and restarts the service, since a running node keeps the secret it
+started with. It prints neither value. It revokes no token: a grant was given
+by someone who knew the old password, and whether that still stands is a
+separate decision, made with `scripts/grants.sh revoke-all`, which the script
+names. `init.sh --force` keeps the same rule for the file: the settings it
+decides — the paths, its answers (defaulting to the file's own values) and
+both secrets, which `--force` is for — replace their lines, its defaults are
+added only where the file has none, and every other setting is kept rather
+than the file being rewritten from its list. It restarts the service instead
+of starting it, so the new secrets are live.
+
 ---
 
 ## No audit log — the history is read, not kept

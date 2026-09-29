@@ -159,7 +159,12 @@ fi
 # freshly seeded rather than cached as plaintext anywhere — the service
 # has been running for a while; there is no "bootstrap moment" like in init.sh,
 # and no reason to leave a secret sitting in a file nobody else needs.
+#
+# Not traced under --verbose: `source` would trace every line of the env file,
+# the secrets included, and the assignments below the tokens. verify() hides
+# its own use of them.
 source_env_for_verify() {
+  hide_trace
   set -a
   # shellcheck source=/dev/null
   source "$ENV_FILE"
@@ -172,6 +177,7 @@ source_env_for_verify() {
   VIGIL_RW_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault 900)"
   # shellcheck disable=SC2034
   VIGIL_RO_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault:read 900)"
+  show_trace
 }
 
 ## ── Rollback mode: short, separate path ──────────────────────────────────

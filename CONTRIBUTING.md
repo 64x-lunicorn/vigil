@@ -83,6 +83,7 @@ bash scripts/test/conventions_skill_test.sh
 bash scripts/test/grants_test.sh
 bash scripts/test/obsidian_templates_test.sh
 node scripts/test/slug_js_test.mjs
+bash scripts/test/operator_secrets_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -121,6 +122,16 @@ revoking grants, against a fake release that records what it is asked to
 evaluate: the arguments it accepts, the confirmation before revoking
 everything, that an id reaches the node as data, and the exit codes. It also
 holds `init.sh --keep-token` to minting no long-lived token.
+
+`operator_secrets_test.sh` holds the scripts to exposing no secret: a `curl`
+on `PATH` records every argument `verify()` gives it and none is a token or a
+SkillKey (and a real curl, against a listener on loopback, sends what was
+handed to it on stdin); `verify()`, `update.sh --rollback` and
+`rotate_secret.sh` under `--verbose` trace none; an answer with a quote, a
+`$(…)` or a backtick comes back from the env file and through `as_vigil` (a
+`runuser` stand-in on `PATH`) as that value; and `rotate_secret.sh` replaces
+one line, keeps every other, restarts the service and names
+`grants.sh revoke-all`.
 
 Those two and `release_smoke.sh` source
 [`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the

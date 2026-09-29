@@ -96,9 +96,10 @@ DEFAULT_GIT_REMOTE="github"
 DEFAULT_GIT_BRANCH="main"
 
 # env_file_value <NAME> — what the env file sets NAME to, without the quotes a
-# value with a space is written in; empty when the line is missing. Read
-# rather than sourced, so that asking for one value does not bring the whole
-# VIGIL_* namespace into the calling shell.
+# value with a space is written in and without the backslashes env_line puts
+# inside them; empty when the line is missing. Read rather than sourced, so
+# that asking for one value does not bring the whole VIGIL_* namespace into
+# the calling shell.
 #
 # A caller that cannot read the file is a unit's process: systemd read it as
 # root (EnvironmentFile=) and exported every line, so the value is asked of
@@ -108,7 +109,115 @@ env_file_value() {
     printenv "$1" 2>/dev/null || true
     return 0
   fi
-  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/'
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 |
+    sed -e '/^".*"$/ {
+      s/^"\(.*\)"$/\1/
+      s/\\\([\\"$`]\)/\1/g
+    }'
+}
+
+# env_line <NAME> <value> — the line that sets NAME to value in the env file,
+# read back as that value by the three things that read the file: systemd's
+# EnvironmentFile=, `source` in these scripts (as root), and env_file_value.
+# A value of only the characters no shell or systemd treats specially is
+# written bare; anything else goes in double quotes with \, ", $ and ` escaped
+# — the four both bash and systemd unescape there, and the only four that
+# could end the quotes or run something when root sources the file. Not
+# `printf %q`: its \  and $'…' forms are bash's, and systemd and env_file_value
+# would read them as different values. A value with a line break is refused:
+# the file is one setting per line.
+env_line() {
+  local name="$1" value="$2"
+  case "$value" in
+    *$'\n'* | *$'\r'*)
+      err "${name}: a value with a line break cannot be written to the env file."
+      return 1
+      ;;
+  esac
+  if [[ "$value" =~ ^[A-Za-z0-9_./:,+=@%-]*$ ]]; then
+    printf '%s=%s\n' "$name" "$value"
+    return 0
+  fi
+  # sed rather than ${value//…}: how a replacement's backslashes are read
+  # changed between bash 3.2 and 5.2.
+  printf '%s="%s"\n' "$name" "$(printf '%s' "$value" | sed 's/[\\"$`]/\\&/g')"
+}
+
+# env_file_update <path> [--add-missing] — reads NAME=value lines on stdin
+# (env_line's) and puts each into the file: in place of the line that sets
+# NAME, or appended when none does. Every other line — the settings nobody
+# named, the comments — is kept as it was. With --add-missing a NAME the file
+# already sets keeps its line, and only the others are added.
+#
+# On stdin rather than as arguments so that a secret is never a word a trace
+# prints, and the tracing is off while the lines are in hand. Atomic, like
+# write_file_atomically: a temp file in the same directory, then mv. The new
+# file has the old one's mode and owner; a file that did not exist yet is
+# 0600 root:root, which is what /etc/vigil/env is.
+env_file_update() {
+  local path="$1" add_missing=0
+  [ "${2:-}" = "--add-missing" ] && add_missing=1
+  hide_trace
+  local line name i tmp mode owner
+  local names=() lines=() written=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    name="${line%%=*}"
+    if ! [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || [ "$name" = "$line" ]; then
+      err "env_file_update: not a NAME=value line (for ${path})."
+      show_trace
+      return 1
+    fi
+    names+=("$name")
+    lines+=("$line")
+    written+=(0)
+  done
+  if [ "${#names[@]}" -eq 0 ]; then
+    show_trace
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY RUN] set $(IFS=' ' && echo "${names[*]}") in ${path}, keeping every other line"
+    show_trace
+    return 0
+  fi
+
+  if [ -f "$path" ]; then
+    mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")"
+    owner="$(stat -c '%u:%g' "$path" 2>/dev/null || stat -f '%u:%g' "$path")"
+  else
+    mode=0600
+    owner=0:0
+  fi
+
+  tmp="$(mktemp "${path}.XXXXXX")"
+  if [ -f "$path" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      name="${line%%=*}"
+      for i in "${!names[@]}"; do
+        [ "$line" != "$name" ] && [ "${names[$i]}" = "$name" ] || continue
+        if [ "$add_missing" = "1" ]; then
+          written[i]=1
+          break
+        fi
+        # A second line setting the same name is dropped: the value is the one
+        # line this call wrote, not one of two.
+        if [ "${written[$i]}" = "0" ]; then
+          printf '%s\n' "${lines[$i]}"
+          written[i]=1
+        fi
+        continue 2
+      done
+      printf '%s\n' "$line"
+    done <"$path" >"$tmp"
+  fi
+  for i in "${!names[@]}"; do
+    [ "${written[$i]}" = "0" ] && printf '%s\n' "${lines[$i]}" >>"$tmp"
+  done
+  chmod "$mode" "$tmp"
+  chown "$owner" "$tmp"
+  mv -f "$tmp" "$path"
+  show_trace
 }
 
 # vault_git_remote — the remote every pull and push names.
@@ -207,6 +316,37 @@ step() {
 
 record_done() { DONE_ITEMS+=("$1"); }
 record_next_step() { NEXT_STEPS+=("$1"); }
+
+## ── Tracing and secrets ──────────────────────────────────────────────────
+#
+# --verbose is `set -x`, and a trace prints every word after expansion — a
+# token's, a secret's, every line of an env file that is sourced. Code that
+# holds one runs between hide_trace and show_trace: the first turns tracing
+# off without tracing itself, the second turns it back on if it was on. They
+# nest, so a function that hides its own work can be called from a stretch
+# that is hidden already, and only the outermost show_trace turns it back on.
+# A secret passed to a function is traced at the call, so the call has to be
+# inside the stretch too — not only the function's body.
+TRACE_HIDDEN=0
+TRACE_WAS_ON=0
+
+hide_trace() {
+  { local was_on=0; case "$-" in *x*) was_on=1 ;; esac; set +x; } 2>/dev/null
+  if [ "$TRACE_HIDDEN" -eq 0 ]; then
+    TRACE_WAS_ON="$was_on"
+  fi
+  TRACE_HIDDEN=$((TRACE_HIDDEN + 1))
+}
+
+show_trace() {
+  if [ "$TRACE_HIDDEN" -gt 0 ]; then
+    TRACE_HIDDEN=$((TRACE_HIDDEN - 1))
+  fi
+  if [ "$TRACE_HIDDEN" -eq 0 ] && [ "$TRACE_WAS_ON" = "1" ]; then
+    set -x
+  fi
+  return 0
+}
 
 ## ── Error trap ───────────────────────────────────────────────────────────
 
@@ -322,23 +462,28 @@ confirm_destructive() {
 }
 
 # as_vigil <cmd...>  — e.g. as_vigil git -C "$VAULT" fetch
-#                        or   as_vigil bash -c 'cd ... && mix test'
+#                        or   as_vigil bash -c 'cd "$1" && mix test' _ "$REPO"
 # Always starts from the service account's home (the state dir), never from the caller's
 # cwd. root often runs these scripts from directories vigil cannot access
 # (/root/... for instance); without an explicit cd even a plain "git
 # --version" fails with "Permission denied" while stat'ing the inherited
 # working directory.
+#
+# runuser rather than `su -c`: the command and its arguments are handed over
+# as words, never joined into a string a shell parses again, so a value with
+# a quote in it stays one argument. The inner bash is a fixed script that
+# only changes directory; what it runs arrives as "$@". A caller that needs a
+# shell of its own passes values the same way: as arguments after the
+# script, never spliced into it.
 as_vigil() {
-  local quoted
-  quoted="$(printf '%q ' "$@")"
   # LANG/LC_ALL: without a UTF-8 locale the BEAM (mix test, mix release)
   # treats filenames as raw bytes instead of Unicode — vault fixtures with
   # non-ASCII names then fail with "no such file or directory" on a path
   # File.ls itself just returned. C.UTF-8 is part of glibc, no locale-gen
   # needed.
-  local quoted_home
-  quoted_home="$(printf '%q' "$STATE_DIR")"
-  su -s /bin/bash -c "cd ${quoted_home} && LANG=C.UTF-8 LC_ALL=C.UTF-8 ${quoted}" "$SERVICE_USER"
+  # shellcheck disable=SC2016 # $1 and $@ are expanded by the inner bash
+  runuser -u "$SERVICE_USER" -- env LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    bash -c 'cd -- "$1" || exit; shift; exec "$@"' as_vigil "$STATE_DIR" "$@"
 }
 
 # run_step "<description>" -- <cmd...>  — honours --dry-run consistently.
@@ -515,16 +660,46 @@ vigil_seed_token() {
 
 ## ── MCP calls used by verify() ───────────────────────────────────────────
 
+# curl_config_string <value> — value as a double-quoted string in curl's
+# config syntax: \\ and \" escaped, a line break written as \n, which curl
+# reads back as one.
+curl_config_string() {
+  printf '"%s"' "$(printf '%s\n' "$1" | sed 's/[\\"]/\\&/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
+}
+
+# mcp_post <base_url> <token> <body> [<session_id>] [<curl option>...] — POSTs
+# a JSON-RPC body to /mcp with the token as the bearer.
+#
+# The token, the session id and the body (which carries the SkillKey) reach
+# curl as a config on its stdin (`-K -`), never as arguments: a process's
+# argument vector is readable by every local user in `ps` and /proc. The
+# tracing is off while they are in hand; the caller's call is its own to hide.
+mcp_post() {
+  local base_url="$1" token="$2" body="$3" session_id="${4:-}"
+  shift 3
+  [ $# -gt 0 ] && shift
+  hide_trace
+  local rc=0
+  {
+    printf 'header = %s\n' "$(curl_config_string "Authorization: Bearer ${token}")"
+    if [ -n "$session_id" ]; then
+      printf 'header = %s\n' "$(curl_config_string "mcp-session-id: ${session_id}")"
+    fi
+    printf 'data-binary = %s\n' "$(curl_config_string "$body")"
+  } | curl -K - -fsS -X POST -H "Content-Type: application/json" "$@" "${base_url}/mcp" || rc=$?
+  show_trace
+  return "$rc"
+}
+
 # mcp_session <base_url> <token>  → prints the Mcp-Session-Id `initialize`
 # issues for <token>. A tool call is made in a session, a session is bound to
 # the token that initialized it, and an id the server did not issue is a 404 —
 # so every call starts its own, the way a client does after a restart.
 mcp_session() {
   local base_url="$1" token="$2"
-  curl -fsS -o /dev/null -D - -X POST "${base_url}/mcp" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"vigil-verify","version":"0"}}}' |
+  mcp_post "$base_url" "$token" \
+    '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"vigil-verify","version":"0"}}}' \
+    "" -o /dev/null -D - |
     tr -d '\r' | awk 'tolower($1) == "mcp-session-id:" { print $2; exit }'
 }
 
@@ -549,11 +724,9 @@ mcp_call() {
   local session_id
   session_id="$(mcp_session "$base_url" "$token")" || return 1
   [ -n "$session_id" ] || return 1
-  curl -fsS -X POST "${base_url}/mcp" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    -H "mcp-session-id: ${session_id}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}"
+  mcp_post "$base_url" "$token" \
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}" \
+    "$session_id"
 }
 
 # True for a tool-level isError:true AND for a JSON-RPC-level error (a parse
@@ -897,6 +1070,10 @@ verify() {
   local all_ok=1
   local check
 
+  # Every check hands the tokens to a function, and a trace would print them
+  # at each call. The verdicts are echoed, so --verbose loses nothing it needs.
+  hide_trace
+
   echo
   echo "=== verify() ==="
 
@@ -909,9 +1086,9 @@ verify() {
   echo
   if [ "$all_ok" = "1" ]; then
     ok "verify(): all mandatory checks passed."
-    return 0
   else
     err "verify(): at least one mandatory check failed."
-    return 1
   fi
+  show_trace
+  [ "$all_ok" = "1" ]
 }

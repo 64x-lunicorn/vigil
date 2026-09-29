@@ -284,6 +284,11 @@ jobs:
       - name: init.sh writes the tunnel's proxy settings
         run: bash scripts/test/proxy_settings_test.sh
 
+      # No token in curl's arguments, no secret in a --verbose trace, an
+      # operator's answer kept a value, and one secret rotated at a time.
+      - name: The operator scripts never expose a secret
+        run: bash scripts/test/operator_secrets_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest

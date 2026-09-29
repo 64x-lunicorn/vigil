@@ -35,7 +35,9 @@ Prerequisite: setup.sh has already run.
   --vault-remote-url <url>    upstream URL for --new-vault (required with
                               --non-interactive, otherwise asked interactively)
   --allow-unprotected         skip the Cloudflare Access check in verify()
-  --force                     regenerate existing secrets (requires typing "yes")
+  --force                     run again over an existing env file: both
+                              secrets are generated anew, every other
+                              setting in it is kept (requires typing "yes")
   --ignore-audit              continue despite a failed dependency audit
   --keep-token                mint no token for the owner, who keeps the ones
                               carried over from the old container (the dets
@@ -342,7 +344,9 @@ run_vault_adoption() {
   fi
 
   local findings_json
-  if ! findings_json="$(as_vigil bash -c "cd /opt/vigil/repo && mix vigil.vault_check '${vault}'")"; then
+  # The path is an argument to the fixed script, never part of it.
+  # shellcheck disable=SC2016 # $1 is expanded by the inner bash -c, not here
+  if ! findings_json="$(as_vigil bash -c 'cd /opt/vigil/repo && mix vigil.vault_check "$1"' _ "$vault")"; then
     err "mix vigil.vault_check failed — vault at ${vault} is not readable or has no valid content."
     return 2
   fi
@@ -508,7 +512,11 @@ if [ "$CHECK_ONLY" = "1" ]; then
     require_command() { :; }
     as_vigil() {
       if [ "$1" = "bash" ] && [ "$2" = "-c" ] && [ -n "${VIGIL_TEST_REPO_ROOT:-}" ]; then
-        bash -c "${3//\/opt\/vigil\/repo/$VIGIL_TEST_REPO_ROOT}"
+        local script="${3//\/opt\/vigil\/repo/$VIGIL_TEST_REPO_ROOT}"
+        # Not "${@:4}": bash 3.2 joins that into one word when IFS has no
+        # space, and the script's arguments are words.
+        shift 3
+        bash -c "$script" "$@"
       else
         "$@"
       fi
@@ -575,7 +583,7 @@ if [ -f "$ENV_FILE" ]; then
     err "${ENV_FILE} already exists. init.sh is idempotent but will not overwrite secrets without --force."
     exit 2
   fi
-  if ! confirm_destructive "Existing secrets in ${ENV_FILE} will be overwritten irreversibly."; then
+  if ! confirm_destructive "Both secrets in ${ENV_FILE} will be replaced irreversibly (every other setting in it is kept). To replace one of them, use scripts/rotate_secret.sh instead."; then
     err "Aborted."
     exit 4
   fi
@@ -638,7 +646,10 @@ else
   if [ "$DRY_RUN" = "1" ]; then
     log "[DRY RUN] create vault skeleton at ${VAULT} (domains: ${DOMAINS_VALUE})"
   else
-    as_vigil bash -c "VIGIL_INIT_DOMAINS='${DOMAINS_VALUE}' VIGIL_GIT_BRANCH='${GIT_BRANCH}' /opt/vigil/repo/scripts/init_vault.sh '${VAULT}'"
+    # The answer is an argument, never spliced into a command line a shell
+    # reads again: a quote in it stays part of the value.
+    as_vigil env "VIGIL_INIT_DOMAINS=${DOMAINS_VALUE}" "VIGIL_GIT_BRANCH=${GIT_BRANCH}" \
+      /opt/vigil/repo/scripts/init_vault.sh "$VAULT"
 
     NEW_REMOTE_URL="${VAULT_REMOTE_URL:-$(ask_value "Git URL for the new vault upstream" "git@github.com:<org>/vault.git")}"
     if as_vigil git -C "$VAULT" remote | grep -qx "$GIT_REMOTE"; then
@@ -685,14 +696,18 @@ step "3/9  Secrets"
 # Two secrets, generated apart. The consent password is typed by a human on
 # the consent page; the SkillKey secret keys the HMAC whose output every
 # client is handed and which ends up in chat transcripts, so it must never be
-# the password — rotating either leaves the other alone.
+# the password — rotating either leaves the other alone
+# (scripts/rotate_secret.sh). Not traced under --verbose: a trace prints the
+# value an assignment is given.
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] generate VIGIL_AUTH_PASSWORD and VIGIL_SKILLKEY_SECRET (openssl rand -base64 48 each)"
   AUTH_PASSWORD="[DRY RUN]"
   SKILLKEY_SECRET="[DRY RUN]"
 else
+  hide_trace
   AUTH_PASSWORD="$(generate_secret)"
   SKILLKEY_SECRET="$(generate_secret)"
+  show_trace
 fi
 record_done "generated VIGIL_AUTH_PASSWORD (the consent password)"
 record_done "generated VIGIL_SKILLKEY_SECRET (the SkillKey HMAC secret)"
@@ -701,10 +716,15 @@ record_done "generated VIGIL_SKILLKEY_SECRET (the SkillKey HMAC secret)"
 
 step "4/9  Runtime config"
 
+# Under --force the file's own values are the defaults, so Enter keeps them.
 HOSTNAME_DEFAULT="localhost:4000"
 if [ -f /etc/cloudflared/config.yml ]; then
   FOUND="$(grep -oP 'hostname:\s*\K\S+' /etc/cloudflared/config.yml 2>/dev/null | head -1 || true)"
   [ -n "$FOUND" ] && HOSTNAME_DEFAULT="$FOUND"
+fi
+EXISTING_ISSUER="$(env_file_value VIGIL_ISSUER)"
+if [ -n "$EXISTING_ISSUER" ]; then
+  HOSTNAME_DEFAULT="${EXISTING_ISSUER#*://}"
 fi
 PUBLIC_HOST="$(ask_value "Public hostname (OAuth issuer/resource)" "$HOSTNAME_DEFAULT")"
 
@@ -715,16 +735,29 @@ else
 fi
 RESOURCE="${ISSUER}/mcp"
 
+# existing_or <NAME> <default> — the env file's value for NAME, or the default.
+existing_or() {
+  local value
+  value="$(env_file_value "$1")"
+  printf '%s\n' "${value:-$2}"
+}
+
 # What the writing instructions tell the assistant about the vault: whose
 # notes these are and which language they are written in.
-VAULT_OWNER="$(ask_value "Vault owner (named in the writing instructions)" "the vault owner")"
-VAULT_LANGUAGE="$(ask_value "Language the notes are written in" "English")"
-VAULT_TZ="$(ask_value "Time zone of the vault" "Europe/Berlin")"
-# Written double-quoted below: the file is read by systemd and by `source`
-# in these scripts, and an unquoted value with a space breaks the latter.
-VAULT_OWNER="${VAULT_OWNER//\"/}"
-VAULT_LANGUAGE="${VAULT_LANGUAGE//\"/}"
+VAULT_OWNER="$(ask_value "Vault owner (named in the writing instructions)" "$(existing_or VIGIL_VAULT_OWNER "the vault owner")")"
+VAULT_LANGUAGE="$(ask_value "Language the notes are written in" "$(existing_or VIGIL_VAULT_LANGUAGE "English")")"
+VAULT_TZ="$(ask_value "Time zone of the vault" "$(existing_or VIGIL_TZ "Europe/Berlin")")"
 
+# Two sets of lines. What this run decides — the paths, the answers above and
+# the two secrets — replaces the line that sets it. The defaults are written
+# only where the file does not set them, so under --force every setting the
+# operator changed or added is kept, rather than the file being rewritten from
+# this list.
+#
+# Every answer goes through env_line, which quotes what needs quoting: the
+# file is read by systemd and sourced by these scripts as root, and an answer
+# written bare could end its line's value and run a command there.
+#
 # cloudflared runs on this host and reaches vigil over loopback, so loopback
 # is the peer whose CF-Connecting-IP is believed — the rate limits and the
 # consent lockout then count the real client, not one bucket for everyone.
@@ -732,29 +765,36 @@ VAULT_LANGUAGE="${VAULT_LANGUAGE//\"/}"
 # The domain list is deliberately NOT written here: it is read at runtime
 # from _domains.yml, never maintained as a regex or list in code. A list kept
 # in two places always drifts.
-ENV_CONTENT="$(
-  cat <<EOF
-VIGIL_VAULT_PATH=${VAULT}
+ENV_DEFAULTS="$(
+  cat <<'EOF'
 VIGIL_PORT=4000
 VIGIL_BIND=127.0.0.1
-VIGIL_GIT_REMOTE=${GIT_REMOTE}
-VIGIL_GIT_BRANCH=${GIT_BRANCH}
-VIGIL_TZ=${VAULT_TZ}
 VIGIL_EXCLUDE=
-VIGIL_ISSUER=${ISSUER}
-VIGIL_RESOURCE=${RESOURCE}
-VIGIL_AUTH_PASSWORD=${AUTH_PASSWORD}
-VIGIL_SKILLKEY_SECRET=${SKILLKEY_SECRET}
 VIGIL_STATE_DIR=/var/lib/vigil
 VIGIL_SKILLKEY_TTL=3600
 VIGIL_RATE_LIMIT_RPM=60
 VIGIL_TRUSTED_PROXY_HEADER=CF-Connecting-IP
 VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128
-VIGIL_VAULT_OWNER="${VAULT_OWNER}"
-VIGIL_VAULT_LANGUAGE="${VAULT_LANGUAGE}"
 EOF
 )"
-write_file_atomically "$ENV_FILE" 0600 root:root "$ENV_CONTENT"
+
+# The secrets are in hand from here to the write; not traced.
+hide_trace
+ENV_DECIDED="$(
+  env_line VIGIL_VAULT_PATH "$VAULT" &&
+    env_line VIGIL_GIT_REMOTE "$GIT_REMOTE" &&
+    env_line VIGIL_GIT_BRANCH "$GIT_BRANCH" &&
+    env_line VIGIL_TZ "$VAULT_TZ" &&
+    env_line VIGIL_ISSUER "$ISSUER" &&
+    env_line VIGIL_RESOURCE "$RESOURCE" &&
+    env_line VIGIL_AUTH_PASSWORD "$AUTH_PASSWORD" &&
+    env_line VIGIL_SKILLKEY_SECRET "$SKILLKEY_SECRET" &&
+    env_line VIGIL_VAULT_OWNER "$VAULT_OWNER" &&
+    env_line VIGIL_VAULT_LANGUAGE "$VAULT_LANGUAGE"
+)"
+env_file_update "$ENV_FILE" <<<"$ENV_DECIDED"
+show_trace
+env_file_update "$ENV_FILE" --add-missing <<<"$ENV_DEFAULTS"
 record_done "wrote runtime config to ${ENV_FILE}"
 
 ## ── Step 5 — dependency audit ────────────────────────────────────────────
@@ -798,7 +838,9 @@ else
   ok "mix test is green."
 
   SHORT_SHA="$(as_vigil git -C /opt/vigil/repo rev-parse --short HEAD)"
-  as_vigil bash -c "cd /opt/vigil/repo && MIX_ENV=prod mix release --overwrite --path /opt/vigil/releases/${SHORT_SHA}"
+  # shellcheck disable=SC2016 # $1 is expanded by the inner bash -c, not here
+  as_vigil bash -c 'cd /opt/vigil/repo && MIX_ENV=prod mix release --overwrite --path "$1"' \
+    _ "/opt/vigil/releases/${SHORT_SHA}"
   ln -sfn "/opt/vigil/releases/${SHORT_SHA}" /opt/vigil/current
   chown -h vigil:vigil /opt/vigil/current
   ok "Built release ${SHORT_SHA}, /opt/vigil/current points at it."
@@ -810,7 +852,7 @@ record_done "mix test green, release built"
 step "7/9  Start, token bootstrap, skill bootstrap"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] commit and push skills/vigil-vault-conventions.md if missing, systemctl start vigil, wait for health, seed tokens"
+  log "[DRY RUN] commit and push skills/vigil-vault-conventions.md if missing, systemctl restart vigil, wait for health, seed tokens"
 else
   # The conventions skill is protected: skill_write refuses it, so it is
   # committed to the vault directly, like a hand edit, before the server is
@@ -828,8 +870,16 @@ else
       ;;
   esac
 
-  systemctl start vigil
+  # restart, not start: under --force the service may be running on the
+  # secrets this run replaced, and start leaves a running service as it is —
+  # the new password would not be live until the next restart. On a first run
+  # restart starts it.
+  systemctl restart vigil
   wait_until_healthy || exit 1
+
+  # The tokens are in hand from here on; the stretch that uses them is not
+  # traced under --verbose.
+  hide_trace
 
   # The owner's pair lives 90 days (vigil_seed_token's default) and is printed
   # in step 9. Under --keep-token the owner keeps the tokens carried over from
@@ -853,8 +903,9 @@ else
     echo
     record_next_step "carry over oauth_tokens.dets/oauth_clients.dets from the old container, if wanted"
   fi
+  show_trace
 fi
-record_done "service started, tokens seeded, conventions skill created"
+record_done "service (re)started, tokens seeded, conventions skill created"
 
 # The push safety net: a write whose push failed is committed and answered
 # `pushed: false`; vigil-push.timer pushes it within 15 minutes if no later
@@ -870,6 +921,7 @@ step "8/9  verify()"
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] verify() would run now"
 else
+  hide_trace
   # Read by verify() in lib.sh, not referenced in this file.
   # shellcheck disable=SC2034
   VIGIL_VAULT="$VAULT"
@@ -895,6 +947,7 @@ else
     systemctl stop vigil
     exit 3
   fi
+  show_trace
 fi
 
 ## ── Step 9 — summary and token output ────────────────────────────────────
@@ -902,6 +955,8 @@ fi
 step "9/9  Summary"
 
 if [ "$DRY_RUN" != "1" ] && [ "$KEEP_TOKEN" != "1" ]; then
+  # Printed once, to the terminal; a trace would print each a second time.
+  hide_trace
   echo
   echo "  ──────────────────────────────────────────────────────"
   echo "  RW token (full access — paste into the Claude.ai connector):"
@@ -915,6 +970,7 @@ if [ "$DRY_RUN" != "1" ] && [ "$KEEP_TOKEN" != "1" ]; then
   echo "  only its digest — so copy them now. List or revoke them, and every"
   echo "  other grant, with: sudo ./scripts/grants.sh list"
   echo
+  show_trace
 fi
 
 ok "init.sh finished."

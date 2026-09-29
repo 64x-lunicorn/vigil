@@ -13,7 +13,8 @@
 #
 # init.sh's step 4 needs root, a "vigil" user and a booted host, so what is
 # asserted is the env file it writes, cut out of its own text — the heredoc
-# that becomes ENV_CONTENT — and the two documents that say what it writes.
+# that becomes ENV_DEFAULTS, the lines it writes where the file has none —
+# and the two documents that say what it writes.
 #
 # Usage: bash scripts/test/proxy_settings_test.sh
 
@@ -31,9 +32,11 @@ HEADER_LINE='VIGIL_TRUSTED_PROXY_HEADER=CF-Connecting-IP'
 PROXIES_LINE='VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128'
 
 # Whether a line appears in the text on a line of its own — not commented out,
-# not inside a longer line.
+# not inside a longer line. A here-string, not a pipe: grep -q stops at the
+# first match, and under pipefail the writer it leaves behind, killed by
+# SIGPIPE, failed a match in a long text now and then.
 has_line() {
-  printf '%s\n' "$1" | grep -qxF -- "$2"
+  grep -qxF -- "$2" <<<"$1"
 }
 
 assert_line() {
@@ -48,12 +51,10 @@ assert_line() {
 
 section "1/3  init.sh writes the tunnel's proxy settings"
 
-# The heredoc between `ENV_CONTENT="$(` and the `EOF` that closes it.
-env_content="$(awk '/^ENV_CONTENT="\$\($/ { on = 1; next } on && /^EOF$/ { exit } on' "$INIT_SH")"
+# The heredoc between `ENV_DEFAULTS="$(` and the `EOF` that closes it.
+env_content="$(awk '/^ENV_DEFAULTS="\$\($/ { on = 1; next } on && /^EOF$/ { exit } on' "$INIT_SH")"
 
-# init.sh's own text, expansion and all, so single-quoted.
-# shellcheck disable=SC2016
-if has_line "$env_content" 'VIGIL_VAULT_PATH=${VAULT}'; then
+if has_line "$env_content" 'VIGIL_PORT=4000'; then
   pass "the env file's heredoc was found in init.sh"
 else
   fail "the env file's heredoc was found in init.sh" "cut out: ${env_content:-nothing}"
