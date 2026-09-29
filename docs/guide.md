@@ -106,7 +106,10 @@ flowchart TB
 ### What happens on a write
 
 Every write is validated, committed and pushed before the client gets an
-answer. If only the push fails, the write still succeeded: the answer says
+answer. Before it, the server fetches from the remote and fast-forwards onto
+whatever was pushed there in the meantime, as long as it holds no unpushed
+commits of its own — so a human's push does not make the next write's push
+fail. If only the push fails, the write still succeeded: the answer says
 `pushed: false` and carries the reason in `push_error`, so the client knows
 without being invited to retry — a retried `append` would append twice, unless
 it carries the same `request_id` as the first call. The commit goes out with
@@ -125,6 +128,10 @@ sequenceDiagram
     Cl->>T: create(path, content, skill_key)
     T->>T: SkillKey valid? scope allows writes?
     T->>St: create
+    opt no unpushed commits
+        Up->>Git: fetch, fast-forward
+        St->>St: rebuild the index if anything arrived
+    end
     St->>St: Policy — normalize, validate, naming rules, duplicates
     St->>St: Plan — frontmatter, content, commit message
     St->>Git: write file, add, commit (as vigil)
@@ -268,7 +275,7 @@ vault has none.
 
 ## Tools
 
-Seventeen tools. "RW" means the token needs the `vault` scope; a token with
+Eighteen tools. "RW" means the token needs the `vault` scope; a token with
 any other scope, `vault:read` included, is not shown them on `tools/list` and
 gets an explicit error if it calls one anyway. "Key" means the call must carry
 a current `skill_key`. Every write also takes an optional `request_id` (see
@@ -290,6 +297,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `lint` | – | duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
+| `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push}` | RO/RW | – |
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content | `{name, pushed}` | RW | ✓ |
@@ -634,8 +642,36 @@ exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
 - **Vault state:** `git -C /var/lib/vigil/vault log --oneline -5`
 - **Health check:** `sudo ./scripts/init.sh --check-only` — safe against a
   running service
+- **Is it serving, and in step with the remote?** `curl -s localhost:4000/healthz`
+  on the host (see below), or the `status` tool from a client
 - **Add a domain:** create the directory, add it to `_domains.yml`, call
   `reload`. No code change, no restart.
+
+### `/healthz` and `status`
+
+`GET /healthz` answers on the host itself, without a token, and nowhere else:
+a request that did not come from a loopback address, names a host other than
+`localhost`, `127.0.0.1` or `::1`, or arrives through a proxy (it carries
+`X-Forwarded-For`, `Forwarded`, `X-Real-IP` or `CF-Connecting-IP`) gets a 404.
+It answers 200 when the index is loaded and the writer answers within five
+seconds, 503 otherwise:
+
+```json
+{"healthy": true, "index_loaded": true, "writer_answers": true,
+ "ahead": 0, "behind": 0, "last_push": {"pushed": true, "at": "2026-09-29T08:12:03Z"}}
+```
+
+`ahead` counts commits the server holds and has not pushed; `behind` counts
+commits the remote holds and the server has not adopted, as of the last fetch —
+the server fetches before every write. `last_push` is `null` until the first
+write since the service started. Neither decides the status code: a failed push
+is reported, not a reason to call the service down. `/healthz` leaves out the
+push's error text; the `status` tool, which needs a token, carries it as
+`last_push.error`.
+
+`update.sh` waits for `/healthz` after every start, and its acceptance check
+asks it too. A push that fails also emits the telemetry event
+`[:vigil, :push, :failed]`, for anyone attaching a handler.
 
 **Updating a host set up before `VIGIL_SKILLKEY_SECRET` existed.** Its env file
 has no such line, and a release that needs it refuses to start, naming the
@@ -719,8 +755,12 @@ server as a commit through the remote, not as a file edited in
 
    A rejected push means vigil wrote something in the meantime —
    `git pull --rebase` and push again.
-4. **Call `reload`.** The server pulls `--ff-only` and rebuilds its index. A
-   `vault:read` token is enough.
+4. **Call `reload`, or don't.** The server pulls `--ff-only` and rebuilds its
+   index; a `vault:read` token is enough. Without it, the server adopts your
+   commits before its next write anyway: it fetches and fast-forwards whenever
+   it holds no unpushed commits of its own, so the write lands on top of yours
+   and its push goes through. `reload` is what makes your edit visible to
+   reads before then.
 5. **Optionally call `lint`** to catch frontmatter or naming problems the edit
    introduced.
 
@@ -730,8 +770,10 @@ what the assistant wrote from what you wrote.
 **Mind the chunk ids.** Renaming a heading changes its chunk id, and links to
 the old id break. `links` and `lint` show what broke.
 
-**If `reload` answers `pull_failed`**, the server has a commit the remote does
-not, almost always a write whose push failed. vigil does not merge. Reconcile
+**If `reload` answers `pull_failed`**, or `status` shows both `ahead` and
+`behind` above zero, the server has a commit the remote does not, almost always
+a write whose push failed. vigil does not merge, and while it holds such a
+commit it does not fast-forward before a write either. Reconcile
 on the server as the service user, then call `reload` again:
 
 ```bash

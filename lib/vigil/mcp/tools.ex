@@ -38,9 +38,10 @@ defmodule Vigil.MCP.Tools do
   row: only three of the nine writes take one, and `write: true` does not
   say which.
 
-  `Vigil.Store` answers all but two of the operations. `skill_list` and
+  `Vigil.Store` answers all but three of the operations. `skill_list` and
   `skill_read` are answered against `Vigil.Skills` in the caller's own
-  process — see `answer/4`.
+  process, and `status` by `Vigil.Store.status/2`, which asks the writer with
+  a timeout of its own — see `answer/4`.
 
   Which writer that is, is the caller's to say. `dispatch/5` takes it and
   defaults to `Vigil.Store.default_name/0`, the registration production runs
@@ -421,6 +422,16 @@ defmodule Vigil.MCP.Tools do
       params: []
     },
     %{
+      name: "status",
+      title: "Server status",
+      description:
+        "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), and the last push's result and time.",
+      write: false,
+      call: :status,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
+      params: []
+    },
+    %{
       name: "skill_list",
       title: "List skills",
       description: "Lists available skills with their description, without bodies.",
@@ -645,6 +656,10 @@ defmodule Vigil.MCP.Tools do
 
   defp answer(:skill_read, %{name: name}, store, key),
     do: Skills.read(name, Store.vault_path(store), key)
+
+  # `status` reports whether the writer answers, so it cannot be a plain call
+  # into it: a writer that does not answer would take the report down with it.
+  defp answer(:status, %{}, store, _key), do: Store.status(store)
 
   defp answer(op, params, store, _key), do: Store.call(store, op, params)
 

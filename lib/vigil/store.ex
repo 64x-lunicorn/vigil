@@ -211,7 +211,9 @@ defmodule Vigil.Store do
       git: git,
       domains: %{},
       index: %Index{},
-      requests: RequestLog.new()
+      requests: RequestLog.new(),
+      # The last push this writer made: nil until the first one.
+      last_push: nil
     }
 
     {state, pull_result} = do_full_load(state)
@@ -252,7 +254,9 @@ defmodule Vigil.Store do
   end
 
   def handle_call({op, params}, _from, state) when op in @write_ops do
-    {result, new_state} = once(op, params, state, &write(op, &1, &2))
+    {result, new_state} =
+      once(op, params, state, &in_step(&1, &2, fn params, state -> write(op, params, state) end))
+
     {:reply, result, new_state}
   end
 
@@ -264,10 +268,22 @@ defmodule Vigil.Store do
   def handle_call({:skill_write, params}, _from, state) do
     {result, new_state} =
       once(:skill_write, params, state, fn params, state ->
-        {do_skill_write(params.name, params.content, state), state}
+        in_step(params, state, fn params, state ->
+          {do_skill_write(params.name, params.content, state), state}
+        end)
       end)
 
     {:reply, result, new_state}
+  end
+
+  def handle_call({:status, _params}, _from, state) do
+    {ahead, behind} =
+      case state.git.divergence.(state.vault_path, state.git_remote, state.git_branch) do
+        {:ok, %{ahead: ahead, behind: behind}} -> {ahead, behind}
+        {:error, _reason} -> {nil, nil}
+      end
+
+    {:reply, %{ahead: ahead, behind: behind, last_push: state.last_push}, state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
@@ -325,11 +341,144 @@ defmodule Vigil.Store do
 
   defp remember(state, _id, _fingerprint, _result, _now), do: state
 
+  ## Staying in step with the remote
+  #
+  # docs/design.md, "The server stays in step with the remote". A human who
+  # pushes and never calls `reload` used to make the next push fail: vigil
+  # committed on top of a history the remote had already moved past. So every
+  # write — the eight note writes and `skill_write` — is performed on a vault
+  # brought up to date first, and the push it ends with is noted for `status`.
+  defp in_step(params, state, perform) do
+    state = bring_up_to_date(state)
+    {result, state} = perform.(params, state)
+    {result, note_push(state, result)}
+  end
+
+  # The one place that decides whether the vault adopts what the remote holds,
+  # and how. Asked before every write.
+  #
+  # With commits of its own not yet pushed, the vault is left as it is: a
+  # fast-forward is not possible, and there is still no merge (principle 2).
+  # The next successful push, or the safety-net cron, takes them out.
+  #
+  # With none, it fetches and, if the remote moved, fast-forwards and rebuilds
+  # the index, so the write is decided against the vault as it now stands and
+  # lands on top of what the human pushed. A fetch or a fast-forward that fails
+  # is logged and changes nothing: the write goes ahead on the vault as it
+  # was, exactly as it did before this step existed.
+  defp bring_up_to_date(state) do
+    case divergence(state) do
+      {:ok, %{ahead: 0}} -> fetch_and_fast_forward(state)
+      {:ok, _unpushed} -> state
+      {:error, _reason} -> state
+    end
+  end
+
+  defp fetch_and_fast_forward(state) do
+    %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
+
+    with :ok <- git.fetch.(vault_path, remote, branch),
+         {:ok, %{ahead: 0, behind: behind}} when behind > 0 <- divergence(state),
+         :ok <- git.fast_forward.(vault_path, remote, branch) do
+      Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch} before a write")
+      load(state)
+    else
+      {:ok, _nothing_to_adopt} ->
+        state
+
+      {:error, reason} ->
+        Logger.warning(
+          "vigil: could not bring the vault up to date with #{remote}/#{branch}: #{reason}"
+        )
+
+        state
+    end
+  end
+
+  defp divergence(state),
+    do: state.git.divergence.(state.vault_path, state.git_remote, state.git_branch)
+
+  # A write that got as far as its push says so in its result, as `pushed:`
+  # and `push_error:` — a note write and a skill write alike. A write refused
+  # or failed before it leaves the last push as it was.
+  defp note_push(state, {:ok, %{pushed: pushed} = result}) do
+    at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    last_push =
+      if pushed,
+        do: %{pushed: true, at: at},
+        else: %{pushed: false, at: at, error: result.push_error}
+
+    %{state | last_push: last_push}
+  end
+
+  defp note_push(state, _result), do: state
+
+  ## Status
+
+  # How long `status/2` waits for the writer before it says the writer does not
+  # answer. A write in progress holds the writer until its push is done, so a
+  # healthy writer can take a while; one that takes longer than this is what
+  # the answer is for.
+  @status_timeout 5_000
+
+  @doc """
+  Whether this writer is serving, and how it stands with the remote — what
+  the `status` tool and `/healthz` report (docs/design.md, "The server stays
+  in step with the remote").
+
+  Asked in the caller's process: whether the index is loaded is read from the
+  writer's table, and the writer is asked the rest with a timeout of its own,
+  so a writer that does not answer is reported rather than waited on.
+  `ahead` and `behind` are `nil` when the writer does not answer or the clone
+  cannot count them; `behind` is as fresh as the last fetch.
+  """
+  @spec status(atom(), timeout()) :: map()
+  def status(store \\ @default_name, timeout \\ @status_timeout) do
+    index_loaded = index_loaded?(store)
+
+    sync =
+      try do
+        {:ok, GenServer.call(store, {:status, %{}}, timeout)}
+      catch
+        :exit, _reason -> :no_answer
+      end
+
+    case sync do
+      {:ok, sync} ->
+        Map.merge(sync, %{index_loaded: index_loaded, writer_answers: true, healthy: index_loaded})
+
+      :no_answer ->
+        %{
+          index_loaded: index_loaded,
+          writer_answers: false,
+          healthy: false,
+          ahead: nil,
+          behind: nil,
+          last_push: nil
+        }
+    end
+  end
+
+  # The event notes are published by put_index/2, which every load goes
+  # through, into a table that lives and dies with the writer: present means
+  # an index was built, absent means the writer is down or still loading.
+  defp index_loaded?(store) do
+    :ets.whereis(store) != :undefined and :ets.member(store, :events)
+  rescue
+    ArgumentError -> false
+  end
+
   ## Loading
 
   defp do_full_load(state) do
     pull_result = state.git.pull.(state.vault_path, state.git_remote, state.git_branch)
+    {load(state), pull_result}
+  end
 
+  # The vault as it now stands on disk, read into a new index: after a pull at
+  # boot and on `reload`, and after a fast-forward before a write.
+  defp load(state) do
     git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)
 
@@ -350,7 +499,7 @@ defmodule Vigil.Store do
       "vigil: #{length(layout.domains)} domains (#{Enum.join(layout.domains, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
-    {put_index(%{state | domains: domains}, index), pull_result}
+    put_index(%{state | domains: domains}, index)
   end
 
   defp load_file(vault_path, rel_path, git_meta) do

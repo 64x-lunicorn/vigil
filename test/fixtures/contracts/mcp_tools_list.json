@@ -544,6 +544,21 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
+    "description": "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), and the last push's result and time.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "status",
+    "title": "Server status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Lists available skills with their description, without bodies.",
     "inputSchema": {
       "properties": {},

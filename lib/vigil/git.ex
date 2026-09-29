@@ -3,12 +3,14 @@ defmodule Vigil.Git do
   Git, as a value its callers hold rather than a module they name
   (`docs/design.md`, "Git is reached through a value").
 
-  Two things live here. The **contract** is a struct of ten functions — the
-  whole of what vigil asks git: `add`, `remove`, `move`, `commit`,
+  Two things live here. The **contract** is a struct of thirteen functions —
+  the whole of what vigil asks git: `add`, `remove`, `move`, `commit`,
   `snapshot_index`, `restore_index` and `push`, which a write uses, `pull`
-  and `log_metadata`, which the load uses and no write ever asks, and
-  `tracking`, which boot asks once to check the remote and branch settings
-  against the clone. Staging and
+  and `log_metadata`, which the load uses and no write ever asks, `tracking`,
+  which boot asks once to check the remote and branch settings against the
+  clone, and `divergence`, `fetch` and `fast_forward`, which bring the vault
+  up to date before a write and tell `status` how far apart the vault and its
+  remote are. Staging and
   committing are separate questions so that a commit can fail *after* its
   staging has happened, and the staging be undone (`Vigil.Commit`,
   `docs/design.md`, "A failed commit leaves the vault as it was"). The seam is drawn where git is, not where the
@@ -18,7 +20,7 @@ defmodule Vigil.Git do
   answer.
 
   The **production adapter** is the rest of this module: `over_repository/0`
-  wires the ten questions to the `git` commands underneath it. It is a function
+  wires the thirteen questions to the `git` commands underneath it. It is a function
   here, beside the contract it implements, rather than closures assembled by a
   caller — there are two callers, `Vigil.Store` and `Vigil.Skills`, and an
   adapter assembled at the call site would exist twice. `Store` builds it when
@@ -62,7 +64,17 @@ defmodule Vigil.Git do
     # What the clone's remotes and branches are, for the boot check of
     # VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH.
     # {:ok, %{head:, remotes:, branches:}} | {:error, reason} — see tracking/1.
-    :tracking
+    :tracking,
+    # How many commits the branch holds that <remote>/<branch> lacks, and the
+    # other way round, as the clone last saw the remote — read locally.
+    # {:ok, %{ahead:, behind:}} | {:error, reason}.
+    :divergence,
+    # git fetch <remote> <branch>, into <remote>/<branch>. Touches neither the
+    # branch nor the working tree. :ok | {:error, reason}.
+    :fetch,
+    # git merge --ff-only <remote>/<branch>: adopts what the last fetch
+    # brought, or refuses. :ok | {:error, reason}.
+    :fast_forward
   ]
 
   defstruct @enforce_keys
@@ -70,7 +82,7 @@ defmodule Vigil.Git do
   @type t :: %__MODULE__{}
 
   @doc """
-  Builds a git adapter from an answer to every one of the ten questions.
+  Builds a git adapter from an answer to every one of the thirteen questions.
 
   Raises `ArgumentError` when a field is missing or unknown, which is the
   point: an unwired question must fail where the adapter is built, not answer
@@ -95,7 +107,10 @@ defmodule Vigil.Git do
       snapshot_index: &snapshot_index/2,
       restore_index: &restore_index/2,
       push: &push/3,
-      tracking: &tracking/1
+      tracking: &tracking/1,
+      divergence: &divergence/3,
+      fetch: &fetch/3,
+      fast_forward: &fast_forward/3
     )
   end
 
@@ -116,7 +131,7 @@ defmodule Vigil.Git do
     "commit.gpgsign=false"
   ]
 
-  # The two calls that leave the machine are bounded. Every write waits on the
+  # The three calls that leave the machine are bounded. Every write waits on the
   # push inside the single writer, so an SSH connection that stalls without
   # closing would otherwise hold every read and write behind it until the
   # kernel gives up — minutes, not seconds. BatchMode and no terminal prompt:
@@ -284,6 +299,51 @@ defmodule Vigil.Git do
       {:error, out} -> {:error, out}
     end
   end
+
+  @doc """
+  How far `branch` and `remote`'s copy of it are apart, as the clone last saw
+  the remote: `{:ok, %{ahead: ahead, behind: behind}}`, where `ahead` counts
+  the commits only the branch holds — committed, not pushed — and `behind`
+  the ones only the remote-tracking branch holds. Read locally; `behind` is as
+  fresh as the last fetch. `{:error, reason}` when either ref is missing.
+  """
+  def divergence(vault_path, remote, branch) do
+    range = "refs/heads/#{branch}...#{tracking_ref(remote, branch)}"
+
+    with {:ok, out} <- run(vault_path, ["rev-list", "--left-right", "--count", range]) do
+      [ahead, behind] = out |> String.trim() |> String.split()
+      {:ok, %{ahead: String.to_integer(ahead), behind: String.to_integer(behind)}}
+    end
+  end
+
+  @doc """
+  `git fetch` of `branch` from `remote` into its remote-tracking branch, and
+  nothing else: the branch and the working tree stay as they are. Forced
+  (`+`), so the remote-tracking branch says what the remote holds even after a
+  force-push there — whether that can be adopted is `fast_forward/3`'s to
+  refuse. Bounded like `pull` and `push`. `:ok | {:error, reason}`.
+  """
+  def fetch(vault_path, remote, branch) do
+    refspec = "+refs/heads/#{branch}:#{tracking_ref(remote, branch)}"
+
+    case run(vault_path, ["fetch", "--quiet", "--no-tags", remote, refspec], @network_env) do
+      {:ok, _} -> :ok
+      {:error, out} -> {:error, out}
+    end
+  end
+
+  @doc """
+  `git merge --ff-only` onto what the last `fetch/3` brought: the checked-out
+  branch moves forward to `remote`'s, or git refuses and nothing moves. Never
+  a merge commit (`docs/design.md`, principle 2). `:ok | {:error, reason}`.
+  """
+  def fast_forward(vault_path, remote, branch) do
+    with {:ok, _} <-
+           run(vault_path, ["merge", "--ff-only", "--quiet", tracking_ref(remote, branch)]),
+         do: :ok
+  end
+
+  defp tracking_ref(remote, branch), do: "refs/remotes/#{remote}/#{branch}"
 
   @doc """
   What the clone at `vault_path` has to say about its remotes and branches,

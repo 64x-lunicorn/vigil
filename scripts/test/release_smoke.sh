@@ -306,6 +306,18 @@ else
   exit 1
 fi
 
+# vigil's own health report, answered on loopback without a token.
+healthz="$(curl -s -w '\n%{http_code}' "${BASE_URL}/healthz")"
+if [ "$(echo "$healthz" | tail -1)" = "200" ] &&
+  echo "$healthz" | head -1 | jq -e '.healthy == true and .index_loaded == true and .writer_answers == true' >/dev/null 2>&1; then
+  pass "/healthz answers 200 on loopback, index loaded and writer answering"
+else
+  fail "/healthz answers 200 on loopback, index loaded and writer answering" "$healthz"
+fi
+
+assert_eq "/healthz is not there for a forwarded request" "404" \
+  "$(curl -o /dev/null -s -w '%{http_code}' -H 'X-Forwarded-For: 203.0.113.9' "${BASE_URL}/healthz")"
+
 ## ── 4. Read path ─────────────────────────────────────────────────────────
 
 section "4/6  Read path"
@@ -413,6 +425,39 @@ if [ "$before_sha" != "$after_sha" ]; then
 else
   fail "the write was committed AND pushed to master on the git remote" \
     "remote is still at ${before_sha}"
+fi
+
+# A human pushes from a clone of their own and calls no `reload`: the next
+# write fetches and fast-forwards first, so it lands on top of the human's
+# commit and its push goes through. `force`, because the note the human pushed
+# is adopted before the write is decided, and counts as its possible duplicate.
+HUMAN="${WORK}/human-clone"
+git clone --quiet -b master "$UPSTREAM" "$HUMAN"
+mkdir -p "${HUMAN}/home"
+printf -- '---\ntype: reference\n---\n# Pushed by a human\n\nNo reload after this.\n' \
+  >"${HUMAN}/home/smoke-human.md"
+git -C "$HUMAN" add -A
+git -C "$HUMAN" -c user.name=human -c user.email=human@localhost -c commit.gpgsign=false \
+  commit --quiet -m "human edit"
+git -C "$HUMAN" push --quiet origin master
+
+after_human_response="$(mcp_call "$RW_TOKEN" create \
+  "{\"path\":\"home/smoke-after-human.md\",\"type\":\"reference\",\"content\":\"# After the human\\n\\nWritten on top.\",\"force\":true,\"skill_key\":\"${skill_key}\"}")"
+if echo "$after_human_response" | mcp_is_error; then
+  fail "a write after a human's push, without reload, is pushed" "$(mcp_why)"
+elif [ "$(echo "$after_human_response" | mcp_payload '.result.pushed')" = "true" ] &&
+  [ -f "${VAULT}/home/smoke-human.md" ] &&
+  [ "$(git -C "$VAULT" rev-parse master)" = "$(git --git-dir="$UPSTREAM" rev-parse master)" ]; then
+  pass "a write after a human's push, without reload, is pushed"
+else
+  fail "a write after a human's push, without reload, is pushed" "$after_human_response"
+fi
+
+if curl -s "${BASE_URL}/healthz" |
+  jq -e '.ahead == 0 and .behind == 0 and .last_push.pushed == true' >/dev/null 2>&1; then
+  pass "/healthz reports the vault in step and the last push succeeded"
+else
+  fail "/healthz reports the vault in step and the last push succeeded" "$(curl -s "${BASE_URL}/healthz")"
 fi
 
 ## ── 5b. The authorization flow a real client actually walks ──────────────

@@ -994,6 +994,195 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # docs/design.md, "The server stays in step with the remote": a commit a
+  # human pushed is adopted before the next write, without a `reload`, as long
+  # as vigil holds no unpushed commit of its own — and `status` says where the
+  # vault stands.
+  describe "staying in step with the remote" do
+    @human_note "---\ntype: reference\n---\n# From the human\nPushed from a clone.\n"
+
+    defp recording_store(vault, opts \\ []) do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+      git = Keyword.get(opts, :wrap, & &1).(git)
+      start_store(vault, git: git)
+      log
+    end
+
+    # `force:` because what is created here is beside the point, and a note
+    # adopted from the remote would otherwise count as its possible duplicate.
+    defp create_note(path) do
+      Store.call(@store, :create, %{
+        path: path,
+        type: "reference",
+        content: "# Note\ntext",
+        force: true
+      })
+    end
+
+    test "a human pushes; the next write lands on top without a reload, and its push succeeds",
+         %{vault: vault} do
+      log = recording_store(vault)
+      CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
+
+      assert {:ok, %{pushed: true}} = create_note("bike/after-human.md")
+
+      assert File.read!(Path.join(vault, "bike/from-human.md")) == @human_note
+
+      assert {:ok, %{title: "From the human"}} =
+               Store.call(@store, :read, %{id: "bike/from-human.md", backlinks: false})
+
+      assert [
+               {:pull, "origin", "main"},
+               {:fetch, "origin", "main"},
+               {:fast_forward, "origin", "main"},
+               {:add, ["bike/after-human.md"]},
+               {:commit, ["bike/after-human.md"], _message},
+               {:push, "origin", "main"}
+             ] = CommitLog.calls(log)
+    end
+
+    test "a skill write is brought up to date the same way", %{vault: vault} do
+      log = recording_store(vault)
+      CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
+
+      assert {:ok, %{pushed: true}} =
+               Store.call(@store, :skill_write, %{
+                 name: "in-step",
+                 content: "---\nname: in-step\ndescription: x\n---\n# Skill\n"
+               })
+
+      assert File.exists?(Path.join(vault, "bike/from-human.md"))
+    end
+
+    test "with nothing pushed elsewhere, the write fetches and adopts nothing", %{vault: vault} do
+      log = recording_store(vault)
+
+      assert {:ok, %{pushed: true}} = create_note("bike/alone.md")
+
+      calls = CommitLog.calls(log)
+      assert {:fetch, "origin", "main"} in calls
+      refute Enum.any?(calls, &match?({:fast_forward, _, _}, &1))
+    end
+
+    @tag :capture_log
+    test "with an unpushed commit, nothing is fetched and the write behaves as before",
+         %{vault: vault} do
+      log =
+        recording_store(vault,
+          wrap: fn git -> %{git | push: fn _, _, _ -> {:error, "unreachable"} end} end
+        )
+
+      assert {:ok, %{pushed: false}} = create_note("bike/first.md")
+      before = length(CommitLog.calls(log))
+      CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
+
+      assert {:ok, %{pushed: false, push_error: msg}} = create_note("bike/second.md")
+      assert msg =~ "unreachable"
+
+      refute File.exists?(Path.join(vault, "bike/from-human.md"))
+      assert File.exists?(Path.join(vault, "bike/second.md"))
+
+      calls = log |> CommitLog.calls() |> Enum.drop(before)
+      assert [{:add, ["bike/second.md"]}, {:commit, ["bike/second.md"], _message}] = calls
+    end
+
+    @tag :capture_log
+    test "a fetch that fails leaves the write to go ahead on the vault as it was",
+         %{vault: vault} do
+      recording_store(vault,
+        wrap: fn git -> %{git | fetch: fn _, _, _ -> {:error, "timed out"} end} end
+      )
+
+      assert {:ok, %{pushed: true}} = create_note("bike/despite.md")
+    end
+
+    test "status: a fresh writer is healthy, in step, and has not pushed yet", %{vault: vault} do
+      recording_store(vault)
+
+      assert %{
+               healthy: true,
+               index_loaded: true,
+               writer_answers: true,
+               ahead: 0,
+               behind: 0,
+               last_push: nil
+             } = Store.status(@store)
+    end
+
+    test "status: the last push and its time, and what a human pushed once it is fetched",
+         %{vault: vault} do
+      log = recording_store(vault)
+
+      {:ok, _} = create_note("bike/pushed.md")
+      assert %{last_push: %{pushed: true, at: %DateTime{}}, ahead: 0} = Store.status(@store)
+
+      # Seen as behind only once a fetch has brought it into view.
+      CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
+      assert %{behind: 0} = Store.status(@store)
+    end
+
+    @tag :capture_log
+    test "status: a failed push, with git's reason, and the commit it left ahead",
+         %{vault: vault} do
+      recording_store(vault,
+        wrap: fn git -> %{git | push: fn _, _, _ -> {:error, "unreachable"} end} end
+      )
+
+      {:ok, _} = create_note("bike/stuck.md")
+
+      assert %{ahead: 1, behind: 0, last_push: %{pushed: false, at: %DateTime{}, error: error}} =
+               Store.status(@store)
+
+      assert error =~ "unreachable"
+    end
+
+    test "status: a writer that does not answer is reported, not waited on", %{vault: vault} do
+      recording_store(vault)
+      writer = Process.whereis(@store)
+      :ok = :sys.suspend(writer)
+
+      try do
+        assert %{healthy: false, writer_answers: false, index_loaded: true, ahead: nil} =
+                 Store.status(@store, 50)
+      after
+        :sys.resume(writer)
+      end
+    end
+
+    test "status: no writer at all is neither loaded nor answering" do
+      assert %{healthy: false, writer_answers: false, index_loaded: false} =
+               Store.status(:"#{__MODULE__}.NoSuchWriter", 50)
+    end
+
+    @tag :capture_log
+    test "a failed push emits a telemetry event", %{vault: vault} do
+      recording_store(vault,
+        wrap: fn git -> %{git | push: fn _, _, _ -> {:error, "unreachable"} end} end
+      )
+
+      test_process = self()
+      handler = "push-failed-#{inspect(self())}"
+
+      :telemetry.attach(
+        handler,
+        [:vigil, :push, :failed],
+        fn event, measurements, metadata, _config ->
+          if metadata.vault_path == vault,
+            do: send(test_process, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      {:ok, %{pushed: false}} = create_note("bike/unpushed.md")
+
+      assert_received {:telemetry, [:vigil, :push, :failed], %{count: 1},
+                       %{remote: "origin", branch: "main", reason: "unreachable"}}
+    end
+  end
+
   # docs/design.md, "The write path": perform the action, commit, reparse into
   # the index, then push. Until git became a value this was the one part of the
   # write path no test could fail on, because exercising it meant building a

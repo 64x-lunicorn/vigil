@@ -74,9 +74,12 @@ CURRENT="${PREFIX}/current"
 # shellcheck disable=SC2034 # read by the sourcing script
 PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
 
-# What wait_until_healthy polls. Unauthenticated and answered before any token
-# exists, which is what makes it usable as a readiness probe.
-HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/.well-known/oauth-protected-resource}"
+# What wait_until_healthy polls: vigil's own health report, unauthenticated and
+# answered on this host only (docs/design.md, "The server stays in step with
+# the remote"). It answers 200 once the index is loaded and the writer
+# answers — a static metadata document answered as soon as the HTTP listener
+# was up, whatever state the vault was in.
+HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/healthz}"
 
 ## ── The vault's remote and branch ────────────────────────────────────────
 #
@@ -737,6 +740,19 @@ verify_survives_write_error() {
   [ "$check12_ok" = "1" ]
 }
 
+# 13. /healthz answers 200: the index is loaded and the writer answers. Asked
+# of the local URL, since it answers nowhere else.
+verify_healthz() {
+  local status
+  status="$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_LOCAL_URL}/healthz" || echo "000")"
+  if [ "$status" = "200" ]; then
+    echo "  ✓ [13] /healthz answers 200 — index loaded, writer answers"
+  else
+    echo "  ✗ [13] /healthz answers ${status} instead of 200 — curl -s ${VIGIL_LOCAL_URL}/healthz says which part is down"
+    return 1
+  fi
+}
+
 # The checks, in the order they run. Named here so the list is one thing rather
 # than a sequence buried in a 210-line function — and so a test can ask for the
 # list rather than repeat it.
@@ -753,6 +769,7 @@ VIGIL_VERIFY_CHECKS=(
   verify_read_only_token_refused
   verify_no_domain_drift
   verify_survives_write_error
+  verify_healthz
 )
 
 verify() {

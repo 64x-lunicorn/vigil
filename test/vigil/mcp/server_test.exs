@@ -78,11 +78,14 @@ defmodule Vigil.MCP.ServerTest do
     {limiter, extra} = Keyword.pop_lazy(extra, :limiter, &RateLimit.Counter.new/0)
 
     Server.init(
-      [
-        store: @store,
-        sessions: @sessions,
-        oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter)
-      ] ++ extra
+      Keyword.merge(
+        [
+          store: @store,
+          sessions: @sessions,
+          oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter)
+        ],
+        extra
+      )
     )
   end
 
@@ -479,14 +482,14 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 400
   end
 
-  test "tools/list contains exactly seventeen tools", %{persistence: persistence, token: token} do
+  test "tools/list contains exactly eighteen tools", %{persistence: persistence, token: token} do
     conn =
       post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
         {"mcp-session-id", "abc"}
       ])
 
     body = Jason.decode!(conn.resp_body)
-    assert length(body["result"]["tools"]) == 17
+    assert length(body["result"]["tools"]) == 18
   end
 
   # A reader is shown what it may call. Offering it the writes only to refuse
@@ -1615,6 +1618,96 @@ defmodule Vigil.MCP.ServerTest do
   # The list is checked against `Tools.definitions/0` first, so a tool added to
   # `@tools` without an entry here fails the suite instead of quietly going
   # unexercised.
+  # docs/design.md, "The server stays in step with the remote": answered on
+  # this host without a token, and to nobody else.
+  describe "/healthz" do
+    defp healthz(persistence, fun \\ & &1, extra \\ []) do
+      conn(:get, "/healthz")
+      |> Map.put(:host, "localhost")
+      |> fun.()
+      |> Server.call(opts(persistence, extra))
+    end
+
+    test "answers 200 on loopback without a token, with where the vault stands", %{
+      persistence: persistence
+    } do
+      conn = healthz(persistence)
+
+      assert conn.status == 200
+
+      assert %{
+               "healthy" => true,
+               "index_loaded" => true,
+               "writer_answers" => true,
+               "ahead" => 0,
+               "behind" => 0,
+               "last_push" => nil
+             } = Jason.decode!(conn.resp_body)
+    end
+
+    test "answers over IPv6 loopback and to 127.0.0.1 by address", %{persistence: persistence} do
+      assert healthz(persistence, &%{&1 | remote_ip: {0, 0, 0, 0, 0, 0, 0, 1}, host: "::1"}).status ==
+               200
+
+      assert healthz(persistence, &%{&1 | host: "127.0.0.1"}).status == 200
+    end
+
+    test "answers 503 when there is no writer to answer", %{persistence: persistence} do
+      conn = healthz(persistence, & &1, store: __MODULE__.NoSuchWriter)
+
+      assert conn.status == 503
+
+      assert %{"healthy" => false, "index_loaded" => false, "writer_answers" => false} =
+               Jason.decode!(conn.resp_body)
+    end
+
+    test "is not there for a peer that is not loopback", %{persistence: persistence} do
+      assert healthz(persistence, &%{&1 | remote_ip: {192, 168, 1, 20}}).status == 404
+    end
+
+    # The proxy in front is on this host too, so what it forwards arrives from
+    # loopback — and says so in a header.
+    test "is not there for a request a proxy forwarded", %{persistence: persistence} do
+      for header <- ~w(x-forwarded-for cf-connecting-ip forwarded x-real-ip) do
+        assert healthz(persistence, &put_req_header(&1, header, "203.0.113.9")).status == 404
+      end
+    end
+
+    test "is not there for a request that names another host", %{persistence: persistence} do
+      assert healthz(persistence, &%{&1 | host: "vault.example.org"}).status == 404
+    end
+
+    @tag :capture_log
+    test "reports a failed push without git's words", %{persistence: persistence, vault: vault} do
+      writer = __MODULE__.FailingPushWriter
+
+      start_supervised!(
+        {Store,
+         vault_path: vault,
+         exclude: [],
+         git_remote: "nonexistent-remote",
+         git: Vigil.Git.CommitLog.new(vault),
+         name: writer},
+        id: writer
+      )
+
+      {:ok, %{pushed: false}} =
+        Store.call(writer, :create, %{
+          path: "bike/healthz.md",
+          type: "reference",
+          content: "# Healthz\ntext",
+          force: true
+        })
+
+      conn = healthz(persistence, & &1, store: writer)
+
+      assert conn.status == 200
+      assert %{"last_push" => last_push} = Jason.decode!(conn.resp_body)
+      assert %{"pushed" => false, "at" => _} = last_push
+      refute Map.has_key?(last_push, "error")
+    end
+  end
+
   describe "dispatch coverage" do
     test "every declared tool is dispatched end to end", %{
       persistence: persistence,
@@ -1680,6 +1773,11 @@ defmodule Vigil.MCP.ServerTest do
        fn %{payload: payload} -> assert is_list(payload["result"]["orphaned_links"]) end},
       {"current", %{}, fn %{payload: payload} -> assert is_list(payload["result"]["active"]) end},
       {"reload", %{}, fn %{payload: payload} -> assert payload["result"]["reloaded"] == true end},
+      {"status", %{},
+       fn %{payload: payload} ->
+         assert %{"index_loaded" => true, "writer_answers" => true, "healthy" => true} =
+                  payload["result"]
+       end},
       {"skill_list", %{},
        fn %{payload: payload} -> assert Enum.any?(payload["result"], &(&1["name"] == "tdd")) end},
       {"skill_read", %{name: "tdd"},

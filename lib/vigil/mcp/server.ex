@@ -149,6 +149,26 @@ defmodule Vigil.MCP.Server do
     method_not_allowed(conn)
   end
 
+  ## Routes — health
+
+  # Whether this server is serving, and how it stands with the remote
+  # (docs/design.md, "The server stays in step with the remote"). No token:
+  # it is what `update.sh` waits on after a start, before any token exists.
+  # So it answers only a request made on this host, and 404 to every other,
+  # as if it were not there. 200 when the index is loaded and the writer
+  # answers, 503 otherwise. The push's error text is left out — git's words
+  # can name the remote's URL, and that is the `status` tool's to show, behind
+  # a token.
+  get "/healthz" do
+    if on_this_host?(conn) do
+      status = Store.status(conn.private.store)
+      report = Map.update!(status, :last_push, &without_error/1)
+      send_json(conn, if(status.healthy, do: 200, else: 503), report)
+    else
+      send_resp(conn, 404, "")
+    end
+  end
+
   # Everything that is not /mcp is the authorization server's: discovery
   # documents, registration, consent and token. Two protocols, two routers.
   match _ do
@@ -160,6 +180,35 @@ defmodule Vigil.MCP.Server do
     |> put_resp_header("allow", "POST, DELETE")
     |> send_resp(405, "")
   end
+
+  ## Health
+
+  # The peer alone does not say "on this host": the proxy the deployment puts
+  # in front (docs/guide.md) is itself on this host, so everything it forwards
+  # arrives from loopback too. A proxy says what it forwarded for, in one of
+  # these headers — or in the one the deployment names for the rate limiter —
+  # and a request carrying any of them came from elsewhere. The host a request
+  # names is checked too: a page that rebinds its own name onto 127.0.0.1
+  # still sends that name.
+  @proxy_headers ~w(forwarded x-forwarded-for x-real-ip cf-connecting-ip)
+  @local_hosts ["localhost", "127.0.0.1", "::1", "[::1]"]
+
+  defp on_this_host?(conn) do
+    configured = conn.private.oauth_opts |> Keyword.get(:client_addr, []) |> Keyword.get(:header)
+    headers = Enum.reject([configured | @proxy_headers], &is_nil/1)
+
+    loopback?(conn.remote_ip) and conn.host in @local_hosts and
+      Enum.all?(headers, &(get_req_header(conn, &1) == []))
+  end
+
+  defp loopback?({127, _, _, _}), do: true
+  defp loopback?({0, 0, 0, 0, 0, 0, 0, 1}), do: true
+  # ::ffff:127.x.y.z, an IPv4 loopback peer on a dual-stack socket.
+  defp loopback?({0, 0, 0, 0, 0, 0xFFFF, high, _low}), do: div(high, 256) == 127
+  defp loopback?(_ip), do: false
+
+  defp without_error(nil), do: nil
+  defp without_error(last_push), do: Map.delete(last_push, :error)
 
   ## MCP handling
 

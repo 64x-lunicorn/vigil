@@ -746,7 +746,9 @@ attributable to either the assistant or the human.
 touches the working tree, so a deliberate human change is made in a clone,
 committed under the human's own identity and pushed to the remote. The next
 load — a restart or a `reload` — pulls with `--ff-only` and rebuilds the index
-from the result. That keeps the provenance query honest and needs no merge: if
+from the result, and so does the next write, which fetches and fast-forwards
+first whenever vigil holds no unpushed commits (see "The server stays in step
+with the remote"). That keeps the provenance query honest and needs no merge: if
 the server holds a commit the remote lacks, typically one whose push failed,
 the histories have diverged, the pull is refused, and `reload` answers
 `pull_failed` with git's reason while serving the unchanged vault. Reconciling
@@ -803,11 +805,13 @@ deletion, a move, a skill.
 the filesystem and it commits. The filesystem half stays where it is. The git
 half is a value its callers hold rather than a module they name.
 
-**The value is the whole of `Vigil.Git`, not the write half.** Ten questions:
-`add`, `remove`, `move`, `commit`, `snapshot_index`, `restore_index`, `push` —
-and `pull` and `log_metadata`, which no write ever asks, and `tracking`, which
-only the boot check asks (see "The vault's remote and branch are checked
-against the clone"). Staging and committing are separate questions, which is
+**The value is the whole of `Vigil.Git`, not the write half.** Thirteen
+questions: `add`, `remove`, `move`, `commit`, `snapshot_index`,
+`restore_index`, `push` — `pull` and `log_metadata`, which no write ever asks,
+`tracking`, which only the boot check asks (see "The vault's remote and branch
+are checked against the clone"), and `divergence`, `fetch` and `fast_forward`,
+which bring the vault up to date before a write (see "The server stays in step
+with the remote"). Staging and committing are separate questions, which is
 what lets a test make a commit fail *after* its `git rm` has happened (see "A
 failed commit leaves the vault as it was"). `pull` and `log_metadata` belong to the load, and
 `Vigil.Store` asks them directly. A seam drawn around the write effect alone
@@ -949,6 +953,75 @@ still holds the chunk's heading. When the two have drifted apart the edit is
 refused and asks for a `reload`, instead of landing in whichever section sits
 at that line now. Only the heading's text is compared, since the chunk does not
 record its rank.
+
+---
+
+## The server stays in step with the remote
+
+A pull used to happen at boot and on `reload` only. A human who pushed from a
+clone and did not call `reload` made vigil's next write commit on top of a
+history the remote had already moved past: the push was refused, the two
+histories diverged, and putting them back together needed a shell on the host.
+
+**Before every write, the vault is brought up to date.** All eight note writes
+and `skill_write` go through one function in `Vigil.Store`,
+`bring_up_to_date/1`, before the policy is asked. It asks git how far the
+branch and its remote-tracking branch are apart. With no unpushed commits it
+fetches, and if the remote moved, it fast-forwards and rebuilds the index from
+the result — so the write is decided against the vault as it now stands, lands
+on top of the human's commit, and its push goes through. With unpushed commits
+of its own it does nothing: a fast-forward is not possible, and there is still
+no merge (principle 2). Those commits go out with the next push that succeeds
+or with the safety-net cron, as before; adopting what another clone pushed
+*around* them is a rebase, and a separate decision.
+
+The decision is in that one function on purpose, so that what it adopts and
+when — rebasing vigil's own unpushed commits, or freshening before reads at a
+bounded rate — is a change to it rather than a second path beside it.
+
+**Nothing about it can fail a write.** A fetch or a fast-forward that fails is
+logged, and the write goes ahead on the vault as it was, exactly as it did
+before this step existed. The fetch is bounded the way `pull` and `push` are
+(`Vigil.Git`'s network environment), so a remote that stalls costs a write its
+connect and stall timeouts, not the writer. The three questions it asks —
+`divergence`, `fetch`, `fast_forward` — are on the Git value like every other
+(see "Git is reached through a value"); only `fetch` leaves the machine.
+
+**`status` and `/healthz` say whether it is.** Both report the same facts: is
+the index loaded, does the writer answer, how many commits is the vault
+`ahead` of the remote and `behind` it, and the last push's result and time.
+`ahead` and `behind` are read locally — `behind` is as fresh as the last
+fetch, which happens before every write. `Vigil.Store.status/2` answers in the
+caller's process: whether the index is loaded is read from the writer's table,
+and the writer is asked the rest with a timeout of five seconds, so a writer
+that does not answer is reported instead of waited on.
+
+*Healthy* means the index is loaded and the writer answers — `/healthz` is 200
+then and 503 otherwise. A failed push or a vault that is ahead is reported in
+the body, not in the status code: the service is serving, the commits are
+safe locally, and the safety-net cron pushes them without the writer ever
+noticing, so a status code tied to the last push would stay red after the
+problem was gone. Deciding otherwise would also make `update.sh` roll back a
+release because of the network.
+
+**`/healthz` answers on the host only, and without a token**, because
+`update.sh` waits on it after every start, before a token exists. The peer
+alone does not establish "on the host": the proxy in front — cloudflared, in
+the deployment the guide describes — runs on the same host, so everything it
+forwards arrives from loopback too. A request is answered only when its peer is
+loopback, the host it names is `localhost`, `127.0.0.1` or `::1`, and it
+carries none of the headers a proxy adds (`Forwarded`, `X-Forwarded-For`,
+`X-Real-IP`, `CF-Connecting-IP`, or the one `VIGIL_TRUSTED_PROXY_HEADER`
+names). Every other request gets a 404, as if the route were not there. The
+host check also refuses a page that rebinds its own name onto 127.0.0.1. The
+push's error text is left out of `/healthz` — git's words can name the remote —
+and shown by `status`, behind a token.
+
+**A failed push is also a telemetry event**, `[:vigil, :push, :failed]`,
+emitted by `Vigil.Commit.push/4` — the one place every push, a note's and a
+skill's, goes through — with the vault path, remote, branch and git's reason.
+It is what leaves the vault and its remote apart, and watching for it should
+not mean reading logs.
 
 ---
 

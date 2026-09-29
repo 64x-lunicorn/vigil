@@ -281,7 +281,7 @@ is in front of the endpoint. They are the defences that were absent behind it.
 ## Endpoints
 
 All served by `Vigil.OAuth.Endpoint`, which `Vigil.MCP.Server` forwards to for
-everything that is not `/mcp`. The decisions behind them — registration, the
+everything that is not `/mcp` or `/healthz`. The decisions behind them — registration, the
 checks on an `/authorize` request, both grants — live in `Vigil.OAuth.Flow`
 and take no `Plug.Conn`.
 
@@ -296,6 +296,7 @@ and take no `Plug.Conn`.
 | `/oauth/token` | POST | code → access token, refresh → access token |
 | `/mcp` | POST | the MCP endpoint itself |
 | `/mcp` | DELETE | ends the MCP session its `Mcp-Session-Id` names (204; 404 for one that is not a live session of the token) |
+| `/healthz` | GET | health report, no token, answered on the host only — 200/503; 404 to anything forwarded or remote (see the user guide) |
 
 No revocation endpoint and no introspection endpoint — neither is needed for a
 single-user deployment.

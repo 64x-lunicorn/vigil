@@ -4,7 +4,7 @@
 # verify() decides whether a delivery stands or is rolled back (update.sh step
 # 7), and it was a single 210-line block that could only run against a real
 # vault host: systemd, journald, Cloudflare, a git remote and a booted release.
-# So the one thing nothing could test was the thing that decides. It is twelve
+# So the one thing nothing could test was the thing that decides. It is thirteen
 # functions now, and this drives each of them against both outcomes.
 #
 # What stays real: every check's own logic — the conditions, the comparisons,
@@ -77,8 +77,8 @@ journalctl() { cat "$JOURNAL" 2>/dev/null || true; }
 
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 curl() {
-  # verify_public_endpoint_protected is the only caller, and it asks for the
-  # status code alone.
+  # verify_public_endpoint_protected and verify_healthz are the callers, and
+  # both ask for the status code alone.
   cat "$HTTP_STATUS" 2>/dev/null || echo "000"
 }
 
@@ -189,7 +189,7 @@ assert_output() {
 
 ## ── 1. Service active ────────────────────────────────────────────────────
 
-section "1/12  Service active"
+section "1/13  Service active"
 reset_stubs
 : >"$SERVICE_STATE"
 assert_check "passes while the unit is active" verify_service_active 0
@@ -199,7 +199,7 @@ assert_output "names the journal command to run" "journalctl -u vigil-under-test
 
 ## ── 2. Public endpoint protected ─────────────────────────────────────────
 
-section "2/12  Public endpoint sits behind Cloudflare Access"
+section "2/13  Public endpoint sits behind Cloudflare Access"
 reset_stubs
 echo "403" >"$HTTP_STATUS"
 assert_check "403 is the expected answer" verify_public_endpoint_protected 0
@@ -222,7 +222,7 @@ VIGIL_ALLOW_UNPROTECTED=0
 
 ## ── 3. Local call answers ────────────────────────────────────────────────
 
-section "3/12  A valid token is answered locally"
+section "3/13  A valid token is answered locally"
 reset_stubs
 mcp_responds current '{}'
 assert_check "passes when current answers" verify_local_call_answers 0
@@ -231,7 +231,7 @@ assert_check "fails when it does not" verify_local_call_answers 1
 
 ## ── 4. Git remote reachable ──────────────────────────────────────────────
 
-section "4/12  The vault's git remote is reachable"
+section "4/13  The vault's git remote is reachable"
 reset_stubs
 : >"$GIT_REMOTE_OK"
 assert_check "passes when ls-remote succeeds" verify_git_remote_reachable 0
@@ -242,7 +242,7 @@ assert_output "points at the key as the likely cause" "deploy key missing"
 
 ## ── 5. reload pulls ──────────────────────────────────────────────────────
 
-section "5/12  reload reports no pull_failed"
+section "5/13  reload reports no pull_failed"
 reset_stubs
 mcp_responds reload '{}'
 assert_check "passes when reload is clean" verify_reload_pulls 0
@@ -254,7 +254,7 @@ assert_output "quotes the reason the server gave" "host key verification failed"
 
 ## ── 6. Chunk count ───────────────────────────────────────────────────────
 
-section "6/12  The chunk count is advisory, and remembered"
+section "6/13  The chunk count is advisory, and remembered"
 reset_stubs
 # Verbatim from Vigil.Store's own log line (lib/vigil/store.ex) — lowercase
 # `chunks`. A fabricated spelling here is what let the check pass while the
@@ -278,7 +278,7 @@ assert_output "says it could not read the count" "could not read the chunk count
 
 ## ── 7. Write and push ────────────────────────────────────────────────────
 
-section "7/12  A note is written, pushed and deleted again"
+section "7/13  A note is written, pushed and deleted again"
 reset_stubs
 mcp_responds create '{"path":"admin/verify-test.md"}'
 mcp_responds delete_note '{}'
@@ -305,7 +305,7 @@ fi
 
 ## ── 8. Nothing unpushed ──────────────────────────────────────────────────
 
-section "8/12  The vault has no unpushed commits"
+section "8/13  The vault has no unpushed commits"
 reset_stubs
 echo "0" >"$UNPUSHED"
 assert_check "passes at zero" verify_nothing_unpushed 0
@@ -318,7 +318,7 @@ assert_output "says how many" "3 local commits not pushed"
 
 ## ── 9. SkillKey enforced ─────────────────────────────────────────────────
 
-section "9/12  A write without a skill_key is refused"
+section "9/13  A write without a skill_key is refused"
 reset_stubs
 mcp_errors create 'SkillKey missing or stale'
 assert_check "passes when the gate refuses it by name" verify_skill_key_enforced 0
@@ -334,7 +334,7 @@ assert_check "fails when some other error refused it" verify_skill_key_enforced 
 
 ## ── 10. Read-only token refused ──────────────────────────────────────────
 
-section "10/12  The read-only token cannot write"
+section "10/13  The read-only token cannot write"
 reset_stubs
 mcp_errors create 'insufficient scope'
 assert_check "passes when the write is refused" verify_read_only_token_refused 0
@@ -345,7 +345,7 @@ assert_output "calls it a role separation failure" "Role separation is not worki
 
 ## ── 11. Domain drift ─────────────────────────────────────────────────────
 
-section "11/12  _domains.yml and the directories agree"
+section "11/13  _domains.yml and the directories agree"
 reset_stubs
 echo "vigil: started" >"$JOURNAL"
 assert_check "passes on a quiet log" verify_no_domain_drift 0
@@ -358,7 +358,7 @@ assert_check "fails on drift in the other direction too" verify_no_domain_drift 
 
 ## ── 12. Survives a write error ───────────────────────────────────────────
 
-section "12/12  A failed write does not take the Store down"
+section "12/13  A failed write does not take the Store down"
 reset_stubs
 VIGIL_TEST_DOMAIN="admin"
 mcp_errors create 'permission denied'
@@ -389,20 +389,33 @@ VIGIL_TEST_DOMAIN=""
 assert_check "fails when check 7 found no writable domain" verify_survives_write_error 1
 assert_output "says why it was skipped" "check 7 found no writable domain"
 
+## ── 13. /healthz ─────────────────────────────────────────────────────────
+
+section "13/13  /healthz reports the server healthy"
+reset_stubs
+echo "200" >"$HTTP_STATUS"
+assert_check "passes on 200" verify_healthz 0
+reset_stubs
+echo "503" >"$HTTP_STATUS"
+assert_check "fails on 503 — the index is not loaded or the writer does not answer" verify_healthz 1
+assert_output "names the status it got" "answers 503"
+reset_stubs
+assert_check "fails when nothing answers at all" verify_healthz 1
+
 ## ── The list itself ──────────────────────────────────────────────────────
 
 section "The check list"
 
-EXPECTED_ORDER="verify_service_active verify_public_endpoint_protected verify_local_call_answers verify_git_remote_reachable verify_reload_pulls verify_chunk_count verify_write_and_push verify_nothing_unpushed verify_skill_key_enforced verify_read_only_token_refused verify_no_domain_drift verify_survives_write_error"
+EXPECTED_ORDER="verify_service_active verify_public_endpoint_protected verify_local_call_answers verify_git_remote_reachable verify_reload_pulls verify_chunk_count verify_write_and_push verify_nothing_unpushed verify_skill_key_enforced verify_read_only_token_refused verify_no_domain_drift verify_survives_write_error verify_healthz"
 
 # Check 7 discovers the domain that 9, 10 and 12 reuse, so the order is part of
 # what the checks mean, not a presentation detail.
 # IFS is $'\n\t' in these scripts, so "${array[*]}" joins with a newline.
 ACTUAL_ORDER="$(IFS=' ' && echo "${VIGIL_VERIFY_CHECKS[*]}")"
 if [ "$ACTUAL_ORDER" = "$EXPECTED_ORDER" ]; then
-  pass "twelve checks, in the order the later ones depend on"
+  pass "thirteen checks, in the order the later ones depend on"
 else
-  fail "twelve checks, in the order the later ones depend on" "$ACTUAL_ORDER"
+  fail "thirteen checks, in the order the later ones depend on" "$ACTUAL_ORDER"
 fi
 
 # One assertion, and it reflects the loop: a name that resolves to nothing is

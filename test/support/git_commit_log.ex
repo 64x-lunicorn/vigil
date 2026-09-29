@@ -16,6 +16,12 @@ defmodule Vigil.Git.CommitLog do
   it by remembering, and `test/vigil/git_test.exs` is what keeps the two from
   drifting apart.
 
+  The remote is a record too. What `push_from_elsewhere/4` puts there is a
+  commit another clone pushed: `fetch` brings it into view, `divergence`
+  counts it as behind, `fast_forward` writes it into the working tree, and
+  `push` is refused while the remote holds anything the vault lacks — which is
+  what git does with a push that is not a fast-forward.
+
   The working tree is real: `remove` deletes the file and `move` renames it,
   because that is what `git rm` and `git mv` do to a vault, and the callers
   above the seam read the vault back afterwards. The staging area is a list of
@@ -39,6 +45,10 @@ defmodule Vigil.Git.CommitLog do
   # there" are told apart by their instants.
   @commit_at ~U[2026-06-01 12:00:00Z]
 
+  # What a commit another clone pushed is dated: between the two above, so a
+  # file adopted from the remote is told apart from both.
+  @elsewhere_at ~U[2026-03-01 08:00:00Z]
+
   @doc """
   A `Vigil.Git` over `vault_path`, and the log behind it.
 
@@ -57,15 +67,43 @@ defmodule Vigil.Git.CommitLog do
     at = @commit_at
 
     {:ok, log} =
-      Agent.start_link(fn -> %{metadata: seed(vault_path), staged: [], calls: []} end)
+      Agent.start_link(fn ->
+        %{
+          metadata: seed(vault_path),
+          staged: [],
+          calls: [],
+          # Committed here and not pushed.
+          unpushed: 0,
+          # Pushed from elsewhere, not fetched yet; fetched, not adopted yet.
+          remote_only: [],
+          fetched: []
+        }
+      end)
+
+    ours = {remote, branch}
 
     git =
       Git.new(
-        pull: fn _vault, name, ref ->
-          remote_result(log, {:pull, name, ref}, {remote, branch}, {name, ref})
+        pull: fn vault, name, ref ->
+          with :ok <- remote_result(log, {:pull, name, ref}, ours, {name, ref}) do
+            fetch(log)
+            fast_forward(log, vault)
+          end
         end,
         push: fn _vault, name, ref ->
-          remote_result(log, {:push, name, ref}, {remote, branch}, {name, ref})
+          with :ok <- remote_result(log, {:push, name, ref}, ours, {name, ref}), do: push(log)
+        end,
+        divergence: fn _vault, name, ref ->
+          with :ok <- remote_known(ours, {name, ref}) do
+            {:ok, Agent.get(log, &%{ahead: &1.unpushed, behind: length(&1.fetched)})}
+          end
+        end,
+        fetch: fn _vault, name, ref ->
+          with :ok <- remote_result(log, {:fetch, name, ref}, ours, {name, ref}), do: fetch(log)
+        end,
+        fast_forward: fn vault, name, ref ->
+          with :ok <- remote_result(log, {:fast_forward, name, ref}, ours, {name, ref}),
+               do: fast_forward(log, vault)
         end,
         tracking: fn _vault -> tracking end,
         log_metadata: fn _vault -> Agent.get(log, & &1.metadata) end,
@@ -103,6 +141,17 @@ defmodule Vigil.Git.CommitLog do
   @spec calls(pid()) :: [tuple()]
   def calls(log), do: Agent.get(log, &Enum.reverse(&1.calls))
 
+  @doc """
+  A commit another clone pushed to the remote: `path` holding `content`,
+  authored by `author`. The vault sees it after a `fetch`, and holds it after
+  a `fast_forward` (or a `pull`).
+  """
+  @spec push_from_elsewhere(pid(), String.t(), String.t(), String.t()) :: :ok
+  def push_from_elsewhere(log, path, content, author \\ "Daniel") do
+    commit = %{path: path, content: content, author: author}
+    Agent.update(log, &%{&1 | remote_only: &1.remote_only ++ [commit]})
+  end
+
   ## The record
 
   defp record(log, call), do: Agent.update(log, &%{&1 | calls: [call | &1.calls]})
@@ -121,7 +170,7 @@ defmodule Vigil.Git.CommitLog do
   defp commit(log, at) do
     Agent.update(log, fn state ->
       metadata = Enum.reduce(state.staged, state.metadata, &apply_staged(&1, &2, at))
-      %{state | metadata: metadata, staged: []}
+      %{state | metadata: metadata, staged: [], unpushed: state.unpushed + 1}
     end)
 
     %{updated_at: at, last_author: "vigil"}
@@ -170,9 +219,61 @@ defmodule Vigil.Git.CommitLog do
     end
   end
 
-  defp remote_result(log, call, {remote, branch}, {name, ref}) do
-    record(log, call)
+  ## The remote
 
+  defp fetch(log) do
+    Agent.update(log, &%{&1 | fetched: &1.fetched ++ &1.remote_only, remote_only: []})
+  end
+
+  # What git does: nothing to adopt is not an error, a branch with commits of
+  # its own cannot be fast-forwarded, and otherwise every fetched commit lands
+  # in the working tree and in the metadata, under its own author.
+  defp fast_forward(log, vault_path) do
+    Agent.get_and_update(log, fn
+      %{fetched: []} = state ->
+        {:ok, state}
+
+      %{unpushed: unpushed} = state when unpushed > 0 ->
+        {{:error, "fatal: Not possible to fast-forward, aborting."}, state}
+
+      state ->
+        metadata = Enum.reduce(state.fetched, state.metadata, &adopt(&1, &2, vault_path))
+        {:ok, %{state | metadata: metadata, fetched: []}}
+    end)
+  end
+
+  defp adopt(%{path: path, content: content, author: author}, metadata, vault_path) do
+    abs = Path.join(vault_path, path)
+    File.mkdir_p!(Path.dirname(abs))
+    File.write!(abs, content)
+
+    entry =
+      case metadata[path] do
+        nil -> %{created_at: @elsewhere_at, updated_at: @elsewhere_at, last_author: author}
+        entry -> %{entry | updated_at: @elsewhere_at, last_author: author}
+      end
+
+    Map.put(metadata, path, entry)
+  end
+
+  # A push that is not a fast-forward is refused, as git refuses it.
+  defp push(log) do
+    Agent.get_and_update(log, fn
+      %{remote_only: [], fetched: []} = state ->
+        {:ok, %{state | unpushed: 0}}
+
+      state ->
+        {{:error, "! [rejected] (fetch first): the remote contains work the vault does not have"},
+         state}
+    end)
+  end
+
+  defp remote_result(log, call, ours, theirs) do
+    record(log, call)
+    remote_known(ours, theirs)
+  end
+
+  defp remote_known({remote, branch}, {name, ref}) do
     cond do
       name != remote or is_nil(remote) ->
         {:error, "fatal: '#{name}' does not appear to be a git repository"}

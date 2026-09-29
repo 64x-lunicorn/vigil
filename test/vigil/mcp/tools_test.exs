@@ -15,9 +15,9 @@ defmodule Vigil.MCP.ToolsTest do
   @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete_note move_note skill_write)
 
   describe "definitions/0 is derived from the declaration table" do
-    test "seventeen tools, matching write_tool?/1 to the write: flag" do
+    test "eighteen tools, matching write_tool?/1 to the write: flag" do
       definitions = Tools.definitions()
-      assert length(definitions) == 17
+      assert length(definitions) == 18
 
       for %{name: name} <- definitions do
         assert Tools.write_tool?(name) == name in @write_tools

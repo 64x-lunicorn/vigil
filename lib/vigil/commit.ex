@@ -28,6 +28,8 @@ defmodule Vigil.Commit do
 
   alias Vigil.Git
 
+  @push_failed [:vigil, :push, :failed]
+
   @doc """
   Writes `content` to `rel_path` inside `vault_path` and commits it under
   `message`, creating the parent directory if it is missing.
@@ -202,9 +204,29 @@ defmodule Vigil.Commit do
   locally but not pushed is a change, a deletion, a move or a skill, and the
   caller is the one that knows which — so the sentence in front of it is the
   caller's (`docs/design.md`, "The write path").
+
+  Every failure is also a telemetry event, `#{inspect(@push_failed)}`, with
+  the vault path, the remote, the branch and git's reason as metadata: a push
+  that fails is the one outcome of a write that leaves the vault and its
+  remote apart, and an operator watching for it should not have to read logs.
   """
   @spec push(Git.t(), String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
-  def push(%Git{} = git, vault_path, remote, branch), do: git.push.(vault_path, remote, branch)
+  def push(%Git{} = git, vault_path, remote, branch) do
+    case git.push.(vault_path, remote, branch) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        :telemetry.execute(@push_failed, %{count: 1}, %{
+          vault_path: vault_path,
+          remote: remote,
+          branch: branch,
+          reason: reason
+        })
+
+        {:error, reason}
+    end
+  end
 
   @doc """
   Creates `path` and every missing parent, or says why it could not.

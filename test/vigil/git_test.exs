@@ -186,6 +186,69 @@ defmodule Vigil.GitTest do
         assert DateTime.compare(created_at, updated_at) in [:lt, :eq]
         assert created_at == before["bike/terra-speed.md"].created_at
       end
+
+      # docs/design.md, "A human edit arrives as a commit, never as a file":
+      # what another clone pushed is seen after a fetch and adopted by a
+      # fast-forward, and nothing before the fast-forward touches the vault.
+      test "a commit pushed elsewhere is behind after a fetch, and a fast-forward adopts it",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert :ok = git.fetch.(vault, "origin", "main")
+        assert {:ok, %{ahead: 0, behind: 1}} = git.divergence.(vault, "origin", "main")
+        refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+
+        assert :ok = git.fast_forward.(vault, "origin", "main")
+
+        assert File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert %{last_author: "x"} = git.log_metadata.(vault)["bike/from-elsewhere.md"]
+      end
+
+      test "a commit not yet pushed counts as ahead, and a push brings it to zero", %{
+        git: git,
+        vault: vault
+      } do
+        path = note(vault, "bike/ahead.md", "Ahead")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+        assert {:ok, %{ahead: 1, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert :ok = git.push.(vault, "origin", "main")
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      test "a push is refused while the remote holds a commit the vault lacks",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+        assert {:error, _reason} = git.push.(vault, "origin", "main")
+      end
+
+      # Principle 2: no merge. With a commit of its own the vault cannot be
+      # fast-forwarded, and it is left exactly as it was.
+      test "a fast-forward is refused while the vault holds a commit of its own",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 1, behind: 1}} = git.divergence.(vault, "origin", "main")
+        assert {:error, _reason} = git.fast_forward.(vault, "origin", "main")
+        refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+      end
+
+      @tag :capture_log
+      test "fetch and divergence against a remote the vault does not have are errors", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:error, _reason} = git.fetch.(vault, "nonexistent-remote", "main")
+        assert {:error, _reason} = git.divergence.(vault, "nonexistent-remote", "main")
+      end
     end
   end
 
@@ -207,6 +270,31 @@ defmodule Vigil.GitTest do
       {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
       assert status == ""
     end
+  end
+
+  # A commit another clone pushed, authored `x`: through a real second clone
+  # for the repository, recorded as such for the commit log.
+  defp push_from_elsewhere(%{log: log}, path) do
+    CommitLog.push_from_elsewhere(log, path, "---\ntype: reference\n---\n# Elsewhere\n", "x")
+  end
+
+  defp push_from_elsewhere(%{remote: remote, vault: vault}, path) do
+    other = vault <> "_elsewhere"
+    {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
+    File.mkdir_p!(Path.dirname(Path.join(other, path)))
+    File.write!(Path.join(other, path), "---\ntype: reference\n---\n# Elsewhere\n")
+    {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+
+    {_out, 0} =
+      System.cmd(
+        "git",
+        ~w(-c user.name=x -c user.email=x@x -c commit.gpgsign=false commit -q -m elsewhere),
+        cd: other
+      )
+
+    {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
+    File.rm_rf!(other)
+    :ok
   end
 
   # Everything on disk under the vault but git's own directory, with its
