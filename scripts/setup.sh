@@ -5,6 +5,7 @@
 #
 # Usage: sudo ./scripts/setup.sh [--repo-url <url>] [--skip-cloudflared]
 #            [--tunnel-name <name>] [--hostname <host>]
+#            [--github-ssh-port 443|22|auto]
 #            [--otp-version <x> --force] [--dry-run] [--non-interactive]
 #            [--verbose] [--help]
 
@@ -17,6 +18,7 @@ REPO_URL="https://github.com/64x-lunicorn/vigil.git"
 SKIP_CLOUDFLARED=0
 TUNNEL_NAME="vigil"
 TUNNEL_HOSTNAME=""
+GITHUB_SSH_PORT="443"
 OTP_VERSION_OVERRIDE=""
 FORCE=0
 
@@ -36,6 +38,9 @@ Order: setup.sh → init.sh → update.sh (as needed, repeatable)
   --skip-cloudflared      set the tunnel up manually; this script skips cloudflared
   --tunnel-name <name>    Cloudflare tunnel to create or reuse (default: vigil)
   --hostname <host>       public hostname routed to vigil (asked for if omitted)
+  --github-ssh-port <p>   443 (default), 22 or auto — how the service user
+                          reaches GitHub over SSH; auto picks 22 when it
+                          answers right now, 443 otherwise
   --otp-version <x>       override .tool-versions (only together with --force)
   --force                 allows --otp-version, otherwise has no effect
   --dry-run               log changes with [DRY RUN] instead of applying them
@@ -68,6 +73,10 @@ while [ $# -gt 0 ]; do
       ;;
     --hostname)
       TUNNEL_HOSTNAME="$2"
+      shift 2
+      ;;
+    --github-ssh-port)
+      GITHUB_SSH_PORT="$2"
       shift 2
       ;;
     --otp-version)
@@ -274,26 +283,87 @@ if [ "$DRY_RUN" != "1" ]; then
   install -d -m 0700 -o vigil -g vigil "$SSH_DIR"
 fi
 
-if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] ssh-keyscan github.com, check fingerprint against ${GITHUB_ED25519_FINGERPRINT}, write known_hosts"
-else
-  SCAN="$(ssh-keyscan -t ed25519 github.com 2>/dev/null || true)"
-  if [ -z "$SCAN" ]; then
-    err "ssh-keyscan against github.com returned nothing."
+case "$GITHUB_SSH_PORT" in
+  auto | 22 | 443) ;;
+  *)
+    err "--github-ssh-port must be auto, 22 or 443 (got '${GITHUB_SSH_PORT}')."
+    exit 2
+    ;;
+esac
+
+tcp_reachable() {
+  timeout 5 bash -c "</dev/tcp/$1/$2" 2>/dev/null
+}
+
+# Scans <host>:<port>, refuses a key that is not GitHub's documented one, and
+# records it. ssh-keyscan writes a non-22 port as [host]:port, which is the
+# form ssh looks up.
+trust_github_host_key() {
+  local host="$1" port="$2" scan found
+  scan="$(ssh-keyscan -t ed25519 -p "$port" "$host" 2>/dev/null || true)"
+  if [ -z "$scan" ]; then
+    err "ssh-keyscan against ${host}:${port} returned nothing."
     exit 2
   fi
-  FOUND="$(echo "$SCAN" | ssh-keygen -lf /dev/stdin -E sha256 2>/dev/null | awk '{print $2}')"
-  if [ "$FOUND" != "$GITHUB_ED25519_FINGERPRINT" ]; then
-    err "GitHub host key fingerprint mismatch! Expected ${GITHUB_ED25519_FINGERPRINT}, found ${FOUND}."
+  found="$(echo "$scan" | ssh-keygen -lf /dev/stdin -E sha256 2>/dev/null | awk '{print $2}')"
+  if [ "$found" != "$GITHUB_ED25519_FINGERPRINT" ]; then
+    err "GitHub host key fingerprint mismatch on ${host}:${port}! Expected ${GITHUB_ED25519_FINGERPRINT}, found ${found}."
     err "Refusing to trust blindly — possible MITM. Aborting, known_hosts not written."
     exit 2
   fi
-  ok "GitHub ED25519 fingerprint confirmed: ${FOUND}"
-  if ! grep -qF "$SCAN" "$KNOWN_HOSTS" 2>/dev/null; then
-    echo "$SCAN" >>"$KNOWN_HOSTS"
-    chown vigil:vigil "$KNOWN_HOSTS"
-    chmod 0644 "$KNOWN_HOSTS"
+  ok "GitHub ED25519 fingerprint confirmed on ${host}:${port}: ${found}"
+  if ! grep -qF "$scan" "$KNOWN_HOSTS" 2>/dev/null; then
+    echo "$scan" >>"$KNOWN_HOSTS"
   fi
+  chown vigil:vigil "$KNOWN_HOSTS"
+  chmod 0644 "$KNOWN_HOSTS"
+}
+
+if [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] pick GitHub SSH port (${GITHUB_SSH_PORT}), ssh-keyscan, check fingerprint against ${GITHUB_ED25519_FINGERPRINT}, write known_hosts and ~/.ssh/config"
+else
+  # 443 by default. Some networks block outbound 22 — or start to, for a
+  # while, after a burst of SSH connections trips an IPS, which a deployment
+  # produces and which a check at setup time cannot foresee (seen on the
+  # reference deployment: 22 answered during setup, then timed out in
+  # verify()). GitHub serves the same SSH endpoint, with the same host key,
+  # on ssh.github.com:443, and 443 is open wherever HTTPS is.
+  if [ "$GITHUB_SSH_PORT" = "auto" ]; then
+    if tcp_reachable github.com 22; then
+      GITHUB_SSH_PORT=22
+    elif tcp_reachable ssh.github.com 443; then
+      warn "github.com:22 is not reachable from here — using ssh.github.com:443."
+      GITHUB_SSH_PORT=443
+    else
+      err "Neither github.com:22 nor ssh.github.com:443 is reachable."
+      exit 2
+    fi
+  fi
+
+  if [ "$GITHUB_SSH_PORT" = "443" ]; then
+    trust_github_host_key ssh.github.com 443
+    GITHUB_ROUTE="  HostName ssh.github.com
+  Port 443"
+  else
+    trust_github_host_key github.com 22
+    GITHUB_ROUTE="  Port 22"
+  fi
+
+  # Owned by this script. The keepalives bound every git fetch, pull and push
+  # the service user makes — including verify()'s ls-remote and the push
+  # safety net — so a connection that stalls without closing ends within a
+  # minute instead of hanging.
+  write_file_atomically "${SSH_DIR}/config" 0600 vigil:vigil "$(
+    cat <<EOF
+# Written by scripts/setup.sh (--github-ssh-port ${GITHUB_SSH_PORT}).
+Host github.com
+${GITHUB_ROUTE}
+  ConnectTimeout 10
+  ServerAliveInterval 15
+  ServerAliveCountMax 4
+EOF
+  )"
+  ok "Service user reaches GitHub over SSH on port ${GITHUB_SSH_PORT}."
 fi
 
 if [ -f "$DEPLOY_KEY" ]; then

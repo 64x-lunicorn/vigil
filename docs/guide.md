@@ -235,7 +235,9 @@ Later updates run from the checkout `setup.sh` made, so there is one copy of
 the code on the host: `cd /opt/vigil/repo && sudo ./scripts/update.sh`.
 
 `setup.sh` installs packages, creates the `vigil` system user, sets up its SSH
-identity (verifying GitHub's host key fingerprint), clones the code, installs
+identity (verifying GitHub's host key fingerprint) and routes its GitHub SSH
+over `ssh.github.com:443` with keepalives (`--github-ssh-port 22` or `auto` to
+change that), clones the code, installs
 Hex and rebar3 for the service user and the systemd unit, and creates the
 Cloudflare tunnel with its DNS record (`--tunnel-name` if a tunnel called
 `vigil` already belongs to another host). `init.sh` provisions the vault, generates secrets,
@@ -610,6 +612,7 @@ editing the vault in another tool.
 | Service fails with `226/NAMESPACE` | an LXC container without `nesting=1` cannot give the unit its sandbox | enable the container's nesting feature in Proxmox and restart it |
 | Service will not start, journal shows an OAuth store error | `Vigil.OAuth.Store` could not open the `dets` files | check ownership and permissions of `VIGIL_STATE_DIR`. A broken OAuth store deliberately takes the whole service down — a service that cannot authenticate anyone is worse than no service |
 | `git pull failed: Host key verification failed` | the service user's `known_hosts` is empty | re-run `setup.sh` (idempotent) |
+| `ssh: connect to host github.com port 22: Connection timed out`, while other hosts reach GitHub | the network blocks outbound 22 for this host, often only after a burst of connections | re-run `setup.sh` with the default `--github-ssh-port 443` |
 | `Permission denied (publickey)` | deploy key not registered, or registered without write access | add the key from `/var/lib/vigil/.ssh/id_ed25519.pub`, enable "Allow write access" |
 | Writes fail with "Missing or expired SkillKey" | key not passed, or older than two rotation windows | call `skill_read` on `vigil-vault-conventions` and use the key it returns — the error case returns one too |
 | `create` fails with "does not match the schema for domain" | the domain has a `naming.pattern` the path does not satisfy | the error contains a valid suggestion; or adjust `naming` in `_domains.yml` |
