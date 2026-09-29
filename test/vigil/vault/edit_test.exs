@@ -241,6 +241,44 @@ defmodule Vigil.Vault.EditTest do
     end
   end
 
+  # docs/design.md, "A retried write is applied once": the line the index
+  # points at is checked before anything is spliced. A file that changed
+  # under the index — a line inserted above the section, a heading renamed —
+  # would otherwise take the splice into whichever section now sits there.
+  describe "a heading line the index no longer matches" do
+    # One line inserted above everything: every section moved down by one.
+    @shifted "# Notes\n\nInserted.\n\n## First\nFirst body.\n\n## Second\nSecond body.\n\n## Third\nThird body.\n"
+
+    test "is refused by every splice, and the refusal asks for a reload" do
+      for edit <- [
+            fn c -> Edit.replace_body(c, second(), "x") end,
+            fn c -> Edit.delete_section(c, second()) end,
+            fn c -> Edit.append(c, {:section, second()}, "x") end
+          ] do
+        assert {:error, message} = edit.(@shifted)
+        assert message =~ "line 6"
+        assert message =~ "\"Second\""
+        assert message =~ "reload"
+      end
+    end
+
+    test "a heading renamed on disk is refused too" do
+      renamed = String.replace(@three_sections, "## Second", "## Later")
+      assert {:error, message} = Edit.delete_section(renamed, second())
+      assert message =~ "reload"
+    end
+
+    test "a heading of another rank with the same text still matches" do
+      demoted = String.replace(@three_sections, "## Second", "### Second")
+      assert {:ok, _} = Edit.delete_section(demoted, second())
+    end
+
+    test "a line past the end of the file is refused" do
+      assert {:error, message} = Edit.delete_section("# Notes\n", third())
+      assert message =~ "reload"
+    end
+  end
+
   # Every test above hands Edit a chunk with hand-written line numbers, which
   # cannot catch the two modules disagreeing about where a body ends. These
   # drive the real parser instead — and what it produces is what Edit splices,

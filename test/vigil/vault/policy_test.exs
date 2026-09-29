@@ -737,6 +737,56 @@ defmodule Vigil.Vault.PolicyTest do
     end
   end
 
+  # docs/design.md, "A retried write is applied once": a section id names a
+  # position, and a delete renumbers the ids below it. `if_match` names the
+  # content the caller read, so a retried delete_section cannot take the
+  # section that was renumbered into the deleted one's id.
+  describe "if_match on the section ops" do
+    alias Vigil.Parser.Chunk
+
+    defp section(heading, body),
+      do: %Chunk{id: "bike/x.md#setup", path: "bike/x.md", heading: heading, body: body}
+
+    test "the hash of the content the id resolves to lets the edit through" do
+      chunk = section("Setup", "First setup.")
+      f = facts(find_chunk: fn _ -> chunk end)
+      hash = Chunk.hash(chunk)
+
+      assert {:ok, _} =
+               Policy.check(:delete_section, %{id: "bike/x.md#setup", if_match: hash}, f)
+
+      assert {:ok, _} =
+               Policy.check(
+                 :replace_section,
+                 %{id: "bike/x.md#setup", content: "text", if_match: hash},
+                 f
+               )
+    end
+
+    test "content renumbered into the id since it was read is refused" do
+      deleted = section("Setup", "First setup.")
+      renumbered = section("Setup", "Second setup.")
+      f = facts(find_chunk: fn _ -> renumbered end)
+
+      for request <- [
+            {:delete_section, %{id: "bike/x.md#setup", if_match: Chunk.hash(deleted)}},
+            {:replace_section,
+             %{id: "bike/x.md#setup", content: "text", if_match: Chunk.hash(deleted)}}
+          ] do
+        {op, params} = request
+        assert {:error, msg} = Policy.check(op, params, f)
+        assert msg =~ "bike/x.md#setup"
+        assert msg =~ "if_match"
+      end
+    end
+
+    test "without if_match the id alone decides, as before" do
+      f = facts(find_chunk: fn _ -> section("Setup", "Second setup.") end)
+      assert {:ok, _} = Policy.check(:delete_section, %{id: "bike/x.md#setup"}, f)
+      assert {:ok, _} = Policy.check(:delete_section, %{id: "bike/x.md#setup", if_match: nil}, f)
+    end
+  end
+
   describe "update_frontmatter enforces the same content rules as create" do
     test "an event type without starts/ends is rejected the same way" do
       f = facts(path_exists?: fn _ -> true end)

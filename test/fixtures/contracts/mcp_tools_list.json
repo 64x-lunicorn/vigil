@@ -150,6 +150,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "type": "string"
+        },
         "skill_key": {
           "description": "Current key from skill_read.",
           "minLength": 1,
@@ -204,6 +208,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "type": "string"
+        },
         "skill_key": {
           "description": "Current key from skill_read.",
           "minLength": 1,
@@ -238,6 +246,14 @@
         "id": {
           "description": "path#heading-slug.",
           "minLength": 1,
+          "type": "string"
+        },
+        "if_match": {
+          "description": "Optional: the section's hash from read. The edit is refused if the id no longer holds that content.",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
           "type": "string"
         },
         "skill_key": {
@@ -280,6 +296,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "type": "string"
+        },
         "skill_key": {
           "description": "Current key from skill_read.",
           "minLength": 1,
@@ -309,6 +329,14 @@
         "id": {
           "description": "path#heading-slug.",
           "minLength": 1,
+          "type": "string"
+        },
+        "if_match": {
+          "description": "Optional: the section's hash from read. The edit is refused if the id no longer holds that content.",
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
           "type": "string"
         },
         "skill_key": {
@@ -343,6 +371,10 @@
         "path": {
           "description": "domain/filename.md.",
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
           "type": "string"
         },
         "skill_key": {
@@ -393,6 +425,10 @@
           "minLength": 1,
           "type": "string"
         },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "type": "string"
+        },
         "skill_key": {
           "description": "Current key from skill_read.",
           "minLength": 1,
@@ -425,6 +461,10 @@
         "from": {
           "description": "Existing path.",
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
           "type": "string"
         },
         "skill_key": {
@@ -550,6 +590,10 @@
         "name": {
           "description": "Skill name, with or without .md.",
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
           "type": "string"
         },
         "skill_key": {

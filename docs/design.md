@@ -505,12 +505,14 @@ exception is `skill_key`, which is a parameter of no operation — it carries th
 SkillKey of the Security model's layer 4, the gate reads it, and it does not
 travel.
 
-**`skill_key` is also the one parameter no row declares.** A tool takes one
-because it writes, and the row already says `write: true` — the same flag the
-gate reads the requirement off. So the parameter is derived from it too,
+**`skill_key` is also one of two parameters no row declares.** A tool takes
+one because it writes, and the row already says `write: true` — the same flag
+the gate reads the requirement off. So the parameter is derived from it too,
 stated once rather than written out identically in nine rows, each free to
 drift in its description or its required-ness while the gate went on requiring
-the same thing. `confirm` is not derivable the same way and stays declared per
+the same thing. The other is `request_id`, optional on every write for the
+same reason, and a parameter of the operation: it travels to the writer, which
+is what remembers it (see "A retried write is applied once"). `confirm` is not derivable the same way and stays declared per
 row: only three of the nine writes take one, and `write: true` does not say
 which. An enum's internal form is the atom of the same name, derived once from
 the values the table already declares rather than restated in each tool's
@@ -867,6 +869,55 @@ note. A rename within one directory is atomic, so a crash mid-write leaves the
 old note and a stray dotfile — never a truncated note. Dotfiles are not notes
 (`Vigil.Vault.Layout` does not list them), so a leftover one is never indexed,
 and vigil stages only the paths it names, so it is never committed either.
+
+---
+
+## A retried write is applied once
+
+A write can outlive the client's call timeout and still complete in the
+writer. The client sees an error and retries. Two writes are not safe to
+repeat: `append` adds its content a second time, and `delete_section` deletes
+whichever section has since been renumbered into the deleted one's id — two
+`## Setup` sections are `#setup` and `#setup-2`, and once the first is gone
+the second is `#setup`. Three guards, one for each way a retry can go wrong.
+
+**A write can name itself.** Every write tool takes an optional `request_id`,
+derived from `write: true` like `skill_key` but, unlike it, handed to the
+writer. `Vigil.Store` remembers, per id, a fingerprint of the write — the
+operation and its parameters, without the instant the response was decided at,
+which a retry has a new one of — and the result it answered. A repeat of the
+same write answers that result again with `already_applied: true` and writes
+nothing: one commit, however often it is sent. The same id with a different
+write is refused rather than answered with a result that is not its own. Only
+a success is remembered, since a refused or failed write changed nothing and
+its corrected retry has to be free to run. Checking and performing happen in
+one call inside the single writer, so a retry that arrives while the first is
+still running queues behind it and finds its id.
+
+**What is remembered is bounded twice** (`Vigil.RequestLog`): at most 1000 ids,
+the oldest going first, and none for longer than an hour. A retry comes within
+minutes of the call it repeats; a client sending a fresh id with every write
+must not grow the writer without limit. The ids live in the writer's memory
+only, so a restart forgets them. The alternative, a file of ids beside the
+vault, was rejected: it is a second store to keep consistent with the
+repository for a window measured in minutes.
+
+**A section edit can name the content it read.** `read` hands out a `hash` for
+every chunk — SHA-256 over its heading and body, never over its id or a line
+number, which are positions — on a chunk read and on every entry of a note's
+table of contents. `replace_section` and `delete_section` take it back as an
+optional `if_match`, and `Vigil.Vault.Policy` refuses the edit when the chunk
+the id resolves to no longer has that content. The retried `delete_section`
+above is refused instead of taking the section that moved into the id. Without
+`if_match` the id alone decides, as before.
+
+**The index is checked against the file before anything is spliced.** A section
+edit splices by the index's line numbers into the file as it is on disk, so
+`Vigil.Vault.Edit` first checks that the line the chunk's `heading_line` names
+still holds the chunk's heading. When the two have drifted apart the edit is
+refused and asks for a `reload`, instead of landing in whichever section sits
+at that line now. Only the heading's text is compared, since the chunk does not
+record its rank.
 
 ---
 

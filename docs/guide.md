@@ -101,9 +101,9 @@ flowchart TB
 Every write is validated, committed and pushed before the client gets an
 answer. If only the push fails, the write still succeeded: the answer says
 `pushed: false` and carries the reason in `push_error`, so the client knows
-without being invited to retry — a retried `append` would append twice. The
-commit goes out with the next successful push, or within 15 minutes through the
-safety-net cron job. A write whose *commit* fails is an error, and the vault is
+without being invited to retry — a retried `append` would append twice, unless
+it carries the same `request_id` as the first call. The commit goes out with
+the next successful push, or within 15 minutes through the safety-net cron job. A write whose *commit* fails is an error, and the vault is
 left as it was: a deleted note is back, a moved note is at its old path, and
 nothing is left staged for the next commit to pick up.
 
@@ -259,18 +259,19 @@ vault has none.
 Seventeen tools. "RW" means the token needs the `vault` scope; a token with
 any other scope, `vault:read` included, is not shown them on `tools/list` and
 gets an explicit error if it calls one anyway. "Key" means the call must carry
-a current `skill_key`.
+a current `skill_key`. Every write also takes an optional `request_id` (see
+"Writing safely").
 
 | Tool | Parameters | Returns | Role | Key |
 |---|---|---|---|:--:|
 | `search` | query, domain?, type?, prefer?, limit? | ranked hits with previews, plus `hub` when unambiguous | RO/RW | – |
-| `read` | id, backlinks? | one chunk, or a note's table of contents plus `links` counters | RO/RW | – |
+| `read` | id, backlinks? | one chunk with its `hash`, or a note's table of contents (each entry with its `hash`) plus `links` counters | RO/RW | – |
 | `links` | id, direction?, depth? | resolved outgoing/incoming references | RO/RW | – |
 | `create` | path, type, content, starts?, ends?, force?, create_dirs? | `{path, pushed, path_normalized_from?}` | RW | ✓ |
 | `append` | path, heading?, content | `{path, pushed}` | RW | ✓ |
-| `replace_section` | id, content | `{path, pushed}` | RW | ✓ |
+| `replace_section` | id, content, if_match? | `{path, pushed}` | RW | ✓ |
 | `rewrite_note` | path, content, confirm? | `{path, pushed}` | RW | ✓ |
-| `delete_section` | id | `{path, pushed}` | RW | ✓ |
+| `delete_section` | id, if_match? | `{path, pushed}` | RW | ✓ |
 | `update_frontmatter` | path, type, starts?, ends? | `{path, pushed}` | RW | ✓ |
 | `delete_note` | path, confirm | `{path, deleted, pushed, broken_backlinks}` | RW | ✓ |
 | `move_note` | from, to, confirm | `{from, to, pushed, broken_backlinks}` | RW | ✓ |
@@ -344,6 +345,18 @@ Beyond that:
 - **`delete_note` reports the damage.** Without `confirm`, the error lists the
   notes that currently link to the target; a confirmed call returns the same
   list as `broken_backlinks`.
+- **A retried write is applied once.** A write can outlive the client's
+  timeout and still complete, and the client retries. Pass a `request_id`,
+  unique per write: a retry with the same one answers the first result with
+  `already_applied: true` and writes nothing, and the same id with a different
+  write is refused. Ids are remembered for an hour, at most the last 1000,
+  and a restart forgets them.
+- **Section edits can name the content they read.** `read` returns a `hash`
+  per section; pass it to `replace_section` or `delete_section` as `if_match`,
+  and the edit is refused if the id now holds other content — as it does
+  after a `delete_section` renumbered `#setup-2` into `#setup`. An edit whose
+  heading is no longer on the line the index says is refused too, and asks
+  for a `reload`.
 - **A failed write never takes the server down.** Permission errors, a full
   disk, a read-only filesystem — all become plain error messages while `read`
   and `search` keep answering.

@@ -20,6 +20,7 @@ defmodule Vigil.Vault.Policy do
   """
 
   alias Vigil.{Index, Markdown, Slug}
+  alias Vigil.Parser.Chunk
   alias Vigil.Vault.{Decision, Facts, Frontmatter, Layout}
 
   @type op ::
@@ -123,6 +124,7 @@ defmodule Vigil.Vault.Policy do
 
     with :ok <- section_id_writable(id, facts),
          {:ok, chunk} <- section_chunk(id, facts, "replaced"),
+         :ok <- if_match(chunk, id, Map.get(request, :if_match)),
          :ok <- replacement_content(Map.fetch!(request, :content)) do
       {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
@@ -132,7 +134,8 @@ defmodule Vigil.Vault.Policy do
     id = Map.fetch!(request, :id)
 
     with :ok <- section_id_writable(id, facts),
-         {:ok, chunk} <- section_chunk(id, facts, "deleted") do
+         {:ok, chunk} <- section_chunk(id, facts, "deleted"),
+         :ok <- if_match(chunk, id, Map.get(request, :if_match)) do
       {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
   end
@@ -261,6 +264,23 @@ defmodule Vigil.Vault.Policy do
       nil -> {:error, "Not found: #{id}"}
       %{heading: nil} -> {:error, "A section without a heading cannot be #{verb}: #{id}"}
       chunk -> {:ok, chunk}
+    end
+  end
+
+  # A section id is a position: deleting a section renumbers the ones below
+  # it, so a retried delete_section would take whatever moved into the id.
+  # `if_match` is the hash of the content the caller read, and content does
+  # not move (docs/design.md, "A retried write is applied once"). Optional —
+  # without it the id alone decides, as it always did.
+  defp if_match(_chunk, _id, nil), do: :ok
+
+  defp if_match(chunk, id, expected) do
+    if Chunk.hash(chunk) == expected do
+      :ok
+    else
+      {:error,
+       "#{id} no longer holds the content if_match names: it changed or was renumbered " <>
+         "since it was read. Read it again before editing it."}
     end
   end
 

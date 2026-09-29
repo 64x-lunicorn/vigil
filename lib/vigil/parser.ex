@@ -75,6 +75,20 @@ defmodule Vigil.Parser do
     @doc "0-based index of the line right after the chunk's body ends."
     @spec body_end_index(t()) :: non_neg_integer()
     def body_end_index(%__MODULE__{body_end_line: line}) when is_integer(line), do: line
+
+    @doc """
+    The chunk's content hash: SHA-256, lowercase hex, over its heading and its
+    body — what `read` hands out as `hash` and what `replace_section` and
+    `delete_section` take back as `if_match` (docs/design.md, "A retried write
+    is applied once").
+
+    Content only, never the id or a line number: those are positions, and a
+    position is exactly what moves under a caller whose write was renumbered.
+    """
+    @spec hash(t()) :: String.t()
+    def hash(%__MODULE__{heading: heading, body: body}) do
+      :crypto.hash(:sha256, "#{heading}\n#{body}") |> Base.encode16(case: :lower)
+    end
   end
 
   defmodule File_ do

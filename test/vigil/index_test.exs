@@ -76,6 +76,20 @@ defmodule Vigil.IndexTest do
 
       refute Map.has_key?(without_backlinks, :backlinks)
     end
+
+    # What `replace_section` and `delete_section` take back as `if_match`
+    # (docs/design.md, "A retried write is applied once"): the SHA-256 of the
+    # heading and the body, so the same content hashes the same wherever it
+    # has been renumbered to.
+    test "carries the hash of its heading and body", %{index: index} do
+      {:ok, result} = Index.read(index, %{id: "bike/via-carolina.md#fueling", backlinks: false})
+
+      expected =
+        :crypto.hash(:sha256, "Fueling\nSteady baseline intake across the day.")
+        |> Base.encode16(case: :lower)
+
+      assert result.hash == expected
+    end
   end
 
   describe "read/2 — note by path" do
@@ -85,6 +99,9 @@ defmodule Vigil.IndexTest do
       assert result.title == "Via Carolina"
       refute Map.has_key?(result, :body)
       assert Enum.map(result.toc, & &1.heading) == ["Fueling", "Second Half", "Gear"]
+
+      {:ok, fueling} = Index.read(index, %{id: "bike/via-carolina.md#fueling", backlinks: false})
+      assert hd(result.toc).hash == fueling.hash
 
       # via-carolina.md links out to terra-speed.md, and is itself linked to
       # from training/note-without-anything.md — see fixture vault.

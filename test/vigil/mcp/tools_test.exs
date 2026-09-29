@@ -104,6 +104,33 @@ defmodule Vigil.MCP.ToolsTest do
       end
     end
 
+    # docs/design.md, "A retried write is applied once". Derived from
+    # `write: true` like skill_key, and optional: a caller that sends no id
+    # writes exactly as it always did.
+    test "every write tool publishes an optional request_id, and no read tool publishes one" do
+      for %{name: name, inputSchema: schema} <- Tools.definitions() do
+        if name in @write_tools do
+          assert %{type: "string", description: description} = schema.properties.request_id
+          assert description =~ "already_applied"
+          refute "request_id" in schema.required
+        else
+          refute Map.has_key?(schema.properties, :request_id)
+        end
+      end
+    end
+
+    test "the two section edits take an optional if_match, and nothing else does" do
+      for %{name: name, inputSchema: schema} <- Tools.definitions() do
+        if name in ~w(replace_section delete_section) do
+          assert %{type: "string", description: description} = schema.properties.if_match
+          assert description =~ "hash"
+          refute "if_match" in schema.required
+        else
+          refute Map.has_key?(schema.properties, :if_match)
+        end
+      end
+    end
+
     test "parameterless tools declare no required key" do
       for name <- ~w(lint current reload skill_list) do
         [tool] = Enum.filter(Tools.definitions(), &(&1.name == name))

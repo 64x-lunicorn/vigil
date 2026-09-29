@@ -26,6 +26,7 @@ defmodule Vigil.Index do
   """
 
   alias Vigil.{Events, LinkIndex, Parser, Slug}
+  alias Vigil.Parser.Chunk
   alias Vigil.Vault.Rules
 
   @stale_decision_days 180
@@ -502,6 +503,7 @@ defmodule Vigil.Index do
       starts: iso(chunk.starts),
       ends: iso(chunk.ends),
       body: chunk.body,
+      hash: Chunk.hash(chunk),
       created_at: iso(chunk.created_at),
       updated_at: iso(chunk.updated_at)
     }
@@ -519,7 +521,12 @@ defmodule Vigil.Index do
       |> Enum.map(&Map.get(index.chunks, &1))
       |> Enum.filter(&(&1 && &1.heading))
       |> Enum.map(fn chunk ->
-        %{id: chunk.id, heading: chunk.heading, heading_path: chunk.heading_path}
+        %{
+          id: chunk.id,
+          heading: chunk.heading,
+          heading_path: chunk.heading_path,
+          hash: Chunk.hash(chunk)
+        }
       end)
 
     base = %{

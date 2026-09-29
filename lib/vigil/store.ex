@@ -10,6 +10,7 @@ defmodule Vigil.Store do
     Index,
     Parser,
     Git,
+    RequestLog,
     Skills
   }
 
@@ -207,7 +208,8 @@ defmodule Vigil.Store do
       git_remote: git_remote,
       git: git,
       domains: %{},
-      index: %Index{}
+      index: %Index{},
+      requests: RequestLog.new()
     }
 
     {state, pull_result} = do_full_load(state)
@@ -248,7 +250,7 @@ defmodule Vigil.Store do
   end
 
   def handle_call({op, params}, _from, state) when op in @write_ops do
-    {result, new_state} = write(op, params, state)
+    {result, new_state} = once(op, params, state, &write(op, &1, &2))
     {:reply, result, new_state}
   end
 
@@ -258,7 +260,12 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:skill_write, params}, _from, state) do
-    {:reply, do_skill_write(params.name, params.content, state), state}
+    {result, new_state} =
+      once(:skill_write, params, state, fn params, state ->
+        {do_skill_write(params.name, params.content, state), state}
+      end)
+
+    {:reply, result, new_state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
@@ -267,6 +274,54 @@ defmodule Vigil.Store do
 
   defp reload_result(:ok), do: %{reloaded: true}
   defp reload_result({:error, reason}), do: %{reloaded: true, pull_failed: reason}
+
+  ## A retried write is applied once
+  #
+  # A write can outlive the client's call timeout and still complete here; the
+  # client sees an error and retries (docs/design.md, "A retried write is
+  # applied once"). A write that names itself with a `request_id` is performed
+  # once: a repeat answers the first write's result with `already_applied:
+  # true` and writes nothing. The same id for a different write is refused
+  # rather than answered with a result that is not its own.
+  #
+  # `request_id` is popped here, like `now`, so what the write path is handed
+  # is the request the operation declares. The fingerprint leaves `now` out
+  # too: a retry's envelope is decided at its own instant, and that does not
+  # make it another write. Only a success is remembered — a refused or failed
+  # write changed nothing, and its corrected retry must be free to run.
+  #
+  # Checking and performing happen in one `handle_call`, inside the single
+  # writer, so a retry that arrives while the first call is still running
+  # queues behind it and finds its id.
+  defp once(op, params, state, perform) do
+    case Map.pop(params, :request_id) do
+      {nil, params} ->
+        perform.(params, state)
+
+      {id, params} ->
+        fingerprint = {op, Map.delete(params, :now)}
+        now = System.monotonic_time(:millisecond)
+
+        case RequestLog.lookup(state.requests, id, fingerprint, now) do
+          {:applied, {:ok, result}} ->
+            {{:ok, Map.put(result, :already_applied, true)}, state}
+
+          :conflict ->
+            {{:error,
+              "request_id #{id} was already used for a different write. " <>
+                "Use a new request_id for every distinct write."}, state}
+
+          :unknown ->
+            {result, state} = perform.(params, state)
+            {result, remember(state, id, fingerprint, result, now)}
+        end
+    end
+  end
+
+  defp remember(state, id, fingerprint, {:ok, _} = result, now),
+    do: %{state | requests: RequestLog.remember(state.requests, id, fingerprint, result, now)}
+
+  defp remember(state, _id, _fingerprint, _result, _now), do: state
 
   ## Loading
 

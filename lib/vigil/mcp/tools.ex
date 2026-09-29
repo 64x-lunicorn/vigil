@@ -27,10 +27,13 @@ defmodule Vigil.MCP.Tools do
   defaulted at that point — by the time the call is built, validation has run
   and every declared parameter has a value.
 
-  `skill_key` is also the one parameter no row declares. A write takes it
+  `skill_key` is also one of two parameters no row declares. A write takes it
   because it is a write, and the row already says `write: true` — the gate
   below reads the requirement off that flag, so the parameter is derived from
   it as well rather than written out identically in every write row. The
+  other is `request_id`, optional on every write for the same reason, which
+  unlike `skill_key` travels with the call: the writer is what remembers it
+  (`docs/design.md`, "A retried write is applied once"). The
   `confirm` parameter is not derivable the same way and stays declared per
   row: only three of the nine writes take one, and `write: true` does not
   say which.
@@ -76,6 +79,25 @@ defmodule Vigil.MCP.Tools do
     type: :string,
     required: true,
     description: "Current key from skill_read."
+  }
+
+  # Derived from `write:` the same way, for the same reason: every write takes
+  # it and no read does (docs/design.md, "A retried write is applied once").
+  # Unlike `skill_key` it is a parameter of the operation and travels with the
+  # call — the writer is what remembers it.
+  @request_id_param %{
+    name: "request_id",
+    type: :string,
+    description:
+      "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again."
+  }
+
+  # Declared on the two rows that edit a section by id.
+  @if_match_param %{
+    name: "if_match",
+    type: :string,
+    description:
+      "Optional: the section's hash from read. The edit is refused if the id no longer holds that content."
   }
 
   @type_enum ["reference", "decision", "event"]
@@ -259,7 +281,8 @@ defmodule Vigil.MCP.Tools do
           type: :string,
           required: true,
           description: "New body, without headings of its own."
-        }
+        },
+        @if_match_param
       ]
     },
     %{
@@ -297,7 +320,8 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "id", type: :string, required: true, description: "path#heading-slug."}
+        %{name: "id", type: :string, required: true, description: "path#heading-slug."},
+        @if_match_param
       ]
     },
     %{
@@ -493,11 +517,12 @@ defmodule Vigil.MCP.Tools do
     }
   end
 
-  # A row's parameters, plus the one its `write:` flag implies. Last, where it
-  # was written by hand in every write row — the published schema lists its
-  # required parameters in declaration order, and this is a change to how the
-  # table is written, not to what `tools/list` serves.
-  defp param_specs(%{write: true} = tool), do: tool.params ++ [@skill_key_param]
+  # A row's parameters, plus the two its `write:` flag implies. `skill_key`
+  # last, where it was written by hand in every write row — the published
+  # schema lists its required parameters in declaration order.
+  defp param_specs(%{write: true} = tool),
+    do: tool.params ++ [@request_id_param, @skill_key_param]
+
   defp param_specs(%{write: false} = tool), do: tool.params
 
   defp input_schema(params) do

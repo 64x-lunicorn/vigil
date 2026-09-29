@@ -1396,4 +1396,146 @@ defmodule Vigil.StoreTest do
       assert search(%{query: "INJECTEDWORD"}) == []
     end
   end
+
+  # docs/design.md, "A retried write is applied once". A write can outlive the
+  # client's call timeout and still complete; the client retries. Three
+  # guards, one per way the retry can go wrong.
+  describe "a retried write" do
+    defp commits(log), do: Enum.filter(CommitLog.calls(log), &match?({:commit, _, _}, &1))
+
+    defp recorded_store(vault) do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault)
+      start_store(vault, git: git)
+      log
+    end
+
+    test "with the same request_id is committed once, and the retry says so", %{vault: vault} do
+      log = recorded_store(vault)
+      request = %{path: "bike/terra-speed.md", content: "Retried once.", request_id: "r-1"}
+
+      assert {:ok, first} = Store.call(@store, :append, request)
+      refute Map.has_key?(first, :already_applied)
+
+      # A retry resolves its own instant: the envelope of the second response
+      # is not the first one's, and that must not make it a different write.
+      retry = Map.put(request, :now, DateTime.add(DateTime.utc_now(), 90))
+      assert {:ok, second} = Store.call(@store, :append, retry)
+
+      assert second == Map.put(first, :already_applied, true)
+      assert length(commits(log)) == 1
+
+      content = File.read!(Path.join(vault, "bike/terra-speed.md"))
+      assert length(String.split(content, "Retried once.")) == 2
+    end
+
+    test "the same request_id for a different write is refused, not answered", %{vault: vault} do
+      log = recorded_store(vault)
+
+      assert {:ok, _} =
+               Store.call(@store, :append, %{
+                 path: "bike/terra-speed.md",
+                 content: "First.",
+                 request_id: "r-2"
+               })
+
+      assert {:error, msg} =
+               Store.call(@store, :append, %{
+                 path: "bike/terra-speed.md",
+                 content: "Second.",
+                 request_id: "r-2"
+               })
+
+      assert msg =~ "r-2"
+      assert length(commits(log)) == 1
+      refute File.read!(Path.join(vault, "bike/terra-speed.md")) =~ "Second."
+    end
+
+    test "a refused write is not remembered: the corrected retry is applied" do
+      request = %{path: "bike/terra-speed.md", content: "## Split\ntext", request_id: "r-3"}
+
+      assert {:error, _} =
+               Store.call(@store, :append, Map.put(request, :heading, "Dimensions"))
+
+      assert {:ok, result} = Store.call(@store, :append, request)
+      refute Map.has_key?(result, :already_applied)
+    end
+
+    test "without a request_id every call is a write of its own", %{vault: vault} do
+      log = recorded_store(vault)
+      request = %{path: "bike/terra-speed.md", content: "Twice."}
+
+      assert {:ok, _} = Store.call(@store, :append, request)
+      assert {:ok, _} = Store.call(@store, :append, request)
+      assert length(commits(log)) == 2
+    end
+
+    test "skill_write takes a request_id too", %{vault: vault} do
+      log = recorded_store(vault)
+
+      request = %{
+        name: "retried",
+        content: "---\nname: retried\ndescription: A skill.\n---\n# Retried\n",
+        request_id: "r-4"
+      }
+
+      assert {:ok, first} = Store.call(@store, :skill_write, request)
+      assert {:ok, second} = Store.call(@store, :skill_write, request)
+      assert second == Map.put(first, :already_applied, true)
+      assert length(commits(log)) == 1
+    end
+
+    test "delete_section with the if_match of a section since renumbered is refused", %{
+      vault: vault
+    } do
+      assert {:ok, _} =
+               Store.call(@store, :create, %{
+                 path: "bike/setups.md",
+                 type: "reference",
+                 content: "# Setups\n\n## Setup\nRoad setup.\n\n## Setup\nGravel setup.\n",
+                 force: true
+               })
+
+      {:ok, read} = Store.call(@store, :read, %{id: "bike/setups.md#setup", backlinks: false})
+      delete = %{id: "bike/setups.md#setup", if_match: read.hash}
+
+      assert {:ok, _} = Store.call(@store, :delete_section, delete)
+
+      # The second ## Setup is bike/setups.md#setup now. The retry names the
+      # content that was deleted, and is refused rather than taking it.
+      assert {:error, msg} = Store.call(@store, :delete_section, delete)
+      assert msg =~ "if_match"
+      assert File.read!(Path.join(vault, "bike/setups.md")) =~ "Gravel setup."
+    end
+
+    test "a heading line that no longer matches the index is refused", %{vault: vault} do
+      log = recorded_store(vault)
+      path = Path.join(vault, "bike/via-carolina.md")
+
+      # Changed behind the index's back: every heading moved down one line.
+      drifted =
+        String.replace(File.read!(path), "# Via Carolina\n", "# Via Carolina\nInserted.\n")
+
+      File.write!(path, drifted)
+
+      assert {:error, msg} =
+               Store.call(@store, :replace_section, %{
+                 id: "bike/via-carolina.md#gear",
+                 content: "x"
+               })
+
+      assert msg =~ "reload"
+      assert File.read!(path) == drifted
+      assert commits(log) == []
+
+      # After the reload the index matches the file again, and the edit lands.
+      Store.call(@store, :reload, %{})
+
+      assert {:ok, _} =
+               Store.call(@store, :replace_section, %{
+                 id: "bike/via-carolina.md#gear",
+                 content: "x"
+               })
+    end
+  end
 end
