@@ -1021,7 +1021,8 @@ defmodule Vigil.StoreTest do
                })
 
       calls = CommitLog.calls(log)
-      assert Enum.count(calls, &(&1 == {:pull, "github", "master"})) == 2
+      # Boot, the reload, and one update before each of the two writes.
+      assert Enum.count(calls, &(&1 == {:fetch, "github", "master"})) == 4
       assert Enum.count(calls, &(&1 == {:push, "github", "master"})) == 2
     end
   end
@@ -1036,9 +1037,52 @@ defmodule Vigil.StoreTest do
     defp recording_store(vault, opts \\ []) do
       :ok = stop_supervised(Store)
       {git, log} = CommitLog.recording(vault, remote: "origin")
-      git = Keyword.get(opts, :wrap, & &1).(git)
+
+      git =
+        case Keyword.get(opts, :wrap, & &1) do
+          wrap when is_function(wrap, 2) -> wrap.(git, log)
+          wrap -> wrap.(git)
+        end
+
       start_store(vault, git: git)
       log
+    end
+
+    # A push that fails the first `n` times it is asked, as a remote briefly
+    # out of reach does, and then reaches the commit log's remote.
+    defp failing_first_pushes(git, n) do
+      asked = :counters.new(1, [])
+
+      %{
+        git
+        | push: fn vault, remote, branch ->
+            :counters.add(asked, 1, 1)
+
+            if :counters.get(asked, 1) <= n,
+              do: {:error, "unreachable"},
+              else: git.push.(vault, remote, branch)
+          end
+      }
+    end
+
+    # A human who pushes between vigil's update and vigil's push, the first
+    # `n` times vigil pushes: each of those pushes is refused as not a
+    # fast-forward, as git refuses it.
+    defp racing_pushes(git, log, n) do
+      asked = :counters.new(1, [])
+
+      %{
+        git
+        | push: fn vault, remote, branch ->
+            :counters.add(asked, 1, 1)
+            round = :counters.get(asked, 1)
+
+            if n == :infinity or round <= n,
+              do: CommitLog.push_from_elsewhere(log, "bike/raced-#{round}.md", @human_note)
+
+            git.push.(vault, remote, branch)
+          end
+      }
     end
 
     # `force:` because what is created here is beside the point, and a note
@@ -1065,7 +1109,7 @@ defmodule Vigil.StoreTest do
                Store.call(@store, :read, %{id: "bike/from-human.md", backlinks: false})
 
       assert [
-               {:pull, "origin", "main"},
+               {:fetch, "origin", "main"},
                {:fetch, "origin", "main"},
                {:fast_forward, "origin", "main"},
                {:add, ["bike/after-human.md"]},
@@ -1097,26 +1141,164 @@ defmodule Vigil.StoreTest do
       refute Enum.any?(calls, &match?({:fast_forward, _, _}, &1))
     end
 
+    # docs/design.md, principle 2: vigil's own unpushed commits are rebased
+    # onto what the human pushed, never merged, and the next push takes them
+    # out together with the write's own.
     @tag :capture_log
-    test "with an unpushed commit, nothing is fetched and the write behaves as before",
+    test "with an unpushed commit, the write rebases it onto what a human pushed, and its push takes both out",
          %{vault: vault} do
-      log =
-        recording_store(vault,
-          wrap: fn git -> %{git | push: fn _, _, _ -> {:error, "unreachable"} end} end
-        )
+      log = recording_store(vault, wrap: &failing_first_pushes(&1, 1))
 
       assert {:ok, %{pushed: false}} = create_note("bike/first.md")
       before = length(CommitLog.calls(log))
       CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
 
-      assert {:ok, %{pushed: false, push_error: msg}} = create_note("bike/second.md")
-      assert msg =~ "unreachable"
+      assert {:ok, %{pushed: true} = result} = create_note("bike/second.md")
+      refute Map.has_key?(result, :push_error)
 
-      refute File.exists?(Path.join(vault, "bike/from-human.md"))
-      assert File.exists?(Path.join(vault, "bike/second.md"))
+      assert File.read!(Path.join(vault, "bike/from-human.md")) == @human_note
+      assert File.exists?(Path.join(vault, "bike/first.md"))
 
-      calls = log |> CommitLog.calls() |> Enum.drop(before)
-      assert [{:add, ["bike/second.md"]}, {:commit, ["bike/second.md"], _message}] = calls
+      assert {:ok, %{title: "From the human"}} =
+               Store.call(@store, :read, %{id: "bike/from-human.md", backlinks: false})
+
+      assert [
+               {:fetch, "origin", "main"},
+               {:rebase, "origin", "main"},
+               {:add, ["bike/second.md"]},
+               {:commit, ["bike/second.md"], _message},
+               {:push, "origin", "main"}
+             ] = log |> CommitLog.calls() |> Enum.drop(before)
+
+      assert %{ahead: 0, behind: 0} = Store.status(@store)
+    end
+
+    test "a push refused because the remote moved in the meantime is rebased and pushed again",
+         %{vault: vault} do
+      log = recording_store(vault, wrap: &racing_pushes(&1, &2, 1))
+
+      assert {:ok, %{pushed: true} = result} = create_note("bike/raced.md")
+      refute Map.has_key?(result, :push_error)
+
+      calls = CommitLog.calls(log)
+      assert Enum.count(calls, &match?({:push, _, _}, &1)) == 2
+      assert {:rebase, "origin", "main"} in calls
+
+      # What the rebase brought in is in the index, not only on disk.
+      assert {:ok, %{title: "From the human"}} =
+               Store.call(@store, :read, %{id: "bike/raced-1.md", backlinks: false})
+
+      assert %{ahead: 0, behind: 0, last_push: %{pushed: true}} = Store.status(@store)
+    end
+
+    @tag :capture_log
+    test "a push the remote keeps refusing is retried a bounded number of times, and says so",
+         %{vault: vault} do
+      log = recording_store(vault, wrap: &racing_pushes(&1, &2, :infinity))
+
+      assert {:ok, %{pushed: false, push_error: msg}} = create_note("bike/raced.md")
+      assert msg =~ "Change saved and committed locally, but push failed"
+      assert msg =~ "pushed again 3 times"
+
+      calls = CommitLog.calls(log)
+      assert Enum.count(calls, &match?({:push, _, _}, &1)) == 4
+      assert %{last_push: %{pushed: false, error: ^msg}} = Store.status(@store)
+    end
+
+    # A real conflict is a human's to resolve: the rebase is aborted, vigil's
+    # commit stays local, and what the human pushed stays on the remote,
+    # untouched — the response says which path is in the way.
+    @tag :capture_log
+    test "a rebase that conflicts is aborted, keeps the local commit and names the path",
+         %{vault: vault} do
+      log = recording_store(vault, wrap: &failing_first_pushes(&1, 1))
+      path = "bike/via-carolina.md"
+
+      assert {:ok, %{pushed: false}} =
+               Store.call(@store, :replace_section, %{id: "#{path}#gear", content: "Ours."})
+
+      ours = File.read!(Path.join(vault, path))
+      CommitLog.push_from_elsewhere(log, path, @human_note)
+
+      assert {:ok, %{pushed: false, push_error: msg}} = create_note("bike/other.md")
+      assert msg =~ "conflicts in #{path}"
+      assert msg =~ "a human has to resolve"
+
+      assert File.read!(Path.join(vault, path)) == ours
+      assert Enum.count(CommitLog.calls(log), &(&1 == :abort_rebase)) == 2
+
+      assert %{ahead: 2, behind: 1, last_push: %{pushed: false, error: ^msg}} =
+               Store.status(@store)
+    end
+
+    test "an edit whose section the update took away is refused and asks for a fresh read",
+         %{vault: vault} do
+      log = recording_store(vault)
+      path = "bike/via-carolina.md"
+      theirs = "---\ntype: reference\n---\n# Via Carolina\n\n## Wheels\nRenamed.\n"
+      CommitLog.push_from_elsewhere(log, path, theirs)
+
+      assert {:error, msg} =
+               Store.call(@store, :replace_section, %{id: "#{path}#gear", content: "x"})
+
+      assert msg =~ "#{path}#gear no longer resolves"
+      assert msg =~ "Read it again"
+      assert File.read!(Path.join(vault, path)) == theirs
+    end
+
+    # docs/design.md, Security model item 3: the load adopts what was pushed
+    # elsewhere the way a write does, and vigil's unpushed commits survive it.
+    @tag :capture_log
+    test "reload with an unpushed commit and a moved remote ends with both histories",
+         %{vault: vault} do
+      log = recording_store(vault, wrap: &failing_first_pushes(&1, 1))
+      {:ok, %{pushed: false}} = create_note("bike/unpushed.md")
+      CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
+
+      assert %{reloaded: true} = result = Store.call(@store, :reload, %{})
+      refute Map.has_key?(result, :pull_failed)
+
+      assert File.exists?(Path.join(vault, "bike/unpushed.md"))
+
+      assert {:ok, %{title: "From the human"}} =
+               Store.call(@store, :read, %{id: "bike/from-human.md", backlinks: false})
+
+      assert %{ahead: 1, behind: 0} = Store.status(@store)
+    end
+
+    @tag :capture_log
+    test "boot with an unpushed commit and a moved remote ends with both histories",
+         %{vault: vault} do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+      start_store(vault, git: failing_first_pushes(git, 1))
+      {:ok, %{pushed: false}} = create_note("bike/unpushed.md")
+      :ok = stop_supervised(Store)
+      CommitLog.push_from_elsewhere(log, "bike/from-human.md", @human_note)
+
+      start_store(vault, git: git)
+
+      assert {:ok, %{title: "Note"}} =
+               Store.call(@store, :read, %{id: "bike/unpushed.md", backlinks: false})
+
+      assert {:ok, %{title: "From the human"}} =
+               Store.call(@store, :read, %{id: "bike/from-human.md", backlinks: false})
+
+      assert %{ahead: 1, behind: 0} = Store.status(@store)
+    end
+
+    @tag :capture_log
+    test "reload with a conflicting unpushed commit reports the path and keeps the commit",
+         %{vault: vault} do
+      log = recording_store(vault, wrap: &failing_first_pushes(&1, 1))
+      path = "bike/via-carolina.md"
+      {:ok, _} = Store.call(@store, :replace_section, %{id: "#{path}#gear", content: "Ours."})
+      ours = File.read!(Path.join(vault, path))
+      CommitLog.push_from_elsewhere(log, path, @human_note)
+
+      assert %{reloaded: true, pull_failed: reason} = Store.call(@store, :reload, %{})
+      assert reason =~ "conflicts in #{path}"
+      assert File.read!(Path.join(vault, path)) == ours
     end
 
     @tag :capture_log
@@ -1225,6 +1407,8 @@ defmodule Vigil.StoreTest do
   # driven through it here: what the adapter was asked to do, in what order, and
   # where the index stood by the time the last of those calls came in.
   describe "the order a plan is executed in" do
+    # The fetches are the update before the write and the one after its failed
+    # push (docs/design.md, "The server stays in step with the remote").
     test "perform, commit, reparse, push", %{vault: vault} do
       :ok = stop_supervised(Store)
       test_process = self()
@@ -1256,10 +1440,12 @@ defmodule Vigil.StoreTest do
       assert content =~ "Ordered"
 
       assert [
-               {:pull, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"},
                {:add, ["bike/ordered.md"]},
                {:commit, ["bike/ordered.md"], "create: bike/ordered.md — # Ordered"},
-               {:push, "nonexistent-remote", "main"}
+               {:push, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"}
              ] = CommitLog.calls(log)
 
       # The push failed and the note is in the index regardless, which it can
@@ -1302,10 +1488,12 @@ defmodule Vigil.StoreTest do
       assert msg =~ "Deletion committed locally, but push failed"
 
       assert [
-               {:pull, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"},
                {:remove, ["bike/via-carolina.md"]},
                {:commit, ["bike/via-carolina.md"], "delete: bike/via-carolina.md"},
-               {:push, "nonexistent-remote", "main"}
+               {:push, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"}
              ] = CommitLog.calls(log)
 
       assert_received {:events_at_push, []}
@@ -1325,11 +1513,13 @@ defmodule Vigil.StoreTest do
       assert msg =~ "Move committed locally, but push failed"
 
       assert [
-               {:pull, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"},
                {:move, "bike/via-carolina.md", "bike/via-carolina-2026.md"},
                {:commit, ["bike/via-carolina.md", "bike/via-carolina-2026.md"],
                 "move: bike/via-carolina.md -> bike/via-carolina-2026.md"},
-               {:push, "nonexistent-remote", "main"}
+               {:push, "nonexistent-remote", "main"},
+               {:fetch, "nonexistent-remote", "main"}
              ] = CommitLog.calls(log)
 
       assert_received {:events_at_push, [%{path: "bike/via-carolina-2026.md"}]}

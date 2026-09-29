@@ -123,21 +123,17 @@ defmodule Vigil.GitTest do
         assert %{last_author: "Daniel"} = git.log_metadata.(vault)["bike/terra-speed.md"]
       end
 
-      test "pull fast-forwards from the vault's remote", %{git: git, vault: vault} do
-        assert :ok = git.pull.(vault, "origin", "main")
-      end
-
-      test "pull against a nonexistent remote returns an error", %{git: git, vault: vault} do
-        assert {:error, _reason} = git.pull.(vault, "nonexistent-remote", "main")
+      test "fetch from the vault's remote succeeds", %{git: git, vault: vault} do
+        assert :ok = git.fetch.(vault, "origin", "main")
       end
 
       @tag :capture_log
-      test "push and pull against a branch the vault does not have return an error", %{
+      test "push and fetch against a branch the vault does not have return an error", %{
         git: git,
         vault: vault
       } do
         assert {:error, _reason} = git.push.(vault, "origin", "no-such-branch")
-        assert {:error, _reason} = git.pull.(vault, "origin", "no-such-branch")
+        assert {:error, _reason} = git.fetch.(vault, "origin", "no-such-branch")
       end
 
       test "tracking reports the checked-out branch, the remotes and each upstream", %{
@@ -241,6 +237,65 @@ defmodule Vigil.GitTest do
         refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
       end
 
+      # docs/design.md, principle 2: vigil's own unpushed commits are
+      # rebased onto what another clone pushed — never merged — and the push
+      # that follows is a fast-forward.
+      test "a rebase puts the vault's commit on top of one pushed elsewhere, and the push succeeds",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+
+        assert File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        assert File.exists?(Path.join(vault, path))
+        assert {:ok, %{ahead: 1, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert :ok = git.push.(vault, "origin", "main")
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+
+        meta = git.log_metadata.(vault)
+        assert %{last_author: "vigil"} = meta[path]
+        assert %{last_author: "x"} = meta["bike/from-elsewhere.md"]
+      end
+
+      test "a rebase with nothing fetched leaves the vault's commit as it was", %{
+        git: git,
+        vault: vault
+      } do
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+        assert {:ok, %{ahead: 1, behind: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      # A real conflict is not vigil's to resolve: the rebase stops, names the
+      # path, and aborting it puts the vault back exactly as it was — its
+      # commit local, the other side's still only on the remote.
+      test "a rebase over the same note stops at a conflict, and aborting it keeps the vault's commit",
+           %{git: git, vault: vault} = ctx do
+        path = "bike/terra-speed.md"
+        push_from_elsewhere(ctx, path, "---\ntype: reference\n---\n# Theirs\nfrom elsewhere\n")
+        File.write!(Path.join(vault, path), "---\ntype: reference\n---\n# Ours\nfrom vigil\n")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:conflict, [^path]} = git.rebase.(vault, "origin", "main")
+        assert :ok = git.abort_rebase.(vault)
+
+        assert File.read!(Path.join(vault, path)) =~ "from vigil"
+        assert {:ok, %{ahead: 1, behind: 1}} = git.divergence.(vault, "origin", "main")
+        assert %{last_author: "vigil"} = git.log_metadata.(vault)[path]
+        assert {:error, _reason} = git.push.(vault, "origin", "main")
+      end
+
+      test "aborting when no rebase is in progress is an error", %{git: git, vault: vault} do
+        assert {:error, _reason} = git.abort_rebase.(vault)
+      end
+
       @tag :capture_log
       test "fetch and divergence against a remote the vault does not have are errors", %{
         git: git,
@@ -274,15 +329,19 @@ defmodule Vigil.GitTest do
 
   # A commit another clone pushed, authored `x`: through a real second clone
   # for the repository, recorded as such for the commit log.
-  defp push_from_elsewhere(%{log: log}, path) do
-    CommitLog.push_from_elsewhere(log, path, "---\ntype: reference\n---\n# Elsewhere\n", "x")
+  @elsewhere "---\ntype: reference\n---\n# Elsewhere\n"
+
+  defp push_from_elsewhere(ctx, path, content \\ @elsewhere)
+
+  defp push_from_elsewhere(%{log: log}, path, content) do
+    CommitLog.push_from_elsewhere(log, path, content, "x")
   end
 
-  defp push_from_elsewhere(%{remote: remote, vault: vault}, path) do
+  defp push_from_elsewhere(%{remote: remote, vault: vault}, path, content) do
     other = vault <> "_elsewhere"
     {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
     File.mkdir_p!(Path.dirname(Path.join(other, path)))
-    File.write!(Path.join(other, path), "---\ntype: reference\n---\n# Elsewhere\n")
+    File.write!(Path.join(other, path), content)
     {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
 
     {_out, 0} =
@@ -453,8 +512,8 @@ defmodule Vigil.GitTest do
   end
 
   # What only a repository can be asked. The identity a commit carries down to
-  # its email address, the ambient configuration it has to survive, and a pull
-  # that actually brings something back.
+  # its email address, the ambient configuration it has to survive, and a rebase
+  # onto the kind of history only a real clone makes.
   describe "the repository alone" do
     setup :real_git
 
@@ -565,39 +624,62 @@ defmodule Vigil.GitTest do
       assert String.trim(out) == ""
     end
 
-    test "pull/3 brings a commit made elsewhere into the vault", %{
+    # What Obsidian Git's "merge" sync puts on the remote: a merge commit.
+    # vigil does not make one, and rebases onto one like onto any other.
+    test "a rebase onto a merge commit pushed elsewhere", %{
       git: git,
       vault: vault,
       remote: remote
     } do
-      other = vault <> "_other_clone"
+      other = vault <> "_merging_clone"
       {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
-      File.write!(Path.join(other, "note.md"), "---\ntype: reference\n---\n# Note\ntext\n")
+      as_x = ~w(-c user.name=x -c user.email=x@x -c commit.gpgsign=false)
+      {_out, 0} = System.cmd("git", ["checkout", "-q", "-b", "side"], cd: other)
+      File.write!(Path.join(other, "side.md"), "# Side\n")
       {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+      {_out, 0} = System.cmd("git", as_x ++ ~w(commit -q -m side), cd: other)
+      {_out, 0} = System.cmd("git", ["checkout", "-q", "main"], cd: other)
+      File.write!(Path.join(other, "main.md"), "# Main\n")
+      {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+      {_out, 0} = System.cmd("git", as_x ++ ~w(commit -q -m main), cd: other)
+      {_out, 0} = System.cmd("git", as_x ++ ~w(merge -q --no-ff --no-edit side), cd: other)
+      {_out, 0} = System.cmd("git", ["push", "-q", "origin", "main"], cd: other)
+      File.rm_rf!(other)
 
-      {_out, 0} =
-        System.cmd(
-          "git",
-          [
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "external"
-          ],
-          cd: other
-        )
+      path = note(vault, "bike/mine.md", "Mine")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
 
-      {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
-      File.rm_rf(other)
+      assert :ok = git.rebase.(vault, "origin", "main")
+      assert :ok = git.push.(vault, "origin", "main")
 
-      assert :ok = git.pull.(vault, "origin", "main")
-      assert File.exists?(Path.join(vault, "note.md"))
+      for file <- ["side.md", "main.md", path], do: assert(File.exists?(Path.join(vault, file)))
+      {parents, 0} = System.cmd("git", ["log", "-1", "--format=%p", "HEAD~1"], cd: vault)
+      assert parents |> String.split() |> length() == 2
+    end
+
+    # A hook in the vault's clone is not vigil's to satisfy, and a rebase
+    # rewrites vigil's commits as vigil, unsigned, whatever the ambient
+    # configuration says.
+    test "a rebase runs no hook and rewrites the vault's commit as vigil, unsigned", %{
+      git: git,
+      vault: vault,
+      remote: remote
+    } do
+      hook = Path.join(vault, ".git/hooks/pre-rebase")
+      File.write!(hook, "#!/bin/sh\necho refused by hook\nexit 1\n")
+      File.chmod!(hook, 0o755)
+      {_, 0} = System.cmd("git", ["config", "commit.gpgsign", "true"], cd: vault)
+      {_, 0} = System.cmd("git", ["config", "gpg.program", "/bin/false"], cd: vault)
+      push_from_elsewhere(%{remote: remote, vault: vault}, "bike/from-elsewhere.md")
+      path = note(vault, "bike/mine.md", "Mine")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
+
+      assert :ok = git.rebase.(vault, "origin", "main")
+
+      {out, 0} = System.cmd("git", ["log", "-1", "--format=%an <%ae>|%cn <%ce>"], cd: vault)
+      assert String.trim(out) == "vigil <vigil@local>|vigil <vigil@local>"
     end
   end
 
@@ -620,7 +702,8 @@ defmodule Vigil.GitTest do
       {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
       assert :ok = git.push.(vault, "origin", "master")
-      assert :ok = git.pull.(vault, "origin", "master")
+      assert :ok = git.fetch.(vault, "origin", "master")
+      assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "master")
 
       {local, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
       {pushed, 0} = System.cmd("git", ["--git-dir", remote, "rev-parse", "master"])

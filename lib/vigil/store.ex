@@ -219,8 +219,11 @@ defmodule Vigil.Store do
     {state, pull_result} = do_full_load(state)
 
     case pull_result do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("vigil: initial git pull failed: #{reason}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("vigil: initial update from the remote failed: #{reason}")
     end
 
     {:ok, state}
@@ -343,60 +346,160 @@ defmodule Vigil.Store do
 
   ## Staying in step with the remote
   #
+  # How many times a push the remote refused is rebased and tried again before
+  # the write gives up and says so. Each round is a fetch, a rebase and a push;
+  # a remote that moves this often between two of them is being written to by
+  # something that should be looked at.
+  @push_retries 3
+
   # docs/design.md, "The server stays in step with the remote". A human who
   # pushes and never calls `reload` used to make the next push fail: vigil
   # committed on top of a history the remote had already moved past. So every
   # write — the eight note writes and `skill_write` — is performed on a vault
-  # brought up to date first, and the push it ends with is noted for `status`.
+  # brought up to date first, a push the remote refuses because it moved in
+  # the meantime is rebased and tried again, and the push it ends with is
+  # noted for `status`.
   defp in_step(params, state, perform) do
+    before = state.index
     state = bring_up_to_date(state)
     {result, state} = perform.(params, state)
+    result = changed_under(result, params, before, state.index)
+    {result, state} = push_again(result, state, @push_retries)
     {result, note_push(state, result)}
   end
 
   # The one place that decides whether the vault adopts what the remote holds,
-  # and how. Asked before every write.
+  # and how: asked before every write, and — through update/1 — by the load at
+  # boot and on `reload`.
   #
-  # With commits of its own not yet pushed, the vault is left as it is: a
-  # fast-forward is not possible, and there is still no merge (principle 2).
-  # The next successful push, or the safety-net cron, takes them out.
-  #
-  # With none, it fetches and, if the remote moved, fast-forwards and rebuilds
-  # the index, so the write is decided against the vault as it now stands and
-  # lands on top of what the human pushed. A fetch or a fast-forward that fails
-  # is logged and changes nothing: the write goes ahead on the vault as it
-  # was, exactly as it did before this step existed.
+  # If the remote moved, the vault is brought on top of it and the index
+  # rebuilt, so the write is decided against the vault as it now stands and
+  # lands on top of what the human pushed. Anything else — a fetch that fails,
+  # a rebase that conflicts — is logged and changes nothing: the write goes
+  # ahead on the vault as it was, and its push says what is in the way.
   defp bring_up_to_date(state) do
-    case divergence(state) do
-      {:ok, %{ahead: 0}} -> fetch_and_fast_forward(state)
-      {:ok, _unpushed} -> state
-      {:error, _reason} -> state
+    case update(state) do
+      :moved ->
+        load(state)
+
+      :in_step ->
+        state
+
+      {_error_or_conflict, reason} ->
+        Logger.warning("vigil: could not bring the vault up to date: #{reason}")
+        state
     end
   end
 
-  defp fetch_and_fast_forward(state) do
+  # What the remote holds, adopted — with no index rebuilt, which is the
+  # caller's: the load builds one regardless, a write only when something
+  # moved. `:moved | :in_step | {:conflict, reason} | {:error, reason}`.
+  #
+  # With no unpushed commits of its own the vault fast-forwards. With some, it
+  # rebases them onto the remote — vigil's own single-file commits replayed on
+  # top of whatever was pushed, merge commits included (principle 2). A rebase
+  # that conflicts is aborted at once: vigil's commits stay local, nothing on
+  # the remote is overwritten, and which paths are in the way is the answer.
+  defp update(state) do
     %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
 
     with :ok <- git.fetch.(vault_path, remote, branch),
-         {:ok, %{ahead: 0, behind: behind}} when behind > 0 <- divergence(state),
-         :ok <- git.fast_forward.(vault_path, remote, branch) do
-      Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch} before a write")
-      load(state)
+         {:ok, %{behind: behind} = divergence} when behind > 0 <- divergence(state),
+         :ok <- adopt(git, vault_path, remote, branch, divergence) do
+      Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch}")
+      :moved
     else
-      {:ok, _nothing_to_adopt} ->
-        state
+      {:ok, %{behind: 0}} -> :in_step
+      {:conflict, reason} -> {:conflict, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp adopt(git, vault_path, remote, branch, %{ahead: 0}),
+    do: git.fast_forward.(vault_path, remote, branch)
+
+  defp adopt(git, vault_path, remote, branch, _unpushed) do
+    case git.rebase.(vault_path, remote, branch) do
+      {:conflict, paths} ->
+        git.abort_rebase.(vault_path)
+        {:conflict, conflict(paths, remote, branch)}
 
       {:error, reason} ->
-        Logger.warning(
-          "vigil: could not bring the vault up to date with #{remote}/#{branch}: #{reason}"
-        )
+        # A rebase that failed for any other reason may still have begun;
+        # aborting one that did not is refused, and harmless.
+        git.abort_rebase.(vault_path)
+        {:error, reason}
 
-        state
+      :ok ->
+        :ok
     end
+  end
+
+  defp conflict(paths, remote, branch) do
+    "Rebasing vigil's unpushed commits onto #{remote}/#{branch} conflicts in " <>
+      "#{Enum.join(paths, ", ")}. The rebase was aborted: vigil's commits stay local, " <>
+      "nothing on the remote was overwritten, and a human has to resolve the conflict"
   end
 
   defp divergence(state),
     do: state.git.divergence.(state.vault_path, state.git_remote, state.git_branch)
+
+  # A push that failed because the remote moved between the update and the
+  # push is rebased onto it and tried again, a bounded number of times. Which
+  # failure it was is not read out of git's words: the vault fetches, and a
+  # remote that holds nothing new means the push failed for some other reason
+  # — an unreachable remote, a refusal — which a rebase cannot help.
+  #
+  # A conflict or the limit, whichever stops the retries, is added to the push
+  # error the write already carries, after git's own reason.
+  defp push_again({:ok, %{pushed: false} = report}, state, 0) do
+    {{:ok,
+      more_push_error(
+        report,
+        "Rebased onto #{state.git_remote}/#{state.git_branch} and pushed again " <>
+          "#{@push_retries} times, and the remote had moved on every time. " <>
+          "The commit stays local and goes out with the next push that succeeds"
+      )}, state}
+  end
+
+  defp push_again({:ok, %{pushed: false} = report} = result, state, retries) do
+    case update(state) do
+      :moved ->
+        state = load(state)
+
+        case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
+          :ok -> {{:ok, report |> Map.put(:pushed, true) |> Map.delete(:push_error)}, state}
+          {:error, _reason} -> push_again(result, state, retries - 1)
+        end
+
+      {:conflict, reason} ->
+        {{:ok, more_push_error(report, reason)}, state}
+
+      _in_step_or_error ->
+        {result, state}
+    end
+  end
+
+  defp push_again(result, state, _retries), do: {result, state}
+
+  defp more_push_error(report, sentence),
+    do: %{report | push_error: "#{String.trim_trailing(report.push_error)}. #{sentence}."}
+
+  # A section id that resolved before the update and does not after it names
+  # a section the remote changed underneath the caller: what it read is gone.
+  # "Not found" would be true and would not say what to do about it.
+  defp changed_under({:error, "Not found: " <> id} = result, %{id: id}, before, now)
+       when before != now do
+    if Index.find_chunk(before, id) != nil and Index.find_chunk(now, id) == nil do
+      {:error,
+       "#{id} no longer resolves: the note changed on the remote since it was read. " <>
+         "Read it again before editing it."}
+    else
+      result
+    end
+  end
+
+  defp changed_under(result, _params, _before, _now), do: result
 
   # A write that got as far as its push says so in its result, as `pushed:`
   # and `push_error:` — a note write and a skill write alike. A write refused
@@ -471,13 +574,23 @@ defmodule Vigil.Store do
 
   ## Loading
 
+  # At boot and on `reload`: the vault brought up to date the way a write
+  # brings it (update/1), unpushed commits of vigil's own rebased rather than
+  # refused, and then read. What stopped the update — an unreachable remote, a
+  # conflict — is what `reload` reports as `pull_failed`; the vault is read
+  # regardless, as it stands.
   defp do_full_load(state) do
-    pull_result = state.git.pull.(state.vault_path, state.git_remote, state.git_branch)
+    pull_result =
+      case update(state) do
+        {_error_or_conflict, reason} -> {:error, reason}
+        _moved_or_in_step -> :ok
+      end
+
     {load(state), pull_result}
   end
 
-  # The vault as it now stands on disk, read into a new index: after a pull at
-  # boot and on `reload`, and after a fast-forward before a write.
+  # The vault as it now stands on disk, read into a new index: at boot and on
+  # `reload`, and whenever an update before or after a write moved it.
   defp load(state) do
     git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)

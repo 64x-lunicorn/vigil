@@ -106,10 +106,12 @@ flowchart TB
 ### What happens on a write
 
 Every write is validated, committed and pushed before the client gets an
-answer. Before it, the server fetches from the remote and fast-forwards onto
-whatever was pushed there in the meantime, as long as it holds no unpushed
-commits of its own — so a human's push does not make the next write's push
-fail. If only the push fails, the write still succeeded: the answer says
+answer. Before it, the server fetches from the remote and brings the vault on
+top of whatever was pushed there in the meantime — a fast-forward, or a rebase
+of its own unpushed commits — so a human's push does not make the next write's
+push fail. A push refused because someone pushed in between is rebased and
+tried again, up to three times. A rebase that conflicts is aborted: the commit
+stays local and `push_error` names the path a human has to resolve. If only the push fails, the write still succeeded: the answer says
 `pushed: false` and carries the reason in `push_error`, so the client knows
 without being invited to retry — a retried `append` would append twice, unless
 it carries the same `request_id` as the first call. The commit goes out with
@@ -128,9 +130,9 @@ sequenceDiagram
     Cl->>T: create(path, content, skill_key)
     T->>T: SkillKey valid? scope allows writes?
     T->>St: create
-    opt no unpushed commits
-        Up->>Git: fetch, fast-forward
-        St->>St: rebuild the index if anything arrived
+    opt the remote moved
+        Up->>Git: fetch, then fast-forward or rebase vigil's unpushed commits
+        St->>St: rebuild the index
     end
     St->>St: Policy — normalize, validate, naming rules, duplicates
     St->>St: Plan — frontmatter, content, commit message
@@ -831,13 +833,20 @@ server as a commit through the remote, not as a file edited in
    ```
 
    A rejected push means vigil wrote something in the meantime —
-   `git pull --rebase` and push again.
-4. **Call `reload`, or don't.** The server pulls `--ff-only` and rebuilds its
-   index; a `vault:read` token is enough. Without it, the server adopts your
-   commits before its next write anyway: it fetches and fast-forwards whenever
-   it holds no unpushed commits of its own, so the write lands on top of yours
-   and its push goes through. `reload` is what makes your edit visible to
-   reads before then.
+   `git pull --rebase` and push again. Obsidian Git with the sync method
+   *merge* does the same with a merge commit, which is fine too.
+4. **Call `reload`, or don't.** The server fetches and rebuilds its index; a
+   `vault:read` token is enough. Without it, the server adopts your commits
+   before its next write anyway, so the write lands on top of yours and its
+   push goes through. If it holds commits of its own it has not pushed yet, it
+   rebases them onto yours — never a merge. `reload` is what makes your edit
+   visible to reads before then.
+
+   If you and vigil changed the same note, the rebase conflicts and is
+   aborted: vigil's commit stays on the server, your commit stays on the
+   remote, and the write's `push_error` (or `reload`'s `pull_failed`) names
+   the note. `status` shows the vault ahead of and behind the remote. See
+   below for resolving it.
 5. **Optionally call `lint`** to catch frontmatter or naming problems the edit
    introduced.
 
@@ -847,11 +856,13 @@ what the assistant wrote from what you wrote.
 **Mind the chunk ids.** Renaming a heading changes its chunk id, and links to
 the old id break. `links` and `lint` show what broke.
 
-**If `reload` answers `pull_failed`**, or `status` shows both `ahead` and
-`behind` above zero, the server has a commit the remote does not, almost always
-a write whose push failed. vigil does not merge, and while it holds such a
-commit it does not fast-forward before a write either. Reconcile
-on the server as the service user, then call `reload` again:
+**If `reload` answers `pull_failed` with a conflict**, or `status` stays both
+`ahead` and `behind` above zero, the server holds a commit of vigil's that
+does not rebase onto the remote: you and vigil changed the same note. vigil
+does not merge and does not resolve conflicts, so it keeps its commit local
+and leaves the remote as you pushed it. Reconcile on the server as the service
+user — `pull --rebase` stops at the conflict; settle the file, `git add` it and
+`git rebase --continue` — then call `reload` again:
 
 ```bash
 sudo -u vigil git -C /var/lib/vigil/vault log --oneline @{u}..

@@ -415,7 +415,8 @@ defmodule Vigil.MCP.Tools do
     %{
       name: "reload",
       title: "Reload from the remote",
-      description: "Runs git pull and reparses the vault.",
+      description:
+        "Fetches from the remote, puts vigil's unpushed commits on top of what it holds, and reparses the vault.",
       write: false,
       call: :reload,
       hints: %{read_only: false, destructive: false, idempotent: true, open_world: true},

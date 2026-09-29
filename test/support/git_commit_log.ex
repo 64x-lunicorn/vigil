@@ -20,7 +20,12 @@ defmodule Vigil.Git.CommitLog do
   commit another clone pushed: `fetch` brings it into view, `divergence`
   counts it as behind, `fast_forward` writes it into the working tree, and
   `push` is refused while the remote holds anything the vault lacks — which is
-  what git does with a push that is not a fast-forward.
+  what git does with a push that is not a fast-forward. `rebase` puts the
+  vault's unpushed commits on top of what was fetched, and stops at a
+  conflict when a fetched commit touches a path one of them touched — a
+  whole-file notion of a conflict, coarser than git's line-wise one, and the
+  same answer for the one case the contract suite pins: both sides changed
+  the same note. A stopped rebase stays stopped until `abort_rebase`.
 
   The working tree is real: `remove` deletes the file and `move` renames it,
   because that is what `git rm` and `git mv` do to a vault, and the callers
@@ -53,7 +58,7 @@ defmodule Vigil.Git.CommitLog do
   A `Vigil.Git` over `vault_path`, and the log behind it.
 
   Three options. `remote:` and `branch:` — the remote name and the branch
-  `push` and `pull` succeed for, `"origin"` and `"main"` unless given; a
+  `push`, `fetch` and `rebase` succeed for, `"origin"` and `"main"` unless given; a
   `remote:` of `nil` is a vault with none configured. Anything else answers
   the error git answers, which is how a test provokes a push failure.
   `tracking:` — what `tracking` answers; by default a clone with that one
@@ -72,8 +77,10 @@ defmodule Vigil.Git.CommitLog do
           metadata: seed(vault_path),
           staged: [],
           calls: [],
-          # Committed here and not pushed.
-          unpushed: 0,
+          # Committed here and not pushed: the paths of each commit.
+          unpushed: [],
+          # The paths a stopped rebase could not apply, until it is aborted.
+          rebasing: nil,
           # Pushed from elsewhere, not fetched yet; fetched, not adopted yet.
           remote_only: [],
           fetched: []
@@ -84,18 +91,12 @@ defmodule Vigil.Git.CommitLog do
 
     git =
       Git.new(
-        pull: fn vault, name, ref ->
-          with :ok <- remote_result(log, {:pull, name, ref}, ours, {name, ref}) do
-            fetch(log)
-            fast_forward(log, vault)
-          end
-        end,
         push: fn _vault, name, ref ->
           with :ok <- remote_result(log, {:push, name, ref}, ours, {name, ref}), do: push(log)
         end,
         divergence: fn _vault, name, ref ->
           with :ok <- remote_known(ours, {name, ref}) do
-            {:ok, Agent.get(log, &%{ahead: &1.unpushed, behind: length(&1.fetched)})}
+            {:ok, Agent.get(log, &%{ahead: length(&1.unpushed), behind: length(&1.fetched)})}
           end
         end,
         fetch: fn _vault, name, ref ->
@@ -104,6 +105,14 @@ defmodule Vigil.Git.CommitLog do
         fast_forward: fn vault, name, ref ->
           with :ok <- remote_result(log, {:fast_forward, name, ref}, ours, {name, ref}),
                do: fast_forward(log, vault)
+        end,
+        rebase: fn vault, name, ref ->
+          with :ok <- remote_result(log, {:rebase, name, ref}, ours, {name, ref}),
+               do: rebase(log, vault)
+        end,
+        abort_rebase: fn _vault ->
+          record(log, :abort_rebase)
+          abort_rebase(log)
         end,
         tracking: fn _vault -> tracking end,
         log_metadata: fn _vault -> Agent.get(log, & &1.metadata) end,
@@ -121,7 +130,7 @@ defmodule Vigil.Git.CommitLog do
         end,
         commit: fn _vault, paths, message ->
           record(log, {:commit, paths, message})
-          {:ok, commit(log, at)}
+          {:ok, commit(log, paths, at)}
         end,
         snapshot_index: fn _vault, _paths -> {:ok, Agent.get(log, & &1.staged)} end,
         restore_index: fn _vault, staged ->
@@ -144,7 +153,7 @@ defmodule Vigil.Git.CommitLog do
   @doc """
   A commit another clone pushed to the remote: `path` holding `content`,
   authored by `author`. The vault sees it after a `fetch`, and holds it after
-  a `fast_forward` (or a `pull`).
+  a `fast_forward` or a `rebase`.
   """
   @spec push_from_elsewhere(pid(), String.t(), String.t(), String.t()) :: :ok
   def push_from_elsewhere(log, path, content, author \\ "Daniel") do
@@ -167,10 +176,10 @@ defmodule Vigil.Git.CommitLog do
   # A commit authored as vigil, of everything staged. `created_at` survives
   # one: the first commit a path had is what principle 3 calls its creation
   # date, and every later commit only moves `updated_at`.
-  defp commit(log, at) do
+  defp commit(log, paths, at) do
     Agent.update(log, fn state ->
       metadata = Enum.reduce(state.staged, state.metadata, &apply_staged(&1, &2, at))
-      %{state | metadata: metadata, staged: [], unpushed: state.unpushed + 1}
+      %{state | metadata: metadata, staged: [], unpushed: state.unpushed ++ [paths]}
     end)
 
     %{updated_at: at, last_author: "vigil"}
@@ -233,12 +242,46 @@ defmodule Vigil.Git.CommitLog do
       %{fetched: []} = state ->
         {:ok, state}
 
-      %{unpushed: unpushed} = state when unpushed > 0 ->
+      %{unpushed: [_ | _]} = state ->
         {{:error, "fatal: Not possible to fast-forward, aborting."}, state}
 
       state ->
         metadata = Enum.reduce(state.fetched, state.metadata, &adopt(&1, &2, vault_path))
         {:ok, %{state | metadata: metadata, fetched: []}}
+    end)
+  end
+
+  # What git does, file by file: with nothing fetched there is nothing to
+  # replay onto; a fetched commit touching a path an unpushed one touched
+  # stops the rebase at a conflict, the working tree left as it was; and
+  # otherwise every fetched commit lands under the vault's own, which keep
+  # their metadata — a rebase keeps a commit's author and its date.
+  defp rebase(log, vault_path) do
+    Agent.get_and_update(log, fn
+      %{rebasing: paths} = state when is_list(paths) ->
+        {{:error, "fatal: It seems that there is already a rebase-merge directory"}, state}
+
+      %{fetched: []} = state ->
+        {:ok, state}
+
+      state ->
+        ours = state.unpushed |> List.flatten() |> MapSet.new()
+
+        case state.fetched |> Enum.map(& &1.path) |> Enum.filter(&(&1 in ours)) |> Enum.uniq() do
+          [] ->
+            metadata = Enum.reduce(state.fetched, state.metadata, &adopt(&1, &2, vault_path))
+            {:ok, %{state | metadata: metadata, fetched: []}}
+
+          conflicting ->
+            {{:conflict, conflicting}, %{state | rebasing: conflicting}}
+        end
+    end)
+  end
+
+  defp abort_rebase(log) do
+    Agent.get_and_update(log, fn
+      %{rebasing: nil} = state -> {{:error, "fatal: No rebase in progress?"}, state}
+      state -> {:ok, %{state | rebasing: nil}}
     end)
   end
 
@@ -260,7 +303,7 @@ defmodule Vigil.Git.CommitLog do
   defp push(log) do
     Agent.get_and_update(log, fn
       %{remote_only: [], fetched: []} = state ->
-        {:ok, %{state | unpushed: 0}}
+        {:ok, %{state | unpushed: []}}
 
       state ->
         {{:error, "! [rejected] (fetch first): the remote contains work the vault does not have"},

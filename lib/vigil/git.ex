@@ -3,14 +3,15 @@ defmodule Vigil.Git do
   Git, as a value its callers hold rather than a module they name
   (`docs/design.md`, "Git is reached through a value").
 
-  Two things live here. The **contract** is a struct of thirteen functions —
+  Two things live here. The **contract** is a struct of fourteen functions —
   the whole of what vigil asks git: `add`, `remove`, `move`, `commit`,
-  `snapshot_index`, `restore_index` and `push`, which a write uses, `pull`
-  and `log_metadata`, which the load uses and no write ever asks, `tracking`,
+  `snapshot_index`, `restore_index` and `push`, which a write uses,
+  `log_metadata`, which the load uses and no write ever asks, `tracking`,
   which boot asks once to check the remote and branch settings against the
-  clone, and `divergence`, `fetch` and `fast_forward`, which bring the vault
-  up to date before a write and tell `status` how far apart the vault and its
-  remote are. Staging and
+  clone, and `divergence`, `fetch`, `fast_forward`, `rebase` and
+  `abort_rebase`, which bring the vault up to date — at boot, on `reload`,
+  before a write and after a push the remote refused — and tell `status` how
+  far apart the vault and its remote are. Staging and
   committing are separate questions so that a commit can fail *after* its
   staging has happened, and the staging be undone (`Vigil.Commit`,
   `docs/design.md`, "A failed commit leaves the vault as it was"). The seam is drawn where git is, not where the
@@ -20,7 +21,7 @@ defmodule Vigil.Git do
   answer.
 
   The **production adapter** is the rest of this module: `over_repository/0`
-  wires the thirteen questions to the `git` commands underneath it. It is a function
+  wires the fourteen questions to the `git` commands underneath it. It is a function
   here, beside the contract it implements, rather than closures assembled by a
   caller — there are two callers, `Vigil.Store` and `Vigil.Skills`, and an
   adapter assembled at the call site would exist twice. `Store` builds it when
@@ -39,8 +40,6 @@ defmodule Vigil.Git do
   require Logger
 
   @enforce_keys [
-    # git pull --ff-only <remote> <branch>. :ok | {:error, reason}.
-    :pull,
     # The whole vault's commit metadata: path => %{created_at:, updated_at:,
     # last_author:}. What "creation date = first commit" is read out of
     # (docs/design.md, principle 3).
@@ -74,7 +73,14 @@ defmodule Vigil.Git do
     :fetch,
     # git merge --ff-only <remote>/<branch>: adopts what the last fetch
     # brought, or refuses. :ok | {:error, reason}.
-    :fast_forward
+    :fast_forward,
+    # git rebase <remote>/<branch>: vigil's unpushed commits replayed on top
+    # of what the last fetch brought, never a merge. :ok | {:conflict, paths}
+    # — the rebase stopped, and is left for abort_rebase — | {:error, reason}.
+    :rebase,
+    # git rebase --abort: the branch and the working tree back as they were
+    # before the rebase. :ok | {:error, reason}.
+    :abort_rebase
   ]
 
   defstruct @enforce_keys
@@ -82,7 +88,7 @@ defmodule Vigil.Git do
   @type t :: %__MODULE__{}
 
   @doc """
-  Builds a git adapter from an answer to every one of the thirteen questions.
+  Builds a git adapter from an answer to every one of the fourteen questions.
 
   Raises `ArgumentError` when a field is missing or unknown, which is the
   point: an unwired question must fail where the adapter is built, not answer
@@ -98,7 +104,6 @@ defmodule Vigil.Git do
   @spec over_repository() :: t
   def over_repository do
     new(
-      pull: &pull/3,
       log_metadata: &log_metadata/1,
       add: &add/2,
       remove: &remove/2,
@@ -110,7 +115,9 @@ defmodule Vigil.Git do
       tracking: &tracking/1,
       divergence: &divergence/3,
       fetch: &fetch/3,
-      fast_forward: &fast_forward/3
+      fast_forward: &fast_forward/3,
+      rebase: &rebase/3,
+      abort_rebase: &abort_rebase/1
     )
   end
 
@@ -144,18 +151,6 @@ defmodule Vigil.Git do
     {"GIT_HTTP_LOW_SPEED_LIMIT", "1000"},
     {"GIT_HTTP_LOW_SPEED_TIME", "20"}
   ]
-
-  @doc "git pull --ff-only <remote> <branch>. Logs and returns {:error, reason} on failure (caller decides)."
-  def pull(vault_path, remote, branch) do
-    case run(vault_path, ["pull", "--ff-only", remote, branch], @network_env) do
-      {:ok, _out} ->
-        :ok
-
-      {:error, out} ->
-        Logger.warning("git pull failed: #{out}")
-        {:error, out}
-    end
-  end
 
   @doc """
   One-shot metadata scan for the whole vault: returns a map
@@ -321,7 +316,7 @@ defmodule Vigil.Git do
   nothing else: the branch and the working tree stay as they are. Forced
   (`+`), so the remote-tracking branch says what the remote holds even after a
   force-push there — whether that can be adopted is `fast_forward/3`'s to
-  refuse. Bounded like `pull` and `push`. `:ok | {:error, reason}`.
+  refuse. Bounded like `push`. `:ok | {:error, reason}`.
   """
   def fetch(vault_path, remote, branch) do
     refspec = "+refs/heads/#{branch}:#{tracking_ref(remote, branch)}"
@@ -344,6 +339,61 @@ defmodule Vigil.Git do
   end
 
   defp tracking_ref(remote, branch), do: "refs/remotes/#{remote}/#{branch}"
+
+  # A rebase answers nobody: no hook runs (a `pre-rebase` or `post-rewrite`
+  # hook in the vault's clone is not vigil's to satisfy), no editor opens, and
+  # the commits it rewrites are committed as vigil and unsigned, like every
+  # commit vigil makes. `--no-autosquash` and `--no-update-refs` keep an
+  # ambient `rebase.*` setting from turning it into something else.
+  @rebase_config ["-c", "core.hooksPath=/dev/null" | @commit_identity]
+  @rebase_env [{"GIT_EDITOR", "true"}, {"GIT_SEQUENCE_EDITOR", "true"}]
+
+  @doc """
+  `git rebase` of the checked-out branch onto what the last `fetch/3` brought
+  from `remote`: the commits only the branch holds — vigil's, committed and
+  not pushed — are replayed on top of `remote`'s, whatever that history holds,
+  merge commits included. Never a merge (`docs/design.md`, principle 2).
+
+  `:ok` when nothing was left to replay or every commit applied.
+  `{:conflict, paths}` when a commit does not apply: the rebase has stopped,
+  the paths are the ones git could not resolve, and it is the caller's to
+  `abort_rebase/1` — nothing here decides that on its behalf.
+  `{:error, reason}` for any other refusal, a rebase that did not start.
+  """
+  def rebase(vault_path, remote, branch) do
+    args =
+      @rebase_config ++
+        ["rebase", "--quiet", "--no-autosquash", "--no-autostash", "--no-update-refs"] ++
+        [tracking_ref(remote, branch)]
+
+    case run(vault_path, args, @rebase_env) do
+      {:ok, _} ->
+        :ok
+
+      {:error, out} ->
+        case unmerged_paths(vault_path) do
+          [] -> {:error, out}
+          paths -> {:conflict, paths}
+        end
+    end
+  end
+
+  defp unmerged_paths(vault_path) do
+    case run(vault_path, ["diff", "--name-only", "--diff-filter=U", "-z"]) do
+      {:ok, out} -> out |> String.split("\0", trim: true) |> Enum.uniq()
+      {:error, _} -> []
+    end
+  end
+
+  @doc """
+  `git rebase --abort`: the branch, the index and the working tree back to
+  where they stood before `rebase/3` began. `{:error, reason}` when no rebase
+  is in progress.
+  """
+  def abort_rebase(vault_path) do
+    with {:ok, _} <- run(vault_path, @rebase_config ++ ["rebase", "--abort"], @rebase_env),
+         do: :ok
+  end
 
   @doc """
   What the clone at `vault_path` has to say about its remotes and branches,

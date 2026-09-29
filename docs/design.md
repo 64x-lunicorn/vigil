@@ -15,12 +15,17 @@ ambiguous, the smaller solution is the right one.
 never written into files. A stored status is a `now` that was frozen and now
 lies.
 
-**2. One writer.** Only vigil writes to the vault's working tree. Obsidian and
-every other client are read-only there. A human who edits on purpose does so in
-a clone of their own, commits under their own name, pushes to the remote and
-calls `reload`, which adopts those commits `--ff-only`. It follows that there
-is no merge, no locking protocol, no conflict handling — none of it is needed:
-a history that does not fast-forward is refused and reported, never merged.
+**2. One writer.** Only vigil writes to *its* working tree. Nothing else edits
+files there. A human who edits — in Obsidian with Obsidian Git, or in any
+other editor — does so in a clone of their own, commits under their own name
+and pushes to the remote. vigil adopts those commits before its next write, at
+boot and on `reload`. What vigil committed and has not pushed yet is its own
+to move: its single-file commits are rebased onto whatever the remote holds,
+merge commits included, and pushed again. vigil never merges a human's work
+and never overwrites it. A rebase that conflicts is aborted, vigil's commit
+stays local, and the conflict is reported for a human to resolve. There is no
+locking protocol and no conflict resolution in vigil — only a real conflict
+is refused.
 
 **3. Git is the metadata database.** Creation date = first commit. Provenance =
 commit author. History = `git log`. No frontmatter field for anything Git
@@ -766,17 +771,20 @@ makes `git log --author=vigil` the provenance query: every line in the vault is
 attributable to either the assistant or the human.
 
 **A human edit arrives as a commit, never as a file.** Nothing but vigil
-touches the working tree, so a deliberate human change is made in a clone,
-committed under the human's own identity and pushed to the remote. The next
-load — a restart or a `reload` — pulls with `--ff-only` and rebuilds the index
-from the result, and so does the next write, which fetches and fast-forwards
-first whenever vigil holds no unpushed commits (see "The server stays in step
-with the remote"). That keeps the provenance query honest and needs no merge: if
-the server holds a commit the remote lacks, typically one whose push failed,
-the histories have diverged, the pull is refused, and `reload` answers
-`pull_failed` with git's reason while serving the unchanged vault. Reconciling
-two histories is a human decision, made on the server with git, not one vigil
-makes on anyone's behalf.
+touches its working tree, so a human change — made in Obsidian with Obsidian
+Git, or by hand — is made in a clone, committed under the human's own
+identity and pushed to the remote. The next load — a restart or a `reload` —
+and the next write fetch it and rebuild the index from the result (see "The
+server stays in step with the remote"). With no unpushed commits of its own
+vigil fast-forwards. With some — typically one whose push was refused
+because the human pushed first — it rebases them onto the remote: vigil's
+commits are its own single-file changes, and replaying them on top of the
+human's keeps both histories, a linear log and the provenance query honest.
+Nothing is ever merged. A rebase that conflicts, both sides having changed
+the same note, is aborted at once: vigil's commit stays local, the remote
+keeps what the human pushed, and the write's `push_error` or `reload`'s
+`pull_failed` names the path. Resolving a real conflict is a human decision,
+made in a clone, not one vigil makes on anyone's behalf.
 
 `commit.gpgsign=false` is forced the same way. The service user has no signing
 key; an inherited `commit.gpgsign=true` would otherwise fail every single
@@ -828,16 +836,17 @@ deletion, a move, a skill.
 the filesystem and it commits. The filesystem half stays where it is. The git
 half is a value its callers hold rather than a module they name.
 
-**The value is the whole of `Vigil.Git`, not the write half.** Thirteen
+**The value is the whole of `Vigil.Git`, not the write half.** Fourteen
 questions: `add`, `remove`, `move`, `commit`, `snapshot_index`,
-`restore_index`, `push` — `pull` and `log_metadata`, which no write ever asks,
+`restore_index`, `push` — `log_metadata`, which no write ever asks,
 `tracking`, which only the boot check asks (see "The vault's remote and branch
-are checked against the clone"), and `divergence`, `fetch` and `fast_forward`,
-which bring the vault up to date before a write (see "The server stays in step
-with the remote"). Staging and committing are separate questions, which is
+are checked against the clone"), and `divergence`, `fetch`, `fast_forward`,
+`rebase` and `abort_rebase`, which bring the vault up to date at boot, on
+`reload`, before a write and after a refused push (see "The server stays in
+step with the remote"). Staging and committing are separate questions, which is
 what lets a test make a commit fail *after* its `git rm` has happened (see "A
-failed commit leaves the vault as it was"). `pull` and `log_metadata` belong to the load, and
-`Vigil.Store` asks them directly. A seam drawn around the write effect alone
+failed commit leaves the vault as it was"). `log_metadata` belongs to the load, and
+`Vigil.Store` asks it directly. A seam drawn around the write effect alone
 would leave every load reaching for a repository, and `log_metadata` answering
 `%{}` for a directory that is not one — which is a `created_at` of `nil` on
 every note, arriving as an ordinary answer. The seam is drawn where git is,
@@ -981,40 +990,68 @@ record its rank.
 
 ## The server stays in step with the remote
 
-A pull used to happen at boot and on `reload` only. A human who pushed from a
-clone and did not call `reload` made vigil's next write commit on top of a
-history the remote had already moved past: the push was refused, the two
-histories diverged, and putting them back together needed a shell on the host.
+The remote used to be pulled at boot and on `reload` only, and only as a
+fast-forward. A human who pushed from a clone and did not call `reload` made
+vigil's next write commit on top of a history the remote had already moved
+past: the push was refused, the two histories diverged, every later pull was
+refused and every later write stayed unpushed, and putting them back together
+needed a shell on the host.
 
 **Before every write, the vault is brought up to date.** All eight note writes
 and `skill_write` go through one function in `Vigil.Store`,
-`bring_up_to_date/1`, before the policy is asked. It asks git how far the
-branch and its remote-tracking branch are apart. With no unpushed commits it
-fetches, and if the remote moved, it fast-forwards and rebuilds the index from
-the result — so the write is decided against the vault as it now stands, lands
-on top of the human's commit, and its push goes through. With unpushed commits
-of its own it does nothing: a fast-forward is not possible, and there is still
-no merge (principle 2). Those commits go out with the next push that succeeds
-or with the safety-net cron, as before; adopting what another clone pushed
-*around* them is a rebase, and a separate decision.
+`bring_up_to_date/1`, before the policy is asked. It fetches and asks git how
+far the branch and its remote-tracking branch are apart. If the remote moved,
+the vault adopts it and the index is rebuilt from the result — so the write is
+decided against the vault as it now stands, lands on top of the human's
+commit, and its push goes through. With no unpushed commits of its own the
+vault fast-forwards. With some, they are rebased onto the remote (principle
+2): git runs the rebase non-interactively, with the clone's hooks disabled,
+and commits the replayed commits as vigil, unsigned, like every other. A
+rebase that conflicts is aborted, and the vault stays as it was.
+
+The edit is resolved only after that, against the note as it now is. A section
+id that resolved before the update and no longer does is refused with "no
+longer resolves: the note changed on the remote since it was read. Read it
+again before editing it" rather than "Not found"; an `if_match` or a heading
+line that no longer matches is refused the same way it always was.
+
+**A push the remote refuses because it moved is rebased and tried again.** A
+human can push between vigil's update and vigil's push. After a failed push the
+vault fetches again: if the remote holds something new, vigil's commits are
+rebased onto it, the index rebuilt, and the push tried again — three times at
+most, after which the write's `push_error` says the remote moved every time.
+If the remote holds nothing new, the push failed for another reason, an
+unreachable remote or a refusal, which no rebase helps, and the write reports
+git's reason as before. A conflict stops the retries and is added to the
+`push_error`, with the path; the write itself stays a success with `pushed:
+false`, its commit local.
+
+**The load is brought up to date the same way.** Boot and `reload` go through
+the same update instead of a `git pull --ff-only`, so vigil's unpushed
+commits survive a push from elsewhere: both histories end up in the vault,
+vigil's on top, and the next push takes them out. What stops the update — an
+unreachable remote, a conflict — is what `reload` reports as `pull_failed`,
+and the vault is read as it stands regardless.
 
 The decision is in that one function on purpose, so that what it adopts and
-when — rebasing vigil's own unpushed commits, or freshening before reads at a
-bounded rate — is a change to it rather than a second path beside it.
+when — freshening before reads at a bounded rate, next — is a change to it
+rather than a second path beside it.
 
-**Nothing about it can fail a write.** A fetch or a fast-forward that fails is
-logged, and the write goes ahead on the vault as it was, exactly as it did
-before this step existed. The fetch is bounded the way `pull` and `push` are
+**Nothing about it can fail a write.** A fetch, a fast-forward or a rebase
+that fails is logged, and the write goes ahead on the vault as it was; its
+push then says what is in the way. The fetch is bounded the way `push` is
 (`Vigil.Git`'s network environment), so a remote that stalls costs a write its
-connect and stall timeouts, not the writer. The three questions it asks —
-`divergence`, `fetch`, `fast_forward` — are on the Git value like every other
-(see "Git is reached through a value"); only `fetch` leaves the machine.
+connect and stall timeouts, not the writer. The questions it asks —
+`divergence`, `fetch`, `fast_forward`, `rebase`, `abort_rebase` — are on the
+Git value like every other (see "Git is reached through a value"); only
+`fetch` leaves the machine.
 
 **`status` and `/healthz` say whether it is.** Both report the same facts: is
 the index loaded, does the writer answer, how many commits is the vault
 `ahead` of the remote and `behind` it, and the last push's result and time.
 `ahead` and `behind` are read locally — `behind` is as fresh as the last
-fetch, which happens before every write. `Vigil.Store.status/2` answers in the
+fetch, which happens before every write. A conflict shows here as a vault both
+ahead and behind, with the path in the last push's error. `Vigil.Store.status/2` answers in the
 caller's process: whether the index is loaded is read from the writer's table,
 and the writer is asked the rest with a timeout of five seconds, so a writer
 that does not answer is reported instead of waited on.
@@ -1729,9 +1766,11 @@ Five layers, each doing one job:
    for a refresh token too, so a family redeemed before the rule carries
    `vault` from its next rotation on. A `vault:read` token cannot change what
    a note says. It can make the server catch up with the remote: `reload`
-   takes no content from the caller and adopts, `--ff-only`, commits already
-   pushed there — so a pull can move the vault under a reader, whoever calls
-   it.
+   takes no content from the caller and adopts commits already pushed there —
+   fast-forwarding, or rebasing vigil's own unpushed commits on top of them,
+   and aborting at a conflict — so an update can move the vault under a
+   reader, whoever calls it, but it adds nothing that was not already on the
+   remote or committed by vigil.
 4. **SkillKey** — a rotating HMAC required by every write tool. Not access
    control (the token already did that): it is proof that the assistant has
    *read the writing conventions* in this session. It can only be obtained by

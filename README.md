@@ -42,9 +42,11 @@ inspect every change, and take them with you.
 
 > [!NOTE]
 > vigil is an early-stage, single-user project. It is not a multi-tenant service,
-> a general-purpose sync engine, or a replacement for backups. It assumes one
-> writer: vigil. Other vault clients should be read-only; deliberate edits go
-> through a clone, a push and `reload` (see the guide's *Editing by hand*).
+> a general-purpose sync engine, or a replacement for backups. vigil is the only
+> writer of its own working tree. You can edit the vault in Obsidian (with
+> Obsidian Git) or any editor in a clone of your own and push: vigil rebases
+> its own unpushed commits onto yours, never merges or overwrites them, and
+> leaves a real conflict for you to resolve (see the guide's *Editing by hand*).
 
 ## How it works
 
