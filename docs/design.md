@@ -1667,6 +1667,21 @@ the push safety net's `scripts/push_pending.sh` gets them from systemd, which
 reads the file for its unit (see "The push safety net runs in the service's
 sandbox").
 
+**The trusted proxies are a list of blocks, or nothing.** Every entry in
+`VIGIL_TRUSTED_PROXIES` must parse as an address or a CIDR block, and the
+header and the list are set together or not at all. A malformed entry used to
+be dropped with a warning when the router was built, and a list that lost its
+only entry keyed every request on the tunnel's loopback address — one consent
+lockout for everyone, which the first wrong password from anywhere spent for
+the owner too. The check hands the blocks on parsed, through `Vigil.Cidr`, the
+one reader of addresses and blocks `Vigil.OAuth.ClientAddr` and
+`Vigil.OAuth.Cimd` share.
+
+**An excluded name is a name.** `VIGIL_EXCLUDE` is matched against every
+segment of a path, so an entry holding a `/`, or `.` or `..`, matches no
+segment and hides nothing while reading as if it did; it is refused, naming
+the entry.
+
 **The secret is named, never echoed.** A check that wants the offending value
 in its message puts it there itself, so `VIGIL_AUTH_PASSWORD`'s says what it
 expected and nothing about what it got — and so does `VIGIL_SKILLKEY_SECRET`'s.

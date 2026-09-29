@@ -661,9 +661,11 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_PUSH_TIMEOUT` | `120` | seconds the [push safety net](#the-push-safety-net)'s push is given before it is stopped and the run fails |
 | `VIGIL_PUSH_ALERT_AFTER` | `60` | minutes vault commits may wait unpushed before the push safety net's run fails on that alone |
 
-Every setting is checked once, when the service starts and before anything
-else does. A bad one stops the start, and the journal names every variable that
-failed and what it expected, all in one message:
+Every setting the service reads — each one above but the push safety net's
+two, which `scripts/push_pending.sh` reads — is checked once, when the service
+starts and before anything else does. A bad one stops the start, and the
+journal names every variable that failed and what it expected, all in one
+message:
 
 - `VIGIL_PORT` must be an integer from 1 to 65535.
 - `VIGIL_SKILLKEY_TTL`, `VIGIL_RATE_LIMIT_RPM`, `VIGIL_RELOAD_RATE_LIMIT_RPM`,
@@ -678,6 +680,14 @@ failed and what it expected, all in one message:
 - Every entry in `VIGIL_ALLOWED_ORIGINS` must be an origin — scheme and host,
   an optional port, no path: `https://claude.ai`, not `claude.ai` or
   `https://claude.ai/mcp`.
+- Every entry in `VIGIL_TRUSTED_PROXIES` must be an address or a CIDR block
+  (`127.0.0.1/32`, `::1/128`): `127.0.0.1/33` is refused, naming the entry,
+  rather than dropped. `VIGIL_TRUSTED_PROXY_HEADER` must be a header name, and
+  the two are set together or not at all.
+- Every entry in `VIGIL_EXCLUDE` must be a directory name, not a path:
+  `secret`, not `projects/secret`, `..` or `/secret`. A name is excluded at any
+  depth, so a path would match nothing and hide nothing.
+- `VIGIL_VAULT_OWNER` and `VIGIL_VAULT_LANGUAGE`, when set, must not be empty.
 - `VIGIL_AUTH_PASSWORD` must be at least 12 characters. The message names the
   variable and never shows the value.
 - `VIGIL_SKILLKEY_SECRET` must be set and decode, as base64 or hex, to at least
@@ -763,8 +773,9 @@ then name the published [IP ranges](https://www.cloudflare.com/ips/) instead.
 A host set up before `init.sh` wrote these adds the two lines to
 `/etc/vigil/env` once and restarts the service.
 
-**Set both or neither.** A header name without a trusted peer is ignored, and
-a trusted peer without a header name has nothing to read. With neither set,
+**Set both or neither.** A header name without a trusted peer would be
+ignored, and a trusted peer without a header name would have nothing to read,
+so the service refuses to start with one and not the other. With neither set,
 every request counts against the peer's one bucket.
 
 **Setting them wrong is worse than leaving them unset.** If `VIGIL_TRUSTED_PROXIES`

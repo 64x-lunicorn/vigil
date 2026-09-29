@@ -28,7 +28,8 @@ defmodule Vigil.Settings.RuntimeConfigTest do
                 VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
                 VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_CONSENT_FAILURES_PER_HOUR
                 VIGIL_ALLOWED_ORIGINS VIGIL_READ_FETCH_INTERVAL
-                VIGIL_GIT_REMOTE VIGIL_GIT_BRANCH)
+                VIGIL_GIT_REMOTE VIGIL_GIT_BRANCH VIGIL_TRUSTED_PROXY_HEADER
+                VIGIL_TRUSTED_PROXIES VIGIL_EXCLUDE VIGIL_VAULT_OWNER VIGIL_VAULT_LANGUAGE)
 
   setup do
     previous = Map.new(@touched, &{&1, System.get_env(&1)})
@@ -144,5 +145,30 @@ defmodule Vigil.Settings.RuntimeConfigTest do
     assert {:error, [message]} = check(prod_config())
     assert message =~ "VIGIL_ALLOWED_ORIGINS"
     assert message =~ ~s("claude.ai")
+  end
+
+  test "the tunnel's proxy settings pass, and a block that is none is refused by name" do
+    System.put_env("VIGIL_TRUSTED_PROXY_HEADER", "CF-Connecting-IP")
+    System.put_env("VIGIL_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
+
+    assert {:ok, %{trusted_proxy_header: "cf-connecting-ip", trusted_proxies: [_, _]}} =
+             check(prod_config())
+
+    System.put_env("VIGIL_TRUSTED_PROXIES", "127.0.0.1/33,::1/128")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_TRUSTED_PROXIES"
+    assert message =~ ~s("127.0.0.1/33")
+  end
+
+  test "the excluded directories arrive as a list, and a path among them is refused" do
+    System.put_env("VIGIL_EXCLUDE", "secret, private")
+
+    assert {:ok, %{exclude: ["secret", "private"]}} = check(prod_config())
+
+    System.put_env("VIGIL_EXCLUDE", "secret,projects/secret")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_EXCLUDE"
   end
 end

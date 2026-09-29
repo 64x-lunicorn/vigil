@@ -13,6 +13,16 @@ integer = fn var, default ->
   end
 end
 
+# A comma-separated variable as the list of its entries, each trimmed, empty
+# ones dropped. Whether an entry is any good is the check's to say.
+list = fn var ->
+  var
+  |> System.get_env("")
+  |> String.split(",", trim: true)
+  |> Enum.map(&String.trim/1)
+  |> Enum.reject(&(&1 == ""))
+end
+
 config :vigil,
   # Whether `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be https and share an
   # origin. Only a deployment talks to real clients; dev runs on localhost.
@@ -32,32 +42,21 @@ config :vigil,
   # UTC unless the deployment names its zone: a default that is some
   # particular place is a zone nobody chose. init.sh asks for it.
   tz: System.get_env("VIGIL_TZ", "UTC"),
-  exclude:
-    System.get_env("VIGIL_EXCLUDE", "")
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == "")),
+  exclude: list.("VIGIL_EXCLUDE"),
   # Which address a rate limit is keyed on. The header name is unset and the
   # trusted list is empty by default, and that is the safe setting: a
   # forwarded header is attacker-controlled
   # unless a proxy is known to sanitize it, so vigil believes one only when
-  # told both the header's name and the peers allowed to set it. Setting
-  # these wrong is worse than leaving them unset — see docs/guide.md.
+  # told both the header's name and the peers allowed to set it, and
+  # Vigil.Settings.Check refuses one without the other. Setting these wrong
+  # is worse than leaving them unset — see docs/guide.md.
   trusted_proxy_header: System.get_env("VIGIL_TRUSTED_PROXY_HEADER"),
-  trusted_proxies:
-    System.get_env("VIGIL_TRUSTED_PROXIES", "")
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == "")),
+  trusted_proxies: list.("VIGIL_TRUSTED_PROXIES"),
   # Browser origins besides the issuer's own that may send a request to `/mcp`
   # and the authorization server. Empty by default: a request with no `Origin`
   # (a program) and one from the issuer's origin (the consent form) are
   # allowed regardless, and every other browser origin is refused with 403.
-  allowed_origins:
-    System.get_env("VIGIL_ALLOWED_ORIGINS", "")
-    |> String.split(",", trim: true)
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == "")),
+  allowed_origins: list.("VIGIL_ALLOWED_ORIGINS"),
   issuer: System.get_env("VIGIL_ISSUER", "http://localhost:4000"),
   resource: System.get_env("VIGIL_RESOURCE", "http://localhost:4000/mcp"),
   # Wrong consent passwords per hour from every address together. Past it the

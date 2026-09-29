@@ -128,9 +128,11 @@ defmodule Vigil.OAuth.ClientAddr do
   Parses trust anchors — `"10.0.0.0/8"`, `"2001:db8::/32"`, or a bare address,
   which is its own single-host prefix.
 
-  A malformed entry is dropped with a warning rather than failing the boot or,
-  worse, being treated as a match: a deployment with one typo in the list
-  should lose that one anchor, not gain a wildcard.
+  A deployment never gets here with a malformed entry: `Vigil.Settings.Check`
+  refuses it at boot, naming it, because losing the one anchor would key
+  every request on the proxy's own address. For a caller outside the
+  supervision tree, one is dropped with a warning rather than treated as a
+  match: a typo should lose that one anchor, not gain a wildcard.
   """
   @spec parse_trusted([String.t()]) :: [cidr()]
   def parse_trusted(entries) when is_list(entries), do: Enum.flat_map(entries, &parse_cidr/1)

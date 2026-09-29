@@ -34,6 +34,11 @@ defmodule Vigil.Settings.CheckTest do
     oauth_rate_limit_rpm: 30,
     oauth_register_rate_limit_rpm: 5,
     read_fetch_interval: 60,
+    trusted_proxy_header: nil,
+    trusted_proxies: [],
+    exclude: [],
+    vault_owner: "the vault owner",
+    vault_language: "English",
     https_required: true
   ]
 
@@ -183,6 +188,89 @@ defmodule Vigil.Settings.CheckTest do
       assert message =~ ~s("claude.ai")
       assert message =~ ~s("https://x.org/mcp")
       refute message =~ ~s("https://claude.ai")
+    end
+  end
+
+  describe "the trusted proxies" do
+    test "neither is fine, and nothing is believed" do
+      assert {:ok, %{trusted_proxy_header: nil, trusted_proxies: []}} = check_with([])
+    end
+
+    test "both come back ready to use: the header lowercase, the blocks parsed" do
+      assert {:ok, checked} =
+               check_with(
+                 trusted_proxy_header: "CF-Connecting-IP",
+                 trusted_proxies: ["127.0.0.1/32", "::1/128"]
+               )
+
+      assert checked.trusted_proxy_header == "cf-connecting-ip"
+      assert checked.trusted_proxies == [{{127, 0, 0, 1}, 32}, {{0, 0, 0, 0, 0, 0, 0, 1}, 128}]
+    end
+
+    # Dropping it with a warning left the list empty, so every request was
+    # counted under the tunnel's loopback address — one bucket for everyone,
+    # which the first wrong password from anywhere spends for the owner.
+    test "an entry that is no address or block is refused, naming the variable and the entry" do
+      assert [message] =
+               refused(
+                 trusted_proxy_header: "CF-Connecting-IP",
+                 trusted_proxies: ["127.0.0.1/33", "::1/128", "cloudflared"]
+               )
+
+      assert message =~ "VIGIL_TRUSTED_PROXIES"
+      assert message =~ ~s("127.0.0.1/33")
+      assert message =~ ~s("cloudflared")
+      refute message =~ ~s("::1/128")
+    end
+
+    test "a header without a trusted peer is refused, naming the list" do
+      assert [message] = refused(trusted_proxy_header: "CF-Connecting-IP")
+      assert message =~ "VIGIL_TRUSTED_PROXIES is not set"
+      assert message =~ "VIGIL_TRUSTED_PROXY_HEADER"
+    end
+
+    test "a trusted peer without a header is refused, naming the header" do
+      assert [message] = refused(trusted_proxies: ["127.0.0.1/32"])
+      assert message =~ "VIGIL_TRUSTED_PROXY_HEADER is not set"
+      assert message =~ "VIGIL_TRUSTED_PROXIES"
+    end
+
+    test "a header name that is no header name is refused" do
+      assert [message] =
+               refused(
+                 trusted_proxy_header: "CF Connecting IP",
+                 trusted_proxies: ["127.0.0.1/32"]
+               )
+
+      assert message =~ "VIGIL_TRUSTED_PROXY_HEADER"
+      assert message =~ ~s("CF Connecting IP")
+    end
+  end
+
+  describe "the excluded directories" do
+    test "names pass as they are" do
+      assert {:ok, %{exclude: ["secret", "private"]}} =
+               check_with(exclude: ["secret", "private"])
+    end
+
+    # A name is matched against each segment of a path, so an entry holding a
+    # path matches none, and hides nothing while looking as if it did.
+    test "an entry that is a path rather than a name is refused, naming the entry" do
+      assert [message] = refused(exclude: ["secret", "projects/secret", "..", "/private"])
+      assert message =~ "VIGIL_EXCLUDE"
+      assert message =~ ~s("projects/secret")
+      assert message =~ ~s("..")
+      assert message =~ ~s("/private")
+      refute message =~ ~s("secret",)
+    end
+  end
+
+  describe "the writing instructions" do
+    test "an empty vault owner or language is named" do
+      messages = refused(vault_owner: "", vault_language: "")
+
+      assert Enum.any?(messages, &(&1 =~ "VIGIL_VAULT_OWNER is not set"))
+      assert Enum.any?(messages, &(&1 =~ "VIGIL_VAULT_LANGUAGE is not set"))
     end
   end
 

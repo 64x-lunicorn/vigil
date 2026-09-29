@@ -33,7 +33,7 @@ defmodule Vigil.Settings.Check do
   the two that depend on it then say nothing more.
   """
 
-  alias Vigil.Git
+  alias Vigil.{Cidr, Git}
 
   @settings [
     {:vault_path, "VIGIL_VAULT_PATH", :git_clone},
@@ -54,7 +54,12 @@ defmodule Vigil.Settings.Check do
     {:reload_rate_limit_rpm, "VIGIL_RELOAD_RATE_LIMIT_RPM", :positive_integer},
     {:oauth_rate_limit_rpm, "VIGIL_OAUTH_RATE_LIMIT_RPM", :positive_integer},
     {:oauth_register_rate_limit_rpm, "VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", :positive_integer},
-    {:read_fetch_interval, "VIGIL_READ_FETCH_INTERVAL", :non_negative_integer}
+    {:read_fetch_interval, "VIGIL_READ_FETCH_INTERVAL", :non_negative_integer},
+    {:trusted_proxy_header, "VIGIL_TRUSTED_PROXY_HEADER", :proxy_header},
+    {:trusted_proxies, "VIGIL_TRUSTED_PROXIES", :proxies},
+    {:exclude, "VIGIL_EXCLUDE", :directory_names},
+    {:vault_owner, "VIGIL_VAULT_OWNER", :required},
+    {:vault_language, "VIGIL_VAULT_LANGUAGE", :required}
   ]
 
   @min_password_length 12
@@ -127,6 +132,19 @@ defmodule Vigil.Settings.Check do
       {:ok, branch} -> {:ok, branch}
       {:error, expected} -> {:error, expected <> ", the default while it is unset"}
     end
+  end
+
+  # Unset is the safe setting for the proxy header, and the default: no
+  # forwarded header is believed. It is refused only beside a list of trusted
+  # peers, which names whose header to believe without saying which one.
+  defp check_value(:proxy_header, value, config) when value in [nil, ""] do
+    if Keyword.get(config, :trusted_proxies) in [nil, []],
+      do: {:ok, nil},
+      else:
+        {:error,
+         {:unset,
+          "VIGIL_TRUSTED_PROXIES lists the peers whose header is believed, " <>
+            "and this names the header: set both or neither"}}
   end
 
   # The setting's own checks. Every one refuses an unset value first: in :prod
@@ -269,6 +287,63 @@ defmodule Vigil.Settings.Check do
 
   defp check_value(:origins, value, _config),
     do: {:error, "a comma-separated list of origins, got #{inspect(value)}"}
+
+  # A header's name as HTTP spells one (RFC 9110 §5.1), lowercase as `Plug`
+  # stores them, which is how `Vigil.OAuth.ClientAddr` asks for it.
+  defp check_value(:proxy_header, value, _config) do
+    if value =~ ~r/\A[!#$%&'*+.^_`|~0-9A-Za-z-]+\z/,
+      do: {:ok, String.downcase(value)},
+      else: {:error, "a header name such as CF-Connecting-IP, got #{inspect(value)}"}
+  end
+
+  # Every entry an address or a block, parsed. An entry that is neither used to
+  # be dropped with a warning, which left the list empty and every request
+  # counted under the proxy's own address: one bucket for everyone, which the
+  # first wrong password from anywhere spends for the owner as well. An empty
+  # list is the default, and refused only beside a header, which it would leave
+  # nobody to believe.
+  defp check_value(:proxies, [], config) do
+    if Keyword.get(config, :trusted_proxy_header) in [nil, ""],
+      do: {:ok, []},
+      else:
+        {:error,
+         {:unset,
+          "VIGIL_TRUSTED_PROXY_HEADER names a header, and this lists the peers " <>
+            "whose header is believed: set both or neither"}}
+  end
+
+  defp check_value(:proxies, entries, _config) when is_list(entries) do
+    case Enum.reject(entries, &match?({:ok, _}, Cidr.parse(&1))) do
+      [] ->
+        {:ok, Enum.map(entries, fn entry -> elem(Cidr.parse(entry), 1) end)}
+
+      bad ->
+        {:error,
+         "a comma-separated list of addresses or CIDR blocks such as 127.0.0.1/32,::1/128, " <>
+           "got #{Enum.map_join(bad, ", ", &inspect/1)}"}
+    end
+  end
+
+  defp check_value(:proxies, value, _config),
+    do: {:error, "a comma-separated list of addresses or CIDR blocks, got #{inspect(value)}"}
+
+  # Each entry is matched against every segment of a path
+  # (`Vigil.Vault.Layout`), so an entry that is a path, or `.` or `..`,
+  # matches none: it would hide nothing while reading as if it did.
+  defp check_value(:directory_names, names, _config) when is_list(names) do
+    case Enum.filter(names, &(String.contains?(&1, "/") or &1 in [".", ".."])) do
+      [] ->
+        {:ok, names}
+
+      bad ->
+        {:error,
+         "a comma-separated list of directory names such as secret, " <>
+           "each excluded at any depth and none a path, got #{Enum.map_join(bad, ", ", &inspect/1)}"}
+    end
+  end
+
+  defp check_value(:directory_names, value, _config),
+    do: {:error, "a comma-separated list of directory names, got #{inspect(value)}"}
 
   # Named, never echoed, and never chosen: every SkillKey is an HMAC under
   # this secret handed to the client, so it ends up in chat transcripts, and a
