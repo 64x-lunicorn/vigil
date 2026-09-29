@@ -26,14 +26,14 @@ defmodule Vigil.OAuth.Store do
   their `client_id`, which is public. State written before that change is
   rekeyed when the tables are opened, in `init/1`.
 
-  Everything below `over_tables/0` is private, the fourteen answers included.
+  Everything below `over_tables/0` is private, the fifteen answers included.
   They are captured from inside this module, so the value is the only way to
   reach them and the sentence above is a fact rather than a convention.
   """
   use GenServer
   require Logger
 
-  alias Vigil.OAuth.{Code, Persistence, Token}
+  alias Vigil.OAuth.{Client, Code, Persistence, Token}
 
   @clients :oauth_clients
   @codes :oauth_codes
@@ -191,6 +191,7 @@ defmodule Vigil.OAuth.Store do
     Persistence.new(
       put_client: &put_client/2,
       get_client: &get_client/1,
+      count_clients: &count_clients/0,
       put_code: &put_code/2,
       take_code: &take_code/1,
       put_token: &put_token/2,
@@ -216,6 +217,8 @@ defmodule Vigil.OAuth.Store do
       [] -> :error
     end
   end
+
+  defp count_clients, do: :dets.info(@clients, :size)
 
   ## Authorization codes
   #
@@ -358,6 +361,10 @@ defmodule Vigil.OAuth.Store do
   ## Janitor sweeps
 
   defp sweep_expired(now) do
+    Enum.each(all_rows(@clients), fn {client_id, attrs} ->
+      if Client.unused?(attrs, now), do: delete_key(@clients, client_id)
+    end)
+
     Enum.each(all_rows(@codes), fn {key, attrs} ->
       if Code.expired?(attrs, now), do: delete_key(@codes, key)
     end)

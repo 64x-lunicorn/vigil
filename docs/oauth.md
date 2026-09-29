@@ -23,7 +23,7 @@ cannot exist with a lookup. The audience is stored at issue time and compared
 at verification time.
 
 **Persistence is reached through a value.** What the server remembers is
-declared as fourteen questions in `Vigil.OAuth.Persistence` — a struct of
+declared as fifteen questions in `Vigil.OAuth.Persistence` — a struct of
 functions with no defaults — and the `:dets`/`:ets` implementation is an
 adapter behind it, `Vigil.OAuth.Store.over_tables/0`. The six modules that
 read and write records ask through the value they are handed rather than
@@ -377,6 +377,43 @@ Redirect URIs are validated at registration: each must be `https://`, or
 `http://` with host `localhost` or `127.0.0.1`. Anything else is rejected with
 `invalid_redirect_uri`.
 
+**Registration is bounded in size, count and lifetime.** It is reachable
+without a token, and every accepted one is a `:dets` row on the disk that also
+holds the vault, so the per-address rate limit alone would still let one
+caller grow the table without end.
+
+| Bound | Limit | Answer when over it |
+|---|---|---|
+| request body | 16 KB, read before anything is decoded | 413 `invalid_request` |
+| `client_name` | 200 characters | 400 `invalid_client_metadata`, `error_description` naming the field |
+| `redirect_uris` | 10 URIs, each at most 2000 bytes | 400 `invalid_redirect_uri`, `error_description` naming the field |
+| stored clients | 1000 (`Vigil.OAuth.Client.max_clients/0`) | 503 `temporarily_unavailable` with `Retry-After`, and a warning in the journal |
+| unused clients | swept 24 h after registration if they received no code | — |
+
+The caps are constants rather than settings: they sit far above anything a
+real client registers (claude.ai sends one redirect URI and a short name), and
+a thousand clients is a few megabytes at most. A client record that could not be
+stored is answered the same 503: a `client_id` nobody can resolve is not
+handed out, just as a code or a token is not.
+
+The client record carries `first_code_at`: `nil` at registration, and the
+instant of the first consent that handed the client a code. The janitor drops
+a client whose `first_code_at` is still `nil` 24 hours after `issued_at`, so
+the stored-client cap is only ever held by clients a human actually approved
+and by registrations from the last day. A record written before the field
+existed does not have it and is kept — whoever wrote it could not say whether
+it was ever authorized — until its next code gives it one.
+
+**Every OAuth parameter is a single string.** `GET /oauth/authorize` decodes
+its query with `Plug.Conn.Query`, and the consent form and the token request
+are decoded the same way, so `client_id[]=x` is a list and `state[a]=b` a map
+on every path. Nothing in OAuth is either: a request carrying one answers
+`invalid_request` — a redirect to the client once the client and its redirect
+URI are trusted (without `state` if that was the parameter), and 400 at the
+token endpoint — before any other check reads the parameter as a string. A
+`client_id` or `redirect_uri` that is not a string is untrusted like any
+unknown one.
+
 ### Client-ID Metadata Document
 
 If `client_id` is an `https://` URL, the document is fetched and validated:
@@ -593,7 +630,8 @@ fact rather than a guess.
 
 **A write that did not persist is the other**: HTTP 503,
 `{"error": "temporarily_unavailable"}`, when a token could not be stored — a
-full disk, the `:dets` size limit. Nothing is handed out in that case; see
+full disk, the `:dets` size limit. Registration answers the same when its
+client could not be stored or the client table is full. Nothing is handed out in that case; see
 "Storage and cleanup". The code is the same one, for the reason its
 definition gives — the server is "unable to handle the request due to a
 temporary overloading or maintenance" — and 503 is the status that says so.
@@ -670,24 +708,25 @@ migration to the frozen pre-seam fixture.
 `{:error, reason}` on a full disk or at the size limit, and the adapter hands
 that back instead of dropping it. `Vigil.OAuth.Persistence.stored!/1` turns it
 into a refusal wherever a value is about to leave the server: the token
-endpoint answers 503 `temporarily_unavailable`, the consent redirects with the
-same code, and `mix vigil.seed_token` dies without printing a token. A value
+endpoint and registration answer 503 `temporarily_unavailable`, the consent
+redirects with the same code, and `mix vigil.seed_token` dies without printing a token. A value
 that was never stored is never handed out.
 
-`Vigil.OAuth.Janitor` runs every five minutes and sweeps five tables, which is
-every table that holds something with an expiry. `oauth_clients.dets` is not
-among them and is deliberately not swept: a registration has no expiry to read,
-and a client stays until it is deleted.
+`Vigil.OAuth.Janitor` runs every five minutes and sweeps six tables, which is
+every table that holds something with an expiry. `oauth_clients.dets` is among
+them for one kind of row only: a client that received no code within 24 hours
+of registering. A client that did stays until it is deleted.
 
 | Swept | Owner | Reclaimed when |
 |---|---|---|
+| registered clients | OAuth persistence | `Vigil.OAuth.Client` says it received no code within 24 h of registering |
 | authorization codes | OAuth persistence | `Vigil.OAuth.Code` says the code has expired |
 | access and refresh tokens | OAuth persistence | `Vigil.OAuth.Token` says the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
 | consent-failure counters | OAuth persistence | the 15-minute lockout window has elapsed |
 | CIMD cache entries | OAuth persistence | the cached hour is up |
 | request-limit windows | `Vigil.RateLimit` | the one-minute window has elapsed |
 
-The first four are one question — persistence's `sweep_expired` — asked
+The first five are one question — persistence's `sweep_expired` — asked
 through the value the janitor holds; `Vigil.OAuth.Store` is the adapter that
 answers it today.
 
@@ -696,7 +735,7 @@ No cron, no job library — just `Process.send_after/3`.
 The last row is both request limiters, not one of them: `Vigil.RateLimit`
 holds a single table for `/mcp` keyed by the access token's digest *and* the
 OAuth endpoints keyed by client address, so one sweep covers both. Only the
-third row is the 15-minute consent lockout, and it covers wrong passwords on
+fourth row is the 15-minute consent lockout, and it covers wrong passwords on
 the consent form and nothing else.
 
 The janitor's list is its own rather than the OAuth store's inventory. It was

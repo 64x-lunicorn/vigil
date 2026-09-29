@@ -8,7 +8,7 @@ defmodule Vigil.OAuth.FlowTest do
   """
   use ExUnit.Case, async: true
 
-  alias Vigil.OAuth.{Code, Flow, Server}
+  alias Vigil.OAuth.{Client, Code, Flow, Server}
 
   # The authorization server these decisions are made for, stated rather than
   # read back out of the deployment. Two of its seven fields are what the
@@ -118,6 +118,74 @@ defmodule Vigil.OAuth.FlowTest do
     test "no redirect_uri at all is refused", %{persistence: persistence} do
       assert {:error, "invalid_redirect_uri"} = Flow.register(persistence, %{})
     end
+
+    # Every registered field is stored and shown, so each has a cap, and a
+    # refusal says which one was over it.
+    test "a client_name over its cap is refused, naming the field", %{persistence: persistence} do
+      metadata = %{"redirect_uris" => ["https://app.example/cb"]}
+
+      assert {:ok, _} =
+               Flow.register(
+                 persistence,
+                 Map.put(metadata, "client_name", String.duplicate("é", 200))
+               )
+
+      assert {:error, "invalid_client_metadata", description} =
+               Flow.register(
+                 persistence,
+                 Map.put(metadata, "client_name", String.duplicate("a", 201))
+               )
+
+      assert description =~ "client_name"
+      assert persistence.count_clients.() == 1
+    end
+
+    test "more redirect_uris than the cap are refused, naming the field", %{
+      persistence: persistence
+    } do
+      uris = for i <- 1..11, do: "https://app.example/cb/#{i}"
+
+      assert {:ok, _} = Flow.register(persistence, %{"redirect_uris" => Enum.take(uris, 10)})
+
+      assert {:error, "invalid_redirect_uri", description} =
+               Flow.register(persistence, %{"redirect_uris" => uris})
+
+      assert description =~ "redirect_uris"
+    end
+
+    test "a redirect URI over its length cap is refused, naming the field", %{
+      persistence: persistence
+    } do
+      base = "https://app.example/"
+      at_cap = base <> String.duplicate("a", 2_000 - byte_size(base))
+
+      assert {:ok, _} = Flow.register(persistence, %{"redirect_uris" => [at_cap]})
+
+      assert {:error, "invalid_redirect_uri", description} =
+               Flow.register(persistence, %{"redirect_uris" => [at_cap <> "a"]})
+
+      assert description =~ "redirect_uris"
+    end
+
+    test "a full client table answers unavailable", %{persistence: persistence} do
+      for i <- 1..Client.max_clients() do
+        :ok = persistence.put_client.("filler-#{i}", %{name: "F", redirect_uris: []})
+      end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :unavailable =
+                 Flow.register(persistence, %{"redirect_uris" => ["https://app.example/cb"]})
+      end)
+    end
+
+    # The follow-up #193 left open: a client_id that was never written is
+    # not handed out, exactly like a code or a token.
+    test "a client that could not be stored answers unavailable", %{persistence: persistence} do
+      failing = %{persistence | put_client: fn _id, _attrs -> {:error, :enospc} end}
+
+      assert :unavailable =
+               Flow.register(failing, %{"redirect_uris" => ["https://app.example/cb"]})
+    end
   end
 
   describe "authorize_request/4" do
@@ -172,6 +240,43 @@ defmodule Vigil.OAuth.FlowTest do
                )
 
       assert ctx.scope == "vault"
+    end
+
+    # `Plug.Conn.Query` decodes `state[a]=x` to a map and `scope[]=x` to a
+    # list. The client is trusted by the time the rest is read, so it is told;
+    # a `state` that is not a string is not echoed back.
+    test "a parameter that decoded to a list or a map is an invalid request", %{
+      persistence: persistence
+    } do
+      client_id = client!(persistence)
+
+      for {name, value} <- [
+            {"scope", ["vault"]},
+            {"code_challenge", %{"a" => "b"}},
+            {"extra", ["x"]}
+          ] do
+        params = authorize_params(client_id, %{name => value, "state" => "xyz"})
+
+        assert {:error, {:redirect, "https://app.example/cb", "invalid_request", "xyz"}} =
+                 Flow.authorize_request(server(persistence), params)
+      end
+
+      params = authorize_params(client_id, %{"state" => %{"a" => "b"}})
+
+      assert {:error, {:redirect, "https://app.example/cb", "invalid_request", nil}} =
+               Flow.authorize_request(server(persistence), params)
+    end
+
+    test "a client_id or redirect_uri that is not a string is untrusted", %{
+      persistence: persistence
+    } do
+      client_id = client!(persistence)
+
+      assert {:error, :untrusted} =
+               Flow.authorize_request(server(persistence), authorize_params([client_id]))
+
+      params = authorize_params(client_id, %{"redirect_uri" => ["https://app.example/cb"]})
+      assert {:error, :untrusted} = Flow.authorize_request(server(persistence), params)
     end
 
     test "the read-only scope is carried through", %{persistence: persistence} do
@@ -570,6 +675,18 @@ defmodule Vigil.OAuth.FlowTest do
 
       assert {:error, 400, "unsupported_grant_type"} = Flow.grant(persistence, %{})
     end
+
+    test "a parameter that decoded to a list or a map is an invalid request", %{
+      persistence: persistence
+    } do
+      for params <- [
+            %{"grant_type" => ["authorization_code"]},
+            %{"grant_type" => "authorization_code", "code" => %{"a" => "b"}},
+            %{"grant_type" => "refresh_token", "refresh_token" => ["x"]}
+          ] do
+        assert {:error, 400, "invalid_request"} = Flow.grant(persistence, params)
+      end
+    end
   end
 
   describe "consent/5" do
@@ -590,6 +707,36 @@ defmodule Vigil.OAuth.FlowTest do
                )
 
       assert {:ok, _} = persistence.take_code.(code)
+    end
+
+    # The first code is what keeps a registered client from the unused-client
+    # sweep, so it is written on the client before the code leaves.
+    test "the first code is recorded on the client", %{persistence: persistence, ctx: ctx} do
+      now = 1_700_000_000
+      id = ctx.client.client_id
+
+      assert {:ok, _} =
+               Flow.consent(server(persistence), "10.0.0.6", @settings.auth_password, ctx, now)
+
+      assert {:ok, %{first_code_at: ^now}} = persistence.get_client.(id)
+
+      :ok = persistence.sweep_expired.(now + Client.unused_ttl() * 10)
+      assert {:ok, _} = persistence.get_client.(id)
+    end
+
+    test "a first code that could not be recorded is not handed out", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      failing = %{persistence | put_client: fn _id, _attrs -> {:error, :enospc} end}
+
+      assert :unavailable =
+               Flow.consent(
+                 Server.new(failing, @settings),
+                 "10.0.0.7",
+                 @settings.auth_password,
+                 ctx
+               )
     end
 
     test "a wrong password yields no code", %{persistence: persistence, ctx: ctx} do

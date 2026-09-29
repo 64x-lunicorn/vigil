@@ -21,7 +21,7 @@ defmodule Vigil.OAuth.JanitorTest do
 
   use ExUnit.Case, async: true
 
-  alias Vigil.OAuth.{Janitor, Store}
+  alias Vigil.OAuth.{Client, Janitor, Store}
   alias Vigil.OAuthCase
   alias Vigil.RateLimit
 
@@ -88,6 +88,28 @@ defmodule Vigil.OAuth.JanitorTest do
 
     assert_received {:swept, swept_at}
     assert swept_at == @now - 7200
+  end
+
+  # The one row the sweep takes that has no expiry of its own: a registered
+  # client that never went on to receive a code. Which clients qualify is
+  # `Vigil.OAuth.Client`'s and asserted against both adapters in
+  # `Vigil.OAuth.PersistenceTest`; this is that the janitor's sweep reaches
+  # the client table at all.
+  test "a sweep drops a client that received no code within its window", %{
+    persistence: persistence
+  } do
+    stale = Client.register(persistence, "Stale", [OAuthCase.redirect_uri()], @now - 86_400)
+
+    janitor =
+      start_janitor(
+        now: fn -> @now end,
+        persistence: persistence,
+        limiter: RateLimit.Counter.new()
+      )
+
+    sweep_now(janitor)
+
+    assert :error = persistence.get_client.(stale.client_id)
   end
 
   ## The limiter that is not the store's

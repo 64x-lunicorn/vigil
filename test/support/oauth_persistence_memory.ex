@@ -14,7 +14,8 @@ defmodule Vigil.OAuth.Persistence.Memory do
   The two agree on what a record *is* by asking the same owners — a code's
   expiry is `Vigil.OAuth.Code`'s, a token's expiry and its grant are
   `Vigil.OAuth.Token`'s — and on the lockout's window and the cache's hour by
-  reading them off the contract rather than restating them. What is left for
+  reading them off the contract rather than restating them. Which clients
+  the sweep drops is `Vigil.OAuth.Client`'s, asked the same way. What is left for
   the two to disagree about is exactly what
   `test/vigil/oauth/persistence_test.exs` runs against both.
 
@@ -22,7 +23,7 @@ defmodule Vigil.OAuth.Persistence.Memory do
   `Vigil.Vault.AbsentFacts`, because only they have a use for it.
   """
 
-  alias Vigil.OAuth.{Code, Persistence, Token}
+  alias Vigil.OAuth.{Client, Code, Persistence, Token}
 
   @rate_limit_window Persistence.rate_limit_window()
   @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
@@ -56,6 +57,7 @@ defmodule Vigil.OAuth.Persistence.Memory do
       Persistence.new(
         put_client: &put(tables, :clients, &1, &2),
         get_client: &fetch(tables, :clients, &1),
+        count_clients: fn -> count(tables, :clients) end,
         # Codes and tokens under their digest, as the `:dets` adapter keeps
         # them: a test that reads this table sees what a backup would.
         put_code: &put(tables, :codes, Token.digest(&1), &2),
@@ -173,6 +175,7 @@ defmodule Vigil.OAuth.Persistence.Memory do
   defp sweep_expired(tables, now) do
     Agent.update(tables, fn state ->
       state
+      |> update_in([:clients], &Map.reject(&1, fn {_k, attrs} -> Client.unused?(attrs, now) end))
       |> update_in([:codes], &Map.reject(&1, fn {_k, attrs} -> Code.expired?(attrs, now) end))
       |> update_in([:tokens], &Map.reject(&1, fn {_k, attrs} -> Token.expired?(attrs, now) end))
       |> update_in(

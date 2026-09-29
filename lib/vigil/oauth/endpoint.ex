@@ -17,6 +17,11 @@ defmodule Vigil.OAuth.Endpoint do
   @default_rpm 30
   @default_register_rpm 5
 
+  # The most a registration body may be. A registration that fits every cap
+  # `Vigil.OAuth.Flow.register/3` applies is a few kilobytes of JSON; this is
+  # read before any of them runs, so nothing larger is buffered at all.
+  @max_register_body 16_384
+
   plug(:check_origin)
   plug(:match)
   plug(:dispatch)
@@ -209,16 +214,39 @@ defmodule Vigil.OAuth.Endpoint do
 
   ## Registration
 
+  # A body over the limit answers `{:more, ...}` and is refused with 413
+  # before a byte of it is decoded. RFC 7591 §3.2.2 names the error codes for
+  # metadata; a body too large to read is not metadata yet, so it gets the
+  # HTTP status that says what happened and the generic `invalid_request`.
+  #
+  # A full client table, or a record that could not be stored, is 503
+  # `temporarily_unavailable` like the token endpoint's: nothing was
+  # registered, and the client may try again later.
   defp handle_register(conn) do
-    with {:ok, body, conn} <- Plug.Conn.read_body(conn),
-         {:ok, json} <- Jason.decode(body) do
-      case Flow.register(persistence(conn), json) do
-        {:ok, registration} -> send_json(conn, 201, registration)
-        {:error, error} -> send_json(conn, 400, %{error: error})
-      end
-    else
-      _ -> send_json(conn, 400, %{error: "invalid_request"})
+    case Plug.Conn.read_body(conn, length: @max_register_body, read_length: @max_register_body) do
+      {:ok, body, conn} -> register_body(conn, body)
+      {:more, _partial, conn} -> send_json(conn, 413, %{error: "invalid_request"})
+      {:error, _reason} -> send_json(conn, 400, %{error: "invalid_request"})
     end
+  end
+
+  defp register_body(conn, body) do
+    case Jason.decode(body) do
+      {:ok, json} -> send_registration(conn, Flow.register(persistence(conn), json))
+      {:error, _} -> send_json(conn, 400, %{error: "invalid_request"})
+    end
+  end
+
+  defp send_registration(conn, {:ok, registration}), do: send_json(conn, 201, registration)
+  defp send_registration(conn, {:error, error}), do: send_json(conn, 400, %{error: error})
+
+  defp send_registration(conn, {:error, error, description}),
+    do: send_json(conn, 400, %{error: error, error_description: description})
+
+  defp send_registration(conn, :unavailable) do
+    conn
+    |> put_retry_after()
+    |> send_json(503, %{error: "temporarily_unavailable"})
   end
 
   ## Authorization
@@ -316,12 +344,23 @@ defmodule Vigil.OAuth.Endpoint do
   # and decoding the part that arrived would decide on fields the caller did
   # not finish sending; one that could not be read answers no body at all.
   # Both are refused, each in the shape of the surface that asked.
+  #
+  # Decoded the way `fetch_query_params/1` decodes the query on
+  # `GET /oauth/authorize`, so `client_id[]=x` is a list in a form exactly as
+  # in a query, and `Vigil.OAuth.Flow.flat?/1` refuses it the same way in
+  # both. A body that is not valid form encoding is no form either.
   defp read_form(conn) do
     case Plug.Conn.read_body(conn) do
-      {:ok, body, conn} -> {:ok, URI.decode_query(body), conn}
+      {:ok, body, conn} -> decode_form(body, conn)
       {:more, _partial, conn} -> {:error, conn}
       {:error, _reason} -> {:error, conn}
     end
+  end
+
+  defp decode_form(body, conn) do
+    {:ok, Plug.Conn.Query.decode(body), conn}
+  rescue
+    Plug.Conn.InvalidQueryError -> {:error, conn}
   end
 
   defp redirect_with_error(conn, redirect_uri, error_code, state) do

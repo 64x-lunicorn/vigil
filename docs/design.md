@@ -880,8 +880,8 @@ atoms. Nothing varied across it, so there was nowhere to substitute, and the
 lockout had no test of their own: they were exercised incidentally, through
 endpoint tests.
 
-**The value is the whole of what those six ask.** Fourteen questions,
-declared in `Vigil.OAuth.Persistence`: a client written and read, a code
+**The value is the whole of what those six ask.** Fifteen questions,
+declared in `Vigil.OAuth.Persistence`: a client written, read and counted, a code
 written and taken, a token written, read, deleted and revoked by family, the
 consent attempts counted per address, the CIMD cache read and written — and
 the sweep. The sweep is part of this surface rather than a concern beside it:
@@ -921,15 +921,31 @@ client a consent round for a fold of a few lines, and the frozen pre-seam
 fixture already recorded exactly the state to migrate —
 `test/vigil/oauth/store_compatibility_test.exs` holds the migration to it.
 
-**A write answers whether it persisted.** `put_code` and `put_token` answer
-`:ok` or the `{:error, reason}` `:dets` gives on a full disk or at the size
-limit, and `Vigil.OAuth.Persistence.stored!/1` turns an error into
+**A write answers whether it persisted.** `put_client`, `put_code` and
+`put_token` answer `:ok` or the `{:error, reason}` `:dets` gives on a full
+disk or at the size limit, and `Vigil.OAuth.Persistence.stored!/1` turns an error into
 `Vigil.OAuth.Persistence.Unavailable` at every place a value is about to leave
 the server. The flow renders it as `temporarily_unavailable` — 503 at the
-token endpoint, a redirect at consent — and never hands out a value nobody
-can look up again. Rotation stores the new pair before it marks the old
-refresh token spent, so a failure part-way leaves the client a retry rather
-than a replay that revokes its grant.
+token endpoint and at registration, a redirect at consent — and never hands
+out a value nobody can look up again. Rotation stores the new pair before it
+marks the old refresh token spent, so a failure part-way leaves the client a
+retry rather than a replay that revokes its grant.
+
+**The client table is bounded in size, count and lifetime.** Registration is
+free to anyone the per-address limit lets through, and a budget bounds only
+how fast rows arrive. So the body is read up to 16 KB, `client_name` and
+`redirect_uris` are capped, at most 1000 clients are stored — past that,
+registration answers 503 `temporarily_unavailable` and warns in the journal —
+and the janitor drops a client that received no code within 24 hours of
+registering. The caps are constants, not settings: nothing real comes near
+them. Which clients are unused is `Vigil.OAuth.Client`'s, read off one field
+of its record: `first_code_at`, `nil` until consent first hands the client a
+code, which is written before the code leaves. A record from before the field
+is kept rather than guessed at. Counting is a question of its own on the
+contract, `count_clients`, so the cap is checked above the seam and both
+adapters are held to the count. Check and write are not one step, so
+concurrent registrations can overshoot the cap by as many as are in flight at
+once, which the per-address budget keeps small.
 
 **The routers resolve it once.** `Vigil.OAuth.Endpoint.init/1` builds the
 production adapter when it is not handed one, exactly as it resolves its proxy

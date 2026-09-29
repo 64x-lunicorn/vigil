@@ -33,9 +33,24 @@ defmodule Vigil.OAuth.Flow do
   alias Vigil.OAuth
   alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Server, Token}
 
+  # What one registration may store (`docs/oauth.md`, "Client registration").
+  # Generous for any client that exists — claude.ai registers one redirect URI
+  # and a short name — and small enough that `Vigil.OAuth.Client.max_clients/0`
+  # records stay a few megabytes on the disk that also holds the vault.
+  @max_client_name 200
+  @max_redirect_uris 10
+  @max_redirect_uri_bytes 2_000
+
   @doc """
-  Dynamic client registration. Returns the registration response, or
-  `{:error, "invalid_redirect_uri"}` when no usable redirect URI was offered.
+  Dynamic client registration. Returns the registration response, or one of:
+
+    * `{:error, "invalid_redirect_uri"}` when no usable redirect URI was
+      offered, and `{:error, "invalid_client_metadata"}` when the metadata is
+      not a JSON object;
+    * `{:error, error, description}` when a field is over its cap — the
+      description names the field;
+    * `:unavailable` when the client table is full or the record could not be
+      stored, which the endpoint answers as `temporarily_unavailable`.
   """
   def register(persistence, json, now \\ System.system_time(:second))
 
@@ -43,16 +58,9 @@ defmodule Vigil.OAuth.Flow do
     do: {:error, "invalid_client_metadata"}
 
   def register(persistence, json, now) do
-    redirect_uris = Map.get(json, "redirect_uris", [])
-
-    if valid_redirect_uris?(redirect_uris) do
-      client =
-        Client.register(
-          persistence,
-          client_name(json),
-          redirect_uris,
-          now
-        )
+    with {:ok, name} <- client_name(json),
+         {:ok, redirect_uris} <- redirect_uris(json) do
+      client = Client.register(persistence, name, redirect_uris, now)
 
       {:ok,
        %{
@@ -64,19 +72,44 @@ defmodule Vigil.OAuth.Flow do
          token_endpoint_auth_method: "none",
          client_id_issued_at: now
        }}
-    else
-      {:error, "invalid_redirect_uri"}
+    end
+  rescue
+    Persistence.Unavailable -> :unavailable
+  end
+
+  defp redirect_uris(json) do
+    uris = Map.get(json, "redirect_uris", [])
+
+    cond do
+      not valid_redirect_uris?(uris) ->
+        {:error, "invalid_redirect_uri"}
+
+      length(uris) > @max_redirect_uris ->
+        {:error, "invalid_redirect_uri",
+         "redirect_uris holds more than #{@max_redirect_uris} URIs"}
+
+      Enum.any?(uris, &(byte_size(&1) > @max_redirect_uri_bytes)) ->
+        {:error, "invalid_redirect_uri",
+         "a URI in redirect_uris is longer than #{@max_redirect_uri_bytes} bytes"}
+
+      true ->
+        {:ok, uris}
     end
   end
 
-  defp valid_redirect_uris?([_ | _] = uris),
-    do: Enum.all?(uris, &(is_binary(&1) and RedirectUri.valid_candidate?(&1)))
-
+  defp valid_redirect_uris?([_ | _] = uris), do: Enum.all?(uris, &RedirectUri.valid_candidate?/1)
   defp valid_redirect_uris?(_), do: false
 
   # Shown on the consent page, so it must be a string whatever the client sent.
-  defp client_name(%{"client_name" => name}) when is_binary(name) and name != "", do: name
-  defp client_name(_json), do: "Unnamed client"
+  defp client_name(%{"client_name" => name}) when is_binary(name) and name != "" do
+    if String.length(name) > @max_client_name,
+      do:
+        {:error, "invalid_client_metadata",
+         "client_name is longer than #{@max_client_name} characters"},
+      else: {:ok, name}
+  end
+
+  defp client_name(_json), do: {:ok, "Unnamed client"}
 
   @doc """
   Checks an `/authorize` request.
@@ -121,6 +154,12 @@ defmodule Vigil.OAuth.Flow do
     state = params["state"]
 
     cond do
+      # Checked first: every check below reads a parameter as a string. The
+      # client and its redirect URI are trusted by now, so the refusal goes
+      # back to it — without a `state` that is not one to echo.
+      not flat?(params) ->
+        {:error, {:redirect, redirect_uri, "invalid_request", if(is_binary(state), do: state)}}
+
       params["response_type"] != "code" ->
         {:error, {:redirect, redirect_uri, "invalid_request", state}}
 
@@ -183,7 +222,10 @@ defmodule Vigil.OAuth.Flow do
     end
   end
 
+  # The client's first code is recorded before the code is minted, so a code
+  # never reaches a client the unused-client sweep would still take.
   defp issue_code(persistence, ctx, now) do
+    Client.authorized(persistence, ctx.client.client_id, now)
     {:ok, Code.issue(persistence, ctx, now)}
   rescue
     Persistence.Unavailable -> :unavailable
@@ -210,7 +252,9 @@ defmodule Vigil.OAuth.Flow do
   end
 
   defp stored_grant(persistence, params, now) do
-    do_grant(persistence, params, now)
+    if flat?(params),
+      do: do_grant(persistence, params, now),
+      else: {:error, 400, "invalid_request"}
   rescue
     Persistence.Unavailable -> {:error, 503, "temporarily_unavailable"}
   end
@@ -309,6 +353,17 @@ defmodule Vigil.OAuth.Flow do
   # its next rotation.
   defp scope_defaulted(%{scope: ""} = record), do: %{record | scope: OAuth.scope()}
   defp scope_defaulted(record), do: record
+
+  @doc """
+  Whether every parameter of a request is a single string.
+
+  The endpoint decodes queries and forms with `Plug.Conn.Query`, where
+  `client_id[]=x` is a list and `state[a]=x` a map. Nothing in OAuth is
+  either, and every check in this module reads a parameter as a string, so a
+  request carrying one is `invalid_request` before it is anything else.
+  """
+  @spec flat?(map()) :: boolean()
+  def flat?(params), do: Enum.all?(params, fn {_name, value} -> is_binary(value) end)
 
   defp target_ok?(params, expected) do
     is_nil(params["resource"]) or params["resource"] == expected

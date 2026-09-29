@@ -281,6 +281,128 @@ defmodule Vigil.OAuth.EndpointTest do
     assert status == 201
   end
 
+  ## Registration bounds
+
+  test "a registration body over the size limit is refused before it is decoded", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    # Valid JSON whose only fault is its size: the refusal is the read's.
+    padding = String.duplicate("a", 16_384)
+
+    conn =
+      post_json(endpoint, "/oauth/register", %{
+        redirect_uris: ["https://claude.ai/cb"],
+        software_statement: padding
+      })
+
+    assert conn.status == 413
+    assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    assert persistence.count_clients.() == 0
+  end
+
+  test "a field over its cap is refused with a description naming it", %{endpoint: endpoint} do
+    {status, body} = register(endpoint, ["https://claude.ai/cb"], String.duplicate("n", 201))
+
+    assert status == 400
+    assert body["error"] == "invalid_client_metadata"
+    assert body["error_description"] =~ "client_name"
+
+    uris = for i <- 1..11, do: "https://claude.ai/cb/#{i}"
+    {status, body} = register(endpoint, uris)
+
+    assert status == 400
+    assert body["error"] == "invalid_redirect_uri"
+    assert body["error_description"] =~ "redirect_uris"
+  end
+
+  test "a full client table answers temporarily_unavailable", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    for i <- 1..Vigil.OAuth.Client.max_clients() do
+      :ok = persistence.put_client.("filler-#{i}", %{name: "F", redirect_uris: []})
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {status, body} = register(endpoint, ["https://claude.ai/cb"])
+
+        assert status == 503
+        assert body["error"] == "temporarily_unavailable"
+      end)
+
+    assert log =~ "registration refused"
+  end
+
+  ## Parameters that are not strings
+
+  test "a nested or array parameter on GET /oauth/authorize is an invalid request", %{
+    endpoint: endpoint
+  } do
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+    {201, client} = register(endpoint, [redirect_uri])
+    {_verifier, challenge} = pkce_pair()
+    query = URI.encode_query(authorize_query(client["client_id"], redirect_uri, challenge))
+
+    for extra <- ["scope[]=vault", "resource[a]=b", "code_challenge[]=x"] do
+      conn = conn(:get, "/oauth/authorize?" <> query <> "&" <> extra) |> call(endpoint)
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri)
+      assert extract_query_param(location, "error") == "invalid_request"
+    end
+
+    # A `state` that is not a string is not echoed back.
+    conn = conn(:get, "/oauth/authorize?" <> query <> "&state[a]=b") |> call(endpoint)
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "invalid_request"
+    assert extract_query_param(location, "state") == nil
+  end
+
+  test "a nested or array parameter on POST /oauth/authorize is an invalid request", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+    {201, client} = register(endpoint, [redirect_uri])
+    {_verifier, challenge} = pkce_pair()
+
+    form =
+      authorize_query(client["client_id"], redirect_uri, challenge, %{"decision" => "allow"})
+      |> URI.encode_query()
+
+    conn =
+      conn(:post, "/oauth/authorize", form <> "&password[]=" <> @settings.auth_password)
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> call(endpoint)
+
+    assert conn.status == 302
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "invalid_request"
+    assert extract_query_param(location, "code") == nil
+    assert {:ok, %{first_code_at: nil}} = persistence.get_client.(client["client_id"])
+  end
+
+  test "a nested or array parameter on /oauth/token is an invalid request", %{
+    endpoint: endpoint
+  } do
+    for body <- [
+          "grant_type[]=authorization_code",
+          "grant_type=authorization_code&code[a]=b",
+          "grant_type=refresh_token&refresh_token[]=x"
+        ] do
+      conn =
+        conn(:post, "/oauth/token", body)
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call(endpoint)
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
+  end
+
   test "the consent page names a client registered without a name in English", %{
     endpoint: endpoint
   } do

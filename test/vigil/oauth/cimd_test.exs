@@ -319,6 +319,18 @@ defmodule Vigil.OAuth.CimdTest do
     assert :error = Cimd.fetch(persistence, @url, @now, net)
   end
 
+  # The document is JSON from an address the client chose, so a redirect URI
+  # can be anything JSON can say. What is not a string is invalid metadata,
+  # refused like the rest, never a crash on the way to a consent page.
+  test "a document with a redirect_uri that is not a string is refused", %{
+    persistence: persistence
+  } do
+    for uri <- [42, nil, %{"uri" => "https://client.example.org/cb"}, ["x"]] do
+      net = net(body: document(%{"redirect_uris" => ["https://client.example.org/cb", uri]}))
+      assert :error = Cimd.fetch(persistence, @url, @now, net)
+    end
+  end
+
   test "a loopback redirect_uri is accepted, as it is at registration", %{
     persistence: persistence
   } do

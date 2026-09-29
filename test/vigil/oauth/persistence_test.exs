@@ -22,7 +22,7 @@ defmodule Vigil.OAuth.PersistenceTest do
   use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Flow, Persistence, Store, Token}
+  alias Vigil.OAuth.{Client, Flow, Persistence, Store, Token}
   alias Vigil.OAuthCase
 
   @now 1_700_000_000
@@ -38,6 +38,7 @@ defmodule Vigil.OAuth.PersistenceTest do
   @questions [
     put_client: 2,
     get_client: 1,
+    count_clients: 0,
     put_code: 2,
     take_code: 1,
     put_token: 2,
@@ -130,6 +131,50 @@ defmodule Vigil.OAuth.PersistenceTest do
 
         assert {:ok, %{name: "App", redirect_uris: []}} = persistence.get_client.("client-1")
         assert :error = persistence.get_client.("never-registered")
+      end
+
+      test "the clients are counted, and a rewrite is not a second client", %{
+        persistence: persistence
+      } do
+        assert persistence.count_clients.() == 0
+
+        :ok = persistence.put_client.("client-1", %{name: "App", redirect_uris: []})
+        :ok = persistence.put_client.("client-2", %{name: "App", redirect_uris: []})
+        :ok = persistence.put_client.("client-1", %{name: "Renamed", redirect_uris: []})
+
+        assert persistence.count_clients.() == 2
+      end
+
+      # A registration is free to anyone the rate limit lets through, so one
+      # that never went on to an authorization is the table's only unbounded
+      # growth. The sweep drops those once their window is up — and nothing
+      # else: not a client that was handed a code, not one still inside its
+      # window, and not one written before the record said which it was.
+      test "a sweep drops the clients that received no code in time, and only those", %{
+        persistence: persistence
+      } do
+        window = Client.unused_ttl()
+        uris = [OAuthCase.redirect_uri()]
+
+        unused = Client.register(persistence, "Unused", uris, @now - window)
+        fresh = Client.register(persistence, "Fresh", uris, @now - window + 1)
+        used = Client.register(persistence, "Used", uris, @now - window)
+        :ok = Client.authorized(persistence, used.client_id, @now - window + 60)
+
+        :ok =
+          persistence.put_client.("legacy", %{
+            name: "Legacy",
+            redirect_uris: uris,
+            issued_at: @now - 10 * window
+          })
+
+        assert :ok = persistence.sweep_expired.(@now)
+
+        assert :error = persistence.get_client.(unused.client_id)
+        assert {:ok, _} = persistence.get_client.(fresh.client_id)
+        assert {:ok, _} = persistence.get_client.(used.client_id)
+        assert {:ok, _} = persistence.get_client.("legacy")
+        assert persistence.count_clients.() == 3
       end
 
       test "an authorization code is single-use", %{persistence: persistence} do

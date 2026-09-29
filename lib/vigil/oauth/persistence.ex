@@ -4,13 +4,14 @@ defmodule Vigil.OAuth.Persistence do
   than a module they name (`docs/design.md`, "OAuth persistence is reached
   through a value").
 
-  This is the **contract**: fourteen questions, which is the whole of what the
-  OAuth modules ask of storage. A registered client written and read, an
-  authorization code written and taken, a token written, read, deleted and
+  This is the **contract**: fifteen questions, which is the whole of what the
+  OAuth modules ask of storage. A registered client written, read and
+  counted, an authorization code written and taken, a token written, read, deleted and
   revoked by family, the consent password attempts counted per address, the
   CIMD cache read and written — and the janitor's sweep, which is part of this
   surface rather than a concern of its own: it asks persistence to drop what
-  has expired, and every expiry it drops belongs to one of the tables above.
+  has expired, and every expiry it drops belongs to one of the tables above —
+  a registered client that never received a code included.
 
   The **production adapter** is `Vigil.OAuth.Store.over_tables/0`, a function
   beside the `:dets`/`:ets` implementation it wires, rather than closures
@@ -37,6 +38,9 @@ defmodule Vigil.OAuth.Persistence do
     :put_client,
     # {:ok, attrs} | :error.
     :get_client,
+    # How many client records are stored: a non-negative integer. What the
+    # registration cap (`Vigil.OAuth.Client.max_clients/0`) is checked against.
+    :count_clients,
 
     ## Authorization codes
     #
@@ -81,7 +85,9 @@ defmodule Vigil.OAuth.Persistence do
     :cimd_cache_put,
 
     ## The janitor's sweep
-    # Drop every record above whose expiry has passed at `now`. :ok.
+    # Drop every record above whose expiry has passed at `now`, and every
+    # client `Vigil.OAuth.Client.unused?/2` says was never handed a code in
+    # time. :ok.
     :sweep_expired
   ]
 
@@ -117,8 +123,9 @@ defmodule Vigil.OAuth.Persistence do
 
   defmodule Unavailable do
     @moduledoc """
-    Raised when a code or a token could not be stored — a full disk, the
-    `:dets` size limit. The value that was minted is never handed out: a
+    Raised when a client, a code or a token could not be stored — a full
+    disk, the `:dets` size limit — and when the client table is at its cap
+    (`reason: :client_cap`). The value that was minted is never handed out: a
     credential nobody can look up again is worse than a refusal, because the
     caller believes it holds one. `Vigil.OAuth.Flow` answers it as
     `temporarily_unavailable`; a seeding task dies of it without printing a
@@ -142,7 +149,7 @@ defmodule Vigil.OAuth.Persistence do
   def stored!({:error, reason}), do: raise(Unavailable, reason: reason)
 
   @doc """
-  Builds a persistence adapter from an answer to every one of the fourteen
+  Builds a persistence adapter from an answer to every one of the fifteen
   questions.
 
   Raises `ArgumentError` when a field is missing or unknown, which is the
