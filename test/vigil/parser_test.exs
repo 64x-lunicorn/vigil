@@ -20,6 +20,45 @@ defmodule Vigil.ParserTest do
   # The note's pre-heading chunk: a body, and no heading line of its own.
   defp pre_chunk, do: struct(Chunk, body_end_line: 3)
 
+  # A heading is recognized once per line, and a note is parsed several times
+  # per write inside the single writer. The pattern used to backtrack over a
+  # run of whitespace once for every position its text could end at: time
+  # quadratic in the line's length, until PCRE's match limit gave up and the
+  # line silently was no heading at all (#201). The recognition itself is now
+  # a fraction of a millisecond; what the parse spends beyond it is the slug,
+  # which is linear.
+  describe "a heading line of 100,000 spaces" do
+    @spaces String.duplicate(" ", 100_000)
+
+    for {label, line} <- [
+          {"between text and text", "## a" <> @spaces <> "b"},
+          {"after the text", "## a" <> @spaces},
+          {"in an H1", "# a" <> @spaces <> "b"}
+        ] do
+      test "is recognized, and the note parsed, within a small fixed time, #{label}" do
+        line = unquote(line)
+        content = "---\ntype: reference\n---\n# Title\n\n#{line}\n\nbody\n"
+
+        {recognize, _kind} =
+          :timer.tc(fn -> {Vigil.Markdown.h1(line), Vigil.Markdown.heading(line)} end)
+
+        {parse, {:ok, _file}} = :timer.tc(fn -> Parser.parse("x/long.md", content, %{}) end)
+
+        assert recognize < 20_000, "recognizing the heading took #{div(recognize, 1000)} ms"
+        assert parse < 500_000, "parsing the note took #{div(parse, 1000)} ms"
+      end
+    end
+
+    test "is still the heading it was" do
+      content = "---\ntype: reference\n---\n# Title a#{@spaces}b\n\n## a#{@spaces}b\n\nbody\n"
+      {:ok, file} = Parser.parse("x/long.md", content, %{})
+
+      assert file.title == "Title a" <> @spaces <> "b"
+      assert [%Chunk{heading: heading}] = Enum.filter(file.chunks, & &1.heading)
+      assert heading == "a" <> @spaces <> "b"
+    end
+  end
+
   test "slug/1 transliterates umlauts and sharp s" do
     assert Parser.slug("Heat Pump Größe") == "heat-pump-groesse"
     assert Parser.slug("Grüße-und-Straße") == "gruesse-und-strasse"

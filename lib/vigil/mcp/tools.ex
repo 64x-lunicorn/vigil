@@ -52,7 +52,11 @@ defmodule Vigil.MCP.Tools do
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
-  non-empty; the generated schema says so with `minLength: 1`. An integer is
+  non-empty; the generated schema says so with `minLength: 1`. A `:string` is
+  always bounded too: every one declares a `max_length`, published as
+  `maxLength` and counted in characters (Unicode code points, as JSON Schema
+  counts them), and a longer value is refused naming the parameter. A row
+  that declares a string without one is a compile error. An integer is
   always bounded — there is no unbounded integer type, because a bound stated
   anywhere but here is a bound the published schema does not carry and the
   validator does not enforce. The range is published as `minimum`/`maximum`
@@ -67,6 +71,20 @@ defmodule Vigil.MCP.Tools do
 
   alias Vigil.{Skills, SkillKey, Store}
 
+  # How long a string argument may be, in characters (docs/design.md, "Input
+  # sizes are bounded"). Two sizes cover every parameter: a note's or a
+  # skill's text, and everything else — a path, an id, a query, a heading, a
+  # name, a timestamp, a key. A note is parsed several times per write inside
+  # the single writer, so how long one write may keep every other caller
+  # waiting is a question of how much text it can carry. A million characters
+  # is a book, not a note; a thousand is a heading nobody writes.
+  #
+  # `Vigil.MCP.Server` reads a `/mcp` body up to a byte limit of its own,
+  # which is kept large enough for the longest `content` below plus the rest
+  # of the message.
+  @content_max 1_000_000
+  @short_max 1_024
+
   # The one parameter that is not a parameter of any Store operation: it
   # authorizes a write and is consumed by the gate below.
   @skill_key :skill_key
@@ -79,6 +97,7 @@ defmodule Vigil.MCP.Tools do
     name: @skill_key_name,
     type: :string,
     required: true,
+    max_length: @short_max,
     description: "Current key from skill_read."
   }
 
@@ -89,6 +108,7 @@ defmodule Vigil.MCP.Tools do
   @request_id_param %{
     name: "request_id",
     type: :string,
+    max_length: @short_max,
     description:
       "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again."
   }
@@ -97,6 +117,7 @@ defmodule Vigil.MCP.Tools do
   @if_match_param %{
     name: "if_match",
     type: :string,
+    max_length: @short_max,
     description:
       "Optional: the section's hash from read. The edit is refused if the id no longer holds that content."
   }
@@ -110,7 +131,8 @@ defmodule Vigil.MCP.Tools do
           required(:type) => param_type,
           required(:description) => String.t(),
           optional(:required) => boolean(),
-          optional(:default) => term()
+          optional(:default) => term(),
+          optional(:max_length) => pos_integer()
         }
 
   @type tool_spec :: %{
@@ -138,8 +160,19 @@ defmodule Vigil.MCP.Tools do
       call: :search,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
-        %{name: "query", type: :string, required: true, description: "Exact search phrase."},
-        %{name: "domain", type: :string, description: "Restrict results to this domain."},
+        %{
+          name: "query",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "Exact search phrase."
+        },
+        %{
+          name: "domain",
+          type: :string,
+          max_length: @short_max,
+          description: "Restrict results to this domain."
+        },
         %{name: "type", type: {:enum, @type_enum}, description: "Filter by chunk type."},
         %{
           name: "prefer",
@@ -166,6 +199,7 @@ defmodule Vigil.MCP.Tools do
         %{
           name: "id",
           type: :string,
+          max_length: @short_max,
           required: true,
           description: "path#heading-slug, or just path."
         },
@@ -186,7 +220,13 @@ defmodule Vigil.MCP.Tools do
       call: :links,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
-        %{name: "id", type: :string, required: true, description: "path, or path#heading-slug."},
+        %{
+          name: "id",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "path, or path#heading-slug."
+        },
         %{
           name: "direction",
           type: {:enum, ["out", "in", "both"]},
@@ -211,7 +251,13 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: false, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "type",
           type: {:enum, @type_enum},
@@ -221,15 +267,22 @@ defmodule Vigil.MCP.Tools do
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "Markdown body, starting with an H1."
         },
         %{
           name: "starts",
           type: :string,
+          max_length: @short_max,
           description: "ISO timestamp, only for type: event."
         },
-        %{name: "ends", type: :string, description: "ISO timestamp, only for type: event."},
+        %{
+          name: "ends",
+          type: :string,
+          max_length: @short_max,
+          description: "ISO timestamp, only for type: event."
+        },
         %{
           name: "force",
           type: :boolean,
@@ -253,15 +306,23 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: false, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "heading",
           type: :string,
+          max_length: @short_max,
           description: "Section name, one non-empty line; without it, appends at end of file."
         },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "Markdown text to append."
         }
@@ -276,10 +337,17 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "id", type: :string, required: true, description: "path#heading-slug."},
+        %{
+          name: "id",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "path#heading-slug."
+        },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "New body, without headings of its own."
         },
@@ -296,10 +364,17 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "New body, starting with an H1."
         },
@@ -321,7 +396,13 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "id", type: :string, required: true, description: "path#heading-slug."},
+        %{
+          name: "id",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "path#heading-slug."
+        },
         @if_match_param
       ]
     },
@@ -335,15 +416,31 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "type",
           type: {:enum, @type_enum},
           required: true,
           description: "New frontmatter type."
         },
-        %{name: "starts", type: :string, description: "ISO timestamp, only for type: event."},
-        %{name: "ends", type: :string, description: "ISO timestamp, only for type: event."}
+        %{
+          name: "starts",
+          type: :string,
+          max_length: @short_max,
+          description: "ISO timestamp, only for type: event."
+        },
+        %{
+          name: "ends",
+          type: :string,
+          max_length: @short_max,
+          description: "ISO timestamp, only for type: event."
+        }
       ]
     },
     %{
@@ -355,7 +452,13 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "confirm",
           type: :boolean,
@@ -374,8 +477,20 @@ defmodule Vigil.MCP.Tools do
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "from", type: :string, required: true, description: "Existing path."},
-        %{name: "to", type: :string, required: true, description: "New path."},
+        %{
+          name: "from",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "Existing path."
+        },
+        %{
+          name: "to",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "New path."
+        },
         %{
           name: "confirm",
           type: :boolean,
@@ -452,6 +567,7 @@ defmodule Vigil.MCP.Tools do
         %{
           name: "name",
           type: :string,
+          max_length: @short_max,
           required: true,
           description: "Skill name, with or without .md."
         }
@@ -469,12 +585,14 @@ defmodule Vigil.MCP.Tools do
         %{
           name: "name",
           type: :string,
+          max_length: @short_max,
           required: true,
           description: "Skill name, with or without .md."
         },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "Full file content including frontmatter."
         },
@@ -503,6 +621,12 @@ defmodule Vigil.MCP.Tools do
   # forgot one would publish, so a missing hint is a compile error rather than
   # a tool quietly described as the opposite of what it is.
   @hint_keys [:destructive, :idempotent, :open_world, :read_only]
+
+  for tool <- @tools, %{type: :string} = param <- tool.params do
+    unless is_integer(param[:max_length]) and param.max_length > 0 do
+      raise ArgumentError, "tool #{tool.name} declares string #{param.name} without a max_length"
+    end
+  end
 
   for tool <- @tools do
     unless is_binary(tool[:title]) and tool.title != "" do
@@ -563,7 +687,7 @@ defmodule Vigil.MCP.Tools do
   end
 
   defp property_schema(%{type: :string, description: description} = spec) do
-    base = %{type: "string", description: description}
+    base = %{type: "string", maxLength: spec.max_length, description: description}
     if required?(spec), do: Map.put(base, :minLength, 1), else: base
   end
 
@@ -605,9 +729,10 @@ defmodule Vigil.MCP.Tools do
   envelope was decided at.
 
   Validates `args` against the declared tool's parameters first — a
-  violation (wrong type, off-enum value, missing or empty required
-  parameter) is reported as a tool error before the Store's mailbox is
-  reached, naming every violation rather than only the first. Undeclared
+  violation (wrong type, off-enum value, out-of-range integer, string over
+  its `max_length`, missing or empty required parameter) is reported as a
+  tool error before the Store's mailbox is reached, naming every violation
+  rather than only the first. Undeclared
   parameters are ignored. What is left is the call the row declares.
   Returns `{:ok, result}` or `{:error, message}` — with a third element,
   `%{stale: true}`, for a read answered while the vault could not be brought
@@ -756,9 +881,17 @@ defmodule Vigil.MCP.Tools do
 
   defp check_type(%{type: :string} = spec, value) do
     cond do
-      not is_binary(value) -> type_error(spec, "a string")
-      required?(spec) and value == "" -> missing_error(spec)
-      true -> {:ok, value}
+      not is_binary(value) ->
+        type_error(spec, "a string")
+
+      required?(spec) and value == "" ->
+        missing_error(spec)
+
+      too_long?(value, spec.max_length) ->
+        type_error(spec, "at most #{spec.max_length} characters")
+
+      true ->
+        {:ok, value}
     end
   end
 
@@ -781,6 +914,16 @@ defmodule Vigil.MCP.Tools do
       type_error(spec, "one of #{Enum.join(values, ", ")}")
     end
   end
+
+  # Characters as JSON Schema counts them, code points. No character is
+  # shorter than a byte, so a value no longer in bytes than the bound is
+  # within it without being counted.
+  defp too_long?(value, max) when byte_size(value) <= max, do: false
+  defp too_long?(value, max), do: codepoints(value, 0) > max
+
+  defp codepoints(<<_::utf8, rest::binary>>, count), do: codepoints(rest, count + 1)
+  defp codepoints(<<_, rest::binary>>, count), do: codepoints(rest, count + 1)
+  defp codepoints(<<>>, count), do: count
 
   defp missing_error(spec), do: {:error, "Missing or invalid parameter: #{spec.name}"}
 

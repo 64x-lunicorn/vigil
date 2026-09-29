@@ -329,6 +329,16 @@ is a tool error naming the range, not a silently clamped result: a caller told
 it got 25 hits of the 100 it asked for could not tell that from having asked
 for 25.
 
+Every string argument has a maximum length, published as `maxLength` on
+`tools/list` and counted in characters: `content` takes up to 1,000,000,
+every other string (`path`, `id`, `from`, `to`, `query`, `domain`, `heading`,
+`name`, `starts`, `ends`, `if_match`, `request_id`, `skill_key`) up to 1,024.
+A longer value is a tool error naming the parameter, e.g. `Invalid parameter
+content: expected at most 1000000 characters`. The `/mcp` request body is read
+up to 8,000,000 bytes, which fits the longest `content` sent as UTF-8; a
+larger body is answered `413` with a JSON-RPC error
+(`-32600`).
+
 `update_frontmatter` changes only `type`, `starts` and `ends`; every other key
 in the block (`tags`, `aliases`, …) stays as it was, line for line. A block
 that does not parse as YAML, or one it cannot edit line by line, is refused

@@ -305,6 +305,73 @@ defmodule Vigil.MCP.ServerTest do
     end
   end
 
+  # docs/design.md, "Input sizes are bounded". The body is read up to a limit
+  # of its own rather than Plug's default, and a longer one is answered in
+  # the protocol's words, not with an empty 400 a client cannot read.
+  describe "the /mcp body limit" do
+    test "a body over the limit is refused with 413 and a JSON-RPC error", %{
+      persistence: persistence,
+      token: token
+    } do
+      padding = String.duplicate("a", Server.max_body_bytes())
+
+      body =
+        ~s({"jsonrpc":"2.0","id":7,"method":"ping","params":{"padding":"#{padding}"}})
+
+      conn =
+        conn(:post, "/mcp", body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> Server.call(opts(persistence))
+
+      assert conn.status == 413
+      reply = Jason.decode!(conn.resp_body)
+      assert reply["jsonrpc"] == "2.0"
+      assert reply["id"] == nil
+      assert reply["error"]["code"] == -32600
+      assert reply["error"]["message"] =~ "#{Server.max_body_bytes()} bytes"
+    end
+
+    # The longest argument, in the longest characters there are, still gets
+    # as far as the validation that measures it: the body limit is not the
+    # smaller of the two bounds.
+    test "a content one character over its limit, in 4-byte characters, reaches validation", %{
+      persistence: persistence,
+      token: token
+    } do
+      content = "# X\n" <> String.duplicate("😀", 1_000_000)
+      assert byte_size(content) < Server.max_body_bytes()
+
+      conn =
+        post(
+          persistence,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 8,
+            method: "tools/call",
+            params: %{
+              name: "create",
+              arguments: %{
+                path: "bike/huge.md",
+                type: "reference",
+                content: content,
+                skill_key: Vigil.SkillKey.current(deployment_key())
+              }
+            }
+          },
+          [{"mcp-session-id", "huge"}]
+        )
+
+      assert conn.status == 200
+      result = Jason.decode!(conn.resp_body)["result"]
+      assert result["isError"] == true
+
+      assert hd(result["content"])["text"] =~
+               "Invalid parameter content: expected at most 1000000 characters"
+    end
+  end
+
   describe "protocol versions" do
     defp initialize_with(persistence, token, version) do
       raw_post(persistence, token, %{
@@ -793,23 +860,6 @@ defmodule Vigil.MCP.ServerTest do
       assert payload["error"] == "Invalid arguments: expected an object"
       assert Map.has_key?(payload, "_")
     end
-  end
-
-  # One byte past what `Plug.Conn.read_body/1` reads in one go, so the body
-  # arrives as `{:more, partial, conn}`. It is refused the way a body that
-  # could not be read is, rather than raising out of the router.
-  test "a body longer than one read is a 400, not a crash", %{
-    persistence: persistence,
-    token: token
-  } do
-    conn =
-      conn(:post, "/mcp", String.duplicate(" ", 8_000_001))
-      |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer #{token}")
-      |> Server.call(opts(persistence))
-
-    assert conn.status == 400
-    assert conn.resp_body == ""
   end
 
   defp failing_create(persistence, token, session_id, id) do

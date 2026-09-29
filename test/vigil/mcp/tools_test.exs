@@ -29,7 +29,14 @@ defmodule Vigil.MCP.ToolsTest do
       props = search.inputSchema.properties
 
       assert search.inputSchema.required == ["query"]
-      assert props.query == %{type: "string", description: "Exact search phrase.", minLength: 1}
+
+      assert props.query == %{
+               type: "string",
+               description: "Exact search phrase.",
+               minLength: 1,
+               maxLength: 1_024
+             }
+
       assert props.domain.type == "string"
       refute Map.has_key?(props.domain, :minLength)
       assert props.type.enum == ["reference", "decision", "event"]
@@ -105,6 +112,7 @@ defmodule Vigil.MCP.ToolsTest do
           assert schema.properties.skill_key == %{
                    type: "string",
                    minLength: 1,
+                   maxLength: 1_024,
                    description: "Current key from skill_read."
                  }
 
@@ -140,6 +148,20 @@ defmodule Vigil.MCP.ToolsTest do
         else
           refute Map.has_key?(schema.properties, :if_match)
         end
+      end
+    end
+
+    # docs/design.md, "Input sizes are bounded". A string with no bound is a
+    # parameter a caller can make as large as the body limit, and every note
+    # it carries is parsed inside the single writer.
+    test "every string parameter publishes a maxLength; content is the long one" do
+      for %{name: tool, inputSchema: %{properties: props}} <- Tools.definitions(),
+          {name, %{type: "string"} = schema} <- props,
+          not Map.has_key?(schema, :enum) do
+        expected = if name == :content, do: 1_000_000, else: 1_024
+
+        assert schema[:maxLength] == expected,
+               "#{tool}.#{name} publishes maxLength #{inspect(schema[:maxLength])}"
       end
     end
 
@@ -305,6 +327,43 @@ defmodule Vigil.MCP.ToolsTest do
                )
 
       assert message =~ "Invalid parameter direction"
+    end
+
+    test "a string over its maxLength is refused, naming the parameter" do
+      query = String.duplicate("a", 1_025)
+
+      assert {:error, "Invalid parameter query: expected at most 1024 characters"} =
+               Tools.dispatch("search", %{"query" => query}, @now, @key)
+    end
+
+    test "a note's content over its maxLength is refused before the writer is reached" do
+      args = %{
+        "path" => "bike/x.md",
+        "type" => "reference",
+        "content" => "# X\n" <> String.duplicate("a", 1_000_000),
+        "skill_key" => Vigil.SkillKey.current(@key)
+      }
+
+      assert {:error, message} = Tools.dispatch("create", args, @now, @key)
+      assert message == "Invalid parameter content: expected at most 1000000 characters"
+    end
+
+    # JSON Schema counts characters, and so does the bound: 1,024 umlauts are
+    # 2,048 bytes and still within it. The off-range limit is there so the
+    # call fails in validation, naming only what is wrong.
+    test "the bound counts characters, not bytes" do
+      query = String.duplicate("ü", 1_024)
+
+      assert {:error, message} =
+               Tools.dispatch("search", %{"query" => query, "limit" => 0}, @now, @key)
+
+      refute message =~ "query"
+      assert message =~ "limit"
+
+      assert {:error, message} =
+               Tools.dispatch("search", %{"query" => query <> "ü", "limit" => 0}, @now, @key)
+
+      assert message =~ "Invalid parameter query: expected at most 1024 characters"
     end
 
     test "every violation is reported in one message, not only the first" do

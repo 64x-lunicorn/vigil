@@ -592,7 +592,8 @@ it, so the last step of adding a tool is exercising it there.
 
 Every declared parameter is validated against the schema the server itself
 publishes. A violation — a wrong type, an off-enum value, an out-of-range
-integer, a missing or empty required parameter, `arguments` that are not an
+integer, a string over its maximum length (see "Input sizes are bounded"), a
+missing or empty required parameter, `arguments` that are not an
 object at all — is a tool error naming what was expected, not a substituted
 default. A caller who claims `type: "bogus"`
 gets told so, rather than receiving unfiltered results it believes were
@@ -623,6 +624,56 @@ Integer parameters carry a range in the table (`limit` is `1..25`, `depth` is
 is refused there. Nothing downstream clamps: `limit: 100` is an error, not a
 quiet 25, because a caller told it received the 25 best hits of 100 asked for
 cannot tell that from having asked for 25.
+
+---
+
+## Input sizes are bounded
+
+A note is parsed several times per write, and every parse runs inside the
+single writer (see "The write path"). How long one call can keep every other
+read and write waiting is therefore a question of how much text it can hand
+the writer, and of how the parser spends its time on that text. Both are
+bounded.
+
+**Every string parameter declares a `max_length`.** It is part of the row,
+like an integer's range: published as `maxLength` on `tools/list`, enforced by
+the same validation that checks the type, and refused before the writer's
+mailbox is reached with a tool error naming the parameter
+(`Invalid parameter content: expected at most 1000000 characters`). A row that
+declares a string without one does not compile. Two sizes cover every
+parameter, counted in characters (Unicode code points, as JSON Schema counts
+them):
+
+| Parameter | `maxLength` |
+|---|---|
+| `content` (`create`, `append`, `replace_section`, `rewrite_note`, `skill_write`) | 1,000,000 |
+| every other string — `path`, `id`, `from`, `to`, `query`, `domain`, `heading`, `name`, `starts`, `ends`, `if_match`, `request_id`, `skill_key` | 1,024 |
+
+A million characters is a book rather than a note, and nothing a real vault
+holds comes near it; it exists to put a ceiling on the parse, not to shape how
+notes are written. A thousand characters is a path or a heading nobody writes.
+More sizes — one for paths, one for timestamps, one for keys — would each be a
+number to justify and document, and would bound nothing the writer cares about
+that 1,024 does not already.
+
+**The `/mcp` body is read up to 8,000,000 bytes**, stated in
+`Vigil.MCP.Server` rather than left to Plug's default. It stays above the
+longest argument the table admits — a million characters of up to four bytes
+each in UTF-8 — plus the rest of the message, so a note that is too long is
+refused by the validation that names its parameter, not by the transport. (A
+client that escapes every character as `\uXXXX` spends up to twelve bytes on
+one and can reach the body limit first; it is refused all the same, only in
+the transport's words.) A body over the limit is not read to its end and is answered `413` with a
+JSON-RPC error (`-32600`, `id: null`): there is no complete message to take an
+id from, and a client should learn why in the protocol's words, not from an
+empty `400`.
+
+**Heading recognition is linear in the line's length.** The pattern captures
+a heading's text greedily and trims it afterwards. The lazy form it replaced,
+`(.+?)\s*$`, retried the trailing whitespace once for every position the text
+could end at: time quadratic in the line, until PCRE's match limit gave up and
+a long heading silently was no heading at all. A heading line of 100,000
+spaces is now recognized in well under a millisecond.
 
 ---
 

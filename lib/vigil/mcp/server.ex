@@ -23,6 +23,14 @@ defmodule Vigil.MCP.Server do
   # every request spends.
   @default_reload_rpm 6
 
+  # How many bytes of a `/mcp` body are read (docs/design.md, "Input sizes are
+  # bounded"). Stated here rather than left to Plug's default, which is a
+  # number nothing in vigil decided. It is kept above the longest argument the
+  # tool table admits — a million characters of `content`, up to four bytes
+  # each in UTF-8 — plus the rest of the message, so a too-long note is
+  # refused by the validation that names its parameter, not by this.
+  @max_body_bytes 8_000_000
+
   # Who this server says it is on `initialize`, beside its name and version.
   @server_title "Vigil"
   @website_url "https://github.com/64x-lunicorn/vigil"
@@ -308,7 +316,7 @@ defmodule Vigil.MCP.Server do
   defp handle_mcp_authenticated(conn, auth) do
     with {:ok, protocol_version_ok?, conn} <- check_protocol_version(conn),
          true <- protocol_version_ok?,
-         {:ok, body, conn} <- Plug.Conn.read_body(conn),
+         {:ok, body, conn} <- Plug.Conn.read_body(conn, length: @max_body_bytes),
          {:ok, msg} <- Jason.decode(body) do
       if is_map(msg), do: handle_message(conn, msg, auth), else: invalid_request(conn)
     else
@@ -322,10 +330,18 @@ defmodule Vigil.MCP.Server do
           error: %{code: -32700, message: "Parse error"}
         })
 
-      # A body longer than one read is refused as a body that could not be read
-      # is: nothing short of all of it is a JSON-RPC message to parse.
+      # A body over the limit is not read to its end: nothing short of all of
+      # it is a JSON-RPC message, so there is no id to echo. 413 says why at
+      # the HTTP layer, the body says it in the protocol's words.
       {:more, _partial, conn} ->
-        send_resp(conn, 400, "")
+        send_json(conn, 413, %{
+          jsonrpc: "2.0",
+          id: nil,
+          error: %{
+            code: -32600,
+            message: "Invalid Request: body larger than #{@max_body_bytes} bytes"
+          }
+        })
 
       {:error, _} ->
         send_resp(conn, 400, "")
@@ -351,6 +367,10 @@ defmodule Vigil.MCP.Server do
     do: version
 
   defp negotiate(_params), do: @latest_protocol_version
+
+  @doc false
+  # The body limit, for the tests that have to cross it.
+  def max_body_bytes, do: @max_body_bytes
 
   # A body that parses but is not one JSON-RPC message — a batch, a scalar,
   # an object with no method that is not a response either. Batches were

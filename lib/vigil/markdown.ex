@@ -13,8 +13,14 @@ defmodule Vigil.Markdown do
   # H1 is deliberately not a heading: it is the note title and creates no
   # chunk. H5 and deeper are not headings either — chunk ids derive from
   # H2–H4 only (see docs/design.md, "Chunking").
-  @h1_re ~r/^\#\s+(.+?)\s*$/
-  @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
+  #
+  # The text is captured greedily and trimmed afterwards, not matched lazily
+  # up to a trailing `\s*$`: the lazy form retried the whitespace run once for
+  # every position the text could end at, which is quadratic in the length of
+  # the line — and past PCRE's match limit, a long heading silently was no
+  # heading at all (docs/design.md, "Input sizes are bounded").
+  @h1_re ~r/^\#\s+(.+)$/
+  @heading_re ~r/^(\#{2,4})\s+(.+)$/
 
   @frontmatter_marker "---"
 
