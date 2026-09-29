@@ -8,8 +8,8 @@ defmodule Vigil.Clock do
   here is the part that is this module's own: an *invalid* timezone falls back
   to UTC rather than taking a caller down with it — in particular the write
   path, which must stay crash-safe by construction. A *missing* one cannot
-  reach here any more; `Vigil.Settings.from_env/0` fetches it at boot, where
-  an operator can see it fail. Nor can the deployment's own zone arrive
+  reach here any more; `Vigil.Settings.Check` refuses it at boot, where an
+  operator can see it fail. Nor can the deployment's own zone arrive
   invalid: `Vigil.Settings.Check` refuses an unknown `VIGIL_TZ` before
   anything starts. The fallback stays for every other caller.
   """

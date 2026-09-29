@@ -42,6 +42,11 @@ defmodule Vigil.MCP.Server do
   # back are the same list rather than two that have to be kept in step.
   @shared_with_oauth [:persistence, :limiter, :settings, :origins]
 
+  # The authorization server's own options, handed on when a caller states
+  # them — `Vigil.Application` does, from the checked settings — and left to
+  # its defaults otherwise.
+  @oauth_only [:client_addr, :limits]
+
   plug(:check_origin)
   plug(:match)
   plug(:dispatch)
@@ -71,7 +76,7 @@ defmodule Vigil.MCP.Server do
   def init(opts) do
     oauth =
       Keyword.get_lazy(opts, :oauth, fn ->
-        Vigil.OAuth.Endpoint.init(Keyword.take(opts, @shared_with_oauth))
+        Vigil.OAuth.Endpoint.init(Keyword.take(opts, @shared_with_oauth ++ @oauth_only))
       end)
 
     opts

@@ -1503,7 +1503,7 @@ responsibilities, and one name over both left a call site unable to tell which
 of them it was looking at without counting arguments. `budget/3` takes the
 setting's name as well, because the warning is the judgement's own: the
 function that decides to ignore what a deployment configured is the one that
-has to say which of the three it ignored.
+has to say which of the four it ignored.
 
 **The missing-table guard is the production adapter's alone.** That table is
 owned by the limiter's process and is gone while that process restarts, so a
@@ -1529,24 +1529,27 @@ the hot path.
 
 `Vigil.Settings` is what the deployment says about itself: the vault's
 timezone, the authorization server's identity — issuer, resource, consent
-password, and the secret and window an AP-4 SkillKey is derived from — and
-the two strings that shape the writing instructions handed to the MCP client.
-`Vigil.Settings.from_env/0` is the only place those eight keys are read,
-`Vigil.Application` calls it once where the supervision tree is built, and
-everything below takes the result as an option.
+password, how many wrong guesses at it every address together may spend in an
+hour, and the secret and window an AP-4 SkillKey is derived from — and the two
+strings that shape the writing instructions handed to the MCP client.
+`Vigil.Application` builds it once, where the supervision tree is built, with
+`Vigil.Settings.from_checked/1` out of what the settings check returned (see
+below), and everything below takes the result as an option.
+`Vigil.Settings.from_env/0` reads the same nine keys from the application
+environment for a caller outside the tree that hands in none.
 
 **The shape is `Vigil.SkillKey`'s**, which bundled the HMAC secret and the
 rotation window into one value because neither derives a token alone, and made
-every function there take the bundle. What is new is the reason: these eight
+every function there take the bundle. What is new is the reason: these nine
 do not derive anything together. They are one value because of *where they are
 read*. An environment read belongs in the composition root, and eight modules
 that each asked for one key with a default of its own had no way to be handed
 another deployment.
 
 **Every default is `config/runtime.exs`'s**, stated once as the fallback of
-the environment variable it comes from. `from_env/0` fetches rather than
-defaults, so a key that is somehow unset fails at boot where an operator can
-see it, and not at the first write. The module-side copies — `Vigil.Clock`'s
+the environment variable it comes from. The settings check refuses a key that
+is somehow unset, and `from_env/0` fetches rather than defaults, so it fails at
+boot where an operator can see it, and not at the first write. The module-side copies — `Vigil.Clock`'s
 `"Europe/Berlin"`, `Vigil.MCP.Server`'s `"the vault owner"` and `"English"` —
 are gone with the reads that used them.
 
@@ -1573,10 +1576,12 @@ against it. A code cannot be minted for a resource its request was never
 checked against, and `Code` has no second opinion to hold.
 
 **What the composition root reads is out of scope and stays there.** The vault
-path, the exclusions, the git remote and branch, the state dir and the port
-are read in `Vigil.Application` and handed to the children that need them —
-the remote and the branch as `Vigil.Settings.Check` returned them, since the
-branch is only known once the clone has been read.
+path, the exclusions, the git remote and branch, the state dir, the listen
+address and port, the rate-limit budgets and the trusted proxies are handed by
+`Vigil.Application` to the children that need them, every one as
+`Vigil.Settings.Check` returned it — the branch is only known once the clone
+has been read, and the proxies arrive parsed. Nothing in the tree is read from
+the application environment a second time, so what was checked is what runs.
 
 **The SkillKey is derived from what was resolved, not read again.** The AP-4
 HMAC secret (`VIGIL_SKILLKEY_SECRET`) and the rotation window are settings like
@@ -1611,7 +1616,7 @@ as an integer is handed on as one, anything else as written. A
 no variable, and a raise in that file cannot be tested apart from the process
 environment; the check takes the configuration as an argument and can.
 
-**A positive integer is positive.** The port, the three rate-limit budgets and
+**A positive integer is positive.** The port, the four rate-limit budgets and
 the SkillKey TTL refuse boot when they are not positive integers. A TTL of `0`
 used to boot and then fail every `skill_read` and every write, and a budget
 that fell back to its default with a warning was a limit quietly not the one

@@ -78,14 +78,19 @@ defmodule Vigil.OAuth.Endpoint do
     do: Origin.allowed(settings.issuer, Application.fetch_env!(:vigil, :allowed_origins))
 
   defp configured_limits do
-    rpm = RateLimit.configured_budget(:oauth_rate_limit_rpm, @default_rpm)
-
-    %{
-      authorize: rpm,
-      token: rpm,
-      register: RateLimit.configured_budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
-    }
+    limits(
+      RateLimit.configured_budget(:oauth_rate_limit_rpm, @default_rpm),
+      RateLimit.configured_budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
+    )
   end
+
+  @doc """
+  The `:limits` option: per client address per minute, `rpm` for
+  `/oauth/authorize` and `/oauth/token` each, and `register_rpm` for
+  `/oauth/register`.
+  """
+  @spec limits(pos_integer(), pos_integer()) :: %{atom() => pos_integer()}
+  def limits(rpm, register_rpm), do: %{authorize: rpm, token: rpm, register: register_rpm}
 
   ## Discovery
 

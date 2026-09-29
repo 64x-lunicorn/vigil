@@ -19,7 +19,10 @@ defmodule Vigil.Settings do
   handed another deployment — which is what made the tests that needed one
   write into global application env and undo it afterwards.
 
-  `from_env/0` is the only place these nine keys are read. Every default is
+  `from_checked/1` builds the value from what `Vigil.Settings.Check` checked,
+  and is what the supervision tree is built with. `from_env/0` is the only
+  place these nine keys are read straight from the application environment,
+  for a caller outside the tree that hands in none. Every default is
   `config/runtime.exs`'s, stated once there as the fallback of the environment
   variable it comes from, which is why this fetches rather than defaults: a
   key that is somehow unset should fail at boot, where the operator can see
@@ -53,11 +56,18 @@ defmodule Vigil.Settings do
         }
 
   @doc """
+  The deployment's settings, taken from what `Vigil.Settings.Check.check!/2`
+  returned: the one resolution `Vigil.Application` builds the tree with.
+  """
+  @spec from_checked(%{atom => term}) :: t
+  def from_checked(checked), do: struct!(__MODULE__, Map.take(checked, @enforce_keys))
+
+  @doc """
   The deployment's settings, read from application configuration.
 
-  Called once, where the supervision tree is built, and handed to the children
-  that need them. Everything that takes a `:settings` option defaults to this
-  so a caller that supplies none gets the deployment's own — the same rule
+  Unchecked, so not what the supervision tree is built with (that is
+  `from_checked/1`). Everything that takes a `:settings` option defaults to
+  this so a caller that supplies none gets the deployment's own — the same rule
   `Vigil.Store`'s git adapter, OAuth persistence and the rate limiter follow.
   """
   @spec from_env() :: t

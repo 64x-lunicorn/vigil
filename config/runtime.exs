@@ -99,7 +99,7 @@ config :vigil,
 # shared by files running in parallel, and after `test/support/oauth_case.ex`
 # stopped needing a state dir this was the only thing left holding the OAuth
 # files serial. Where they are read from is a separate question and has an
-# answer now: `Vigil.Settings.from_env/0`, once, where the supervision tree is
+# answer now: `Vigil.Settings.Check`, once, where the supervision tree is
 # built (docs/design.md, "The deployment is resolved once"). Which also makes
 # the defaults above the only statement of each in `lib/` — no module there
 # restates them. In the suite the three are one value in one place,
