@@ -64,6 +64,10 @@ for a in "$@"; do
   fi
 done
 
+# Kept for require_root's hint, which repeats the command as it was given —
+# the loop below shifts every argument out of "$@".
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --new-vault)
@@ -501,7 +505,7 @@ if [ "$CHECK_ONLY" = "1" ]; then
     }
   fi
 
-  require_root "$@"
+  require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
   if [ "${VIGIL_INIT_TEST_STUBS:-0}" != "1" ] && [ ! -d /opt/vigil/repo/.git ]; then
     err "Code repo missing at /opt/vigil/repo — run setup.sh first."
@@ -535,7 +539,7 @@ fi
 ## ── Step 1 — preflight ───────────────────────────────────────────────────
 
 step "1/9  Preflight"
-require_root "$@"
+require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
 if ! id vigil >/dev/null 2>&1; then
   err "User 'vigil' missing — run setup.sh first."
@@ -851,8 +855,9 @@ else
   # restart, not start: under --force the service may be running on the
   # secrets this run replaced, and start leaves a running service as it is —
   # the new password would not be live until the next restart. On a first run
-  # restart starts it.
-  systemctl restart vigil
+  # restart starts it. start_service clears the unit's failed-start count
+  # first: a unit that gave up on an earlier attempt would refuse this one.
+  start_service restart
   wait_until_healthy || exit 1
 
   # The tokens are in hand from here on; the stretch that uses them is not

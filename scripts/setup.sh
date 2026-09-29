@@ -57,6 +57,10 @@ for a in "$@"; do
   fi
 done
 
+# Kept for require_root's hint, which repeats the command as it was given —
+# the loop below shifts every argument out of "$@".
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo-url)
@@ -116,7 +120,7 @@ fi
 ## ── Step 1 — preflight ───────────────────────────────────────────────────
 
 step "1/9  Preflight"
-require_root "$@"
+require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
 if [ -r /etc/os-release ]; then
   # shellcheck source=/dev/null

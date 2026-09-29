@@ -64,6 +64,10 @@ fi
 
 ## ── Arguments ────────────────────────────────────────────────────────────
 
+# Kept for require_root's hint, which repeats the command as it was given —
+# the loop below shifts the secret's name out of "$@".
+ORIGINAL_ARGS=("$@")
+
 for a in "$@"; do
   if [ "$a" = "--help" ] || [ "$a" = "-h" ]; then
     trap - EXIT
@@ -118,7 +122,7 @@ esac
 ## ── Step 1 — preflight ───────────────────────────────────────────────────
 
 step "1/3  Preflight"
-require_root "$@"
+require_root "${ORIGINAL_ARGS[@]}"
 
 if [ ! -f "$ENV_FILE" ]; then
   err "${ENV_FILE} does not exist — run init.sh first."
@@ -146,10 +150,12 @@ record_done "replaced ${KEY} (${WHAT}) in ${ENV_FILE}, every other setting kept"
 step "3/3  Restart ${SERVICE}"
 
 # restart, not start: a running service keeps the secret it started with.
+# start_service clears the unit's failed-start count first, so a unit that
+# gave up on an earlier start does not refuse this one.
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] systemctl restart ${SERVICE}, wait for health"
 else
-  systemctl restart "$SERVICE"
+  start_service restart
   wait_until_healthy || exit 1
 fi
 record_done "restarted ${SERVICE} on the new secret"

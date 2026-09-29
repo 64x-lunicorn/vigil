@@ -85,6 +85,14 @@ PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
 # was up, whatever state the vault was in.
 HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/healthz}"
 
+# 1 while the release being started is one this run goes *back* to — an
+# automatic rollback, `update.sh --rollback` — which may predate /healthz
+# (vigil 0.2 has none, and answers it 404). Such a release is taken as up
+# when /healthz is a 404 and its protected-resource metadata, the document
+# that release's own scripts waited for, answers. A release switched *to* has
+# /healthz, and a 404 there is a failure like any other.
+ACCEPT_PRE_HEALTHZ_RELEASE=0
+
 ## ── The vault's remote and branch ────────────────────────────────────────
 #
 # Every pull and push names these two, and the env file is where a deployment
@@ -463,7 +471,11 @@ trap summary EXIT
 
 ## ── Helpers ──────────────────────────────────────────────────────────────
 
+# require_root "<the arguments the script was given>" — the hint repeats the
+# command, so a caller passes every argument it was run with. Joined with a
+# space: the IFS these scripts set would put each on a line of its own.
 require_root() {
+  local IFS=' '
   if [ "$(id -u)" -ne 0 ]; then
     err "This script must run as root. Fix: sudo $0 $*"
     exit 2
@@ -584,13 +596,42 @@ generate_secret() {
   openssl rand -base64 48
 }
 
+# start_service <start|restart> — starts the service, or restarts it, after
+# clearing systemd's count of its failed starts. deploy/vigil.service gives up
+# after StartLimitBurst failed starts within StartLimitIntervalSec, and with
+# Restart=on-failure and RestartSec=1 a release that crashes on boot uses them
+# all up by itself inside the 30s health wait; every start after that — the
+# automatic rollback's, the next run's — would be refused, and the service
+# left down. What a start then does is wait_until_healthy's to judge, so a
+# caller that has a way back runs this as `start_service start || true`.
+start_service() {
+  systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  systemctl "$1" "$SERVICE"
+}
+
+# health_answers — whether the service answers healthy right now: /healthz at
+# 200, or, for a release ACCEPT_PRE_HEALTHZ_RELEASE allows, a /healthz that is
+# not there (404) beside metadata that is. Asked for the status code rather
+# than with -f, which cannot tell a 404 from a connection refused.
+health_answers() {
+  local status
+  status="$(curl -o /dev/null -s -w '%{http_code}' "$HEALTH_URL" 2>/dev/null || true)"
+  [ "$status" = "200" ] && return 0
+  if [ "$status" != "404" ] || [ "$ACCEPT_PRE_HEALTHZ_RELEASE" != "1" ]; then
+    return 1
+  fi
+  status="$(curl -o /dev/null -s -w '%{http_code}' \
+    "${HEALTH_URL%/healthz}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
+  [ "$status" = "200" ]
+}
+
 # wait_until_healthy — waits up to 30s for the local endpoint to answer.
 # Required after every systemctl start/restart, BEFORE anything tries to talk
 # to the node (bearer call or `bin/vigil rpc`) — otherwise that fails with
 # "noconnection"/connection refused because the BEAM has not finished booting.
 wait_until_healthy() {
   local i=0
-  while ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; do
+  while ! health_answers; do
     i=$((i + 1))
     if [ "$i" -ge 30 ]; then
       err "Service did not become healthy within 30s. journalctl -u ${SERVICE} -n 50:"
@@ -1096,11 +1137,17 @@ verify_survives_write_error() {
 
 # 13. /healthz answers 200: the index is loaded and the writer answers. Asked
 # of the local URL, since it answers nowhere else.
+#
+# A release gone back to may predate /healthz (ACCEPT_PRE_HEALTHZ_RELEASE):
+# there a 404 is that release's answer, and its metadata document stands in.
 verify_healthz() {
   local status
   status="$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_LOCAL_URL}/healthz" || echo "000")"
   if [ "$status" = "200" ]; then
     echo "  ✓ [13] /healthz answers 200 — index loaded, writer answers"
+  elif [ "$status" = "404" ] && [ "$ACCEPT_PRE_HEALTHZ_RELEASE" = "1" ] &&
+    [ "$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_LOCAL_URL}/.well-known/oauth-protected-resource" || echo "000")" = "200" ]; then
+    echo "  ✓ [13] No /healthz (a release before it) — its protected-resource metadata answers 200"
   else
     echo "  ✗ [13] /healthz answers ${status} instead of 200 — curl -s ${VIGIL_LOCAL_URL}/healthz says which part is down"
     return 1

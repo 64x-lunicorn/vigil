@@ -47,6 +47,10 @@ for a in "$@"; do
   fi
 done
 
+# Kept for require_root's hint, which repeats the command as it was given —
+# the loop below shifts every argument out of "$@".
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --to)
@@ -152,12 +156,27 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
   # start and stop is also recorded together with what `current` pointed at
   # when it happened, which is what lets the test assert that the symlink moved
   # while the service was down rather than under a running BEAM.
+  #
+  # The unit's start limit is modelled too (StartLimitBurst= in
+  # deploy/vigil.service): a release that crashes on boot is restarted by
+  # Restart=on-failure until the limit is used up, and from then on every
+  # start is refused until `reset-failed`. A release holding .start-fails is
+  # one whose start systemd reports as failed.
   systemctl() {
     case "${1:-}" in
       start | restart)
-        : >"${PREFIX}/.service-active"
+        if [ -f "${PREFIX}/.start-limit-hit" ]; then
+          echo "refused $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+          return 1
+        fi
         echo "start $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+        [ -f "$(readlink -f "$CURRENT")/.start-fails" ] && return 1
+        : >"${PREFIX}/.service-active"
+        if [ -f "$(readlink -f "$CURRENT")/.boot-fails" ]; then
+          : >"${PREFIX}/.start-limit-hit"
+        fi
         ;;
+      reset-failed) rm -f "${PREFIX}/.start-limit-hit" ;;
       stop)
         rm -f "${PREFIX}/.service-active"
         echo "stop $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
@@ -170,17 +189,24 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
   }
 
   # A release directory holding .boot-fails is one that never answers on
-  # /healthz, which is how the test drives the health wait after a switch.
+  # /healthz, which is how the test drives the health wait after a switch. One
+  # holding .no-healthz is a release from before /healthz: up only where the
+  # run accepts one (ACCEPT_PRE_HEALTHZ_RELEASE, scripts/lib.sh).
+  release_answers() {
+    local release
+    release="$(readlink -f "$CURRENT")"
+    [ ! -f "${release}/.boot-fails" ] &&
+      { [ ! -f "${release}/.no-healthz" ] || [ "$ACCEPT_PRE_HEALTHZ_RELEASE" = "1" ]; }
+  }
   wait_until_healthy() {
-    systemctl is-active --quiet "$SERVICE" &&
-      [ ! -f "$(readlink -f "$CURRENT")/.boot-fails" ]
+    systemctl is-active --quiet "$SERVICE" && release_answers
   }
 
   # verify() is the decision the automatic rollback hangs on, and it is a
   # property of the release that was switched to — which is how the test drives
   # both outcomes, and both attempts of the rollback path independently: a
   # release directory holding .verify-fails is one that does not come up.
-  verify() { [ ! -f "$(readlink -f "$CURRENT")/.verify-fails" ]; }
+  verify() { release_answers && [ ! -f "$(readlink -f "$CURRENT")/.verify-fails" ]; }
 fi
 
 ## ── Helper: load VIGIL_* variables for verify() from the env file ────────
@@ -269,7 +295,7 @@ trap 'on_exit $?' EXIT
 
 if [ "$ROLLBACK" = "1" ]; then
   step "Rollback without building"
-  require_root "$@"
+  require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
   if [ ! -f "$PREVIOUS_RELEASE_FILE" ]; then
     err "No previous release known (${PREVIOUS_RELEASE_FILE} missing)."
@@ -304,10 +330,12 @@ if [ "$ROLLBACK" = "1" ]; then
     warn "Cannot tell which commit ${OLD_RELEASE} was built from — the code checkout is left where it is."
   fi
 
+  # The release gone back to may predate /healthz.
+  ACCEPT_PRE_HEALTHZ_RELEASE=1
   systemctl stop "$SERVICE"
   ln -sfn "$OLD_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-  systemctl start "$SERVICE"
+  start_service start || true
   wait_until_healthy || exit 1
 
   # shellcheck disable=SC2034
@@ -325,7 +353,7 @@ fi
 ## ── Step 1 — preflight (exit 2, nothing changed) ─────────────────────────
 
 step "1/8  Preflight"
-require_root "$@"
+require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
 if ! systemctl is-active --quiet "$SERVICE"; then
   err "Service is not running — update.sh requires a running service."
@@ -619,11 +647,18 @@ record_done "push safety net: vigil-push.timer enabled"
 # (step 7). Always exits: 3 when the old release serves again, 1 when it does
 # not either. The checkout is put back by the EXIT trap, since CHECKOUT_TARGET
 # still names the old release's revision.
+#
+# Nothing in here may end the run before the health wait has judged the old
+# release: a stop or a start that systemd answers with an error is not the
+# verdict, and under `set -e` it would leave the service down with the
+# operator told nothing about the rollback.
 roll_back_automatically() {
-  systemctl stop "$SERVICE"
+  # The release that ran before may predate /healthz.
+  ACCEPT_PRE_HEALTHZ_RELEASE=1
+  systemctl stop "$SERVICE" || true
   ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-  systemctl start "$SERVICE"
+  start_service start || true
 
   if wait_until_healthy; then
     source_env_for_verify
@@ -649,7 +684,9 @@ else
   ln -sfn "$RELEASE_DIR" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   echo "$PREVIOUS_RELEASE" >"$PREVIOUS_RELEASE_FILE"
-  systemctl start "$SERVICE"
+  # A start systemd refuses is a release that did not come up, which is the
+  # health wait's to say and the rollback's to answer — not the end of the run.
+  start_service start || true
   if ! wait_until_healthy; then
     err "$(basename "$RELEASE_DIR") did not come up — rolling back automatically to ${PREVIOUS_RELEASE}."
     roll_back_automatically

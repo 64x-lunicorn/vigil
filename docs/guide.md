@@ -911,6 +911,16 @@ If the new release does not come up, or comes up and fails that check, it
 **rolls back automatically**, restarts, and checks again — exiting 3 with
 `Update rolled back to <old-sha>. The service is running again.`
 
+Every start clears the unit's count of failed starts first
+(`systemctl reset-failed vigil`). A release that crashes on boot is restarted
+by systemd until it has used up the unit's start limit, five in five minutes,
+all within the health wait; without the reset the old release's start would be
+refused and the service left down. A release gone back to, automatically or
+with `--rollback`, may be one from before `/healthz`, which 0.2 answers with
+404: for that release the health wait and the acceptance check take its
+`/.well-known/oauth-protected-resource` answering 200 instead. A release
+switched *to* is held to `/healthz`.
+
 Which commit is running is read from the release `current` points at — each
 release records it in its `REVISION` file — not from the code checkout in
 `/opt/vigil/repo`. The checkout is moved to the target for the build, and put

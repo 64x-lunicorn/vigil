@@ -59,6 +59,7 @@ trap 'summary; cleanup' EXIT INT TERM
 SERVICE_STATE="${WORK}/service-active"
 JOURNAL="${WORK}/journal"
 HTTP_STATUS="${WORK}/http-status"
+METADATA_STATUS="${WORK}/metadata-status"
 MCP_SCRIPT="${WORK}/mcp-responses"
 GIT_REMOTE_OK="${WORK}/git-remote-ok"
 UNPUSHED="${WORK}/unpushed"
@@ -77,10 +78,21 @@ journalctl() { cat "$JOURNAL" 2>/dev/null || true; }
 
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 curl() {
-  # verify_public_endpoint_protected and verify_healthz are the callers, and
-  # both ask for the status code alone.
-  cat "$HTTP_STATUS" 2>/dev/null || echo "000"
+  # verify_public_endpoint_protected, verify_healthz and health_answers are
+  # the callers, and all ask for the status code alone. The protected-resource
+  # metadata, which a release from before /healthz is judged by, answers from
+  # a file of its own.
+  local url
+  for url in "$@"; do :; done
+  case "$url" in
+    */.well-known/oauth-protected-resource) cat "$METADATA_STATUS" 2>/dev/null || echo "000" ;;
+    *) cat "$HTTP_STATUS" 2>/dev/null || echo "000" ;;
+  esac
 }
+
+# The health wait polls once a second; here the answer never changes.
+# shellcheck disable=SC2329 # called by wait_until_healthy in lib.sh
+sleep() { :; }
 
 # as_vigil runs directly, except for the two git questions the checks ask,
 # which are answered from files — and what each was asked about is written
@@ -114,7 +126,7 @@ mcp_call() {
 }
 
 reset_stubs() {
-  rm -f "$SERVICE_STATE" "$JOURNAL" "$HTTP_STATUS" "$MCP_SCRIPT" "$GIT_REMOTE_OK" "$UNPUSHED" "$GIT_ASKED"
+  rm -f "$SERVICE_STATE" "$JOURNAL" "$HTTP_STATUS" "$METADATA_STATUS" "$MCP_SCRIPT" "$GIT_REMOTE_OK" "$UNPUSHED" "$GIT_ASKED"
   : >"$MCP_SCRIPT"
   : >"$JOURNAL"
 }
@@ -401,6 +413,38 @@ assert_check "fails on 503 — the index is not loaded or the writer does not an
 assert_output "names the status it got" "answers 503"
 reset_stubs
 assert_check "fails when nothing answers at all" verify_healthz 1
+
+# A release a rollback goes back to may be one from before /healthz (0.2
+# answers it 404); there the metadata document stands in. Nowhere else.
+reset_stubs
+echo "404" >"$HTTP_STATUS"
+echo "200" >"$METADATA_STATUS"
+assert_check "fails on 404 for a release switched to" verify_healthz 1
+ACCEPT_PRE_HEALTHZ_RELEASE=1
+assert_check "passes on 404 with the metadata answering, for a release gone back to" verify_healthz 0
+assert_output "says the release predates /healthz" "a release before it"
+echo "503" >"$METADATA_STATUS"
+assert_check "fails there too when the metadata does not answer" verify_healthz 1
+echo "503" >"$HTTP_STATUS"
+echo "200" >"$METADATA_STATUS"
+assert_check "a 503 is never excused by the metadata" verify_healthz 1
+ACCEPT_PRE_HEALTHZ_RELEASE=0
+
+## ── The health wait ──────────────────────────────────────────────────────
+
+section "The health wait after a start"
+
+reset_stubs
+echo "200" >"$HTTP_STATUS"
+assert_check "is over once /healthz answers 200" wait_until_healthy 0
+echo "404" >"$HTTP_STATUS"
+echo "200" >"$METADATA_STATUS"
+assert_check "does not take a 404 for up on a release switched to" wait_until_healthy 1
+ACCEPT_PRE_HEALTHZ_RELEASE=1
+assert_check "takes it, with the metadata answering, on a release gone back to" wait_until_healthy 0
+rm -f "$METADATA_STATUS"
+assert_check "but not when the metadata does not answer either" wait_until_healthy 1
+ACCEPT_PRE_HEALTHZ_RELEASE=0
 
 ## ── The list itself ──────────────────────────────────────────────────────
 

@@ -835,7 +835,10 @@ assert_eq "the checkout is on the revision of that release" "$OLD_SHA" "$(checko
 section "10f  A release that never comes up is rolled back too"
 
 # The health wait after the switch used to exit on its own, leaving the new
-# release switched in and the service down.
+# release switched in and the service down. And a release that crashes on
+# boot uses up the unit's start limit while it is waited for, so the start
+# of the old release is refused unless the failed starts are cleared first:
+# the stand-in systemctl logs that start as "refused".
 build_host
 make_unbootable "$NEW_SHA"
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
@@ -860,6 +863,49 @@ if grep -q "Manual intervention needed" "${WORK}/out.log"; then
 else
   fail "says manual intervention is needed" "$(tail -3 "${WORK}/out.log")"
 fi
+
+section "10h  A start systemd refuses is rolled back, not the end of the run"
+
+build_host
+make_unbootable "$NEW_SHA"
+rm -f "${PREFIX}/releases/${NEW_SHA}/.boot-fails"
+touch "${PREFIX}/releases/${NEW_SHA}/.start-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 3 — rolled back, service running" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the service is running again" "yes" "$(service_running)"
+
+section "10i  A release from before /healthz is one the rollback can go back to"
+
+# vigil 0.2 answers /healthz with 404. Going back to it — automatically or with
+# --rollback — is going back to a release that is up; switching to one is not.
+build_host
+touch "${PREFIX}/releases/v0/.no-healthz"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the automatic rollback to it exits 3, not 1" "3" "$RC"
+assert_eq "current points back at it" "v0" "$(current_release)"
+assert_eq "the service is running" "yes" "$(service_running)"
+
+build_host
+touch "${PREFIX}/releases/v0/.no-healthz"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "an update away from it exits 0" "0" "$RC"
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback to it exits 0" "0" "$RC"
+assert_eq "--rollback: current points at it" "v0" "$(current_release)"
+
+build_host
+make_unbootable "$NEW_SHA"
+rm -f "${PREFIX}/releases/${NEW_SHA}/.boot-fails"
+touch "${PREFIX}/releases/${NEW_SHA}/.no-healthz"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "a release switched to without /healthz is rolled back (exit 3)" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
 
 ## ── 11. --rebuild ────────────────────────────────────────────────────────
 

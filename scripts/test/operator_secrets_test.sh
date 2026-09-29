@@ -433,7 +433,8 @@ for which in password skillkey; do
   assert_eq "${which}: the file keeps its mode" "640" "$(file_mode "$VIGIL_ENV_FILE")"
   assert_eq "${which}: no temp file is left beside it" "" \
     "$(find "$(dirname "$VIGIL_ENV_FILE")" -maxdepth 1 -name "$(basename "$VIGIL_ENV_FILE").*")"
-  assert_eq "${which}: the service is restarted" "restart ${VIGIL_SERVICE_NAME}" \
+  assert_eq "${which}: its failed-start count is cleared, then it is restarted" \
+    "$(printf 'reset-failed %s\nrestart %s' "$VIGIL_SERVICE_NAME" "$VIGIL_SERVICE_NAME")" \
     "$(cat "${VIGIL_PREFIX}/.systemctl.log" 2>/dev/null)"
   if grep -q "Rotation revokes no token" "${WORK}/rotate-out.txt" &&
     grep -q "scripts/grants.sh revoke-all" "${WORK}/rotate-out.txt"; then
@@ -466,6 +467,22 @@ for bad in "" "token" "password skillkey" "password --force"; do
   assert_eq "'${bad}' is refused with exit 2" "2" "$RC"
 done
 assert_eq "the refused runs changed nothing" "$(cat "${WORK}/env-before")" "$(cat "$VIGIL_ENV_FILE")"
+
+# Without the seam and without root, the refusal repeats the command to run
+# under sudo — with the secret's name, which the argument loop had shifted
+# out of "$@" by the time it was printed.
+if [ "$(id -u)" -ne 0 ]; then
+  set +e
+  bash "${REPO_ROOT}/scripts/rotate_secret.sh" skillkey --dry-run >"${WORK}/rotate-out.txt" 2>&1 </dev/null
+  RC=$?
+  set -e
+  assert_eq "as another user than root: exit 2" "2" "$RC"
+  if grep -q "Fix: sudo .*rotate_secret.sh skillkey --dry-run" "${WORK}/rotate-out.txt"; then
+    pass "the sudo hint repeats the whole command"
+  else
+    fail "the sudo hint repeats the whole command" "$(grep -i sudo "${WORK}/rotate-out.txt" || echo none)"
+  fi
+fi
 
 rm -f "$VIGIL_ENV_FILE"
 rotate password
@@ -515,8 +532,8 @@ has "init.sh replaces the settings it decides" 'env_file_update "$ENV_FILE" <<<"
 # shellcheck disable=SC2016
 has "and only adds its defaults where the file has none" \
   'env_file_update "$ENV_FILE" --add-missing <<<"$ENV_DEFAULTS"'
-has "init.sh restarts the service, so replaced secrets are live" "  systemctl restart vigil"
-if printf '%s\n' "$init_text" | grep -qE '^ *systemctl start vigil'; then
+has "init.sh restarts the service, so replaced secrets are live" "  start_service restart"
+if printf '%s\n' "$init_text" | grep -qE '^ *(systemctl|start_service) start( vigil)?$'; then
   fail "init.sh no longer only starts it"
 else
   pass "init.sh no longer only starts it"
