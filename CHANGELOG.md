@@ -225,6 +225,9 @@ read it afterwards.
 
 - A failed commit leaves the working tree and the index as they were, for
   every write, including `delete_note` and `move_note`.
+- Two first `bin/vigil` commands at once on a release without a cookie no
+  longer each write one: the second keeps the first one's instead of
+  replacing the cookie its node already runs with.
 - A skill file whose name is not UTF-8 is left out of `skill_list` with a
   warning naming it; it made the whole list fail to encode.
 - A write while another branch is checked out in the vault's clone — a

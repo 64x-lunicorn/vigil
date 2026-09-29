@@ -210,6 +210,26 @@ else
     pass "with RELEASE_COOKIE set, none is written"
   fi
 
+  # Two first commands at once — `bin/vigil start` and an operator's
+  # `bin/vigil version` — both find no cookie. The one that writes second must
+  # not replace the cookie the first one's node already runs with, and uses it
+  # instead. A `head` that lets the other one win while this one is still
+  # drawing its bytes makes the race happen every time.
+  ROOT="$(cd "$WORK" && make_release "${WORK}/z" bin/vigil && echo "${WORK}/z")"
+  mkdir -p "${WORK}/racing-bin"
+  theirs="$(printf 'ab%.0s' $(seq 32))"
+  cat >"${WORK}/racing-bin/head" <<RACE
+#!/bin/sh
+(umask 0377 && printf '%s' "${theirs}" >"\$RELEASE_ROOT/releases/COOKIE")
+PATH="${PATH}" exec head "\$@"
+RACE
+  chmod +x "${WORK}/racing-bin/head"
+  out="$(first_command PATH="${WORK}/racing-bin:${PATH}")"
+  assert_eq "when another command wrote the cookie first, it is kept and used" \
+    "${theirs} rc=0" "$out"
+  assert_eq "and nothing is left beside it" "COOKIE" "$(cd "${ROOT}/releases" && LC_ALL=C ls)"
+
+  ROOT="$other"
   chmod 0555 "${ROOT}/releases"
   out="$(first_command)"
   chmod 0755 "${ROOT}/releases"
