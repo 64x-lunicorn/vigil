@@ -111,6 +111,8 @@ defmodule Vigil.GitTest do
         git: git,
         vault: vault
       } do
+        before = git.log_metadata.(vault)
+
         assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
                  git.move_commit.(
                    vault,
@@ -122,11 +124,17 @@ defmodule Vigil.GitTest do
         refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
         assert File.exists?(Path.join(vault, "bike/terra-speed-new.md"))
 
-        # A rename is neither an addition nor a modification: git reports it
-        # as `R`, and log_metadata's `--diff-filter=AM` drops it. The moved
-        # note's creation date survives in Vigil.Index, which is what carries
-        # it across a move (Vigil.Index.move/3) — not in the commit log.
-        refute git.log_metadata.(vault)["bike/terra-speed-new.md"]
+        # A rename carries the note's history to its new path: the creation
+        # date a restart rebuilds the index from survives the move, and the
+        # old path no longer answers.
+        meta = git.log_metadata.(vault)
+        refute meta["bike/terra-speed.md"]
+
+        assert %{created_at: created_at, updated_at: updated_at, last_author: "vigil"} =
+                 meta["bike/terra-speed-new.md"]
+
+        assert DateTime.compare(created_at, updated_at) in [:lt, :eq]
+        assert created_at == before["bike/terra-speed.md"].created_at
       end
     end
   end
@@ -168,6 +176,18 @@ defmodule Vigil.GitTest do
                git.move_commit.(vault, "bike/signed2.md", "bike/signed3.md", "move: s2 -> s3")
 
       assert :ok = git.remove_commit.(vault, "bike/signed3.md", "delete: bike/signed3.md")
+    end
+
+    # git quotes every non-ASCII path under the default core.quotePath=true;
+    # a German vault is full of them, and a quoted path matches no note.
+    test "log_metadata reports non-ASCII paths as the filesystem spells them", %{
+      git: git,
+      vault: vault
+    } do
+      path = note(vault, "home/Übersicht Heizöl.md", "Übersicht")
+      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+
+      assert %{created_at: %DateTime{}, last_author: "vigil"} = git.log_metadata.(vault)[path]
     end
 
     test "delete and move are git operations, not filesystem calls", %{git: git, vault: vault} do

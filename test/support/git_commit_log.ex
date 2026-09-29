@@ -66,7 +66,7 @@ defmodule Vigil.Git.CommitLog do
         end,
         move_commit: fn vault, from, to, message ->
           record(log, {:move_commit, from, to, message})
-          move(vault, from, to, at)
+          move(log, vault, from, to, at)
         end
       )
 
@@ -118,19 +118,27 @@ defmodule Vigil.Git.CommitLog do
     end
   end
 
-  # A rename is neither an addition nor a modification: git reports it as `R`,
-  # and `log_metadata`'s `--diff-filter=AM` drops it. So a moved path has no
-  # entry of its own until something writes to it again, and the old path keeps
-  # the history it already had — the commit metadata the move *returns* is
-  # `git log -1 -- <to>`, which is not diff-filtered and does find it. Faithful
-  # to what the repository answers, quirk included; the note's creation date
-  # survives a move in `Vigil.Index`, not here.
-  defp move(vault_path, from, to, at) do
+  # A rename carries the old path's record to the new one, dated by the move:
+  # `log_metadata` follows `R` entries, so a moved note keeps the creation date
+  # it had, and the old path no longer answers.
+  defp move(log, vault_path, from, to, at) do
     abs_to = Path.join(vault_path, to)
     File.mkdir_p!(Path.dirname(abs_to))
 
     case File.rename(Path.join(vault_path, from), abs_to) do
       :ok ->
+        Agent.update(log, fn state ->
+          {entry, metadata} = Map.pop(state.metadata, from)
+
+          moved =
+            case entry do
+              nil -> %{created_at: at, updated_at: at, last_author: "vigil"}
+              existing -> %{existing | updated_at: at, last_author: "vigil"}
+            end
+
+          %{state | metadata: Map.put(metadata, to, moved)}
+        end)
+
         {:ok, %{updated_at: at, last_author: "vigil"}}
 
       {:error, reason} ->
