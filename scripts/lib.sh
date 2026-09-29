@@ -418,8 +418,10 @@ trap 'error_trap $? $LINENO' ERR
 
 ## ── Final summary (always runs, including on abort) ──────────────────────
 
+# summary [rc] — the exit code comes from the caller when it has one: update.sh
+# runs its own cleanup in the EXIT trap first, and hands on the code it saw.
 summary() {
-  local rc=$?
+  local rc="${1:-$?}"
   local duration=$(( $(date +%s) - SCRIPT_START ))
   local minutes=$(( duration / 60 ))
   local seconds=$(( duration % 60 ))

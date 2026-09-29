@@ -192,21 +192,31 @@ record_done "preflight passed"
 
 step "2/9  Install packages"
 
+# The toolchain, held as one: every Erlang package installed here and Elixir.
+# Holding only some of them let the others move on their own, so the OTP a
+# release bundled depended on which package an upgrade happened to reach. An
+# Erlang/OTP security update is taken deliberately, all of them together, and
+# reaches the service by `update.sh --rebuild` (docs/guide.md, "Erlang/OTP
+# security updates").
+TOOLCHAIN_PACKAGES=(
+  erlang-base erlang-dev erlang-crypto erlang-ssl erlang-public-key
+  erlang-inets erlang-xmerl erlang-tools elixir
+)
 PACKAGES=(
   git curl ca-certificates jq openssl util-linux openssh-client gnupg
   build-essential libssl-dev
-  erlang-base erlang-dev erlang-crypto erlang-ssl erlang-public-key
-  erlang-inets erlang-xmerl erlang-tools elixir
+  "${TOOLCHAIN_PACKAGES[@]}"
 )
 
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] apt-get update && apt-get install -y --no-install-recommends ${PACKAGES[*]}"
+  log "[DRY RUN] apt-mark hold every Erlang package and elixir"
 else
   apt-get update
   apt-get install -y --no-install-recommends "${PACKAGES[@]}"
-  apt-mark hold erlang-base erlang-dev elixir >/dev/null
+  apt-mark hold "${TOOLCHAIN_PACKAGES[@]}" >/dev/null
 fi
-record_done "installed and pinned packages (erlang-base, erlang-dev, elixir)"
+record_done "installed packages, held every Erlang package and elixir"
 
 check_tool_versions() {
   local file="/opt/vigil/repo/.tool-versions"

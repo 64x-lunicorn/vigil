@@ -3,7 +3,7 @@
 # number of times, idempotent. Never touches secrets or vault content; touches
 # the systemd unit only with --update-unit.
 #
-# Usage: sudo ./scripts/update.sh [--to <ref>] [--skip-tests --force]
+# Usage: sudo ./scripts/update.sh [--to <ref> | --rebuild] [--skip-tests --force]
 #            [--update-unit] [--rollback]
 #            [--dry-run] [--non-interactive] [--verbose] [--help]
 
@@ -15,12 +15,16 @@ SKIP_TESTS=0
 FORCE=0
 UPDATE_UNIT=0
 ROLLBACK=0
+REBUILD=0
+TO_GIVEN=0
 
 usage() {
   cat <<'EOF'
 scripts/update.sh — switch code revision.
 
   --to <ref>          target commit/tag (default: origin/main)
+  --rebuild             build the running commit again, into a new release,
+                        and switch to it (after an Erlang/OTP security update)
   --skip-tests          only together with --force; is logged
   --force              allows --skip-tests
   --update-unit         adopt a changed systemd unit
@@ -43,7 +47,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --to)
       TARGET_REF="$2"
+      TO_GIVEN=1
       shift 2
+      ;;
+    --rebuild)
+      REBUILD=1
+      shift
       ;;
     --skip-tests)
       SKIP_TESTS=1
@@ -83,6 +92,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$REBUILD" = "1" ] && [ "$TO_GIVEN" = "1" ]; then
+  err "--rebuild builds the running commit; it does not take --to."
+  exit 2
+fi
+if [ "$REBUILD" = "1" ] && [ "$ROLLBACK" = "1" ]; then
+  err "--rebuild and --rollback are two different runs; pick one."
+  exit 2
+fi
 if [ "$SKIP_TESTS" = "1" ] && [ "$FORCE" != "1" ]; then
   err "--skip-tests requires --force."
   exit 2
@@ -144,7 +161,12 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
     esac
   }
 
-  wait_until_healthy() { systemctl is-active --quiet "$SERVICE"; }
+  # A release directory holding .boot-fails is one that never answers on
+  # /healthz, which is how the test drives the health wait after a switch.
+  wait_until_healthy() {
+    systemctl is-active --quiet "$SERVICE" &&
+      [ ! -f "$(readlink -f "$CURRENT")/.boot-fails" ]
+  }
 
   # verify() is the decision the automatic rollback hangs on, and it is a
   # property of the release that was switched to — which is how the test drives
@@ -180,6 +202,61 @@ source_env_for_verify() {
   show_trace
 }
 
+## ── Which commit a release was built from ────────────────────────────────
+
+# release_revision <release-dir> — the short sha of the commit the release was
+# built from, or nothing when that cannot be told. The running revision is a
+# property of the release `current` points at, not of the code checkout: the
+# checkout is moved to the target before the build, so reading it after a
+# failed build or a rollback named a commit that was not running, and the same
+# update run again reported "nothing to do".
+#
+# Read from the REVISION file every build writes, and for a release built
+# before that file existed from its directory name, which has always begun
+# with the short sha.
+release_revision() {
+  local release="$1" rev
+  if [ -f "${release}/REVISION" ]; then
+    rev="$(head -n 1 "${release}/REVISION")"
+  else
+    rev="$(basename "$release")"
+    rev="${rev%%-*}"
+  fi
+  as_vigil git -C "$REPO" rev-parse --short "${rev}^{commit}" 2>/dev/null || true
+}
+
+## ── The checkout follows the running release ─────────────────────────────
+
+# The revision the code checkout has to be on when this script ends, set once
+# the running one is known; empty leaves the checkout where it is. The build
+# needs the checkout on the target, and every way out that does not end on the
+# target — a red audit or suite, a failed build, a refused unit, an automatic
+# rollback, a dry run, an abort anywhere — puts it back, so that the checkout
+# always shows what is running. A successful switch clears it.
+CHECKOUT_TARGET=""
+
+restore_checkout() {
+  [ -n "$CHECKOUT_TARGET" ] || return 0
+  local head
+  head="$(as_vigil git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)"
+  [ "$head" = "$CHECKOUT_TARGET" ] && return 0
+  if as_vigil git -C "$REPO" checkout -q "$CHECKOUT_TARGET"; then
+    log "Code checkout put back on ${CHECKOUT_TARGET}, the running revision."
+  else
+    warn "Could not put the code checkout back on ${CHECKOUT_TARGET}. Fix: git -C ${REPO} checkout ${CHECKOUT_TARGET}"
+  fi
+}
+
+# Replaces lib.sh's EXIT trap with one that restores the checkout first and
+# then prints the same summary, with the exit code the script ended on.
+# shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap below
+on_exit() {
+  local rc="$1"
+  restore_checkout || true
+  summary "$rc"
+}
+trap 'on_exit $?' EXIT
+
 ## ── Rollback mode: short, separate path ──────────────────────────────────
 
 if [ "$ROLLBACK" = "1" ]; then
@@ -211,6 +288,12 @@ if [ "$ROLLBACK" = "1" ]; then
     log "[DRY RUN] switch back to ${OLD_RELEASE}, restart the service, verify()"
     ok "Dry run finished."
     exit 0
+  fi
+
+  # The checkout goes back with the release, whatever verify() says below.
+  CHECKOUT_TARGET="$(release_revision "$OLD_RELEASE")"
+  if [ -z "$CHECKOUT_TARGET" ]; then
+    warn "Cannot tell which commit ${OLD_RELEASE} was built from — the code checkout is left where it is."
   fi
 
   systemctl stop "$SERVICE"
@@ -247,8 +330,8 @@ fi
 
 # A setting every release from here on refuses to boot without, and that an
 # init.sh older than it never wrote. Checked here rather than left to boot:
-# a release that does not come up fails step 6's health wait, which exits
-# with the new release switched in and the service down. The value is only
+# a release that does not come up fails step 6's health wait and is rolled
+# back, but only after the service was stopped for it. The value is only
 # tested for being there — the boot check judges it — and never printed.
 if ! grep -qE '^VIGIL_SKILLKEY_SECRET=.' "$ENV_FILE" 2>/dev/null; then
   err "${ENV_FILE} has no VIGIL_SKILLKEY_SECRET, which vigil now requires (the SkillKey's own HMAC secret). Add it once, then run update.sh again:"
@@ -295,20 +378,39 @@ step "2/8  Fetch target revision"
 
 as_vigil git -C "$REPO" fetch --all --tags
 
-CURRENT_SHA="$(as_vigil git -C "$REPO" rev-parse --short HEAD)"
-TARGET_SHA="$(as_vigil git -C "$REPO" rev-parse --short "$TARGET_REF")"
-
-if [ "$CURRENT_SHA" = "$TARGET_SHA" ]; then
-  ok "Target commit ${TARGET_SHA} matches the running revision — nothing to do."
-  exit 0
+CURRENT_SHA="$(release_revision "$(readlink -f "$CURRENT")")"
+if [ -z "$CURRENT_SHA" ]; then
+  err "Cannot tell which commit $(readlink -f "$CURRENT") was built from. Write its sha into $(readlink -f "$CURRENT")/REVISION, then run update.sh again."
+  exit 2
 fi
+CHECKOUT_TARGET="$CURRENT_SHA"
 
-log "Switch: ${CURRENT_SHA} → ${TARGET_SHA}"
-as_vigil git -C "$REPO" log --oneline "${CURRENT_SHA}..${TARGET_SHA}" || true
+if [ "$REBUILD" = "1" ]; then
+  TARGET_SHA="$CURRENT_SHA"
+  # A directory of its own, never the running one: the running release keeps
+  # serving while this one is built, and stays the rollback target.
+  RELEASE_DIR="${RELEASES}/${TARGET_SHA}-$(date -u +%Y%m%d%H%M%S)"
+  while [ -e "$RELEASE_DIR" ]; do
+    sleep 1
+    RELEASE_DIR="${RELEASES}/${TARGET_SHA}-$(date -u +%Y%m%d%H%M%S)"
+  done
+  log "Rebuild: ${CURRENT_SHA} again, into $(basename "$RELEASE_DIR")"
+else
+  TARGET_SHA="$(as_vigil git -C "$REPO" rev-parse --short "$TARGET_REF")"
+  RELEASE_DIR="${RELEASES}/${TARGET_SHA}"
 
-CHANGED_FILES="$(as_vigil git -C "$REPO" diff --name-only "${CURRENT_SHA}..${TARGET_SHA}")"
-if echo "$CHANGED_FILES" | grep -qE '^mix\.exs$|^config/|^deploy/vigil\.service$'; then
-  warn "The change touches mix.exs, config/ or deploy/vigil.service — review the summary."
+  if [ "$CURRENT_SHA" = "$TARGET_SHA" ]; then
+    ok "Target commit ${TARGET_SHA} matches the running revision — nothing to do. (--rebuild builds it again.)"
+    exit 0
+  fi
+
+  log "Switch: ${CURRENT_SHA} → ${TARGET_SHA}"
+  as_vigil git -C "$REPO" log --oneline "${CURRENT_SHA}..${TARGET_SHA}" || true
+
+  CHANGED_FILES="$(as_vigil git -C "$REPO" diff --name-only "${CURRENT_SHA}..${TARGET_SHA}")"
+  if echo "$CHANGED_FILES" | grep -qE '^mix\.exs$|^config/|^deploy/vigil\.service$'; then
+    warn "The change touches mix.exs, config/ or deploy/vigil.service — review the summary."
+  fi
 fi
 
 record_done "fetched target revision ${TARGET_SHA}"
@@ -331,7 +433,6 @@ else
   if ! AUDIT_OUTPUT="$(as_vigil bash -c 'cd "$1" && mix deps.get && mix hex.audit && mix deps.audit' _ "$REPO" 2>&1)"; then
     echo "$AUDIT_OUTPUT"
     err "Dependency audit failed (retired package or known vulnerability). Aborting (no override in update.sh)."
-    as_vigil git -C "$REPO" checkout -q "$CURRENT_SHA"
     exit 2
   fi
   echo "$AUDIT_OUTPUT"
@@ -351,7 +452,6 @@ else
   # shellcheck disable=SC2016 # $1 is expanded by the inner bash -c, not here
   if ! as_vigil bash -c 'cd "$1" && mix test' _ "$REPO"; then
     err "mix test is red — not deploying, the running service is untouched."
-    as_vigil git -C "$REPO" checkout -q "$CURRENT_SHA"
     exit 1
   fi
   ok "mix test is green."
@@ -363,14 +463,18 @@ record_done "tests run (or deliberately skipped)"
 step "5/8  Build"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] MIX_ENV=prod mix release --path ${RELEASES}/${TARGET_SHA}"
+  log "[DRY RUN] MIX_ENV=prod mix release --path ${RELEASE_DIR}"
 else
+  # The release bundles the ERTS and OTP applications installed right now,
+  # which is what makes --rebuild the way an Erlang/OTP security update reaches
+  # the service. REVISION is what release_revision reads the running commit
+  # from.
   # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
-  as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix release --overwrite --path "$2"' \
-    _ "$REPO" "${RELEASES}/${TARGET_SHA}"
-  ok "Built release ${TARGET_SHA} — the running release is untouched."
+  as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix release --overwrite --path "$2" && git rev-parse HEAD >"$2/REVISION"' \
+    _ "$REPO" "$RELEASE_DIR"
+  ok "Built release $(basename "$RELEASE_DIR") — the running release is untouched."
 fi
-record_done "built release ${TARGET_SHA}"
+record_done "built release $(basename "$RELEASE_DIR")"
 
 ## ── Optional: adopt the systemd unit ─────────────────────────────────────
 
@@ -428,6 +532,32 @@ if ! install_push_timer "${REPO}/deploy"; then
 fi
 record_done "push safety net: vigil-push.timer enabled"
 
+## ── Automatic rollback ───────────────────────────────────────────────────
+
+# Back to the release that was running before step 6, for a new release that
+# does not come up (step 6) and for one that comes up and fails verify()
+# (step 7). Always exits: 3 when the old release serves again, 1 when it does
+# not either. The checkout is put back by the EXIT trap, since CHECKOUT_TARGET
+# still names the old release's revision.
+roll_back_automatically() {
+  systemctl stop "$SERVICE"
+  ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
+  chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
+  systemctl start "$SERVICE"
+
+  if wait_until_healthy; then
+    source_env_for_verify
+    # shellcheck disable=SC2034
+    VIGIL_VAULT="$VAULT"
+    if verify; then
+      err "Update rolled back to $(basename "$PREVIOUS_RELEASE"). The service is running again."
+      exit 3
+    fi
+  fi
+  err "Rollback to ${PREVIOUS_RELEASE} also failed. Manual intervention needed — restore the container's Proxmox snapshot."
+  exit 1
+}
+
 ## ── Step 6 — switch over ─────────────────────────────────────────────────
 
 step "6/8  Switch over"
@@ -435,17 +565,20 @@ step "6/8  Switch over"
 PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] systemctl stop ${SERVICE}; symlink to ${TARGET_SHA}; systemctl start ${SERVICE}"
+  log "[DRY RUN] systemctl stop ${SERVICE}; symlink to $(basename "$RELEASE_DIR"); systemctl start ${SERVICE}"
 else
   systemctl stop "$SERVICE"
-  ln -sfn "${RELEASES}/${TARGET_SHA}" "$CURRENT"
+  ln -sfn "$RELEASE_DIR" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   echo "$PREVIOUS_RELEASE" >"$PREVIOUS_RELEASE_FILE"
   systemctl start "$SERVICE"
-  wait_until_healthy || exit 1
-  ok "Switched to ${TARGET_SHA} (previous release: ${PREVIOUS_RELEASE})."
+  if ! wait_until_healthy; then
+    err "$(basename "$RELEASE_DIR") did not come up — rolling back automatically to ${PREVIOUS_RELEASE}."
+    roll_back_automatically
+  fi
+  ok "Switched to $(basename "$RELEASE_DIR") (previous release: ${PREVIOUS_RELEASE})."
 fi
-record_done "switched over to ${TARGET_SHA}"
+record_done "switched over to $(basename "$RELEASE_DIR")"
 
 ## ── Step 7 — verify() with automatic rollback ────────────────────────────
 
@@ -459,22 +592,12 @@ else
   VIGIL_VAULT="$VAULT"
 
   if verify; then
+    # The target runs now, and the checkout is already on it.
+    CHECKOUT_TARGET=""
     record_done "verify(): all mandatory checks passed"
   else
     err "verify() failed — rolling back automatically to ${PREVIOUS_RELEASE}."
-    systemctl stop "$SERVICE"
-    ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
-    chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-    systemctl start "$SERVICE"
-    wait_until_healthy || true
-
-    if verify; then
-      err "Update rolled back to $(basename "$PREVIOUS_RELEASE"). The service is running again."
-      exit 3
-    else
-      err "Rollback to ${PREVIOUS_RELEASE} also failed. Manual intervention needed — restore the container's Proxmox snapshot."
-      exit 1
-    fi
+    roll_back_automatically
   fi
 fi
 

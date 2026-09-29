@@ -772,12 +772,22 @@ value it chose.
 sudo ./scripts/update.sh                 # move to origin/main
 sudo ./scripts/update.sh --to v1.2.3     # to a specific tag or commit
 sudo ./scripts/update.sh --rollback      # back to the previous release
+sudo ./scripts/update.sh --rebuild       # the running commit again, as a new release
 ```
 
 `update.sh` builds the new code as its own release and switches by symlink
 (`stop` → symlink → `start`, never `restart`), then runs the acceptance check.
-If that fails it **rolls back automatically**, restarts, and checks again —
-exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
+If the new release does not come up, or comes up and fails that check, it
+**rolls back automatically**, restarts, and checks again — exiting 3 with
+`Update rolled back to <old-sha>. The service is running again.`
+
+Which commit is running is read from the release `current` points at — each
+release records it in its `REVISION` file — not from the code checkout in
+`/opt/vigil/repo`. The checkout is moved to the target for the build, and put
+back on the running commit whenever the run does not end on the target: a red
+audit or suite, a failed build, an automatic rollback, a dry run, and
+`--rollback`. So after any `update.sh` the checkout shows what is running, and
+an update that failed can simply be run again.
 
 - **Logs:** `journalctl -u vigil -f`
 - **Vault state:** `git -C /var/lib/vigil/vault log --oneline -5`
@@ -791,6 +801,46 @@ exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
   from the installed one, and keeps the old one until it is run with
   `--update-unit`, which verifies the new unit, scores its sandbox and then
   installs it.
+
+### Erlang/OTP security updates
+
+A release carries its own Erlang runtime: `mix release` copies the ERTS and
+the OTP applications (`ssl`, `crypto`, `public_key`, …) installed at build
+time into the release directory, and the service runs those. Upgrading the
+Erlang packages on the host therefore changes nothing for the running
+service, and neither does an update to a commit that is already running. A
+security fix in Erlang/OTP reaches the service only through a new build.
+
+`setup.sh` holds every Erlang package it installs, and `elixir`, with
+`apt-mark hold`, so that an unattended upgrade never moves the toolchain
+under a checkout whose `.tool-versions` names it, and never moves only part
+of it. An OTP security update is taken deliberately, all packages together:
+
+```bash
+TOOLCHAIN="erlang-base erlang-dev erlang-crypto erlang-ssl erlang-public-key
+  erlang-inets erlang-xmerl erlang-tools elixir"
+sudo apt-mark unhold $TOOLCHAIN
+sudo apt-get update
+sudo apt-get install --only-upgrade $TOOLCHAIN
+sudo apt-mark hold $TOOLCHAIN           # also on hosts set up holding only three
+cd /opt/vigil/repo && sudo ./scripts/update.sh --rebuild
+```
+
+Stay within the OTP major version `.tool-versions` names; Debian's security
+updates do. `--rebuild` builds the commit that is running — audit, tests and
+build as in any update — into a new release directory,
+`/opt/vigil/releases/<sha>-<UTC timestamp>`, and switches to it with the same
+acceptance check and automatic rollback. The release it replaces stays the
+rollback target, so `sudo ./scripts/update.sh --rollback` returns to the old
+runtime. To see which runtime a release carries:
+
+```bash
+ls -d /opt/vigil/current/erts-*                                      # the release's
+erl -noshell -eval 'io:format("~s~n", [erlang:system_info(version)]), halt().'  # the host's
+```
+
+The two match after a rebuild. `--rebuild` does not take `--to`: moving to
+another commit builds with the installed runtime anyway.
 
 ### `/healthz` and `status`
 

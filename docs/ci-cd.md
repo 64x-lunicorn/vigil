@@ -493,7 +493,8 @@ and a booted release) and pins:
 - a healthy release is switched to, and `.previous_release` records what it
   replaced
 - a red `verify()` rolls back automatically, the service comes up on the old
-  release, and the operator gets exit 3 rather than a silent failure
+  release, and the operator gets exit 3 rather than a silent failure; so does
+  a new release that never comes up at all
 - a rollback that is *also* red says manual intervention is needed (exit 1)
 - `--rollback` returns to the recorded release, and refuses — rather than
   reporting success for a switch it did not make — when an automatic rollback
@@ -505,6 +506,12 @@ and a booted release) and pins:
   more — including when the prefix is reached through a symlink, which is the
   case that had the protection comparing resolved paths against unresolved
   ones and deleting the rollback target
+- the running revision is read from the release, not the checkout, and the
+  checkout is put back on it after a failed build, an automatic rollback and
+  `--rollback` — so a failed update run again proceeds instead of reporting
+  nothing to do
+- `--rebuild` builds the running commit into a new release directory and
+  switches to it
 
 **Supply chain.** `mix hex.audit` (retired packages) and `mix deps.audit`
 (published CVEs) run in CI. Every third-party action is pinned to a **commit

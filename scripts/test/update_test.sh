@@ -110,6 +110,10 @@ case "${1:-}" in
       echo "fake mix: release without --path" >&2
       exit 1
     fi
+    if [ -f "${FAKE_MIX_RELEASE_FAILS:-/nonexistent}" ]; then
+      echo "fake mix: the build failed" >&2
+      exit 1
+    fi
     mkdir -p "${path}/bin"
     echo "#!/bin/sh" >"${path}/bin/vigil"
     chmod +x "${path}/bin/vigil"
@@ -182,13 +186,23 @@ build_vault() {
   git -C "$VAULT" update-ref refs/remotes/upstream/master HEAD
 }
 
-# One release directory, optionally one that does not come up.
+# One release directory, optionally one that does not come up. Each one
+# carries the commit it was built from, as update.sh writes it: the running
+# revision is read from there, not from the checkout.
 make_release() {
   local name="$1" healthy="${2:-healthy}"
   mkdir -p "${PREFIX}/releases/${name}/bin"
   echo "#!/bin/sh" >"${PREFIX}/releases/${name}/bin/vigil"
+  git -C "${PREFIX}/repo" rev-parse "$OLD_SHA" >"${PREFIX}/releases/${name}/REVISION"
   [ "$healthy" = "broken" ] && touch "${PREFIX}/releases/${name}/.verify-fails"
   echo "${PREFIX}/releases/${name}"
+}
+
+# A release switched to that never answers on /healthz, as opposed to one that
+# answers and fails the acceptance check.
+make_unbootable() {
+  mkdir -p "${PREFIX}/releases/$1"
+  touch "${PREFIX}/releases/$1/.boot-fails"
 }
 
 # Everything the authorization server has persisted lives beside the vault, in
@@ -278,6 +292,7 @@ run_update() {
     FAKE_MIX_LOG="$FAKE_MIX_LOG" \
     FAKE_MIX_TEST_FAILS="${FAKE_MIX_TEST_FAILS:-/nonexistent}" \
     FAKE_MIX_AUDIT_CRITICAL="${FAKE_MIX_AUDIT_CRITICAL:-/nonexistent}" \
+    FAKE_MIX_RELEASE_FAILS="${FAKE_MIX_RELEASE_FAILS:-/nonexistent}" \
     FAKE_SA_LOG="${WORK}/systemd-analyze.log" \
     FAKE_SA_EXPOSED="${FAKE_SA_EXPOSED:-/nonexistent}" \
     bash "$UPDATE_SH" "$@" >"${WORK}/out.log" 2>&1
@@ -287,6 +302,7 @@ run_update() {
 }
 
 current_release() { basename "$(readlink "${PREFIX}/current")"; }
+checkout_sha() { git -C "${PREFIX}/repo" rev-parse --short HEAD; }
 
 # The recorded start/stop calls as one line: "stop v0 | start 7a1b2c3". Each
 # entry carries what `current` pointed at when the call was made, so the line
@@ -433,8 +449,8 @@ assert_eq "current still points at the old release" "v0" "$(current_release)"
 section "5b2  An env file without the SkillKey secret aborts the preflight"
 
 # A host set up before VIGIL_SKILLKEY_SECRET existed. The new release would
-# refuse to boot, and step 6 does not roll back a release that never comes
-# up, so preflight has to catch it, and say what to add.
+# refuse to boot; step 6 would roll it back, but only after stopping the
+# service, so preflight catches it first, and says what to add.
 build_host
 sed -i.bak '/^VIGIL_SKILLKEY_SECRET=/d' "$ENV_FILE"
 rm -f "${ENV_FILE}.bak"
@@ -715,6 +731,157 @@ else
 fi
 assert_eq "current still points at the old release" "v0" "$(current_release)"
 assert_eq "the service was never stopped" "yes" "$(service_running)"
+
+## ── 10. The checkout follows the running release ────────────────────────
+
+section "10   A failed build leaves the checkout on the running revision"
+
+# Before, the checkout stayed on the target after a failed build, and the
+# running revision was read from the checkout — so the same update, run again,
+# found the target "running" and reported nothing to do.
+build_host
+FAKE_MIX_RELEASE_FAILS="${WORK}/build-fails"
+touch "$FAKE_MIX_RELEASE_FAILS"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+FAKE_MIX_RELEASE_FAILS=""
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "10b  The same update, run again after a failed build, proceeds"
+
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+if grep -q "nothing to do" "${WORK}/out.log"; then
+  fail "does not report nothing to do" "$(grep "nothing to do" "${WORK}/out.log")"
+else
+  pass "does not report nothing to do"
+fi
+assert_eq "the checkout is on the new revision" "$NEW_SHA" "$(checkout_sha)"
+assert_eq "the new release records the commit it was built from" \
+  "$(git -C "${PREFIX}/repo" rev-parse "$NEW_SHA")" \
+  "$(cat "${PREFIX}/releases/${NEW_SHA}/REVISION")"
+
+section "10c  The running revision is read from the release, not the checkout"
+
+# A checkout moved by hand, onto the target: the release still runs the old
+# commit, so the update is not "nothing to do".
+build_host
+git -C "${PREFIX}/repo" checkout -q "$NEW_SHA"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+
+section "10d  After an automatic rollback the checkout matches the running release"
+
+build_host
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the checkout is on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+rm -f "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "the same update, run again once fixed, exits 0" "0" "$RC"
+assert_eq "and switches to the new release" "$NEW_SHA" "$(current_release)"
+
+section "10e  --rollback puts the checkout back on the release it returns to"
+
+build_host
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "the update it rolls back exits 0" "0" "$RC"
+RC="$(run_update --rollback --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the recorded previous release" "v0" "$(current_release)"
+assert_eq "the checkout is on the revision of that release" "$OLD_SHA" "$(checkout_sha)"
+
+section "10f  A release that never comes up is rolled back too"
+
+# The health wait after the switch used to exit on its own, leaving the new
+# release switched in and the service down.
+build_host
+make_unbootable "$NEW_SHA"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 3 — rolled back, service running" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the service is running again" "yes" "$(service_running)"
+assert_eq "the service was cycled twice, ending on the old release" \
+  "stop v0 | start ${NEW_SHA} | stop ${NEW_SHA} | start v0" "$(systemctl_calls)"
+assert_eq "the checkout is on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "10g  When the previous release does not come up either, that is said"
+
+build_host
+make_unbootable v0
+make_unbootable "$NEW_SHA"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 1 — manual intervention" "1" "$RC"
+if grep -q "Manual intervention needed" "${WORK}/out.log"; then
+  pass "says manual intervention is needed"
+else
+  fail "says manual intervention is needed" "$(tail -3 "${WORK}/out.log")"
+fi
+
+## ── 11. --rebuild ────────────────────────────────────────────────────────
+
+section "11   --rebuild builds the running commit into a new release and switches to it"
+
+build_host
+RC="$(run_update --rebuild --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+REBUILT="$(current_release)"
+case "$REBUILT" in
+  "${OLD_SHA}-"*) pass "the new release is named after the running commit" ;;
+  *) fail "the new release is named after the running commit" "current: ${REBUILT}" ;;
+esac
+if [ -x "${PREFIX}/releases/${REBUILT}/bin/vigil" ]; then
+  pass "the new release directory was built"
+else
+  fail "the new release directory was built"
+fi
+assert_eq "it records the commit it was built from" \
+  "$(git -C "${PREFIX}/repo" rev-parse "$OLD_SHA")" \
+  "$(cat "${PREFIX}/releases/${REBUILT}/REVISION")"
+assert_eq "the previous release is recorded" "${PREFIX}/releases/v0" \
+  "$(cat "${PREFIX}/.previous_release")"
+assert_eq "stopped on the old release, started on the rebuilt one" \
+  "stop v0 | start ${REBUILT}" "$(systemctl_calls)"
+assert_eq "the checkout is on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "11b  A second --rebuild builds yet another release, and --rollback returns"
+
+RC="$(run_update --rebuild --non-interactive)"
+assert_eq "exits 0" "0" "$RC"
+if [ "$(current_release)" != "$REBUILT" ]; then
+  pass "switched to a release directory of its own"
+else
+  fail "switched to a release directory of its own" "current: $(current_release)"
+fi
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback exits 0" "0" "$RC"
+assert_eq "and returns to the first rebuild" "$REBUILT" "$(current_release)"
+
+section "11c  --rebuild does not combine with --to or --rollback"
+
+build_host
+RC="$(run_update --rebuild --to "$NEW_SHA" --non-interactive)"
+assert_eq "--rebuild --to exits 2" "2" "$RC"
+RC="$(run_update --rebuild --rollback --non-interactive)"
+assert_eq "--rebuild --rollback exits 2" "2" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 
