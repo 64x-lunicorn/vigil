@@ -15,9 +15,12 @@ ambiguous, the smaller solution is the right one.
 never written into files. A stored status is a `now` that was frozen and now
 lies.
 
-**2. One writer.** Only vigil writes to the vault. Obsidian and every other
-client are read-only. It follows that there is no merge, no locking protocol,
-no conflict handling — none of it is needed.
+**2. One writer.** Only vigil writes to the vault's working tree. Obsidian and
+every other client are read-only there. A human who edits on purpose does so in
+a clone of their own, commits under their own name, pushes to the remote and
+calls `reload`, which adopts those commits `--ff-only`. It follows that there
+is no merge, no locking protocol, no conflict handling — none of it is needed:
+a history that does not fast-forward is refused and reported, never merged.
 
 **3. Git is the metadata database.** Creation date = first commit. Provenance =
 commit author. History = `git log`. No frontmatter field for anything Git
@@ -688,6 +691,17 @@ in the repository config, so manual commits keep the human's identity. That
 makes `git log --author=vigil` the provenance query: every line in the vault is
 attributable to either the assistant or the human.
 
+**A human edit arrives as a commit, never as a file.** Nothing but vigil
+touches the working tree, so a deliberate human change is made in a clone,
+committed under the human's own identity and pushed to the remote. The next
+load — a restart or a `reload` — pulls with `--ff-only` and rebuilds the index
+from the result. That keeps the provenance query honest and needs no merge: if
+the server holds a commit the remote lacks, typically one whose push failed,
+the histories have diverged, the pull is refused, and `reload` answers
+`pull_failed` with git's reason while serving the unchanged vault. Reconciling
+two histories is a human decision, made on the server with git, not one vigil
+makes on anyone's behalf.
+
 `commit.gpgsign=false` is forced the same way. The service user has no signing
 key; an inherited `commit.gpgsign=true` would otherwise fail every single
 write.
@@ -1293,8 +1307,8 @@ Not built, and not "prepared for" either:
 - No automatic summaries or journal entries — only explicit tool calls write
 - No Phoenix, no Ecto, no database
 - No LLM call inside the server
-- No file watcher — vigil is the only writer; external changes are picked up on
-  restart or `reload`
+- No file watcher — vigil is the only writer of its working tree; a human's
+  commits arrive through the remote and are adopted on restart or `reload`
 - No `create_domain` tool — the server creates no structure, because it would
   then be deciding its own filing system
 - No write access to `_domains.yml`

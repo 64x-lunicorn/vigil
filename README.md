@@ -43,7 +43,8 @@ inspect every change, and take them with you.
 > [!NOTE]
 > vigil is an early-stage, single-user project. It is not a multi-tenant service,
 > a general-purpose sync engine, or a replacement for backups. It assumes one
-> writer: vigil. Other vault clients should be read-only.
+> writer: vigil. Other vault clients should be read-only; deliberate edits go
+> through a clone, a push and `reload` (see the guide's *Editing by hand*).
 
 ## How it works
 
