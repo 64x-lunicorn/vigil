@@ -37,16 +37,19 @@ defmodule Vigil.OAuth.Flow do
   Dynamic client registration. Returns the registration response, or
   `{:error, "invalid_redirect_uri"}` when no usable redirect URI was offered.
   """
-  def register(persistence, json, now \\ System.system_time(:second)) do
+  def register(persistence, json, now \\ System.system_time(:second))
+
+  def register(_persistence, json, _now) when not is_map(json),
+    do: {:error, "invalid_client_metadata"}
+
+  def register(persistence, json, now) do
     redirect_uris = Map.get(json, "redirect_uris", [])
 
-    if redirect_uris == [] or not Enum.all?(redirect_uris, &RedirectUri.valid_candidate?/1) do
-      {:error, "invalid_redirect_uri"}
-    else
+    if valid_redirect_uris?(redirect_uris) do
       client =
         Client.register(
           persistence,
-          Map.get(json, "client_name", "Unnamed client"),
+          client_name(json),
           redirect_uris,
           now
         )
@@ -61,8 +64,19 @@ defmodule Vigil.OAuth.Flow do
          token_endpoint_auth_method: "none",
          client_id_issued_at: now
        }}
+    else
+      {:error, "invalid_redirect_uri"}
     end
   end
+
+  defp valid_redirect_uris?([_ | _] = uris),
+    do: Enum.all?(uris, &(is_binary(&1) and RedirectUri.valid_candidate?(&1)))
+
+  defp valid_redirect_uris?(_), do: false
+
+  # Shown on the consent page, so it must be a string whatever the client sent.
+  defp client_name(%{"client_name" => name}) when is_binary(name) and name != "", do: name
+  defp client_name(_json), do: "Unnamed client"
 
   @doc """
   Checks an `/authorize` request.

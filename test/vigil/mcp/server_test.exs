@@ -186,6 +186,51 @@ defmodule Vigil.MCP.ServerTest do
     assert body["error"]["code"] == -32601
   end
 
+  # A body that parses but is not one request object used to crash the
+  # handler into a 500. Each is a protocol error with an answer.
+  test "a batch or a scalar body is an Invalid Request", %{
+    persistence: persistence,
+    token: token
+  } do
+    for body <- [[%{jsonrpc: "2.0", id: 1, method: "ping"}], 42, "ping"] do
+      conn = post(persistence, token, body, [{"mcp-session-id", "abc"}])
+
+      assert conn.status == 200
+      assert Jason.decode!(conn.resp_body)["error"]["code"] == -32600
+    end
+  end
+
+  test "tools/call with params that are not an object is Invalid params", %{
+    persistence: persistence,
+    token: token
+  } do
+    conn =
+      post(persistence, token, %{jsonrpc: "2.0", id: 3, method: "tools/call", params: [1]}, [
+        {"mcp-session-id", "abc"}
+      ])
+
+    body = Jason.decode!(conn.resp_body)
+    assert body["id"] == 3
+    assert body["error"]["code"] == -32602
+  end
+
+  test "two protocol-version headers are refused, not crashed on", %{
+    persistence: persistence,
+    token: token
+  } do
+    conn =
+      conn(:post, "/mcp", Jason.encode!(%{jsonrpc: "2.0", id: 1, method: "ping"}))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> Map.update!(:req_headers, fn headers ->
+        headers ++
+          [{"mcp-protocol-version", "2025-11-25"}, {"mcp-protocol-version", "2025-06-18"}]
+      end)
+      |> Server.call(opts(persistence))
+
+    assert conn.status == 400
+  end
+
   test "tools/list contains exactly seventeen tools", %{persistence: persistence, token: token} do
     conn =
       post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [

@@ -96,6 +96,25 @@ defmodule Vigil.OAuth.FlowTest do
                Flow.authorize_request(server(persistence), authorize_params(id))
     end
 
+    # Registration is reachable without a token; whatever JSON arrives must
+    # come back as a registration error, never as a crash.
+    test "malformed client metadata is refused", %{persistence: persistence} do
+      assert {:error, "invalid_client_metadata"} = Flow.register(persistence, ["x"])
+
+      for uris <- ["https://app.example/cb", [42], [nil], %{"a" => "b"}] do
+        assert {:error, "invalid_redirect_uri"} =
+                 Flow.register(persistence, %{"redirect_uris" => uris})
+      end
+    end
+
+    test "a client_name that is not a string is not stored", %{persistence: persistence} do
+      assert {:ok, %{client_name: "Unnamed client"}} =
+               Flow.register(persistence, %{
+                 "redirect_uris" => ["https://app.example/cb"],
+                 "client_name" => %{"x" => 1}
+               })
+    end
+
     test "no redirect_uri at all is refused", %{persistence: persistence} do
       assert {:error, "invalid_redirect_uri"} = Flow.register(persistence, %{})
     end
