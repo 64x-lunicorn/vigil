@@ -743,6 +743,11 @@ VIGIL_STATE_DIR=/var/lib/vigil
 # VIGIL_ALLOWED_ORIGINS=https://claude.ai
 ```
 
+The consent password is the consent page's and nothing else's. The SkillKey is
+keyed with `VIGIL_SKILLKEY_SECRET`, a random secret of its own (see
+[the guide](guide.md#configuration)), so changing the password leaves every
+SkillKey valid and nothing handed to a client is derived from it.
+
 **Startup check:** if `VIGIL_AUTH_PASSWORD` is missing or shorter than 12
 characters the application refuses to start. A publicly reachable authorization
 server without a strong password is an open door to the vault. In prod the

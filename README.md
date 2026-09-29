@@ -105,12 +105,13 @@ remote for real notes.
 ### 3. Start vigil
 
 In the same terminal, replace the password placeholder with a unique password
-of at least 12 characters:
+of at least 12 characters. The SkillKey secret is random bytes, never chosen:
 
 ```bash
 export VIGIL_VAULT_PATH="$DEMO_DIR/vault"
 export VIGIL_STATE_DIR="$DEMO_DIR/oauth"
 export VIGIL_AUTH_PASSWORD='replace-with-your-own-local-password'
+export VIGIL_SKILLKEY_SECRET="$(openssl rand -base64 48)"
 
 mix run --no-halt
 ```

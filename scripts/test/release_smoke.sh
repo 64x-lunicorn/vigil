@@ -217,6 +217,10 @@ fi
 export VIGIL_VAULT_PATH="$VAULT"
 export VIGIL_STATE_DIR="$STATE"
 export VIGIL_AUTH_PASSWORD="$AUTH_PASSWORD"
+# The SkillKey HMAC secret, apart from the password; the release refuses to
+# boot without one.
+VIGIL_SKILLKEY_SECRET="$(openssl rand -base64 48)"
+export VIGIL_SKILLKEY_SECRET
 export VIGIL_PORT="$PORT"
 export VIGIL_GIT_REMOTE="origin"
 export VIGIL_ISSUER="$BASE_URL"

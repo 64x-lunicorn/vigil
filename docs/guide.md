@@ -410,8 +410,10 @@ flowchart TB
 2. **OAuth 2.1** with Authorization Code + PKCE. Dynamic Client Registration
    and Client-ID Metadata Documents are both supported. No static bearer token.
 3. **Scopes.** `vault` for full access, `vault:read` for read-only clients.
-4. **SkillKey.** Rotating HMAC derived from `VIGIL_AUTH_PASSWORD`, required by
-   every write tool.
+4. **SkillKey.** Rotating HMAC derived from `VIGIL_SKILLKEY_SECRET`, required
+   by every write tool. The secret is random bytes of its own, never the
+   consent password: every key is handed to a client and ends up in chat
+   transcripts, and one keyed with a password could be tested against offline.
 5. **Rate limiting**, fixed window — per access token behind `/mcp`, per
    client address in front of the authorization server.
 
@@ -459,7 +461,8 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
 | `VIGIL_ISSUER` | **required in prod**; `http://localhost:4000` in dev | OAuth issuer |
 | `VIGIL_RESOURCE` | **required in prod**; `http://localhost:4000/mcp` in dev | canonical MCP endpoint URI (audience) |
-| `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |
+| `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters** |
+| `VIGIL_SKILLKEY_SECRET` | — | SkillKey HMAC secret, **required, at least 32 random bytes**, base64 or hex (`openssl rand -base64 48`); never the consent password |
 | `VIGIL_STATE_DIR` | **required in prod**; `tmp/oauth_state` in dev | directory for the three `:dets` files |
 | `VIGIL_ALLOWED_ORIGINS` | empty | comma-separated browser origins, besides the issuer's own, that may send a request to `/mcp` and the OAuth endpoints, e.g. `http://localhost:6274`. See [browser origins](#browser-origins) |
 | `VIGIL_TRUSTED_PROXY_HEADER` | unset | header carrying the real client address, e.g. `CF-Connecting-IP` |
@@ -488,6 +491,10 @@ failed and what it expected, all in one message:
   `https://claude.ai/mcp`.
 - `VIGIL_AUTH_PASSWORD` must be at least 12 characters. The message names the
   variable and never shows the value.
+- `VIGIL_SKILLKEY_SECRET` must be set and decode, as base64 or hex, to at least
+  32 bytes — a long phrase is refused however long it is — and must not be the
+  consent password. The message names the variable, says how to generate one
+  and never shows the value.
 - In prod, `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be `https` URLs, and the
   resource must sit on the issuer's origin (same scheme, host and port):
   `https://vault.example.org` and `https://vault.example.org/mcp`, not
@@ -581,6 +588,21 @@ exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
   running service
 - **Add a domain:** create the directory, add it to `_domains.yml`, call
   `reload`. No code change, no restart.
+
+**Updating a host set up before `VIGIL_SKILLKEY_SECRET` existed.** Its env file
+has no such line, and a release that needs it refuses to start, naming the
+variable. `update.sh` checks for the line in its preflight and stops there
+(exit 2, nothing changed, the old release still running), printing the command
+below. Add the secret once, then update:
+
+```bash
+echo "VIGIL_SKILLKEY_SECRET=$(openssl rand -base64 48)" | sudo tee -a /etc/vigil/env >/dev/null
+sudo ./scripts/update.sh
+```
+
+Outstanding SkillKeys stop working with the switch; an assistant gets a new one
+from `skill_read`, as after any rotation. The consent password and every OAuth
+token are untouched.
 
 ---
 

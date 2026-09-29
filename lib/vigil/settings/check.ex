@@ -35,6 +35,7 @@ defmodule Vigil.Settings.Check do
     {:resource, "VIGIL_RESOURCE", :resource},
     {:auth_password, "VIGIL_AUTH_PASSWORD", :password},
     {:allowed_origins, "VIGIL_ALLOWED_ORIGINS", :origins},
+    {:skillkey_secret, "VIGIL_SKILLKEY_SECRET", :skillkey_secret},
     {:skillkey_ttl_seconds, "VIGIL_SKILLKEY_TTL", :positive_integer},
     {:rate_limit_rpm, "VIGIL_RATE_LIMIT_RPM", :positive_integer},
     {:reload_rate_limit_rpm, "VIGIL_RELOAD_RATE_LIMIT_RPM", :positive_integer},
@@ -43,6 +44,11 @@ defmodule Vigil.Settings.Check do
   ]
 
   @min_password_length 12
+
+  # Bytes of randomness the SkillKey secret must decode to, and the command
+  # that prints one — `scripts/init.sh` runs exactly this.
+  @min_secret_bytes 32
+  @generate_secret "generate one with `openssl rand -base64 48`"
 
   @doc """
   The application's configuration, checked; raises naming every setting that
@@ -74,6 +80,7 @@ defmodule Vigil.Settings.Check do
         case check_value(check, Keyword.get(config, key), config) do
           {:ok, value} -> {Map.put(checked, key, value), errors}
           {:error, :unset} -> {checked, ["#{var} is not set" | errors]}
+          {:error, {:unset, hint}} -> {checked, ["#{var} is not set; #{hint}" | errors]}
           {:error, expected} -> {checked, ["#{var} must be #{expected}" | errors]}
         end
       end)
@@ -83,7 +90,12 @@ defmodule Vigil.Settings.Check do
 
   # The setting's own checks. Every one refuses an unset value first: in :prod
   # `config/runtime.exs` leaves the required ones nil when their variable is
-  # unset, and every other one has a default there.
+  # unset, and every other one has a default there. The SkillKey secret says
+  # how to make one: a host set up before it existed has none, and its
+  # operator meets this message on the first boot after the update.
+  defp check_value(:skillkey_secret, value, _config) when value in [nil, ""],
+    do: {:error, {:unset, @generate_secret}}
+
   defp check_value(_check, value, _config) when value in [nil, ""], do: {:error, :unset}
 
   defp check_value(:required, value, _config), do: {:ok, value}
@@ -131,7 +143,7 @@ defmodule Vigil.Settings.Check do
     end
   end
 
-  # Named, never echoed: the consent password is also the SkillKey secret.
+  # Named, never echoed: a human types it on the consent page.
   defp check_value(:password, value, _config) do
     if is_binary(value) and String.length(value) >= @min_password_length,
       do: {:ok, value},
@@ -158,6 +170,39 @@ defmodule Vigil.Settings.Check do
 
   defp check_value(:origins, value, _config),
     do: {:error, "a comma-separated list of origins, got #{inspect(value)}"}
+
+  # Named, never echoed, and never chosen: every SkillKey is an HMAC under
+  # this secret handed to the client, so it ends up in chat transcripts, and a
+  # guessable secret can be tested against one offline. Random bytes are the
+  # only thing that makes that pointless, so the value has to *be* them —
+  # base64 or hex, decoding to at least 32 — rather than merely be long. The
+  # consent password is refused here for the same reason: it is the one
+  # secret in this file a human may have chosen.
+  defp check_value(:skillkey_secret, value, config) do
+    cond do
+      value == Keyword.get(config, :auth_password) ->
+        {:error, "a secret of its own, not VIGIL_AUTH_PASSWORD; #{@generate_secret}"}
+
+      byte_size(decode_secret(value)) < @min_secret_bytes ->
+        {:error,
+         "at least #{@min_secret_bytes} random bytes, base64 or hex encoded; #{@generate_secret}"}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  # What the secret decodes to, or nothing if it is neither hex nor base64.
+  # Hex first: every hex string is also valid base64, and decoding it as that
+  # would count half again the randomness it holds.
+  defp decode_secret(value) do
+    with :error <- Base.decode16(value, case: :mixed),
+         :error <- Base.decode64(value, padding: false) do
+      ""
+    else
+      {:ok, bytes} -> bytes
+    end
+  end
 
   defp url(value, config) do
     https? = Keyword.get(config, :https_required, false)

@@ -218,6 +218,7 @@ build_host() {
   cat >"$ENV_FILE" <<ENV
 VIGIL_RESOURCE=https://vault.example/mcp
 VIGIL_PORT=4000
+VIGIL_SKILLKEY_SECRET=not-a-real-secret-the-stubbed-release-never-reads-it
 ENV
   local first
   first="$(make_release v0)"
@@ -391,6 +392,26 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "exits 2 — nothing was touched" "2" "$RC"
 assert_eq "current still points at the old release" "v0" "$(current_release)"
+
+section "5b2  An env file without the SkillKey secret aborts the preflight"
+
+# A host set up before VIGIL_SKILLKEY_SECRET existed. The new release would
+# refuse to boot, and step 6 does not roll back a release that never comes
+# up, so preflight has to catch it, and say what to add.
+build_host
+sed -i.bak '/^VIGIL_SKILLKEY_SECRET=/d' "$ENV_FILE"
+rm -f "${ENV_FILE}.bak"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 2 — nothing was touched" "2" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+if grep -q "VIGIL_SKILLKEY_SECRET" "${WORK}/out.log" &&
+  grep -q "openssl rand -base64 48" "${WORK}/out.log"; then
+  pass "names the variable and how to generate one"
+else
+  fail "names the variable and how to generate one" "$(tail -3 "${WORK}/out.log")"
+fi
 
 ## ── 5c. Persisted auth state survives the delivery ───────────────────────
 

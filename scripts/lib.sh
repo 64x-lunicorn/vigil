@@ -278,6 +278,16 @@ write_file_atomically() {
   mv -f "$tmp" "$path"
 }
 
+# generate_secret — 48 random bytes, base64: what init.sh makes both
+# VIGIL_AUTH_PASSWORD and VIGIL_SKILLKEY_SECRET of, one call each, so the two
+# are never the same value. 48 rather than the 32 the boot check asks the
+# SkillKey secret for, and one 64-character line with no padding: nothing in
+# it that systemd's EnvironmentFile or `source` would read differently.
+# Printed to stdout — the caller captures it, and it never reaches log/warn/err.
+generate_secret() {
+  openssl rand -base64 48
+}
+
 # wait_until_healthy — waits up to 30s for the local endpoint to answer.
 # Required after every systemctl start/restart, BEFORE anything tries to talk
 # to the node (bearer call or `bin/vigil rpc`) — otherwise that fails with

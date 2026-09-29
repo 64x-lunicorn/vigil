@@ -1077,15 +1077,15 @@ the hot path.
 
 `Vigil.Settings` is what the deployment says about itself: the vault's
 timezone, the authorization server's identity — issuer, resource, consent
-password, and the window an AP-4 SkillKey rotates on — and the two strings
-that shape the writing instructions handed to the MCP client.
-`Vigil.Settings.from_env/0` is the only place those seven keys are read,
+password, and the secret and window an AP-4 SkillKey is derived from — and
+the two strings that shape the writing instructions handed to the MCP client.
+`Vigil.Settings.from_env/0` is the only place those eight keys are read,
 `Vigil.Application` calls it once where the supervision tree is built, and
 everything below takes the result as an option.
 
 **The shape is `Vigil.SkillKey`'s**, which bundled the HMAC secret and the
 rotation window into one value because neither derives a token alone, and made
-every function there take the bundle. What is new is the reason: these seven
+every function there take the bundle. What is new is the reason: these eight
 do not derive anything together. They are one value because of *where they are
 read*. An environment read belongs in the composition root, and eight modules
 that each asked for one key with a default of its own had no way to be handed
@@ -1124,11 +1124,11 @@ checked against, and `Code` has no second opinion to hold.
 path, the exclusions, the git remote, the state dir and the port are read in
 `Vigil.Application` and handed to the children that need them.
 
-**The SkillKey is derived from what was resolved, not read again.** The
-consent password is the AP-4 HMAC secret in a second role, so `Vigil.SkillKey`
-takes it from the settings rather than from the environment, and the rotation
-window joined them there — one resolution, and `VIGIL_SKILLKEY_TTL`'s default
-stated once in `config/runtime.exs` like every other. `Vigil.SkillKey.key/1`
+**The SkillKey is derived from what was resolved, not read again.** The AP-4
+HMAC secret (`VIGIL_SKILLKEY_SECRET`) and the rotation window are settings like
+the rest, so `Vigil.SkillKey` takes both from the settings rather than from the
+environment — one resolution, and `VIGIL_SKILLKEY_TTL`'s default stated once
+in `config/runtime.exs` like every other. `Vigil.SkillKey.key/1`
 is where the deployment's settings become the bundle that module's functions
 take, and `Vigil.MCP.Server` hands that bundle to `Vigil.MCP.Tools.dispatch/5`
 the way it hands the timezone to the envelope. The gate and the `skill_read`
@@ -1181,7 +1181,17 @@ settings have no fallback there; dev keeps its `http://localhost` defaults.
 
 **The secret is named, never echoed.** A check that wants the offending value
 in its message puts it there itself, so `VIGIL_AUTH_PASSWORD`'s says what it
-expected and nothing about what it got — and so will any secret added later.
+expected and nothing about what it got — and so does `VIGIL_SKILLKEY_SECRET`'s.
+
+**The SkillKey secret is random bytes, not a long string.** It must decode, as
+hex or as base64, to at least 32 bytes, and must not equal the consent
+password. Length alone would let a chosen phrase through, and a chosen secret
+is exactly what an exposed HMAC output lets someone guess at offline; a value
+that decodes to 32 bytes is almost certainly what `openssl rand` printed. Hex
+is tried first, because every hex string is also valid base64 and would count
+half again the randomness it holds. The message for an unset one says how to
+generate one (`openssl rand -base64 48`, what `init.sh` runs), because the
+operator most likely to meet it is one whose host predates the setting.
 
 ---
 
@@ -1457,13 +1467,30 @@ responses say how long the key lives from the key bundle they were handed —
 the deployment's window, and that the previous window's key is still accepted
 — rather than a fixed hour, which is true only of the default.
 
-`VIGIL_AUTH_PASSWORD` doubles as both the password the resource owner types on
-the OAuth consent page (layer 2) and the HMAC secret behind the SkillKey
-(layer 4) — one setting, two unrelated roles. Deliberate, reviewed, and left
-as-is: for a single-user server the blast radius is acceptable. But it means
-rotating the password because someone saw the consent page also invalidates
-every outstanding SkillKey, and an assistant mid-conversation loses write
-access until it calls `skill_read` again.
+**The consent password keys nothing whose output leaves the server.** The
+SkillKey is an HMAC under `VIGIL_SKILLKEY_SECRET`, a random secret of its own
+that `init.sh` generates beside the password (layer 2's) and never from it.
+They used to be one setting in two roles, reviewed and kept for rotation
+convenience — but that review missed what a SkillKey is: an HMAC output handed
+to every client, kept in chat transcripts. Keyed with a password a human may
+have chosen, every one of them was a test for password guesses that needs no
+server and meets no rate limit. Keyed with 32 random bytes, it is a test for
+nothing. So the two rotate apart: changing the password because someone saw
+the consent page leaves every outstanding SkillKey valid, and rotating the
+SkillKey secret — which invalidates them, so an assistant mid-conversation
+calls `skill_read` again — leaves the password and every OAuth token alone.
+
+**A host set up before the secret existed refuses to boot.** Its env file has
+no `VIGIL_SKILLKEY_SECRET`, and the settings check stops the start naming the
+variable and the command that makes one. `update.sh` looks for the line in its
+preflight and stops there with the same command, before anything is built or
+switched: a release that never comes up fails the health wait after the
+switchover, which does not roll back. Of refusing and generating a secret on
+first boot (into the state dir), refusing is the simpler and the safer: a
+generated secret would be a second place secrets live, outside the env file an
+operator backs up and rotates, and a fallback to the password would keep
+exactly the exposure this closes. The operator adds one line, once
+(`docs/guide.md`, "Operations").
 
 ---
 

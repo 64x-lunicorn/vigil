@@ -53,6 +53,9 @@ config :vigil,
   issuer: System.get_env("VIGIL_ISSUER", "http://localhost:4000"),
   resource: System.get_env("VIGIL_RESOURCE", "http://localhost:4000/mcp"),
   auth_password: System.get_env("VIGIL_AUTH_PASSWORD"),
+  # The AP-4 SkillKey HMAC secret: random bytes of its own, never the consent
+  # password. No default anywhere, like the password.
+  skillkey_secret: System.get_env("VIGIL_SKILLKEY_SECRET"),
   skillkey_ttl_seconds: integer.("VIGIL_SKILLKEY_TTL", "3600"),
   rate_limit_rpm: integer.("VIGIL_RATE_LIMIT_RPM", "60"),
   # `reload` is counted a second time, per access token, against a budget of
@@ -94,15 +97,17 @@ config :vigil,
 # in the files whose subject makes the string opaque: an audience persistence
 # only stores and gives back, and the one a pre-seam fixture was minted with.
 #
-# `auth_password` doubles as the AP-4 SkillKey HMAC secret (`Vigil.SkillKey`),
-# which is why the suite cannot simply leave it unset.
+# `skillkey_secret` is pinned beside it: every write the suite makes carries a
+# SkillKey (`Vigil.SkillKey`) derived from it, so it cannot be left unset
+# either. Not a secret — it keys nothing outside the suite.
 if config_env() == :test do
   config :vigil,
     vault_path: Path.expand("test/fixtures/vault", File.cwd!()),
     state_dir: Path.expand("tmp/test_oauth_state", File.cwd!()),
     issuer: "https://vault.factory-lab.org",
     resource: "https://vault.factory-lab.org/mcp",
-    auth_password: "correct-horse-battery-staple"
+    auth_password: "correct-horse-battery-staple",
+    skillkey_secret: "y7CI4lMs8Utr4o5rIo2N2TqzaVmvCH4X6yjvDaLpVnzq4k5LCvhFQIPj3KnhnyKq"
 else
   # In :prod the four facts that decide which vault, which OAuth state and
   # which identity have no fallback. A missing line in /etc/vigil/env used to

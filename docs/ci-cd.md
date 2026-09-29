@@ -236,8 +236,9 @@ and a booted release) and pins:
 - `--rollback` returns to the recorded release, and refuses — rather than
   reporting success for a switch it did not make — when an automatic rollback
   has already left `current` and `.previous_release` naming the same release
-- a red suite and unpushed vault commits never reach the switchover, and leave
-  the running service and the code checkout as they were
+- a red suite, unpushed vault commits and an env file without
+  `VIGIL_SKILLKEY_SECRET` never reach the switchover, and leave the running
+  service and the code checkout as they were
 - the retention rule keeps the running release, the rollback target and one
   more — including when the prefix is reached through a symlink, which is the
   case that had the protection comparing resolved paths against unresolved

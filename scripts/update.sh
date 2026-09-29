@@ -239,6 +239,17 @@ if [ ! -L "$CURRENT" ] || [ ! -d "$(readlink -f "$CURRENT")" ]; then
   exit 2
 fi
 
+# A setting every release from here on refuses to boot without, and that an
+# init.sh older than it never wrote. Checked here rather than left to boot:
+# a release that does not come up fails step 6's health wait, which exits
+# with the new release switched in and the service down. The value is only
+# tested for being there — the boot check judges it — and never printed.
+if ! grep -qE '^VIGIL_SKILLKEY_SECRET=.' "$ENV_FILE" 2>/dev/null; then
+  err "${ENV_FILE} has no VIGIL_SKILLKEY_SECRET, which vigil now requires (the SkillKey's own HMAC secret). Add it once, then run update.sh again:"
+  err "  echo \"VIGIL_SKILLKEY_SECRET=\$(openssl rand -base64 48)\" >> ${ENV_FILE}"
+  exit 2
+fi
+
 PENDING="$(as_vigil git -C "$VAULT" rev-list --count github/main..main 2>/dev/null || echo "?")"
 if [ "$PENDING" != "0" ]; then
   err "The vault has ${PENDING} unpushed commits. Secure them first: git -C ${VAULT} push github main"

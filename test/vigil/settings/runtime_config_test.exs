@@ -18,7 +18,8 @@ defmodule Vigil.Settings.RuntimeConfigTest do
     "VIGIL_STATE_DIR" => "/var/lib/vigil",
     "VIGIL_ISSUER" => "https://vault.example.org",
     "VIGIL_RESOURCE" => "https://vault.example.org/mcp",
-    "VIGIL_AUTH_PASSWORD" => "correct-horse-battery-staple"
+    "VIGIL_AUTH_PASSWORD" => "correct-horse-battery-staple",
+    "VIGIL_SKILLKEY_SECRET" => "itTnVnZk/sC37IrApqZhoUWOfli819Xl7zZx6DSYKPrXRrOsez+p930plUaYNzV6"
   }
 
   @touched Map.keys(@prod_env) ++
@@ -74,6 +75,17 @@ defmodule Vigil.Settings.RuntimeConfigTest do
 
     assert {:error, [message]} = Check.check(prod_config())
     assert message =~ "VIGIL_STATE_DIR is not set"
+  end
+
+  # The upgrade path: a host set up before the SkillKey had a secret of its own
+  # has an env file without one. It refuses to boot rather than fall back to
+  # the consent password, and says which line to add and how to make it.
+  test "an env file from before the SkillKey secret existed is refused, naming it" do
+    System.delete_env("VIGIL_SKILLKEY_SECRET")
+
+    assert {:error, [message]} = Check.check(prod_config())
+    assert message =~ "VIGIL_SKILLKEY_SECRET is not set"
+    assert message =~ "openssl rand -base64 48"
   end
 
   test "an http issuer is refused in prod" do

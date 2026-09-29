@@ -65,8 +65,8 @@ few minutes; later runs reuse it from `priv/plts/`.
 
 Tests run in `MIX_ENV=test`; do not run them with `MIX_ENV=prod` or source
 production environment files first. Test configuration pins the vault path,
-the OAuth state path and the authorization server's issuer, resource and
-consent password independently of deployment environment variables.
+the OAuth state path, the authorization server's issuer, resource and
+consent password, and the SkillKey secret independently of deployment environment variables.
 
 For changes to the deployment scripts, also run ShellCheck and the existing
 shell tests:
@@ -76,6 +76,7 @@ shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
 bash scripts/test/update_test.sh
 bash scripts/test/verify_test.sh
+bash scripts/test/secrets_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -91,8 +92,13 @@ real one.
 
 `update_test.sh` drives `update.sh` against a throwaway prefix: the
 switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
-refusals that must leave the running service alone, and the release retention
+refusals that must leave the running service alone (among them an env file
+without `VIGIL_SKILLKEY_SECRET`), and the release retention
 rule. It needs no root, no systemd and no production paths.
+
+`secrets_test.sh` checks the secrets `init.sh` writes: that what it generates
+passes the boot check's floor for the SkillKey secret, and that the consent
+password and the SkillKey secret are generated apart and both written.
 
 Those two and `release_smoke.sh` source
 [`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the

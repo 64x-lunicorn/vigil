@@ -23,6 +23,7 @@ defmodule Vigil.Settings.CheckTest do
     resource: "https://vault.example.org/mcp",
     auth_password: "correct-horse-battery-staple",
     allowed_origins: [],
+    skillkey_secret: "itTnVnZk/sC37IrApqZhoUWOfli819Xl7zZx6DSYKPrXRrOsez+p930plUaYNzV6",
     skillkey_ttl_seconds: 3600,
     rate_limit_rpm: 60,
     reload_rate_limit_rpm: 6,
@@ -173,6 +174,52 @@ defmodule Vigil.Settings.CheckTest do
       assert [message] = refused(bind: "localhost")
       assert message =~ "VIGIL_BIND"
       assert message =~ ~s("localhost")
+    end
+  end
+
+  describe "the SkillKey secret" do
+    # What `openssl rand` prints for 32 random bytes, in the two encodings an
+    # operator is likely to reach for.
+    @base64_32 "3q2+7wABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhs="
+    @hex_32 "deadbeef000102030405060708090a0b0c0d0e0f101112131415161718191a1b"
+
+    test "an unset secret is named, with how to generate one" do
+      assert [message] = refused(skillkey_secret: nil)
+      assert message =~ "VIGIL_SKILLKEY_SECRET is not set"
+      assert message =~ "openssl rand -base64 48"
+    end
+
+    test "32 random bytes pass, base64 or hex" do
+      assert {:ok, _} = check_with(skillkey_secret: @base64_32)
+      assert {:ok, _} = check_with(skillkey_secret: @hex_32)
+    end
+
+    test "fewer than 32 bytes are refused without being echoed" do
+      short_base64 = Base.encode64(:binary.copy(<<7>>, 31))
+      short_hex = Base.encode16(:binary.copy(<<7>>, 31), case: :lower)
+
+      for short <- [short_base64, short_hex] do
+        assert [message] = refused(skillkey_secret: short)
+        assert message =~ "VIGIL_SKILLKEY_SECRET"
+        assert message =~ "32 random bytes"
+        refute message =~ short
+      end
+    end
+
+    test "a chosen phrase is refused, however long, and not echoed" do
+      phrase = "correct horse battery staple, and then some more words to make it long"
+
+      assert [message] = refused(skillkey_secret: phrase)
+      assert message =~ "VIGIL_SKILLKEY_SECRET"
+      assert message =~ "openssl rand -base64 48"
+      refute message =~ phrase
+    end
+
+    test "the consent password is refused as the secret, and neither is echoed" do
+      assert [message] = refused(auth_password: @base64_32, skillkey_secret: @base64_32)
+      assert message =~ "VIGIL_SKILLKEY_SECRET"
+      assert message =~ "VIGIL_AUTH_PASSWORD"
+      refute message =~ @base64_32
     end
   end
 

@@ -635,13 +635,20 @@ fi
 
 step "3/9  Secrets"
 
+# Two secrets, generated apart. The consent password is typed by a human on
+# the consent page; the SkillKey secret keys the HMAC whose output every
+# client is handed and which ends up in chat transcripts, so it must never be
+# the password — rotating either leaves the other alone.
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] generate VIGIL_AUTH_PASSWORD (openssl rand -base64 48)"
+  log "[DRY RUN] generate VIGIL_AUTH_PASSWORD and VIGIL_SKILLKEY_SECRET (openssl rand -base64 48 each)"
   AUTH_PASSWORD="[DRY RUN]"
+  SKILLKEY_SECRET="[DRY RUN]"
 else
-  AUTH_PASSWORD="$(openssl rand -base64 48)"
+  AUTH_PASSWORD="$(generate_secret)"
+  SKILLKEY_SECRET="$(generate_secret)"
 fi
-record_done "generated VIGIL_AUTH_PASSWORD (also the SkillKey HMAC secret)"
+record_done "generated VIGIL_AUTH_PASSWORD (the consent password)"
+record_done "generated VIGIL_SKILLKEY_SECRET (the SkillKey HMAC secret)"
 
 ## ── Step 4 — runtime config ──────────────────────────────────────────────
 
@@ -685,6 +692,7 @@ VIGIL_EXCLUDE=
 VIGIL_ISSUER=${ISSUER}
 VIGIL_RESOURCE=${RESOURCE}
 VIGIL_AUTH_PASSWORD=${AUTH_PASSWORD}
+VIGIL_SKILLKEY_SECRET=${SKILLKEY_SECRET}
 VIGIL_STATE_DIR=/var/lib/vigil
 VIGIL_SKILLKEY_TTL=3600
 VIGIL_RATE_LIMIT_RPM=60
