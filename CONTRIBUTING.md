@@ -77,6 +77,7 @@ bash scripts/test/check_only_test.sh
 bash scripts/test/update_test.sh
 bash scripts/test/verify_test.sh
 bash scripts/test/secrets_test.sh
+bash scripts/test/git_settings_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -99,6 +100,10 @@ rule. It needs no root, no systemd and no production paths.
 `secrets_test.sh` checks the secrets `init.sh` writes: that what it generates
 passes the boot check's floor for the SkillKey secret, and that the consent
 password and the SkillKey secret are generated apart and both written.
+
+`git_settings_test.sh` checks that the scripts read the vault's remote and
+branch from the env file — against a real repository on `master` — and that no
+script or deploy file names `github` or `main` as either again.
 
 Those two and `release_smoke.sh` source
 [`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the

@@ -139,16 +139,19 @@ build_repo() {
   git -C "$repo" checkout -q "$OLD_SHA"
 }
 
-# A vault whose `github/main..main` count is 0, which is what preflight asks.
+# A vault whose `upstream/master..master` count is 0, which is what preflight
+# asks. Neither name is a default: the env file below states both, and a
+# preflight that counted `github/main..main` instead could not count at all
+# and would refuse every update here.
 build_vault() {
   mkdir -p "$VAULT"
-  git -C "$VAULT" init -q -b main
+  git -C "$VAULT" init -q -b master
   git -C "$VAULT" config user.email test@example.com
   git -C "$VAULT" config user.name "Update Test"
   echo "# note" >"${VAULT}/note.md"
   git -C "$VAULT" add -A
   git -C "$VAULT" commit -q -m "note"
-  git -C "$VAULT" update-ref refs/remotes/github/main HEAD
+  git -C "$VAULT" update-ref refs/remotes/upstream/master HEAD
 }
 
 # One release directory, optionally one that does not come up.
@@ -219,6 +222,8 @@ build_host() {
 VIGIL_RESOURCE=https://vault.example/mcp
 VIGIL_PORT=4000
 VIGIL_SKILLKEY_SECRET=not-a-real-secret-the-stubbed-release-never-reads-it
+VIGIL_GIT_REMOTE=upstream
+VIGIL_GIT_BRANCH=master
 ENV
   local first
   first="$(make_release v0)"

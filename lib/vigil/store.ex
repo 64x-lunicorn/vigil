@@ -180,6 +180,7 @@ defmodule Vigil.Store do
     vault_path = Keyword.fetch!(opts, :vault_path) |> Path.expand()
     exclude = Keyword.get(opts, :exclude, [])
     git_remote = Keyword.get(opts, :git_remote, "origin")
+    git_branch = Keyword.get(opts, :git_branch, "main")
 
     # The one default, in the one place that has configuration to build it
     # from (docs/design.md, "Git is reached through a value"). Vigil.Skills
@@ -206,6 +207,7 @@ defmodule Vigil.Store do
       vault_path: vault_path,
       exclude: exclude,
       git_remote: git_remote,
+      git_branch: git_branch,
       git: git,
       domains: %{},
       index: %Index{},
@@ -326,7 +328,7 @@ defmodule Vigil.Store do
   ## Loading
 
   defp do_full_load(state) do
-    pull_result = state.git.pull.(state.vault_path, state.git_remote)
+    pull_result = state.git.pull.(state.vault_path, state.git_remote, state.git_branch)
 
     git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)
@@ -596,7 +598,7 @@ defmodule Vigil.Store do
   # retried is an `append` twice. The commit goes out with the next push that
   # succeeds, or with the safety-net cron.
   defp push(state, success, failure_prefix) do
-    case Commit.push(state.git, state.vault_path, state.git_remote) do
+    case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
       :ok ->
         {{:ok, success}, state}
 
@@ -698,6 +700,7 @@ defmodule Vigil.Store do
     Skills.write(name, content, %{
       vault_path: state.vault_path,
       git_remote: state.git_remote,
+      git_branch: state.git_branch,
       git: state.git
     })
   end

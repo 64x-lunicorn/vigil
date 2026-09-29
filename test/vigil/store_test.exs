@@ -30,6 +30,7 @@ defmodule Vigil.StoreTest do
        vault_path: vault,
        exclude: Keyword.get(opts, :exclude, []),
        git_remote: Keyword.get(opts, :git_remote, "origin"),
+       git_branch: Keyword.get(opts, :git_branch, "main"),
        git: Keyword.get_lazy(opts, :git, fn -> CommitLog.new(vault) end),
        name: @store}
     )
@@ -964,6 +965,35 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # The branch is a setting: a vault on `master` is pulled and pushed as
+  # `master`, and nothing on the way falls back to `main`.
+  describe "a vault on another branch" do
+    test "pulls, and pushes a write, on the branch it was handed", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "github", branch: "master")
+      start_store(vault, git: git, git_remote: "github", git_branch: "master")
+
+      assert %{reloaded: true} = Store.call(@store, :reload, %{})
+
+      assert {:ok, %{pushed: true}} =
+               Store.call(@store, :create, %{
+                 path: "bike/on-master.md",
+                 type: "reference",
+                 content: "# On master\ntext"
+               })
+
+      assert {:ok, %{pushed: true}} =
+               Store.call(@store, :skill_write, %{
+                 name: "on-master",
+                 content: "---\nname: on-master\ndescription: x\n---\n# Skill\n"
+               })
+
+      calls = CommitLog.calls(log)
+      assert Enum.count(calls, &(&1 == {:pull, "github", "master"})) == 2
+      assert Enum.count(calls, &(&1 == {:push, "github", "master"})) == 2
+    end
+  end
+
   # docs/design.md, "The write path": perform the action, commit, reparse into
   # the index, then push. Until git became a value this was the one part of the
   # write path no test could fail on, because exercising it meant building a
@@ -1005,10 +1035,10 @@ defmodule Vigil.StoreTest do
       assert content =~ "Ordered"
 
       assert [
-               {:pull, "nonexistent-remote"},
+               {:pull, "nonexistent-remote", "main"},
                {:add, ["bike/ordered.md"]},
                {:commit, ["bike/ordered.md"], "create: bike/ordered.md — # Ordered"},
-               {:push, "nonexistent-remote"}
+               {:push, "nonexistent-remote", "main"}
              ] = CommitLog.calls(log)
 
       # The push failed and the note is in the index regardless, which it can
@@ -1031,9 +1061,9 @@ defmodule Vigil.StoreTest do
 
       probing = %{
         git
-        | push: fn vault_path, remote ->
+        | push: fn vault_path, remote, branch ->
             send(test_process, {:events_at_push, :ets.lookup_element(@store, :events, 2)})
-            git.push.(vault_path, remote)
+            git.push.(vault_path, remote, branch)
           end
       }
 
@@ -1051,10 +1081,10 @@ defmodule Vigil.StoreTest do
       assert msg =~ "Deletion committed locally, but push failed"
 
       assert [
-               {:pull, "nonexistent-remote"},
+               {:pull, "nonexistent-remote", "main"},
                {:remove, ["bike/via-carolina.md"]},
                {:commit, ["bike/via-carolina.md"], "delete: bike/via-carolina.md"},
-               {:push, "nonexistent-remote"}
+               {:push, "nonexistent-remote", "main"}
              ] = CommitLog.calls(log)
 
       assert_received {:events_at_push, []}
@@ -1074,11 +1104,11 @@ defmodule Vigil.StoreTest do
       assert msg =~ "Move committed locally, but push failed"
 
       assert [
-               {:pull, "nonexistent-remote"},
+               {:pull, "nonexistent-remote", "main"},
                {:move, "bike/via-carolina.md", "bike/via-carolina-2026.md"},
                {:commit, ["bike/via-carolina.md", "bike/via-carolina-2026.md"],
                 "move: bike/via-carolina.md -> bike/via-carolina-2026.md"},
-               {:push, "nonexistent-remote"}
+               {:push, "nonexistent-remote", "main"}
              ] = CommitLog.calls(log)
 
       assert_received {:events_at_push, [%{path: "bike/via-carolina-2026.md"}]}

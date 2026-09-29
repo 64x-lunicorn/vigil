@@ -22,7 +22,12 @@ defmodule Vigil.SkillsTest do
   # `remote: nil` is a vault with no remote configured, which is how a push
   # failure is provoked.
   defp target(vault, opts \\ []) do
-    %{vault_path: vault, git_remote: "origin", git: CommitLog.new(vault, opts)}
+    %{
+      vault_path: vault,
+      git_remote: "origin",
+      git_branch: "main",
+      git: CommitLog.new(vault, opts)
+    }
   end
 
   defp tmp_dir do

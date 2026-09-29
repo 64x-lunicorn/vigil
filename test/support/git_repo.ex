@@ -17,15 +17,16 @@ defmodule Vigil.GitRepo do
   @at "2026-01-01T10:00:00+01:00"
 
   @doc """
-  `git init` on `path`, on branch `main`, with everything in it committed as
-  `#{@author}` at `#{@at}`.
+  `git init` on `path`, on branch `main` (or `branch:`), with everything in it
+  committed as `#{@author}` at `#{@at}`.
 
   With `remote: true` it also creates a bare remote beside the vault, adds it
   as `origin` and pushes to it; the remote's path comes back, `nil` otherwise.
   """
   def init(path, opts \\ []) do
+    branch = Keyword.get(opts, :branch, "main")
     git!(path, ["init", "-q"])
-    git!(path, ["symbolic-ref", "HEAD", "refs/heads/main"])
+    git!(path, ["symbolic-ref", "HEAD", "refs/heads/#{branch}"])
     git!(path, ["config", "user.name", @author])
     git!(path, ["config", "user.email", @email])
     # Repo-level, not just for the initial commit: Vigil.Git's own
@@ -41,17 +42,17 @@ defmodule Vigil.GitRepo do
       env: [{"GIT_AUTHOR_DATE", @at}, {"GIT_COMMITTER_DATE", @at}]
     )
 
-    if Keyword.get(opts, :remote, false), do: add_remote(path)
+    if Keyword.get(opts, :remote, false), do: add_remote(path, branch)
   end
 
-  defp add_remote(path) do
+  defp add_remote(path, branch) do
     remote = path <> "_remote.git"
-    # -b main explicit: a bare init without it follows the machine's global
-    # init.defaultBranch, which isn't guaranteed to be "main" (e.g. plain
-    # Debian ships "master"). Vigil.Git always operates against "main".
-    git!(nil, ["init", "-q", "--bare", "-b", "main", remote])
+    # -b explicit: a bare init without it follows the machine's global
+    # init.defaultBranch, which isn't guaranteed to be the vault's branch
+    # (plain Debian ships "master").
+    git!(nil, ["init", "-q", "--bare", "-b", branch, remote])
     git!(path, ["remote", "add", "origin", remote])
-    git!(path, ["push", "-q", "-u", "origin", "main"])
+    git!(path, ["push", "-q", "-u", "origin", branch])
     remote
   end
 

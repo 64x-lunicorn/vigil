@@ -95,8 +95,8 @@ git -C "$DEMO_DIR/vault" config user.email "vigil@localhost"
 git -C "$DEMO_DIR/vault" config commit.gpgsign false
 
 bash scripts/init_vault.sh "$DEMO_DIR/vault"
-git -C "$DEMO_DIR/vault" remote add origin "$DEMO_DIR/upstream.git"
-git -C "$DEMO_DIR/vault" push -u origin main
+git -C "$DEMO_DIR/vault" remote add github "$DEMO_DIR/upstream.git"
+git -C "$DEMO_DIR/vault" push -u github main
 ```
 
 This is temporary storage, not a backup. Use a persistent vault and a private

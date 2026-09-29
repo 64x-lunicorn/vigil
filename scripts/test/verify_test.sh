@@ -62,6 +62,7 @@ HTTP_STATUS="${WORK}/http-status"
 MCP_SCRIPT="${WORK}/mcp-responses"
 GIT_REMOTE_OK="${WORK}/git-remote-ok"
 UNPUSHED="${WORK}/unpushed"
+GIT_ASKED="${WORK}/git-asked"
 
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 systemctl() {
@@ -82,12 +83,19 @@ curl() {
 }
 
 # as_vigil runs directly, except for the two git questions the checks ask,
-# which are answered from files.
+# which are answered from files — and what each was asked about is written
+# down, so a case can say which remote and which branch a check named.
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 as_vigil() {
   case "${1:-} ${4:-}" in
-    "git ls-remote") [ -f "$GIT_REMOTE_OK" ] ;;
-    "git rev-list") cat "$UNPUSHED" 2>/dev/null || echo "?" ;;
+    "git ls-remote")
+      echo "ls-remote ${5:-}" >>"$GIT_ASKED"
+      [ -f "$GIT_REMOTE_OK" ]
+      ;;
+    "git rev-list")
+      echo "rev-list ${6:-}" >>"$GIT_ASKED"
+      cat "$UNPUSHED" 2>/dev/null || echo "?"
+      ;;
     *) "$@" ;;
   esac
 }
@@ -106,7 +114,7 @@ mcp_call() {
 }
 
 reset_stubs() {
-  rm -f "$SERVICE_STATE" "$JOURNAL" "$HTTP_STATUS" "$MCP_SCRIPT" "$GIT_REMOTE_OK" "$UNPUSHED"
+  rm -f "$SERVICE_STATE" "$JOURNAL" "$HTTP_STATUS" "$MCP_SCRIPT" "$GIT_REMOTE_OK" "$UNPUSHED" "$GIT_ASKED"
   : >"$MCP_SCRIPT"
   : >"$JOURNAL"
 }
@@ -136,11 +144,14 @@ mcp_errors() {
 }
 
 
-# What verify() reads about the deployment it is checking.
+# What verify() reads about the deployment it is checking. The vault's remote
+# and branch come from the env file, as every script reads them — and neither
+# is a default, so a check that named `github` or `main` itself would show.
+mkdir -p "$(dirname "$VIGIL_ENV_FILE")"
+printf 'VIGIL_GIT_REMOTE=upstream\nVIGIL_GIT_BRANCH=master\n' >"$VIGIL_ENV_FILE"
 VIGIL_VAULT="$VIGIL_VAULT_DIR"
 VIGIL_LOCAL_URL="http://localhost:4000"
 VIGIL_RESOURCE="https://vault.example/mcp"
-VIGIL_GIT_REMOTE="github"
 VIGIL_ALLOW_UNPROTECTED=0
 VIGIL_RW_TOKEN="rw-token"
 VIGIL_RO_TOKEN="ro-token"
@@ -224,6 +235,7 @@ section "4/12  The vault's git remote is reachable"
 reset_stubs
 : >"$GIT_REMOTE_OK"
 assert_check "passes when ls-remote succeeds" verify_git_remote_reachable 0
+assert_eq "asks the remote the env file names" "ls-remote upstream" "$(cat "$GIT_ASKED")"
 reset_stubs
 assert_check "fails when it does not" verify_git_remote_reachable 1
 assert_output "points at the key as the likely cause" "deploy key missing"
@@ -297,6 +309,8 @@ section "8/12  The vault has no unpushed commits"
 reset_stubs
 echo "0" >"$UNPUSHED"
 assert_check "passes at zero" verify_nothing_unpushed 0
+assert_eq "counts the env file's branch against the env file's remote" \
+  "rev-list upstream/master..master" "$(cat "$GIT_ASKED")"
 reset_stubs
 echo "3" >"$UNPUSHED"
 assert_check "fails with commits still local" verify_nothing_unpushed 1

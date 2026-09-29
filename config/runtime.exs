@@ -22,7 +22,13 @@ config :vigil,
   # the LAN is a way around Cloudflare Access. Set 0.0.0.0 (or an interface
   # address) only when a proxy on another host forwards to vigil.
   bind: System.get_env("VIGIL_BIND", "127.0.0.1"),
-  git_remote: System.get_env("VIGIL_GIT_REMOTE", "origin"),
+  # The remote and the branch every pull and push names. The branch has no
+  # default here: unset, it is the clone's to say — its checked-out branch
+  # when that tracks one, `main` otherwise — and Vigil.Settings.Check, which
+  # reads the clone at boot, is where that is decided. scripts/lib.sh states
+  # the same two defaults for the scripts.
+  git_remote: System.get_env("VIGIL_GIT_REMOTE", "github"),
+  git_branch: System.get_env("VIGIL_GIT_BRANCH"),
   tz: System.get_env("VIGIL_TZ", "Europe/Berlin"),
   exclude:
     System.get_env("VIGIL_EXCLUDE", "")

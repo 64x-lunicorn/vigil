@@ -178,8 +178,13 @@ fi
 
 section "2/6  Provision a throwaway vault"
 
-git init --quiet --bare -b main "$UPSTREAM"
-git init --quiet -b main "$VAULT"
+# On `master`, not `main`, and nothing below says so: VIGIL_GIT_BRANCH is left
+# unset, so the release has to find the branch in the clone — its checked-out
+# branch, tracking the default remote — and then pull and push that one. The
+# branch was once `main` in every git call, and a vault on `master` failed
+# every write with a git error.
+git init --quiet --bare -b master "$UPSTREAM"
+git init --quiet -b master "$VAULT"
 git -C "$VAULT" config user.name "vigil smoke"
 git -C "$VAULT" config user.email "vigil-smoke@localhost"
 git -C "$VAULT" config commit.gpgsign false
@@ -203,9 +208,9 @@ EOF
 
 git -C "$VAULT" add -A
 git -C "$VAULT" commit --quiet -m "smoke fixture"
-git -C "$VAULT" remote add origin "$UPSTREAM"
-git -C "$VAULT" push --quiet -u origin main
-pass "vault created, committed and pushed to its bare remote"
+git -C "$VAULT" remote add github "$UPSTREAM"
+git -C "$VAULT" push --quiet -u github master
+pass "vault created on master, committed and pushed to its bare remote"
 
 ## ── 3. Seed tokens, then boot ────────────────────────────────────────────
 
@@ -241,9 +246,37 @@ export VIGIL_AUTH_PASSWORD="$AUTH_PASSWORD"
 VIGIL_SKILLKEY_SECRET="$(openssl rand -base64 48)"
 export VIGIL_SKILLKEY_SECRET
 export VIGIL_PORT="$PORT"
-export VIGIL_GIT_REMOTE="origin"
 export VIGIL_ISSUER="$ISSUER"
 export VIGIL_RESOURCE="$RESOURCE"
+
+# A remote or a branch the clone does not have stops boot, and says which
+# setting is wrong. Checked against the release because that is where the
+# check runs: in the application's start, before any child.
+refuses_boot() {
+  local var="$1" value="$2"
+  local log="${WORK}/refused-${var}.log"
+  env "${var}=${value}" ERL_CRASH_DUMP_SECONDS=0 "$RELEASE_BIN" start >"$log" 2>&1 &
+  local pid=$!
+  local exited=0
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      exited=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$exited" = "0" ]; then
+    kill -9 "$pid" 2>/dev/null || true
+    fail "boot refuses ${var}=${value}" "the release was still running after 60s"
+  elif grep -q "${var} must be" "$log"; then
+    pass "boot refuses ${var}=${value}, naming the setting"
+  else
+    fail "boot refuses ${var}=${value}, naming the setting" "$(tail -5 "$log")"
+  fi
+}
+
+refuses_boot VIGIL_GIT_BRANCH main
+refuses_boot VIGIL_GIT_REMOTE origin
 
 "$RELEASE_BIN" start > "${WORK}/server.log" 2>&1 &
 SERVER_PID=$!
@@ -354,7 +387,7 @@ else
   fail "read-only token is authenticated but refused by a write tool" "$(mcp_why)"
 fi
 
-before_sha="$(git --git-dir="$UPSTREAM" rev-parse main)"
+before_sha="$(git --git-dir="$UPSTREAM" rev-parse master)"
 
 create_response="$(mcp_call "$RW_TOKEN" create \
   "{\"path\":\"home/smoke-note.md\",\"type\":\"reference\",\"content\":\"# Smoke note\\n\\nWritten by release_smoke.sh.\",\"skill_key\":\"${skill_key}\"}")"
@@ -370,11 +403,11 @@ else
   fail "the note exists on disk"
 fi
 
-after_sha="$(git --git-dir="$UPSTREAM" rev-parse main)"
+after_sha="$(git --git-dir="$UPSTREAM" rev-parse master)"
 if [ "$before_sha" != "$after_sha" ]; then
-  pass "the write was committed AND pushed to the git remote"
+  pass "the write was committed AND pushed to master on the git remote"
 else
-  fail "the write was committed AND pushed to the git remote" \
+  fail "the write was committed AND pushed to master on the git remote" \
     "remote is still at ${before_sha}"
 fi
 

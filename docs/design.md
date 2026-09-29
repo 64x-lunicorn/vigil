@@ -774,11 +774,13 @@ deletion, a move, a skill.
 the filesystem and it commits. The filesystem half stays where it is. The git
 half is a value its callers hold rather than a module they name.
 
-**The value is the whole of `Vigil.Git`, not the write half.** Nine questions:
+**The value is the whole of `Vigil.Git`, not the write half.** Ten questions:
 `add`, `remove`, `move`, `commit`, `snapshot_index`, `restore_index`, `push` —
-and `pull` and `log_metadata`, which no write ever asks. Staging and committing
-are separate questions, which is what lets a test make a commit fail *after*
-its `git rm` has happened (see "A failed commit leaves the vault as it was"). Those two belong to the load, and
+and `pull` and `log_metadata`, which no write ever asks, and `tracking`, which
+only the boot check asks (see "The vault's remote and branch are checked
+against the clone"). Staging and committing are separate questions, which is
+what lets a test make a commit fail *after* its `git rm` has happened (see "A
+failed commit leaves the vault as it was"). `pull` and `log_metadata` belong to the load, and
 `Vigil.Store` asks them directly. A seam drawn around the write effect alone
 would leave every load reaching for a repository, and `log_metadata` answering
 `%{}` for a directory that is not one — which is a `created_at` of `nil` on
@@ -1188,8 +1190,10 @@ against it. A code cannot be minted for a resource its request was never
 checked against, and `Code` has no second opinion to hold.
 
 **What the composition root reads is out of scope and stays there.** The vault
-path, the exclusions, the git remote, the state dir and the port are read in
-`Vigil.Application` and handed to the children that need them.
+path, the exclusions, the git remote and branch, the state dir and the port
+are read in `Vigil.Application` and handed to the children that need them —
+the remote and the branch as `Vigil.Settings.Check` returned them, since the
+branch is only known once the clone has been read.
 
 **The SkillKey is derived from what was resolved, not read again.** The AP-4
 HMAC secret (`VIGIL_SKILLKEY_SECRET`) and the rotation window are settings like
@@ -1245,6 +1249,29 @@ sit on the issuer's origin — same scheme, host and port — because a client
 finds the one through the other's metadata. Which environment is "prod" is
 `config/runtime.exs`'s to say (`https_required`), as it already says which
 settings have no fallback there; dev keeps its `http://localhost` defaults.
+
+**The vault's remote and branch are checked against the clone.**
+`VIGIL_GIT_REMOTE` and `VIGIL_GIT_BRANCH` are what every pull and every push
+names; the branch used to be `main` in both calls, so a vault on `master`
+failed every write with a git error. The check asks the clone once, through
+the git value's `tracking` question, so it stays off the repository in the
+suite like everything else: the remote must be one of the clone's, and the
+branch one of its branches, tracking the branch of the same name on that
+remote — an upstream anywhere else would be a branch pulled from one place and
+pushed to another. A vault path that is no git clone is refused on its own
+entry, and the two say nothing more.
+
+**The remote defaults to `github`; the branch to the clone's.** The remote's
+default was `origin` in `config/runtime.exs` while `scripts/init.sh`, the push
+safety net, `verify()` and the troubleshooting guide all said `github`; the
+layout init.sh creates won, so the default and the docs agree. The branch has
+no fixed default: unset, it is the clone's checked-out branch when that tracks
+a branch on the remote, and `main` otherwise — what a clone of a `master`
+vault already says about itself. The scripts read both from `/etc/vigil/env`
+(`vault_git_remote` and `vault_git_branch` in `scripts/lib.sh`, which apply
+the same rule and name the two defaults once), init.sh writes both there, and
+the push safety net is `scripts/push_pending.sh`, run by cron as root because
+root is who can read that file.
 
 **The secret is named, never echoed.** A check that wants the offending value
 in its message puts it there itself, so `VIGIL_AUTH_PASSWORD`'s says what it

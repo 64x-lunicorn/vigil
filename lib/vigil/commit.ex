@@ -176,15 +176,15 @@ defmodule Vigil.Commit do
   defp restore_file(_abs_path, {:error, _reason}), do: :ok
 
   @doc """
-  Pushes the vault's commits to `remote`.
+  Pushes the vault's `branch` to `remote`.
 
   The failure comes back as git wrote it, unwrapped: what was committed
   locally but not pushed is a change, a deletion, a move or a skill, and the
   caller is the one that knows which — so the sentence in front of it is the
   caller's (`docs/design.md`, "The write path").
   """
-  @spec push(Git.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
-  def push(%Git{} = git, vault_path, remote), do: git.push.(vault_path, remote)
+  @spec push(Git.t(), String.t(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  def push(%Git{} = git, vault_path, remote, branch), do: git.push.(vault_path, remote, branch)
 
   @doc """
   Creates `path` and every missing parent, or says why it could not.

@@ -23,10 +23,22 @@ defmodule Vigil.Settings.Check do
   `{:error, expected}`, which is appended to the variable's name. A check that
   wants the offending value in the message puts it there itself, which is how
   a secret stays out of the journal.
+
+  Two entries are checked against the vault clone rather than on their own:
+  the remote and the branch every pull and push names. What the clone has is
+  asked once, through the `Vigil.Git` value `check/2` is handed — its
+  `tracking` question — and put beside the configuration as
+  `:vault_clone`, so those two checks read it the way the resource reads the
+  issuer. A vault path that is no git clone is refused on its own entry, and
+  the two that depend on it then say nothing more.
   """
 
+  alias Vigil.Git
+
   @settings [
-    {:vault_path, "VIGIL_VAULT_PATH", :required},
+    {:vault_path, "VIGIL_VAULT_PATH", :git_clone},
+    {:git_remote, "VIGIL_GIT_REMOTE", :git_remote},
+    {:git_branch, "VIGIL_GIT_BRANCH", :git_branch},
     {:state_dir, "VIGIL_STATE_DIR", :required},
     {:port, "VIGIL_PORT", :port},
     {:bind, "VIGIL_BIND", :ip_address},
@@ -50,13 +62,19 @@ defmodule Vigil.Settings.Check do
   @min_secret_bytes 32
   @generate_secret "generate one with `openssl rand -base64 48`"
 
+  # The branch a vault is on when VIGIL_GIT_BRANCH does not say and the clone's
+  # checked-out branch tracks nothing: what `git init` names it on a host
+  # whose init.defaultBranch is what scripts/init.sh sets.
+  @default_branch "main"
+
   @doc """
-  The application's configuration, checked; raises naming every setting that
-  failed. Returns the checked values by key.
+  The application's configuration, checked against the vault clone `git`
+  reads; raises naming every setting that failed. Returns the checked values
+  by key.
   """
-  @spec check!(keyword) :: %{atom => term}
-  def check!(config \\ Application.get_all_env(:vigil)) do
-    case check(config) do
+  @spec check!(keyword, Git.t()) :: %{atom => term}
+  def check!(config \\ Application.get_all_env(:vigil), git \\ Git.over_repository()) do
+    case check(config, git) do
       {:ok, checked} ->
         checked
 
@@ -71,10 +89,17 @@ defmodule Vigil.Settings.Check do
   @doc """
   `{:ok, checked}` with every setting's checked value by key, or
   `{:error, messages}` with one message per setting that failed, each naming
-  its variable.
+  its variable. `git` is what the vault clone is asked about its remotes and
+  branches.
+
+  The checked branch is the one to use: `VIGIL_GIT_BRANCH` when it is set,
+  and otherwise the clone's checked-out branch when that tracks a branch on
+  the remote, or `"#{@default_branch}"`.
   """
-  @spec check(keyword) :: {:ok, %{atom => term}} | {:error, [String.t()]}
-  def check(config) do
+  @spec check(keyword, Git.t()) :: {:ok, %{atom => term}} | {:error, [String.t()]}
+  def check(config, %Git{} = git) do
+    config = Keyword.put(config, :vault_clone, vault_clone(Keyword.get(config, :vault_path), git))
+
     {checked, errors} =
       Enum.reduce(@settings, {%{}, []}, fn {key, var, check}, {checked, errors} ->
         case check_value(check, Keyword.get(config, key), config) do
@@ -88,6 +113,20 @@ defmodule Vigil.Settings.Check do
     if errors == [], do: {:ok, checked}, else: {:error, Enum.reverse(errors)}
   end
 
+  # The clone's remotes and branches, or why there are none to read. Not asked
+  # for a path that is unset: that is reported on its own entry already.
+  defp vault_clone(path, git) when is_binary(path) and path != "", do: git.tracking.(path)
+  defp vault_clone(_path, _git), do: {:error, :unset}
+
+  # Unset is not an error for the branch: it has a default, and the default
+  # is the clone's to say. Ahead of the clause refusing an unset value.
+  defp check_value(:git_branch, value, config) when value in [nil, ""] do
+    case check_value(:git_branch, default_branch(config), config) do
+      {:ok, branch} -> {:ok, branch}
+      {:error, expected} -> {:error, expected <> ", the default while it is unset"}
+    end
+  end
+
   # The setting's own checks. Every one refuses an unset value first: in :prod
   # `config/runtime.exs` leaves the required ones nil when their variable is
   # unset, and every other one has a default there. The SkillKey secret says
@@ -97,6 +136,55 @@ defmodule Vigil.Settings.Check do
     do: {:error, {:unset, @generate_secret}}
 
   defp check_value(_check, value, _config) when value in [nil, ""], do: {:error, :unset}
+
+  defp check_value(:git_clone, value, config) do
+    case Keyword.fetch!(config, :vault_clone) do
+      {:ok, _clone} -> {:ok, value}
+      {:error, _} -> {:error, "a git clone, got #{inspect(value)}"}
+    end
+  end
+
+  # Checked against the clone, and only a clone that could be read: a vault
+  # path that is none is reported on its own entry.
+  defp check_value(:git_remote, value, config) do
+    case Keyword.fetch!(config, :vault_clone) do
+      {:ok, %{remotes: remotes}} ->
+        if value in remotes,
+          do: {:ok, value},
+          else: {:error, "a remote of the vault clone (#{names(remotes)}), got #{inspect(value)}"}
+
+      {:error, _} ->
+        {:ok, value}
+    end
+  end
+
+  # The branch exists in the clone and tracks its namesake on the remote:
+  # every pull and every push names the two, so an upstream anywhere else
+  # would be a branch pulled from one place and pushed to another. A remote
+  # that is not there is reported on its own entry, not here as well.
+  defp check_value(:git_branch, value, config) do
+    remote = Keyword.get(config, :git_remote)
+
+    case Keyword.fetch!(config, :vault_clone) do
+      {:ok, %{branches: branches, remotes: remotes}} ->
+        cond do
+          not Map.has_key?(branches, value) ->
+            {:error,
+             "a branch of the vault clone (#{names(Map.keys(branches))}), got #{inspect(value)}"}
+
+          remote not in remotes or branches[value] == {remote, value} ->
+            {:ok, value}
+
+          true ->
+            {:error,
+             "a branch tracking #{remote}/#{value} (git branch --set-upstream-to=#{remote}/#{value} #{value}), " <>
+               "got #{inspect(value)} #{upstream(branches[value])}"}
+        end
+
+      {:error, _} ->
+        {:ok, value}
+    end
+  end
 
   defp check_value(:required, value, _config), do: {:ok, value}
 
@@ -203,6 +291,26 @@ defmodule Vigil.Settings.Check do
       {:ok, bytes} -> bytes
     end
   end
+
+  # The checked-out branch, when it tracks a branch on the configured remote;
+  # otherwise the one every other script defaults to as well.
+  defp default_branch(config) do
+    remote = Keyword.get(config, :git_remote)
+
+    with {:ok, %{head: head, branches: branches}} when is_binary(head) <-
+           Keyword.fetch!(config, :vault_clone),
+         {^remote, _} <- branches[head] do
+      head
+    else
+      _ -> @default_branch
+    end
+  end
+
+  defp names([]), do: "it has none"
+  defp names(names), do: "it has " <> (names |> Enum.sort() |> Enum.join(", "))
+
+  defp upstream(nil), do: "with no upstream"
+  defp upstream({remote, branch}), do: "tracking #{remote}/#{branch}"
 
   defp url(value, config) do
     https? = Keyword.get(config, :https_required, false)

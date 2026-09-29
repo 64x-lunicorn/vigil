@@ -79,7 +79,7 @@ defmodule Vigil.GitTest do
         assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
                  add_commit(git, vault, path, "create: #{path}")
 
-        assert :ok = git.push.(vault, "origin")
+        assert :ok = git.push.(vault, "origin", "main")
       end
 
       # Creation date = first commit (docs/design.md, principle 3), read back
@@ -103,7 +103,7 @@ defmodule Vigil.GitTest do
         path = note(vault, "bike/new2.md", "New2")
         {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
-        assert {:error, _reason} = git.push.(vault, "nonexistent-remote")
+        assert {:error, _reason} = git.push.(vault, "nonexistent-remote", "main")
 
         assert %{last_author: "vigil"} = git.log_metadata.(vault)[path]
         assert File.exists?(Path.join(vault, path))
@@ -124,11 +124,29 @@ defmodule Vigil.GitTest do
       end
 
       test "pull fast-forwards from the vault's remote", %{git: git, vault: vault} do
-        assert :ok = git.pull.(vault, "origin")
+        assert :ok = git.pull.(vault, "origin", "main")
       end
 
       test "pull against a nonexistent remote returns an error", %{git: git, vault: vault} do
-        assert {:error, _reason} = git.pull.(vault, "nonexistent-remote")
+        assert {:error, _reason} = git.pull.(vault, "nonexistent-remote", "main")
+      end
+
+      @tag :capture_log
+      test "push and pull against a branch the vault does not have return an error", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:error, _reason} = git.push.(vault, "origin", "no-such-branch")
+        assert {:error, _reason} = git.pull.(vault, "origin", "no-such-branch")
+      end
+
+      test "tracking reports the checked-out branch, the remotes and each upstream", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:ok,
+                %{head: "main", remotes: ["origin"], branches: %{"main" => {"origin", "main"}}}} =
+                 git.tracking.(vault)
       end
 
       test "remove and commit remove the file", %{git: git, vault: vault} do
@@ -406,7 +424,7 @@ defmodule Vigil.GitTest do
       assert String.trim(out) == ""
     end
 
-    test "pull/2 brings a commit made elsewhere into the vault", %{
+    test "pull/3 brings a commit made elsewhere into the vault", %{
       git: git,
       vault: vault,
       remote: remote
@@ -437,8 +455,57 @@ defmodule Vigil.GitTest do
       {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
       File.rm_rf(other)
 
-      assert :ok = git.pull.(vault, "origin")
+      assert :ok = git.pull.(vault, "origin", "main")
       assert File.exists?(Path.join(vault, "note.md"))
+    end
+  end
+
+  # A vault on another branch than `main`: every call that names a branch
+  # names the one it is handed, and nothing falls back to `main`.
+  describe "a repository on master" do
+    setup %{vault: vault} do
+      {:ok,
+       git: Git.over_repository(),
+       remote: Vigil.GitRepo.init(vault, remote: true, branch: "master")}
+    end
+
+    test "tracking reports master and its upstream", %{git: git, vault: vault} do
+      assert {:ok, %{head: "master", branches: branches}} = git.tracking.(vault)
+      assert branches == %{"master" => {"origin", "master"}}
+    end
+
+    test "a write pushes master to the remote", %{git: git, vault: vault, remote: remote} do
+      path = note(vault, "bike/master.md", "Master")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+      assert :ok = git.push.(vault, "origin", "master")
+      assert :ok = git.pull.(vault, "origin", "master")
+
+      {local, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
+      {pushed, 0} = System.cmd("git", ["--git-dir", remote, "rev-parse", "master"])
+      assert pushed == local
+    end
+
+    test "a branch without an upstream is reported as having none", %{git: git, vault: vault} do
+      {_, 0} = System.cmd("git", ["branch", "draft"], cd: vault)
+
+      assert {:ok, %{branches: %{"draft" => nil}}} = git.tracking.(vault)
+    end
+
+    test "a detached HEAD has no checked-out branch", %{git: git, vault: vault} do
+      {_, 0} = System.cmd("git", ["checkout", "-q", "--detach"], cd: vault)
+
+      assert {:ok, %{head: nil}} = git.tracking.(vault)
+    end
+
+    test "a directory that is not a git clone is an error", %{git: git} do
+      dir =
+        Path.join(System.tmp_dir!(), "vigil_not_a_clone_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      assert {:error, _reason} = git.tracking.(dir)
     end
   end
 
@@ -455,12 +522,12 @@ defmodule Vigil.GitTest do
     } do
       path = note(vault, "bike/new.md", "New")
       {:ok, _} = add_commit(git, vault, path, "create: #{path}")
-      :ok = git.push.(vault, "origin")
+      :ok = git.push.(vault, "origin", "main")
 
       assert CommitLog.calls(log) == [
                {:add, [path]},
                {:commit, [path], "create: #{path}"},
-               {:push, "origin"}
+               {:push, "origin", "main"}
              ]
     end
   end

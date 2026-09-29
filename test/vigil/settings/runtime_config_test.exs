@@ -8,6 +8,7 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   """
   use ExUnit.Case, async: false
 
+  alias Vigil.Git.CommitLog
   alias Vigil.Settings.Check
 
   @runtime Path.expand("../../../config/runtime.exs", __DIR__)
@@ -25,7 +26,8 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   @touched Map.keys(@prod_env) ++
              ~w(VIGIL_PORT VIGIL_TZ VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
                 VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
-                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_ALLOWED_ORIGINS)
+                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_ALLOWED_ORIGINS
+                VIGIL_GIT_REMOTE VIGIL_GIT_BRANCH)
 
   setup do
     previous = Map.new(@touched, &{&1, System.get_env(&1)})
@@ -43,8 +45,13 @@ defmodule Vigil.Settings.RuntimeConfigTest do
 
   defp prod_config, do: @runtime |> Config.Reader.read!(env: :prod) |> Keyword.fetch!(:vigil)
 
+  # A clone laid out the way scripts/init.sh leaves one: `main`, tracking
+  # `github/main`.
+  defp check(config),
+    do: Check.check(config, CommitLog.new("/var/lib/vigil/vault", remote: "github"))
+
   test "the prod defaults pass the check, with integers parsed" do
-    assert {:ok, checked} = Check.check(prod_config())
+    assert {:ok, checked} = check(prod_config())
     assert checked.port == 4000
     assert checked.rate_limit_rpm == 60
   end
@@ -55,7 +62,7 @@ defmodule Vigil.Settings.RuntimeConfigTest do
              VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM) do
       System.put_env(var, "12abc")
 
-      assert {:error, [message]} = Check.check(prod_config())
+      assert {:error, [message]} = check(prod_config())
       assert message =~ var
       assert message =~ ~s("12abc")
 
@@ -66,14 +73,25 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   test "a SkillKey TTL of zero is refused" do
     System.put_env("VIGIL_SKILLKEY_TTL", "0")
 
-    assert {:error, [message]} = Check.check(prod_config())
+    assert {:error, [message]} = check(prod_config())
     assert message =~ "VIGIL_SKILLKEY_TTL"
+  end
+
+  test "the remote defaults to github, and an unset branch to the clone's" do
+    assert {:ok, %{git_remote: "github", git_branch: "main"}} = check(prod_config())
+  end
+
+  test "the remote and the branch are read from the environment" do
+    System.put_env("VIGIL_GIT_REMOTE", "origin")
+    System.put_env("VIGIL_GIT_BRANCH", "master")
+
+    assert %{git_remote: "origin", git_branch: "master"} = prod_config() |> Map.new()
   end
 
   test "an unset required setting in prod is refused by name" do
     System.delete_env("VIGIL_STATE_DIR")
 
-    assert {:error, [message]} = Check.check(prod_config())
+    assert {:error, [message]} = check(prod_config())
     assert message =~ "VIGIL_STATE_DIR is not set"
   end
 
@@ -83,7 +101,7 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   test "an env file from before the SkillKey secret existed is refused, naming it" do
     System.delete_env("VIGIL_SKILLKEY_SECRET")
 
-    assert {:error, [message]} = Check.check(prod_config())
+    assert {:error, [message]} = check(prod_config())
     assert message =~ "VIGIL_SKILLKEY_SECRET is not set"
     assert message =~ "openssl rand -base64 48"
   end
@@ -91,21 +109,21 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   test "an http issuer is refused in prod" do
     System.put_env("VIGIL_ISSUER", "http://vault.example.org")
 
-    assert {:error, messages} = Check.check(prod_config())
+    assert {:error, messages} = check(prod_config())
     assert Enum.any?(messages, &(&1 =~ "VIGIL_ISSUER"))
   end
 
   test "the allowed origins arrive as a list, and a bad one is refused by name" do
-    assert {:ok, %{allowed_origins: []}} = Check.check(prod_config())
+    assert {:ok, %{allowed_origins: []}} = check(prod_config())
 
     System.put_env("VIGIL_ALLOWED_ORIGINS", " https://claude.ai, http://localhost:6274 ,")
 
     assert {:ok, %{allowed_origins: ["https://claude.ai", "http://localhost:6274"]}} =
-             Check.check(prod_config())
+             check(prod_config())
 
     System.put_env("VIGIL_ALLOWED_ORIGINS", "https://claude.ai,claude.ai")
 
-    assert {:error, [message]} = Check.check(prod_config())
+    assert {:error, [message]} = check(prod_config())
     assert message =~ "VIGIL_ALLOWED_ORIGINS"
     assert message =~ ~s("claude.ai")
   end

@@ -78,6 +78,50 @@ PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
 # exists, which is what makes it usable as a readiness probe.
 HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/.well-known/oauth-protected-resource}"
 
+## ── The vault's remote and branch ────────────────────────────────────────
+#
+# Every pull and push names these two, and the env file is where a deployment
+# states them: VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH, read by the server and by
+# every script from there rather than repeated in each. A file that does not
+# state one gets the server's default (config/runtime.exs and
+# Vigil.Settings.Check), and this is the one place the scripts name those.
+DEFAULT_GIT_REMOTE="github"
+DEFAULT_GIT_BRANCH="main"
+
+# env_file_value <NAME> — what the env file sets NAME to, without the quotes a
+# value with a space is written in; empty when the file or the line is
+# missing. Read rather than sourced, so that asking for one value does not
+# bring the whole VIGIL_* namespace into the calling shell.
+env_file_value() {
+  [ -r "$ENV_FILE" ] || return 0
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/'
+}
+
+# vault_git_remote — the remote every pull and push names.
+vault_git_remote() {
+  local remote
+  remote="$(env_file_value VIGIL_GIT_REMOTE)"
+  echo "${remote:-$DEFAULT_GIT_REMOTE}"
+}
+
+# vault_git_branch [<vault>] — the branch every pull and push names. Unset, it
+# is the vault's checked-out branch when that tracks a branch on the remote,
+# and the default otherwise: the rule Vigil.Settings.Check applies at boot, so
+# a script and the server it serves never name two branches.
+vault_git_branch() {
+  local vault="${1:-$VAULT}"
+  local branch head
+  branch="$(env_file_value VIGIL_GIT_BRANCH)"
+  if [ -z "$branch" ]; then
+    head="$(as_vigil git -C "$vault" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    if [ -n "$head" ] &&
+      [ "$(as_vigil git -C "$vault" config "branch.${head}.remote" 2>/dev/null || true)" = "$(vault_git_remote)" ]; then
+      branch="$head"
+    fi
+  fi
+  echo "${branch:-$DEFAULT_GIT_BRANCH}"
+}
+
 ## ── Logging ──────────────────────────────────────────────────────────────
 
 _timestamp() { date +%H:%M:%S; }
@@ -412,8 +456,9 @@ mcp_error_text() {
 #
 # Expects to be set: VIGIL_VAULT, VIGIL_RW_TOKEN, VIGIL_RO_TOKEN,
 # VIGIL_RESOURCE (public MCP endpoint URL, e.g. https://vault.example.org/mcp),
-# VIGIL_LOCAL_URL (e.g. http://localhost:4000), VIGIL_GIT_REMOTE,
-# VIGIL_ALLOW_UNPROTECTED (0/1).
+# VIGIL_LOCAL_URL (e.g. http://localhost:4000), VIGIL_ALLOW_UNPROTECTED (0/1).
+# The vault's remote and branch are read from the env file, like everywhere
+# else (vault_git_remote, vault_git_branch).
 # Returns 0 when every mandatory check passes, 1 otherwise.
 
 # Each check is a function of its own: it prints its verdict and answers 0 or
@@ -482,10 +527,12 @@ verify_local_call_answers() {
 
 # 4. Git remote reachable
 verify_git_remote_reachable() {
-  if as_vigil git -C "$VIGIL_VAULT" ls-remote "$VIGIL_GIT_REMOTE" >/dev/null 2>&1; then
-    echo "  ✓ [4] git ls-remote ${VIGIL_GIT_REMOTE} succeeded"
+  local remote
+  remote="$(vault_git_remote)"
+  if as_vigil git -C "$VIGIL_VAULT" ls-remote "$remote" >/dev/null 2>&1; then
+    echo "  ✓ [4] git ls-remote ${remote} succeeded"
   else
-    echo "  ✗ [4] git ls-remote ${VIGIL_GIT_REMOTE} failed — host key or deploy key missing"
+    echo "  ✗ [4] git ls-remote ${remote} failed — host key or deploy key missing"
     return 1
   fi
 }
@@ -596,8 +643,9 @@ verify_write_and_push() {
 
 # 8. No pending local commits
 verify_nothing_unpushed() {
-  local pending
-  pending="$(as_vigil git -C "$VIGIL_VAULT" rev-list --count "${VIGIL_GIT_REMOTE}/main..main" 2>/dev/null || echo "?")"
+  local pending branch
+  branch="$(vault_git_branch "$VIGIL_VAULT")"
+  pending="$(as_vigil git -C "$VIGIL_VAULT" rev-list --count "$(vault_git_remote)/${branch}..${branch}" 2>/dev/null || echo "?")"
   if [ "$pending" = "0" ]; then
     echo "  ✓ [8] No pending local commits in the vault"
   else

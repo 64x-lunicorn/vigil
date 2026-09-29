@@ -9,12 +9,15 @@ defmodule Vigil.Settings.CheckTest do
   """
   use ExUnit.Case, async: true
 
+  alias Vigil.Git.CommitLog
   alias Vigil.Settings.Check
 
   # A deployment that passes every check, in the shape `config/runtime.exs`
   # leaves it: integers where the variable read as one, strings elsewhere.
   @good [
     vault_path: "/var/lib/vigil/vault",
+    git_remote: "github",
+    git_branch: nil,
     state_dir: "/var/lib/vigil",
     port: 4000,
     bind: "127.0.0.1",
@@ -32,7 +35,16 @@ defmodule Vigil.Settings.CheckTest do
     https_required: true
   ]
 
-  defp check_with(overrides), do: Check.check(Keyword.merge(@good, overrides))
+  # The vault clone the deployment is checked against, as the git adapter
+  # answers for it: by default one remote, `github`, and `main` checked out
+  # and tracking `github/main`. The path is never read: the adapter is what
+  # says what is there (test/vigil/git_test.exs holds it to a repository).
+  defp clone(opts \\ []) do
+    CommitLog.new("/var/lib/vigil/vault", Keyword.put_new(opts, :remote, "github"))
+  end
+
+  defp check_with(overrides, clone \\ clone()),
+    do: Check.check(Keyword.merge(@good, overrides), clone)
 
   defp refused(overrides) do
     assert {:error, messages} = check_with(overrides)
@@ -40,7 +52,7 @@ defmodule Vigil.Settings.CheckTest do
   end
 
   test "a good deployment passes, and the listen address comes back parsed" do
-    assert {:ok, checked} = Check.check(@good)
+    assert {:ok, checked} = Check.check(@good, clone())
     assert checked.bind == {127, 0, 0, 1}
     assert checked.port == 4000
   end
@@ -223,17 +235,104 @@ defmodule Vigil.Settings.CheckTest do
     end
   end
 
+  describe "the vault's remote and branch" do
+    # A clone on `master`, tracking `github/master`, with a second branch that
+    # tracks nothing.
+    defp master_clone do
+      clone(
+        tracking:
+          {:ok,
+           %{
+             head: "master",
+             remotes: ["github"],
+             branches: %{"master" => {"github", "master"}, "draft" => nil}
+           }}
+      )
+    end
+
+    test "unset, the branch is the checked-out one when it tracks the remote" do
+      assert {:ok, %{git_remote: "github", git_branch: "master"}} =
+               check_with([git_branch: nil], master_clone())
+    end
+
+    test "unset, the branch is main when the checked-out one tracks nothing" do
+      untracked =
+        clone(
+          tracking:
+            {:ok,
+             %{
+               head: "draft",
+               remotes: ["github"],
+               branches: %{"draft" => nil, "main" => {"github", "main"}}
+             }}
+        )
+
+      assert {:ok, %{git_branch: "main"}} = check_with([git_branch: ""], untracked)
+    end
+
+    test "a branch that is set is used as set" do
+      assert {:ok, %{git_branch: "master"}} = check_with([git_branch: "master"], master_clone())
+    end
+
+    test "a branch the clone does not have is refused, naming the setting" do
+      assert [message] = refused_by(master_clone(), git_branch: "main")
+      assert message =~ "VIGIL_GIT_BRANCH"
+      assert message =~ ~s("main")
+      assert message =~ "master"
+    end
+
+    test "an unset branch whose default the clone does not have is refused, saying so" do
+      detached =
+        clone(
+          tracking:
+            {:ok,
+             %{head: nil, remotes: ["github"], branches: %{"master" => {"github", "master"}}}}
+        )
+
+      assert [message] = refused_by(detached, git_branch: nil)
+      assert message =~ "VIGIL_GIT_BRANCH"
+      assert message =~ "the default while it is unset"
+    end
+
+    test "a branch without an upstream on the remote is refused, naming the setting" do
+      assert [message] = refused_by(master_clone(), git_branch: "draft")
+      assert message =~ "VIGIL_GIT_BRANCH"
+      assert message =~ "github/draft"
+      assert message =~ "no upstream"
+    end
+
+    test "a remote the clone does not have is refused, naming the setting" do
+      assert [message] = refused_by(master_clone(), git_remote: "origin", git_branch: "master")
+      assert message =~ "VIGIL_GIT_REMOTE"
+      assert message =~ ~s("origin")
+      assert message =~ "github"
+    end
+
+    test "a vault path that is no git clone is refused, and the two say nothing more" do
+      none = clone(tracking: {:error, "not a git clone"})
+
+      assert [message] = refused_by(none, git_branch: "master")
+      assert message =~ "VIGIL_VAULT_PATH"
+      assert message =~ "git clone"
+    end
+
+    defp refused_by(clone, overrides) do
+      assert {:error, messages} = check_with(overrides, clone)
+      messages
+    end
+  end
+
   test "every bad setting is named at once, not the first one only" do
     messages = refused(port: "abc", tz: "Nowhere", rate_limit_rpm: 0)
 
     assert length(messages) == 3
   end
 
-  describe "check!/1" do
+  describe "check!/2" do
     test "raises one message naming every bad setting" do
       error =
         assert_raise RuntimeError, fn ->
-          Check.check!(Keyword.merge(@good, port: "abc", skillkey_ttl_seconds: 0))
+          Check.check!(Keyword.merge(@good, port: "abc", skillkey_ttl_seconds: 0), clone())
         end
 
       assert error.message =~ "VIGIL_PORT"
@@ -242,7 +341,7 @@ defmodule Vigil.Settings.CheckTest do
     end
 
     test "returns what was checked when nothing is wrong" do
-      assert %{port: 4000, bind: {127, 0, 0, 1}} = Check.check!(@good)
+      assert %{port: 4000, bind: {127, 0, 0, 1}} = Check.check!(@good, clone())
     end
   end
 end

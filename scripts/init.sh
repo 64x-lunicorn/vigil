@@ -138,6 +138,25 @@ fi
 # layout once. They were repeated here as literals, which meant the same two
 # paths were defined in two files that must agree.
 
+# The vault's remote and branch, as the env file states them or, where it
+# does not, as lib.sh defaults them. A run with --force keeps what the file
+# it replaces said; a first run writes the defaults into the new one.
+GIT_REMOTE="$(vault_git_remote)"
+
+# vault_branch <vault> — the branch the vault is pulled and pushed on: the env
+# file's, or else the one the clone has checked out, or else the default for
+# a vault that is not there yet. Not vault_git_branch: that asks for a branch
+# already tracking the remote, and adoption is what makes a fresh clone's
+# branch do so.
+vault_branch() {
+  local vault="$1" branch
+  branch="$(env_file_value VIGIL_GIT_BRANCH)"
+  if [ -z "$branch" ] && [ -d "${vault}/.git" ]; then
+    branch="$(as_vigil git -C "$vault" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  fi
+  echo "${branch:-$DEFAULT_GIT_BRANCH}"
+}
+
 ## ── Vault adoption phase ──────────────────────────────────────────────────
 #
 # Automatic fixes (additive, applied without asking): .gitignore, local git
@@ -215,33 +234,35 @@ fix_vault_git_config() {
   ADOPTION_FIXES_APPLIED+=("set local git configuration in the vault")
 }
 
+# A fresh clone names its remote `origin`, git's own default; adoption renames
+# it to the remote the env file says, unless that is `origin` already.
 fix_vault_upstream() {
-  local vault="$1" mode="$2"
+  local vault="$1" mode="$2" branch="$3"
   local upstream
-  upstream="$(as_vigil git -C "$vault" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
-  [ "$upstream" = "github/main" ] && return 0
+  upstream="$(as_vigil git -C "$vault" rev-parse --abbrev-ref --symbolic-full-name "${branch}@{u}" 2>/dev/null || true)"
+  [ "$upstream" = "${GIT_REMOTE}/${branch}" ] && return 0
 
-  local github_remote
-  github_remote="$(as_vigil git -C "$vault" remote 2>/dev/null | grep -qx github && echo yes || echo no)"
+  local has_remote
+  has_remote="$(as_vigil git -C "$vault" remote 2>/dev/null | grep -qx "$GIT_REMOTE" && echo yes || echo no)"
 
-  local description="upstream: point main at github/main"
-  [ "$github_remote" = "no" ] && description="${description} (remote 'github' missing; will be renamed from 'origin', or must be added by hand)"
+  local description="upstream: point ${branch} at ${GIT_REMOTE}/${branch}"
+  [ "$has_remote" = "no" ] && description="${description} (remote '${GIT_REMOTE}' missing; will be renamed from 'origin', or must be added by hand)"
 
   if [ "$mode" = "check" ]; then
     ADOPTION_FIXES_PENDING+=("$description")
     return 0
   fi
 
-  if [ "$github_remote" = "no" ]; then
+  if [ "$has_remote" = "no" ]; then
     if as_vigil git -C "$vault" remote | grep -qx origin; then
-      as_vigil git -C "$vault" remote rename origin github
+      as_vigil git -C "$vault" remote rename origin "$GIT_REMOTE"
     else
-      warn "upstream: no 'github' or 'origin' remote in the vault — cannot set it automatically."
+      warn "upstream: no '${GIT_REMOTE}' or 'origin' remote in the vault — cannot set it automatically."
       return 0
     fi
   fi
-  as_vigil git -C "$vault" branch --set-upstream-to=github/main main
-  ADOPTION_FIXES_APPLIED+=("pointed upstream of main at github/main")
+  as_vigil git -C "$vault" branch --set-upstream-to="${GIT_REMOTE}/${branch}" "$branch"
+  ADOPTION_FIXES_APPLIED+=("pointed upstream of ${branch} at ${GIT_REMOTE}/${branch}")
 }
 
 fix_vault_domains_yml() {
@@ -294,6 +315,8 @@ fix_vault_permissions() {
 # (pending or reported) findings through the global ADOPTION_TOTAL_FINDINGS.
 run_vault_adoption() {
   local vault="$1" mode="$2"
+  local branch
+  branch="$(vault_branch "$vault")"
   ADOPTION_FIXES_APPLIED=()
   ADOPTION_FIXES_PENDING=()
   ADOPTION_TOTAL_FINDINGS=0
@@ -326,7 +349,7 @@ run_vault_adoption() {
   # ── Automatic fixes ───────────────────────────────────────────────────
   fix_vault_gitignore "$vault" "$mode"
   fix_vault_git_config "$vault" "$mode"
-  fix_vault_upstream "$vault" "$mode"
+  fix_vault_upstream "$vault" "$mode" "$branch"
   fix_vault_domains_yml "$vault" "$mode" "$findings_json"
   fix_vault_permissions "$vault" "$mode"
 
@@ -346,11 +369,11 @@ run_vault_adoption() {
       # is safe.
       if as_vigil git -C "$vault" -c user.name=vigil -c user.email=vigil@local commit -q -m \
         "vault adoption: automatic fixes"; then
-        if as_vigil git -C "$vault" remote | grep -qx github &&
-          as_vigil git -C "$vault" push github main >/dev/null 2>&1; then
-          ADOPTION_FIXES_APPLIED+=("committed automatic fixes and pushed them to github")
+        if as_vigil git -C "$vault" remote | grep -qx "$GIT_REMOTE" &&
+          as_vigil git -C "$vault" push "$GIT_REMOTE" "$branch" >/dev/null 2>&1; then
+          ADOPTION_FIXES_APPLIED+=("committed automatic fixes and pushed them to ${GIT_REMOTE}")
         else
-          warn "automatic fixes committed, but push failed or no 'github' remote — please push manually."
+          warn "automatic fixes committed, but push failed or no '${GIT_REMOTE}' remote — please push manually."
         fi
       fi
     fi
@@ -403,15 +426,15 @@ run_vault_adoption() {
   # Unpushed commits and an extra remote are git facts, not vault content, so
   # they are checked directly here rather than in the mix task.
   local pending
-  pending="$(as_vigil git -C "$vault" rev-list --count github/main..main 2>/dev/null || echo "0")"
+  pending="$(as_vigil git -C "$vault" rev-list --count "${GIT_REMOTE}/${branch}..${branch}" 2>/dev/null || echo "0")"
   if [ "$pending" != "0" ]; then
     b_lines="${b_lines}
   ! ${pending} local commits not pushed
-      Fix: git -C ${vault} push github main"
+      Fix: git -C ${vault} push ${GIT_REMOTE} ${branch}"
     b_count=$((b_count + 1))
   fi
 
-  if as_vigil git -C "$vault" remote | grep -qx origin; then
+  if [ "$GIT_REMOTE" != "origin" ] && as_vigil git -C "$vault" remote | grep -qx origin; then
     local origin_target
     origin_target="$(as_vigil git -C "$vault" remote get-url origin 2>/dev/null || echo "?")"
     b_lines="${b_lines}
@@ -560,8 +583,12 @@ if [ "$DRY_RUN" != "1" ]; then
   as_vigil git config --global user.name vigil
   as_vigil git config --global user.email "vigil@$(hostname)"
   as_vigil git config --global commit.gpgsign false
-  as_vigil git config --global init.defaultBranch main
+  as_vigil git config --global init.defaultBranch "$DEFAULT_GIT_BRANCH"
 fi
+
+# Before step 2 creates or clones anything: a new vault is created on it, and
+# a vault that is already there says it.
+GIT_BRANCH="$(vault_branch "$VAULT")"
 
 if [ -d "${VAULT}/.git" ]; then
   log "Vault already exists at ${VAULT} — skipping create/clone."
@@ -580,7 +607,7 @@ elif [ -n "$EXISTING_VAULT_URL" ]; then
     }
   fi
 
-  # Renaming origin→github, local git config, .gitignore and so on all run
+  # Renaming origin to the configured remote, local git config, .gitignore and so on all run
   # through the vault adoption phase below, not separately here.
 else
   if [ -z "$VAULT_REMOTE_URL" ] && [ "$NON_INTERACTIVE" = "1" ]; then
@@ -594,19 +621,22 @@ else
   if [ "$DRY_RUN" = "1" ]; then
     log "[DRY RUN] create vault skeleton at ${VAULT} (domains: ${DOMAINS_VALUE})"
   else
-    as_vigil bash -c "VIGIL_INIT_DOMAINS='${DOMAINS_VALUE}' /opt/vigil/repo/scripts/init_vault.sh '${VAULT}'"
+    as_vigil bash -c "VIGIL_INIT_DOMAINS='${DOMAINS_VALUE}' VIGIL_GIT_BRANCH='${GIT_BRANCH}' /opt/vigil/repo/scripts/init_vault.sh '${VAULT}'"
 
     NEW_REMOTE_URL="${VAULT_REMOTE_URL:-$(ask_value "Git URL for the new vault upstream" "git@github.com:<org>/vault.git")}"
-    if as_vigil git -C "$VAULT" remote | grep -qx github; then
+    if as_vigil git -C "$VAULT" remote | grep -qx "$GIT_REMOTE"; then
       :
     else
-      as_vigil git -C "$VAULT" remote add github "$NEW_REMOTE_URL"
+      as_vigil git -C "$VAULT" remote add "$GIT_REMOTE" "$NEW_REMOTE_URL"
     fi
-    as_vigil git -C "$VAULT" push -u github main
+    as_vigil git -C "$VAULT" push -u "$GIT_REMOTE" "$GIT_BRANCH"
   fi
 fi
 
-record_done "vault ready at ${VAULT} (remote: github)"
+# A clone checks out the remote's default branch, so the branch is read again
+# now that there is one to read.
+GIT_BRANCH="$(vault_branch "$VAULT")"
+record_done "vault ready at ${VAULT} (remote: ${GIT_REMOTE}, branch: ${GIT_BRANCH})"
 
 ## ── Step 2b — vault adoption ─────────────────────────────────────────────
 # Only for --existing-vault: a fresh --new-vault skeleton satisfies the rules
@@ -686,7 +716,8 @@ ENV_CONTENT="$(
 VIGIL_VAULT_PATH=${VAULT}
 VIGIL_PORT=4000
 VIGIL_BIND=127.0.0.1
-VIGIL_GIT_REMOTE=github
+VIGIL_GIT_REMOTE=${GIT_REMOTE}
+VIGIL_GIT_BRANCH=${GIT_BRANCH}
 VIGIL_TZ=${VAULT_TZ}
 VIGIL_EXCLUDE=
 VIGIL_ISSUER=${ISSUER}
@@ -836,8 +867,6 @@ else
   VIGIL_RESOURCE="$RESOURCE"
   # shellcheck disable=SC2034
   VIGIL_LOCAL_URL="http://localhost:4000"
-  # shellcheck disable=SC2034
-  VIGIL_GIT_REMOTE="github"
   # shellcheck disable=SC2034
   VIGIL_ALLOW_UNPROTECTED="$ALLOW_UNPROTECTED"
 

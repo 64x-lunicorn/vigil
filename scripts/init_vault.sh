@@ -10,9 +10,11 @@ DOMAINS=(${VIGIL_INIT_DOMAINS:-admin gear home journal projects training} skills
 mkdir -p "$VAULT_DIR"
 cd "$VAULT_DIR"
 
+# On VIGIL_GIT_BRANCH when it is set (scripts/init.sh sets it), otherwise on
+# whatever branch this machine's git starts a repository on.
 if [ ! -d .git ]; then
-  git init -b main
-  echo "initialized git repository in $VAULT_DIR (main)"
+  git init ${VIGIL_GIT_BRANCH:+-b "$VIGIL_GIT_BRANCH"}
+  echo "initialized git repository in $VAULT_DIR ($(git symbolic-ref --short HEAD))"
 fi
 
 for domain in "${DOMAINS[@]}"; do
@@ -75,5 +77,5 @@ fi
 
 echo
 echo "Done. Now set a remote, for example:"
-echo "  git remote add origin git@github.com:<org>/vault.git"
-echo "  git push -u origin main"
+echo "  git remote add <remote> git@github.com:<org>/vault.git"
+echo "  git push -u <remote> $(git symbolic-ref --short HEAD)"

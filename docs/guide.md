@@ -248,7 +248,8 @@ seeds two OAuth tokens, and finishes with an acceptance check.
 `init.sh` prints both tokens **once** at the end. After that they exist
 nowhere: `/var/lib/vigil/oauth_tokens.dets` keeps only their SHA-256 digests,
 so a lost token is seeded again, not recovered. It also installs the push
-safety net as `/etc/cron.d/vigil-push-safety-net`. An adopted vault keeps its
+safety net as `/etc/cron.d/vigil-push-safety-net`, which runs
+`scripts/push_pending.sh` every 15 minutes. An adopted vault keeps its
 own `vigil-vault-conventions` skill; the template is only written when the
 vault has none.
 
@@ -469,7 +470,8 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_VAULT_PATH` | **required in prod**; `test/fixtures/vault` in dev | path to the vault's Git clone |
 | `VIGIL_PORT` | `4000` | HTTP port |
 | `VIGIL_BIND` | `127.0.0.1` | listen address; loopback keeps the LAN from bypassing Cloudflare Access. Widen it only for a proxy on another host |
-| `VIGIL_GIT_REMOTE` | `origin` | remote used for pull **and** push; must match `git branch -vv` |
+| `VIGIL_GIT_REMOTE` | `github` | remote used for pull **and** push; must be a remote of the vault clone |
+| `VIGIL_GIT_BRANCH` | the clone's checked-out branch when it tracks a branch on the remote, otherwise `main` | branch used for pull **and** push; must exist and track `<remote>/<branch>` (`git branch -vv`) |
 | `VIGIL_TZ` | `Europe/Berlin` | timezone for `current`, envelopes, relative times |
 | `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
 | `VIGIL_ISSUER` | **required in prod**; `http://localhost:4000` in dev | OAuth issuer |
@@ -514,6 +516,15 @@ failed and what it expected, all in one message:
   `https://mcp.example.org`. In dev, the `http://localhost` defaults pass.
 - In prod, `VIGIL_VAULT_PATH`, `VIGIL_STATE_DIR`, `VIGIL_ISSUER` and
   `VIGIL_RESOURCE` must be set.
+- `VIGIL_VAULT_PATH` must be a git clone, `VIGIL_GIT_REMOTE` one of its
+  remotes, and `VIGIL_GIT_BRANCH` one of its branches, tracking the branch of
+  the same name on that remote. Fix a missing upstream with
+  `git branch --set-upstream-to=<remote>/<branch> <branch>`; the message
+  prints it.
+
+The scripts read the remote and the branch from `/etc/vigil/env` too, so a
+vault on `master`, or a remote called `origin`, is two lines there and nothing
+else.
 
 The last two only affect the instructions handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
@@ -657,9 +668,9 @@ not, almost always a write whose push failed. vigil does not merge. Reconcile
 on the server as the service user, then call `reload` again:
 
 ```bash
-sudo -u vigil git -C /var/lib/vigil/vault log --oneline github/main..main
-sudo -u vigil git -C /var/lib/vigil/vault pull --rebase github main
-sudo -u vigil git -C /var/lib/vigil/vault push github main
+sudo -u vigil git -C /var/lib/vigil/vault log --oneline @{u}..
+sudo -u vigil git -C /var/lib/vigil/vault pull --rebase
+sudo -u vigil git -C /var/lib/vigil/vault push
 ```
 
 ---
@@ -673,7 +684,9 @@ phase that separates two kinds of finding:
 
 **Applied automatically** (additive, committed as one `vault adoption` commit):
 `.gitignore` entry for `.obsidian/` including untracking it, local git identity
-and `commit.gpgsign false`, upstream `main` → `github/main`, missing
+and `commit.gpgsign false`, the branch's upstream → `<remote>/<branch>` as
+`VIGIL_GIT_REMOTE` and `VIGIL_GIT_BRANCH` say (a clone's `origin` is renamed
+to the remote; the branch is the one the clone checked out), missing
 `_domains.yml` entries (without naming rules — those are a human decision),
 directory permissions.
 
@@ -714,7 +727,7 @@ editing the vault in another tool.
 | Client gets 401 | token wrong or expired | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
 | A write tool answers "Read-only token: write access denied." | the token's scope is not `vault` (for example `vault:read`) | connect with a `vault` token |
 | Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client | fix the Access configuration — never disable Access to "solve" this |
-| Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | the safety-net cron retries every 15 minutes; check `journalctl -t vigil-push` and `git -C /var/lib/vigil/vault rev-list --count github/main..main` |
+| Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | the safety-net cron retries every 15 minutes; check `journalctl -t vigil-push` and `git -C /var/lib/vigil/vault rev-list --count @{u}..` |
 
 ---
 

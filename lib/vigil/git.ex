@@ -3,10 +3,12 @@ defmodule Vigil.Git do
   Git, as a value its callers hold rather than a module they name
   (`docs/design.md`, "Git is reached through a value").
 
-  Two things live here. The **contract** is a struct of nine functions — the
+  Two things live here. The **contract** is a struct of ten functions — the
   whole of what vigil asks git: `add`, `remove`, `move`, `commit`,
-  `snapshot_index`, `restore_index` and `push`, which a write uses, and `pull`
-  and `log_metadata`, which the load uses and no write ever asks. Staging and
+  `snapshot_index`, `restore_index` and `push`, which a write uses, `pull`
+  and `log_metadata`, which the load uses and no write ever asks, and
+  `tracking`, which boot asks once to check the remote and branch settings
+  against the clone. Staging and
   committing are separate questions so that a commit can fail *after* its
   staging has happened, and the staging be undone (`Vigil.Commit`,
   `docs/design.md`, "A failed commit leaves the vault as it was"). The seam is drawn where git is, not where the
@@ -16,7 +18,7 @@ defmodule Vigil.Git do
   answer.
 
   The **production adapter** is the rest of this module: `over_repository/0`
-  wires the nine questions to the `git` commands underneath it. It is a function
+  wires the ten questions to the `git` commands underneath it. It is a function
   here, beside the contract it implements, rather than closures assembled by a
   caller — there are two callers, `Vigil.Store` and `Vigil.Skills`, and an
   adapter assembled at the call site would exist twice. `Store` builds it when
@@ -35,7 +37,7 @@ defmodule Vigil.Git do
   require Logger
 
   @enforce_keys [
-    # git pull --ff-only <remote> main. :ok | {:error, reason}.
+    # git pull --ff-only <remote> <branch>. :ok | {:error, reason}.
     :pull,
     # The whole vault's commit metadata: path => %{created_at:, updated_at:,
     # last_author:}. What "creation date = first commit" is read out of
@@ -55,8 +57,12 @@ defmodule Vigil.Git do
     :snapshot_index,
     # Put the index back as a snapshot found it. :ok | {:error, reason}.
     :restore_index,
-    # git push <remote> main. :ok | {:error, reason}.
-    :push
+    # git push <remote> <branch>. :ok | {:error, reason}.
+    :push,
+    # What the clone's remotes and branches are, for the boot check of
+    # VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH.
+    # {:ok, %{head:, remotes:, branches:}} | {:error, reason} — see tracking/1.
+    :tracking
   ]
 
   defstruct @enforce_keys
@@ -64,7 +70,7 @@ defmodule Vigil.Git do
   @type t :: %__MODULE__{}
 
   @doc """
-  Builds a git adapter from an answer to every one of the nine questions.
+  Builds a git adapter from an answer to every one of the ten questions.
 
   Raises `ArgumentError` when a field is missing or unknown, which is the
   point: an unwired question must fail where the adapter is built, not answer
@@ -80,7 +86,7 @@ defmodule Vigil.Git do
   @spec over_repository() :: t
   def over_repository do
     new(
-      pull: &pull/2,
+      pull: &pull/3,
       log_metadata: &log_metadata/1,
       add: &add/2,
       remove: &remove/2,
@@ -88,7 +94,8 @@ defmodule Vigil.Git do
       commit: &commit/3,
       snapshot_index: &snapshot_index/2,
       restore_index: &restore_index/2,
-      push: &push/2
+      push: &push/3,
+      tracking: &tracking/1
     )
   end
 
@@ -123,9 +130,9 @@ defmodule Vigil.Git do
     {"GIT_HTTP_LOW_SPEED_TIME", "20"}
   ]
 
-  @doc "git pull --ff-only <remote> main. Logs and returns {:error, reason} on failure (caller decides)."
-  def pull(vault_path, remote) do
-    case run(vault_path, ["pull", "--ff-only", remote, "main"], @network_env) do
+  @doc "git pull --ff-only <remote> <branch>. Logs and returns {:error, reason} on failure (caller decides)."
+  def pull(vault_path, remote, branch) do
+    case run(vault_path, ["pull", "--ff-only", remote, branch], @network_env) do
       {:ok, _out} ->
         :ok
 
@@ -270,11 +277,61 @@ defmodule Vigil.Git do
   defp update_index(path, {mode, sha}),
     do: ["update-index", "--add", "--cacheinfo", "#{mode},#{sha},#{path}"]
 
-  @doc "git push <remote> main. Returns :ok | {:error, reason}."
-  def push(vault_path, remote) do
-    case run(vault_path, ["push", remote, "main"], @network_env) do
+  @doc "git push <remote> <branch>. Returns :ok | {:error, reason}."
+  def push(vault_path, remote, branch) do
+    case run(vault_path, ["push", remote, branch], @network_env) do
       {:ok, _} -> :ok
       {:error, out} -> {:error, out}
+    end
+  end
+
+  @doc """
+  What the clone at `vault_path` has to say about its remotes and branches,
+  read locally — nothing here reaches the network.
+
+  `{:ok, %{head: head, remotes: remotes, branches: branches}}`: `head` is the
+  checked-out branch (`nil` when `HEAD` is detached), `remotes` every
+  configured remote's name, and `branches` every local branch mapped to its
+  upstream as `{remote, branch}`, or to `nil` when it has none.
+  `{:error, reason}` when `vault_path` is not the top of a git clone — the same
+  test `Vigil.Store` puts to it, so that a vault inside another repository is
+  not answered for by that repository.
+  """
+  def tracking(vault_path) do
+    with true <- File.exists?(Path.join(vault_path, ".git")),
+         {:ok, remotes} <- run(vault_path, ["remote"]),
+         {:ok, refs} <-
+           run(vault_path, [
+             "for-each-ref",
+             "--format=%(refname:short)%00%(upstream:remotename)%00%(upstream:remoteref)",
+             "refs/heads"
+           ]) do
+      {:ok,
+       %{
+         head: head(vault_path),
+         remotes: String.split(remotes, "\n", trim: true),
+         branches: refs |> String.split("\n", trim: true) |> Map.new(&upstream/1)
+       }}
+    else
+      false -> {:error, "#{vault_path} is not a git clone"}
+      {:error, out} -> {:error, out}
+    end
+  end
+
+  defp head(vault_path) do
+    case run(vault_path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) do
+      {:ok, out} -> String.trim(out)
+      {:error, _} -> nil
+    end
+  end
+
+  defp upstream(line) do
+    case String.split(line, "\0") do
+      [branch, remote, "refs/heads/" <> upstream] when remote != "" ->
+        {branch, {remote, upstream}}
+
+      [branch | _] ->
+        {branch, nil}
     end
   end
 

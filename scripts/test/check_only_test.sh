@@ -99,7 +99,12 @@ EOF
 
 # Missing .gitignore entry: no .gitignore at all yet.
 
-git -C "$VAULT" init -q -b main
+# On `master`, with no upstream yet, and the env file naming a remote that is
+# not a default either: the upstream fix has to say both, read from there.
+git -C "$VAULT" init -q -b master
+ENV_FILE_UNDER_TEST="$(mktemp)"
+trap 'rm -rf "$VAULT" "$ENV_FILE_UNDER_TEST"' EXIT
+echo "VIGIL_GIT_REMOTE=upstream" >"$ENV_FILE_UNDER_TEST"
 # Wrong local git identity on purpose — init.sh's fix wants
 # "vigil"/"vigil@$(hostname)".
 git -C "$VAULT" config user.name "Not Vigil"
@@ -123,6 +128,7 @@ set +e
 OUTPUT="$(
   VIGIL_INIT_TEST_STUBS=1 \
     VIGIL_TEST_REPO_ROOT="$REPO_ROOT" \
+    VIGIL_ENV_FILE="$ENV_FILE_UNDER_TEST" \
     bash "$INIT_SH" --check-only --vault "$VAULT" 2>&1
 )"
 EXIT_CODE=$?
@@ -158,6 +164,8 @@ assert_contains "reports the .gitignore fix as pending, not applied" "$OUTPUT" \
   "gitignore: add .obsidian/"
 assert_contains "reports the git identity fix as pending, not applied" "$OUTPUT" \
   "git config: set local user.name/user.email/commit.gpgsign"
+assert_contains "reports the upstream fix for the vault's branch and the env file's remote" "$OUTPUT" \
+  "upstream: point master at upstream/master"
 assert_contains "reports the permissions fix as pending, not applied" "$OUTPUT" \
   "permissions: chown -R vigil:vigil, chmod 0750"
 # fix_vault_domains_yml itself needs GNU grep -P (PCRE), same as production

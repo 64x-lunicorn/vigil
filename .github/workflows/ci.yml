@@ -242,6 +242,11 @@ jobs:
       - name: init.sh generates both secrets apart
         run: bash scripts/test/secrets_test.sh
 
+      # The vault's remote and branch are two lines in the env file, and every
+      # script reads them from there rather than naming `github` and `main`.
+      - name: The scripts read the vault's remote and branch from the env file
+        run: bash scripts/test/git_settings_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest

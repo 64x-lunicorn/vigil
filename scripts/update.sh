@@ -165,8 +165,6 @@ source_env_for_verify() {
   # shellcheck disable=SC2034
   VIGIL_LOCAL_URL="http://localhost:${VIGIL_PORT:-4000}"
   # shellcheck disable=SC2034
-  VIGIL_GIT_REMOTE="${VIGIL_GIT_REMOTE:-github}"
-  # shellcheck disable=SC2034
   VIGIL_ALLOW_UNPROTECTED=0
   # shellcheck disable=SC2034
   VIGIL_RW_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault 900)"
@@ -250,9 +248,11 @@ if ! grep -qE '^VIGIL_SKILLKEY_SECRET=.' "$ENV_FILE" 2>/dev/null; then
   exit 2
 fi
 
-PENDING="$(as_vigil git -C "$VAULT" rev-list --count github/main..main 2>/dev/null || echo "?")"
+GIT_REMOTE="$(vault_git_remote)"
+GIT_BRANCH="$(vault_git_branch "$VAULT")"
+PENDING="$(as_vigil git -C "$VAULT" rev-list --count "${GIT_REMOTE}/${GIT_BRANCH}..${GIT_BRANCH}" 2>/dev/null || echo "?")"
 if [ "$PENDING" != "0" ]; then
-  err "The vault has ${PENDING} unpushed commits. Secure them first: git -C ${VAULT} push github main"
+  err "The vault has ${PENDING} unpushed commits. Secure them first: git -C ${VAULT} push ${GIT_REMOTE} ${GIT_BRANCH}"
   exit 2
 fi
 

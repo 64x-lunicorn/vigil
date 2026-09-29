@@ -42,13 +42,18 @@ defmodule Vigil.Git.CommitLog do
   @doc """
   A `Vigil.Git` over `vault_path`, and the log behind it.
 
-  One option, `remote:` — the remote name `push` and `pull` succeed for, `nil`
-  for a vault with none configured. Anything else answers the error git
-  answers, which is how a test provokes a push failure.
+  Three options. `remote:` and `branch:` — the remote name and the branch
+  `push` and `pull` succeed for, `"origin"` and `"main"` unless given; a
+  `remote:` of `nil` is a vault with none configured. Anything else answers
+  the error git answers, which is how a test provokes a push failure.
+  `tracking:` — what `tracking` answers; by default a clone with that one
+  remote and that one branch checked out, tracking its namesake there.
   """
   @spec recording(Path.t(), keyword()) :: {Git.t(), pid()}
   def recording(vault_path, opts \\ []) do
     remote = Keyword.get(opts, :remote, "origin")
+    branch = Keyword.get(opts, :branch, "main")
+    tracking = Keyword.get_lazy(opts, :tracking, fn -> tracking(remote, branch) end)
     at = @commit_at
 
     {:ok, log} =
@@ -56,8 +61,13 @@ defmodule Vigil.Git.CommitLog do
 
     git =
       Git.new(
-        pull: fn _vault, name -> remote_result(log, {:pull, name}, remote, name) end,
-        push: fn _vault, name -> remote_result(log, {:push, name}, remote, name) end,
+        pull: fn _vault, name, ref ->
+          remote_result(log, {:pull, name, ref}, {remote, branch}, {name, ref})
+        end,
+        push: fn _vault, name, ref ->
+          remote_result(log, {:push, name, ref}, {remote, branch}, {name, ref})
+        end,
+        tracking: fn _vault -> tracking end,
         log_metadata: fn _vault -> Agent.get(log, & &1.metadata) end,
         add: fn _vault, paths ->
           record(log, {:add, paths})
@@ -160,15 +170,25 @@ defmodule Vigil.Git.CommitLog do
     end
   end
 
-  defp remote_result(log, call, remote, name) do
+  defp remote_result(log, call, {remote, branch}, {name, ref}) do
     record(log, call)
 
-    if name == remote and not is_nil(remote) do
-      :ok
-    else
-      {:error, "fatal: '#{name}' does not appear to be a git repository"}
+    cond do
+      name != remote or is_nil(remote) ->
+        {:error, "fatal: '#{name}' does not appear to be a git repository"}
+
+      ref != branch ->
+        {:error, "error: src refspec #{ref} does not match any"}
+
+      true ->
+        :ok
     end
   end
+
+  defp tracking(nil, branch), do: {:ok, %{head: branch, remotes: [], branches: %{branch => nil}}}
+
+  defp tracking(remote, branch),
+    do: {:ok, %{head: branch, remotes: [remote], branches: %{branch => {remote, branch}}}}
 
   # Everything the vault holds when the adapter is built, as one commit by
   # whoever put it there. Without it every note in every test would carry a
