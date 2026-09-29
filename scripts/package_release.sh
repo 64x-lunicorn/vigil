@@ -17,8 +17,13 @@
 # every entry carries the time SOURCE_DATE_EPOCH names (the commit time of
 # HEAD when it is unset), owner and group are 0 with no names, and gzip
 # records neither a file name nor a time. Modes are kept as the release has
-# them (releases/COOKIE stays 0400) except that nothing is group- or
-# world-writable, so the packager's umask cannot leak into the archive.
+# them except that nothing is group- or world-writable, so the packager's
+# umask cannot leak into the archive.
+#
+# releases/COOKIE is left out. It is Erlang distribution's only credential,
+# and a public tarball would hand the same one to every host that installed
+# it; a release without one writes its own on the first bin/vigil command
+# (rel/env.sh.eex).
 #
 # What it cannot make equal is a release directory that differs itself; see
 # "Reproducibility" in docs/ci-cd.md for what two builds of one commit still
@@ -89,6 +94,7 @@ trap cleanup EXIT INT TERM
 cp -Rp "${RELEASE}/." "${STAGE}/"
 install -m 0644 "${REPO_ROOT}/LICENSE" "${STAGE}/LICENSE"
 install -m 0644 "${REPO_ROOT}/THIRD_PARTY_NOTICES.md" "${STAGE}/THIRD_PARTY_NOTICES.md"
+rm -f "${STAGE}/releases/COOKIE"
 
 mkdir -p "$DIST"
 LC_ALL=C "$TAR" \

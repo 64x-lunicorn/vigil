@@ -94,23 +94,38 @@ group- or world-writable modes, and `gzip -n` so the compressed stream records
 neither a name nor a time. Packing the same release directory gives the same
 bytes on any machine with GNU tar.
 
+The tarball carries no `releases/COOKIE`. The cookie is Erlang distribution's
+only credential, and one in a public file would be the same credential on
+every host that installed it. A release without one writes its own — random,
+`0400`, owned by whoever ran the command — the first time any `bin/vigil`
+command runs ([`rel/env.sh.eex`](../rel/env.sh.eex)). Run that first command
+as the service account after unpacking, before the unit starts the release:
+its sandbox cannot write into the release, and `bin/vigil` refuses to write
+the cookie as root.
+
+```bash
+sudo -u vigil /opt/vigil/releases/<name>/bin/vigil version
+```
+
 ### Reproducibility
 
 Two builds of one commit do not yet give the same tarball. The packing is
-deterministic; two files of the release it packs are not:
+deterministic; one file of the release it packs is not:
 
 | File | Why it differs between builds |
 | :--- | :--- |
-| `releases/COOKIE` | `mix release` generates a new random distribution cookie for every build. |
 | `lib/tz-*/ebin/Elixir.Tz.PeriodsProvider.beam` | The `tz` dependency compiles its build time into the module (`compiled_at/0`). |
+
+`mix release` also writes a new random `releases/COOKIE` for every build, but
+the tarball leaves it out (below).
 
 Everything else is byte for byte the same when the builds use the same
 toolchain (`.tool-versions`) and the same checkout path — compiled modules
 record where their source was, and the release workflow always builds in the
 same directory. [`scripts/test/reproducible_release.sh`](../scripts/test/reproducible_release.sh)
 builds `HEAD` twice from a clean `_build` and passes when the two trees differ
-in exactly these two files, so a new source of difference fails it rather than
-hiding behind the known ones. It takes a few minutes and is not part of the
+in exactly this file, so a new source of difference fails it rather than
+hiding behind the known one. It takes a few minutes and is not part of the
 CI gate; run it after changing the release configuration or the packaging.
 
 ### Deploying

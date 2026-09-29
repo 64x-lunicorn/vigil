@@ -95,7 +95,7 @@ section "2/5  The tarball carries the release and the notices"
 
 TARBALL="${WORK}/a/dist/${NAME}.tar.gz"
 assert_eq "entries are the release plus the notices, sorted by name" \
-  "$(printf '%s\n' ./ ./LICENSE ./THIRD_PARTY_NOTICES.md ./bin/ ./bin/vigil ./lib/ ./lib/vigil-9.9.9/ ./lib/vigil-9.9.9/ebin/ ./lib/vigil-9.9.9/ebin/Elixir.Vigil.beam ./lib/vigil-9.9.9/ebin/vigil.app ./releases/ ./releases/COOKIE)" \
+  "$(printf '%s\n' ./ ./LICENSE ./THIRD_PARTY_NOTICES.md ./bin/ ./bin/vigil ./lib/ ./lib/vigil-9.9.9/ ./lib/vigil-9.9.9/ebin/ ./lib/vigil-9.9.9/ebin/Elixir.Vigil.beam ./lib/vigil-9.9.9/ebin/vigil.app ./releases/)" \
   "$("$TAR" -tzf "$TARBALL")"
 
 mkdir -p "${WORK}/x"
@@ -125,8 +125,13 @@ assert_eq "every entry is owned by 0/0" \
   "0/0" "$(printf '%s\n' "$listing" | awk '{print $2}' | sort -u)"
 assert_eq "every entry carries SOURCE_DATE_EPOCH" \
   "2026-01-01 00:00:00" "$(printf '%s\n' "$listing" | awk '{print $4" "$5}' | sort -u)"
-assert_eq "releases/COOKIE keeps its 0400" \
-  "-r--------" "$(printf '%s\n' "$listing" | awk '$6 == "./releases/COOKIE" {print $1}')"
+assert_eq "releases/COOKIE is left out: a public tarball would give every host the same one" \
+  "" "$(printf '%s\n' "$listing" | awk '$6 == "./releases/COOKIE"')"
+if [ -f "${WORK}/a/release/releases/COOKIE" ]; then
+  pass "the release directory keeps its own cookie"
+else
+  fail "the release directory keeps its own cookie"
+fi
 assert_eq "bin/vigil stays executable, and a umask 0002 build leaves nothing group-writable" \
   "-rwxr-xr-x" "$(printf '%s\n' "$listing" | awk '$6 == "./bin/vigil" {print $1}')"
 # RFC 1952: bytes 4-7 are MTIME, and FLG (byte 3) has FNAME at 0x08.
@@ -158,6 +163,63 @@ package "${WORK}/a/release" "${WORK}/c/dist" "$NAME"
 assert_eq "without an SBOM, there is none and the checksums leave it out" \
   "$(printf '%s\n' "${NAME}-SHA256SUMS" "${NAME}-mix.lock" "${NAME}.tar.gz")" \
   "$(cd "${WORK}/c/dist" && LC_ALL=C ls)"
+
+## ── 4b. A release without a cookie writes its own ────────────────────────
+
+section "4b   A release unpacked from the tarball writes its own cookie"
+
+# rel/env.sh.eex as bin/vigil sources it, rendered the one way mix does, in a
+# release root the tarball left without a cookie.
+ENV_SH="${WORK}/env.sh"
+sed 's/<%= @release.name %>/vigil/' "${REPO_ROOT}/rel/env.sh.eex" >"$ENV_SH"
+ROOT="${WORK}/x"
+cookie_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+
+# Sources env.sh as bin/vigil does (/bin/sh, set -e), then prints the cookie
+# bin/vigil would read. Prints the exit code last.
+first_command() {
+  set +e
+  # shellcheck disable=SC2016 # $1 and $RELEASE_ROOT are the inner sh's
+  env -u RELEASE_COOKIE RELEASE_ROOT="$ROOT" "$@" sh -c \
+    'set -e; . "$1"; cat "$RELEASE_ROOT/releases/COOKIE"' _ "$ENV_SH" 2>"${WORK}/env-err.txt"
+  echo " rc=$?"
+  set -e
+}
+
+if [ "$(id -u)" -eq 0 ]; then
+  pass "skipped: run as root, which env.sh refuses to write the cookie as"
+else
+  out="$(first_command)"
+  cookie="${out% rc=*}"
+  assert_eq "the first command succeeds" "rc=0" "${out##* }"
+  if [[ "$cookie" =~ ^[0-9a-f]{64}$ ]]; then
+    pass "the cookie is 32 random bytes, in hex"
+  else
+    fail "the cookie is 32 random bytes, in hex" "got '${cookie}'"
+  fi
+  assert_eq "readable by the account that wrote it only" "400" "$(cookie_mode "${ROOT}/releases/COOKIE")"
+  out="$(first_command)"
+  assert_eq "the next command keeps it" "${cookie} rc=0" "$out"
+
+  other="$(cd "$WORK" && make_release "${WORK}/y" bin/vigil && echo "${WORK}/y")"
+  ROOT="$other"
+  out="$(first_command RELEASE_COOKIE=given)"
+  if [ -e "${ROOT}/releases/COOKIE" ]; then
+    fail "with RELEASE_COOKIE set, none is written"
+  else
+    pass "with RELEASE_COOKIE set, none is written"
+  fi
+
+  chmod 0555 "${ROOT}/releases"
+  out="$(first_command)"
+  chmod 0755 "${ROOT}/releases"
+  assert_eq "where it cannot be written, the command stops" "rc=1" "${out##* }"
+  if grep -q "sudo -u vigil ${ROOT}/bin/vigil version" "${WORK}/env-err.txt"; then
+    pass "and says how to write it as the service account"
+  else
+    fail "and says how to write it as the service account" "$(cat "${WORK}/env-err.txt")"
+  fi
+fi
 
 ## ── 5. Refusals ─────────────────────────────────────────────────────────
 

@@ -8,17 +8,16 @@
 # release workflow always builds in the same checkout directory, and compiled
 # modules record where their source was.
 #
-# They are not the same bytes yet, and this names why. Two files differ in
-# every pair of builds, for reasons outside the packaging:
+# They are not the same bytes yet, and this names why. One file differs in
+# every pair of builds, for a reason outside the packaging:
 #
-#   releases/COOKIE                               `mix release` writes a new
-#                                                 random cookie for each build
 #   lib/tz-*/ebin/Elixir.Tz.PeriodsProvider.beam  tz compiles its build time
 #                                                 into the module (compiled_at/0)
 #
-# The test passes when the two trees differ in exactly those files and in
-# nothing else, so a new source of difference fails it instead of hiding
-# behind the known two. docs/ci-cd.md ("Reproducibility") says the same for
+# (`mix release` also writes a new random releases/COOKIE for each build, but
+# the tarball leaves it out.) The test passes when the two trees differ in
+# exactly that file and in nothing else, so a new source of difference fails
+# it instead of hiding behind the known one. docs/ci-cd.md ("Reproducibility") says the same for
 # someone comparing a published tarball with their own build.
 #
 # Takes a few minutes: it compiles the dependencies twice. Uses the
@@ -93,8 +92,8 @@ assert_eq "no file exists in only one of the builds" "" "$others"
 if [ "$first" = "$second" ]; then
   pass "the tarballs are the same bytes"
 else
-  assert_eq "the differing files are exactly the known ones" \
-    "$(printf '%s\n' "lib/tz-*/ebin/Elixir.Tz.PeriodsProvider.beam" "releases/COOKIE")" \
+  assert_eq "the differing files are exactly the known one" \
+    "lib/tz-*/ebin/Elixir.Tz.PeriodsProvider.beam" \
     "$differing"
 fi
 

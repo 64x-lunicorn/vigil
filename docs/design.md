@@ -2345,7 +2345,10 @@ without epmd — the port is fixed (4370), and the short-lived node behind `rpc`
 dials it directly and listens on nothing (`rel/`). No epmd means no second
 daemon to bind, and none started under a different environment by whoever
 called first. The cookie is distribution's only credential, so the release
-writes it `0400`. A full name rather than a short one because a short name
+writes it `0400`, and the published tarball carries none: a release without
+one writes its own, random, on its first `bin/vigil` command
+(`rel/env.sh.eex`), rather than every host that installed the tarball holding
+the same one. A full name rather than a short one because a short name
 goes through the host name, which Debian maps to 127.0.1.1.
 
 **The unit is sandboxed to a recorded exposure.** `deploy/vigil.service`

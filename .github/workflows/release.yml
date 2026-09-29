@@ -167,7 +167,8 @@ jobs:
 
       # Proves the archive is complete and its ERTS runs: `eval` boots the VM
       # and evaluates runtime.exs without starting the supervision tree, so it
-      # needs no vault and no credentials.
+      # needs no vault and no credentials. The archive carries no cookie, and
+      # the first command writes the release its own (rel/env.sh.eex).
       - name: Verify the packaged artifact
         env:
           TARBALL: ${{ steps.package.outputs.tarball }}
@@ -175,6 +176,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/verify
+          if tar -tzf "${TARBALL}" | grep -q 'releases/COOKIE$'; then
+            echo "the tarball carries a distribution cookie" >&2
+            exit 1
+          fi
           tar -xzf "${TARBALL}" -C /tmp/verify
           reported="$(/tmp/verify/bin/vigil eval 'IO.puts(Application.spec(:vigil, :vsn))' | tail -1)"
           echo "release reports version: ${reported}"

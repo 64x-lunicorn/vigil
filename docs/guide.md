@@ -603,7 +603,9 @@ Nothing vigil opens listens beyond loopback: the HTTP listener on
 `VIGIL_BIND`, and Erlang distribution — what `bin/vigil stop` and
 `bin/vigil rpc` use — on `127.0.0.1:4370`, with no epmd. The node is
 `vigil@127.0.0.1`, and the release cookie is `0400`, readable by the service
-user only. Debian's `erlang-base` enables `epmd.socket`, which has systemd
+user only. A release built on the host gets a random one from `mix release`;
+the published tarball carries none, and writes its own on the first
+`bin/vigil` command run as the service user ([ci-cd.md](ci-cd.md#release-assets)). Debian's `erlang-base` enables `epmd.socket`, which has systemd
 listen on port 4369 on every interface whether vigil uses epmd or not;
 `setup.sh` stops and masks `epmd.socket` and `epmd.service`. On a host set up
 by hand, or before this: `sudo systemctl disable --now epmd.socket epmd.service

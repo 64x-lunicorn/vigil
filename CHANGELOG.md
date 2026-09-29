@@ -86,7 +86,9 @@ read it afterwards.
   `deploy/vigil.service` gains a sandbox scored at an exposure of 3.0 or lower;
   without the flag the old unit stays and `update.sh` says so. The release node
   now listens on loopback only (`vigil@127.0.0.1`, no epmd, port 4370) and its
-  cookie is `0400`.
+  cookie is `0400`. The published tarball carries no cookie: a release
+  unpacked from it writes its own on the first `bin/vigil` command, run as the
+  service user (`sudo -u vigil <release>/bin/vigil version`).
 - **Mask epmd on a host set up before this.** Debian's `erlang-base` enables
   `epmd.socket`, which listens on port 4369 on every interface; `setup.sh` now
   stops and masks it. On an existing host:
