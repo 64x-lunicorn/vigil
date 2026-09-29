@@ -247,7 +247,8 @@ defmodule Vigil.Store do
       # nil while the last update succeeded; otherwise when it failed and why.
       stale: nil,
       # The chunk ids each of the last reloads of the index took away, newest
-      # first (changed_under/3).
+      # first: handed to Vigil.Vault.Facts, so a refusal can say that the
+      # remote changed a section under the caller (vanished/2).
       vanished: []
     }
 
@@ -438,7 +439,6 @@ defmodule Vigil.Store do
   defp in_step(params, state, perform) do
     state = bring_up_to_date(state)
     {result, state} = perform.(params, state)
-    result = changed_under(result, params, state)
     {result, state} = push_again(result, state, @push_retries)
     {result, note_push(state, result)}
   end
@@ -682,28 +682,13 @@ defmodule Vigil.Store do
   defp more_push_error(report, sentence),
     do: %{report | push_error: "#{String.trim_trailing(report.push_error)}. #{sentence}."}
 
-  # A section id that does not resolve now and did before one of the last
-  # reloads of the index names a section the remote changed underneath the
-  # caller: what it read is gone. "Not found" would be true and would not say
-  # what to do about it. Which call adopted the change does not matter — the
-  # write's own update, or a read in between that already took the section
-  # away — so the ids each reload took away are remembered (vanished/2),
-  # rather than the index before this write compared with the one after.
-  #
-  # Only an id that vanished is caught. A positional id that now resolves to
-  # another section than the caller read — a heading renamed into the name
-  # of one that was removed — resolves, and only `if_match` refuses the edit.
-  defp changed_under({:error, _reason} = result, %{id: id}, state) when is_binary(id) do
-    if Index.find_chunk(state.index, id) == nil and Enum.any?(state.vanished, &(id in &1)) do
-      {:error,
-       "#{id} no longer resolves: the note changed on the remote since it was read. " <>
-         "Read it again before editing it."}
-    else
-      result
-    end
-  end
-
-  defp changed_under(result, _params, _state), do: result
+  # A section id that the index does not resolve and one of the last
+  # reloads took away is refused as changed on the remote rather than as not
+  # found — `Vigil.Vault.Policy` words it, from the ids handed in with the
+  # facts. Which call adopted the change does not matter — the write's own
+  # update, or a read in between that already took the section away — so the
+  # ids each reload took away are remembered (vanished/2), rather than the
+  # index before this write compared with the one after.
 
   # How many reloads of the index the ids they took away are remembered for:
   # enough to span the reads and writes between a client's read and its edit,
@@ -712,7 +697,7 @@ defmodule Vigil.Store do
 
   # The index read again from disk — after an update moved the vault, and at
   # boot and on `reload` — and which chunk ids that took away remembered for
-  # changed_under/3.
+  # the facts a write is decided on.
   defp reload_index(state) do
     before = state.index
     state = load(state)
@@ -1000,7 +985,7 @@ defmodule Vigil.Store do
   defp facts(state, now) do
     Facts.over_vault(
       state.index,
-      %{layout: layout(state), naming: naming_rules(state)},
+      %{layout: layout(state), naming: naming_rules(state), vanished: state.vanished},
       now
     )
   end

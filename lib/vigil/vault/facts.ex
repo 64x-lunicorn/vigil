@@ -57,6 +57,11 @@ defmodule Vigil.Vault.Facts do
     # is what says whether a section exists — and the record it hands
     # back carries the path the write uses.
     :find_chunk,
+    # Whether a section id that `find_chunk` does not resolve resolved before
+    # one of the writer's last reloads of the index took it away: a section
+    # the remote changed under the caller, who has to read again, rather than
+    # one that was never there. It words a refusal and opens no gate.
+    :vanished?,
     # The section in a note whose heading matches, or nil (append's
     # target decision).
     :find_section
@@ -78,13 +83,15 @@ defmodule Vigil.Vault.Facts do
 
   @typedoc """
   The vault's plain facts, as the caller gathered them: its layout — which
-  paths in it are notes, and where on disk it is — and what `_domains.yml`
-  says about naming. Everything here is a fact about the vault; the instant
-  the write belongs to is not one, and travels beside it.
+  paths in it are notes, and where on disk it is — what `_domains.yml`
+  says about naming, and the chunk ids each of the last reloads of the index
+  took away. Everything here is a fact about the vault; the instant the write
+  belongs to is not one, and travels beside it.
   """
   @type vault :: %{
           layout: Layout.t(),
-          naming: %{optional(String.t()) => map}
+          naming: %{optional(String.t()) => map},
+          vanished: [MapSet.t(String.t())]
         }
 
   @doc """
@@ -108,7 +115,11 @@ defmodule Vigil.Vault.Facts do
   # sobelow_skip ["Traversal.FileModule"]
   def over_vault(
         %Index{} = index,
-        %{layout: %Layout{vault_path: vault_path} = layout, naming: naming},
+        %{
+          layout: %Layout{vault_path: vault_path} = layout,
+          naming: naming,
+          vanished: vanished
+        },
         %DateTime{} = now
       ) do
     new(
@@ -132,6 +143,7 @@ defmodule Vigil.Vault.Facts do
       end,
       count_headings: fn path -> Index.count_headings(index, path) end,
       find_chunk: fn id -> Index.find_chunk(index, id) end,
+      vanished?: fn id -> Enum.any?(vanished, &(id in &1)) end,
       find_section: fn path, heading -> Index.find_section(index, path, heading) end
     )
   end

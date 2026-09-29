@@ -8,8 +8,9 @@ defmodule Vigil.Git do
   `snapshot_index`, `restore_index` and `push`, which a write uses,
   `log_metadata`, which the load uses and no write ever asks, `history` and
   `show`, which the `history` tool and `read` at a revision ask, `tracking`,
-  which boot asks once to check the remote and branch settings against the
-  clone, and `divergence`, `fetch`, `fast_forward`, `rebase` and
+  which boot asks to check the remote and branch settings against the clone,
+  `Vigil.Store` at init for a rebase left in progress and `status` and
+  `/healthz` for whether HEAD is on the branch, and `divergence`, `fetch`, `fast_forward`, `rebase` and
   `abort_rebase`, which bring the vault up to date — at boot, on `reload`,
   before a write and after a push the remote refused — and tell `status` how
   far apart the vault and its remote are. Staging and

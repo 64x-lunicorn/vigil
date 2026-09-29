@@ -285,13 +285,30 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # A section id that does not resolve now and did before one of the last
+  # reloads of the index names a section the remote changed underneath the
+  # caller: what it read is gone. "Not found" would be true and would not say
+  # what to do about it (docs/design.md, "The server stays in step with the
+  # remote"). Only this verdict is worded so: a refusal that came before the
+  # id was resolved keeps its own reason.
+  #
+  # Only an id that vanished is caught. A positional id that now resolves to
+  # another section than the caller read — a heading renamed into the name
+  # of one that was removed — resolves, and only `if_match` refuses the edit.
   defp section_chunk(id, facts, verb) do
     case facts.find_chunk.(id) do
-      nil -> {:error, "Not found: #{id}"}
+      nil -> {:error, not_found(id, facts.vanished?.(id))}
       %{heading: nil} -> {:error, "A section without a heading cannot be #{verb}: #{id}"}
       chunk -> {:ok, chunk}
     end
   end
+
+  defp not_found(id, true = _vanished) do
+    "#{id} no longer resolves: the note changed on the remote since it was read. " <>
+      "Read it again before editing it."
+  end
+
+  defp not_found(id, false), do: "Not found: #{id}"
 
   # A section id is a position: deleting a section renumbers the ones below
   # it, so a retried delete_section would take whatever moved into the id.

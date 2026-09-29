@@ -1030,8 +1030,11 @@ half is a value its callers hold rather than a module they name.
 questions: `add`, `remove`, `move`, `commit`, `snapshot_index`,
 `restore_index`, `push` — `log_metadata`, which no write ever asks,
 `history` and `show`, which only the reads of the history ask (see "No audit
-log — the history is read, not kept"), `tracking`, which only the boot check asks (see "The vault's remote and branch
-are checked against the clone"), and `divergence`, `fetch`, `fast_forward`,
+log — the history is read, not kept"), `tracking`, which the boot check asks to check the settings against the
+clone (see "The vault's remote and branch are checked against the clone"),
+the writer at init for a rebase left in progress and `status` and `/healthz`
+for whether `HEAD` is on the branch (see "The server stays in step with the
+remote"), and `divergence`, `fetch`, `fast_forward`,
 `rebase` and `abort_rebase`, which bring the vault up to date at boot, on
 `reload`, before a write, before a read once per interval and after a refused
 push (see "The server stays in step with the remote"). Staging and committing are separate questions, which is
@@ -1236,7 +1239,10 @@ rather than comparing the index before the write with the one after it,
 because the update that adopted the change need not be the write's own: a read
 in between, fetching once per interval, may have taken the section away
 first, and the write's update then finds nothing new. Sixteen reloads bound
-what is kept; an id older than that is "Not found".
+what is kept; an id older than that is "Not found". The ids are handed to
+`Vigil.Vault.Policy` with the rest of the facts (`vanished?`), and only its
+not-found verdict is worded this way: a refusal that comes before the id is
+resolved — an id in `skills/` or an excluded directory — keeps its own reason.
 
 That refusal covers only ids that vanished. Chunk ids are positional — a
 heading's slug, numbered when it repeats — so an update can also leave an id

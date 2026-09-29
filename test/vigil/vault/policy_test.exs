@@ -750,6 +750,33 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:replace_section, %{id: "bike/x.md#nope", content: "## H"}, facts())
     end
 
+    # docs/design.md, "The server stays in step with the remote": an id a
+    # reload of the index took away names a section the remote changed under
+    # the caller. Only the not-found verdict says so; a refusal that comes
+    # before the id is resolved keeps its own reason.
+    test "an id a reload took away is refused as changed on the remote, for both section ops" do
+      f = facts(vanished?: fn id -> id == "bike/x.md#gear" end)
+
+      for op <- [:replace_section, :delete_section] do
+        assert {:error, msg} = Policy.check(op, %{id: "bike/x.md#gear", content: "text"}, f)
+        assert msg =~ "bike/x.md#gear no longer resolves"
+        assert msg =~ "Read it again"
+
+        assert {:error, "Not found: bike/x.md#other"} =
+                 Policy.check(op, %{id: "bike/x.md#other", content: "text"}, f)
+      end
+    end
+
+    test "a refusal before the id is resolved is not turned into one about the remote" do
+      f = facts(vanished?: fn _id -> true end)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:replace_section, %{id: "skills/x.md#gear", content: "text"}, f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:delete_section, %{id: "work/x.md#gear"}, f)
+    end
+
     test "a section without a heading cannot be replaced or deleted" do
       f = facts(find_chunk: fn _ -> %{heading: nil, path: "bike/x.md"} end)
 
