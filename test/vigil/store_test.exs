@@ -958,6 +958,11 @@ defmodule Vigil.StoreTest do
       assert {:error, "Unknown revision: --all"} = read_at("bike/via-carolina.md", "--all")
     end
 
+    test "read at an empty revision is read without one" do
+      assert read_at("bike/via-carolina.md#gear", "") ==
+               Store.call(@store, :read, %{id: "bike/via-carolina.md#gear", backlinks: false})
+    end
+
     test "read at a revision the note did not exist in is not found" do
       {:ok, %{commits: [initial]}} = history("bike/via-carolina.md")
 

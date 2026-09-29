@@ -2392,7 +2392,24 @@ it per commit — and the old text is read against today's vault, so its
 anything is read: it is handed to `git rev-parse --verify --end-of-options`
 peeled to a commit, so it can be neither an option nor a tree or a blob, and
 a revision starting with `-` is not tried at all. A revision that names no
-commit is a tool error, "Unknown revision".
+commit is a tool error, "Unknown revision". An empty `at` names no revision
+and is read as `read` without one.
+
+**Both read only what the index could hold.** The history holds every file
+ever committed — an excluded directory's, `skills/`, a README at the vault
+root, a template, a file that is not Markdown — and neither read may become
+the way around the boundary `VIGIL_EXCLUDE` draws or the layout the index is
+built from. So the requested path, and every name `git log --follow` traced
+the note back to, is put to the current `Vigil.Vault.Layout` first. A path
+that fails the safety check is "Invalid path", as for `read`. One that is
+excluded, a skill, or no note is answered as a path with no history: "Not
+found", from `history`, and "Not found … at <rev>" from `read` at a
+revision — the same words a note that is simply not there gets, so neither
+says whether the file exists. A commit that knew the note under such a name
+(a note moved out of an excluded directory) is left out of `history`, and
+`read` at that commit under the old name is "Not found". A path shaped like a
+note in a domain or project directory that is no longer there is still a
+note: its history is what is left of it.
 
 Both are reads like the others: answered inside the writer's read clause, and
 so fetched first once per interval (see "Reads see what another clone

@@ -463,10 +463,11 @@ defmodule Vigil.Store do
   # to answer; what a note went through is Git's (docs/design.md, "No audit
   # log"), asked through the same value a write commits through.
   defp read_answer(:history, params, state),
-    do: History.history(state.git, state.vault_path, params)
+    do: History.history(state.git, layout(state), params)
 
-  defp read_answer(:read, %{at: rev} = params, state) when is_binary(rev),
-    do: History.read_at(state.git, state.vault_path, state.index, params)
+  # An empty `at` is no revision, and is read as `read` without one.
+  defp read_answer(:read, %{at: rev} = params, state) when is_binary(rev) and rev != "",
+    do: History.read_at(state.git, layout(state), state.index, params)
 
   defp read_answer(op, params, state), do: apply(Index, op, [state.index, params])
 

@@ -34,16 +34,26 @@ defmodule Vigil.StoreExcludeTest do
     Contains the unique search word nestedsearchword. See [[vigil]].
     """)
 
+    # Committed, and no note: a file at the vault root, one that is not
+    # Markdown, and one in a `_`-prefixed directory, all of which the Git
+    # history holds.
+    File.write!(Path.join(vault, "README.md"), "# Readme\n\nreadmesearchword\n")
+    File.write!(Path.join(vault, "bike/notes.txt"), "not markdown\n")
+    File.mkdir_p!(Path.join(vault, "_templates"))
+    File.write!(Path.join(vault, "_templates/meeting.md"), "# Meeting\n\ntemplateword\n")
+
+    git = Vigil.Git.CommitLog.new(vault)
+
     start_supervised!(
       {Store,
        vault_path: vault,
        exclude: ["work", "geheim", "verborgen"],
        git_remote: "origin",
-       git: Vigil.Git.CommitLog.new(vault),
+       git: git,
        name: @store}
     )
 
-    %{vault: vault}
+    %{vault: vault, git: git}
   end
 
   test "VIGIL_EXCLUDE hides the folder from search, the index, read, and create even though it exists on disk",
@@ -198,6 +208,71 @@ defmodule Vigil.StoreExcludeTest do
       refute File.exists?(Path.join(vault, "projects/verborgen"))
       assert File.read!(Path.join(vault, @nested)) == before
       assert File.exists?(Path.join(vault, "projects/vigil/vigil.md"))
+    end
+  end
+
+  # The two reads that answer out of the Git history rather than the index
+  # (Vigil.History) see what the index sees and nothing more: the history
+  # holds every file ever committed, excluded or not, note or not, and
+  # neither read may become the way around the boundary the index keeps.
+  describe "history and read at a revision" do
+    defp history(path), do: Store.call(@store, :history, %{path: path, limit: 20})
+
+    defp read_at(id, at), do: Store.call(@store, :read, %{id: id, at: at, backlinks: false})
+
+    defp initial_commit do
+      {:ok, %{commits: [initial]}} = history("bike/via-carolina.md")
+      initial.commit
+    end
+
+    @hidden [
+      "work/secret.md",
+      "projects/geheim/plan.md",
+      "skills/tdd.md",
+      "README.md",
+      "bike/notes.txt"
+    ]
+
+    test "answer a path that is no note, or is excluded, as one with no history" do
+      for path <- @hidden do
+        assert history(path) == {:error, "Not found: #{path}"}, path
+      end
+    end
+
+    test "read at a revision answers it as not there at that revision" do
+      at = initial_commit()
+
+      for path <- @hidden do
+        assert read_at(path, at) == {:error, "Not found: #{path} at #{at}"}, path
+      end
+
+      assert read_at("work/secret.md#secret", at) ==
+               {:error, "Not found: work/secret.md#secret at #{at}"}
+    end
+
+    # A `_`-prefixed directory fails the safety check, as it does for `read`.
+    test "an unsafe path is still refused as a path" do
+      at = initial_commit()
+
+      for path <- ["../outside.md", "_templates/meeting.md", "_domains.yml"] do
+        assert history(path) == {:error, "Invalid path"}, path
+        assert read_at(path, at) == {:error, "Invalid path"}, path
+      end
+    end
+
+    # A note that was moved out of an excluded directory keeps the commits
+    # it had there, under the excluded name: those are dropped, and the name
+    # it had then cannot be read at them.
+    test "leave out the commits a note had under an excluded name", %{vault: vault, git: git} do
+      at = initial_commit()
+      :ok = git.move.(vault, "work/secret.md", "bike/secret.md")
+      {:ok, _} = git.commit.(vault, ["work/secret.md", "bike/secret.md"], "move out of work")
+
+      assert {:ok, %{path: "bike/secret.md", commits: [moved]}} = history("bike/secret.md")
+      assert %{path: "bike/secret.md", message: "move out of work"} = moved
+
+      assert read_at("work/secret.md", at) == {:error, "Not found: work/secret.md at #{at}"}
+      assert {:ok, %{path: "bike/secret.md"}} = read_at("bike/secret.md", moved.commit)
     end
   end
 end

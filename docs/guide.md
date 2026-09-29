@@ -349,7 +349,10 @@ lists the commits that touched a note, following it across renames, and says
 for each whether vigil or a human made it (by the author address,
 `vigil@local` being vigil's). `read` with `at` set to one of those commits
 returns the note or section as it was then, under the path it had then; a
-revision that names no commit is a tool error.
+revision that names no commit is a tool error. Both see only notes: a path in
+an excluded directory, under `skills/`, or a file that is no note (a README at
+the vault root, a template) is "Not found" however much history it has, and a
+commit that knew a note under an excluded name is left out.
 
 `limit` is 1–25 for `search` (default 10), 1–100 for `list` (default 25)
 and 1–100 for `history` (default 20), and `depth` is 1 or 2. A value outside the range is a tool error naming
