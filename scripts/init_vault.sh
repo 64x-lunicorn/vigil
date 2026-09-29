@@ -4,6 +4,8 @@
 set -euo pipefail
 
 VAULT_DIR="${1:-.}"
+# The Obsidian templates ship beside this script. Resolved before the cd below.
+OBSIDIAN_TEMPLATES="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/templates/obsidian"
 # shellcheck disable=SC2206 # VIGIL_INIT_DOMAINS is deliberately word-split
 DOMAINS=(${VIGIL_INIT_DOMAINS:-admin gear home journal projects training} skills)
 
@@ -61,6 +63,21 @@ Elixir server that reads this vault and serves it over MCP as a memory backend.
 EOF
   echo "created projects/vigil/vigil.md"
 fi
+
+# Templater templates, their user script and a Dataview dashboard, for editing
+# the vault in Obsidian (docs/guide.md, "Editing by hand"). `_templates/` is not
+# a domain and a root file is not a note, so vigil reads neither. A file the
+# vault already has is the owner's and is never overwritten.
+while IFS= read -r -d '' template; do
+  relative="${template#"$OBSIDIAN_TEMPLATES"/}"
+  if [ -e "$relative" ]; then
+    echo "$relative already exists, left untouched"
+  else
+    mkdir -p "$(dirname "$relative")"
+    cp "$template" "$relative"
+    echo "created $relative"
+  fi
+done < <(find "$OBSIDIAN_TEMPLATES" -type f -print0 | sort -z)
 
 for domain in "${DOMAINS[@]}"; do
   if [ -z "$(find "$domain" -mindepth 1 -not -name '.gitkeep' -print -quit 2>/dev/null)" ]; then

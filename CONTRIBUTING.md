@@ -81,6 +81,8 @@ bash scripts/test/git_settings_test.sh
 bash scripts/test/push_safety_net_test.sh
 bash scripts/test/conventions_skill_test.sh
 bash scripts/test/grants_test.sh
+bash scripts/test/obsidian_templates_test.sh
+node scripts/test/slug_js_test.mjs
 ```
 
 CI pins ShellCheck to the version named in
@@ -126,6 +128,13 @@ reporting — `pass`, `fail`, `assert_eq`, `section`, and the `report` a suite
 ends on, which is what decides its exit code. `check_only_test.sh` is the
 exception: its `assert_eq` and `assert_contains` carry a message shape of
 their own. A new suite sources the harness.
+
+`obsidian_templates_test.sh` runs `init_vault.sh` against a temp directory:
+that a new vault gets the Obsidian templates committed, and that a vault's own
+copies are kept. `slug_js_test.mjs` is plain Node without dependencies: it
+checks the JavaScript slug in the Templater user script against
+`test/fixtures/slug_examples.json`, the table `mix test` checks `Vigil.Slug`
+against. Change one slug and the table, and both have to follow.
 
 For changes to `mix.exs`, `config/`, the release or anything on the boot path,
 run the release smoke test. It builds a production release, boots it against a

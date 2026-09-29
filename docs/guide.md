@@ -984,6 +984,47 @@ sudo -u vigil git -C /var/lib/vigil/vault pull --rebase
 sudo -u vigil git -C /var/lib/vigil/vault push
 ```
 
+### Obsidian
+
+A vault made by `init_vault.sh` (through `init.sh`) comes with what an
+Obsidian clone needs to write notes the way vigil reads them:
+
+- `_templates/reference.md`, `decision.md` and `event.md` — Templater
+  templates, one per type. Each writes the frontmatter with its `type` and an
+  H1 with the title; `decision` adds the sections Context, Decision,
+  Alternatives and Consequences, and `event` writes `starts` (now) and `ends`
+  (an hour later) as ISO 8601 with the offset vigil requires. Adjust the times,
+  not their format. The headings are English; translate them in your vault if
+  you like.
+- `_templates/_scripts/vigil_title.js` — the Templater user script every
+  template calls first. On a note that is still untitled it asks for a title;
+  it renames the file to the title's slug, the one vigil would give it, and
+  hands the title to the H1.
+- `Dashboard.md` at the vault root — Dataview queries: upcoming events,
+  decisions longest untouched, recent changes, notes without a type.
+
+vigil reads none of them: `_templates/` is not a domain, and a file at the
+root is not a note (`mix vigil.vault_check` lists `Dashboard.md` as
+information, not as a finding). The script never overwrites a file the vault
+already has, so a translated template stays yours. A vault that predates vigil
+gets none of this from `init.sh --existing-vault`; copy
+[`scripts/templates/obsidian/`](../scripts/templates/obsidian/) into it by hand
+if you want them.
+
+In Obsidian, install three community plugins:
+
+1. **Obsidian Git** — pulls before you edit and commits and pushes what you
+   changed, which is steps 2 and 3 above. Turn on pull on startup and an
+   automatic commit-and-sync interval; the sync method *merge* or *rebase*
+   both work.
+2. **Templater** — set *Template folder location* to `_templates` and *Script
+   files folder location* (the user-script folder) to `_templates/_scripts`,
+   so `tp.user.vigil_title` is found. Create a note in the domain it belongs
+   to and insert a template there; a note at the vault root or in a directory
+   that is not a domain is not read by vigil.
+3. **Dataview** — renders `Dashboard.md`. Its queries are plain Dataview
+   queries; JavaScript queries can stay off.
+
 ---
 
 ## Adopting an existing vault

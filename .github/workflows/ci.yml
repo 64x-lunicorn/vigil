@@ -257,6 +257,23 @@ jobs:
       - name: init.sh installs the conventions skill as a commit
         run: bash scripts/test/conventions_skill_test.sh
 
+      # init_vault.sh installs the Obsidian templates and never overwrites a
+      # vault's own.
+      - name: init_vault.sh installs the Obsidian templates
+        run: bash scripts/test/obsidian_templates_test.sh
+
+      # The Obsidian template's slug is a JavaScript copy of Vigil.Slug. The
+      # test job checks the Elixir against test/fixtures/slug_examples.json;
+      # this checks the copy against the same table. Node is pinned like
+      # every other tool here rather than taken from the runner image.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: The Obsidian slug agrees with Vigil.Slug
+        run: node scripts/test/slug_js_test.mjs
+
       # The operator's revocation command: what it sends into the node, what
       # it asks before revoking everything, and the exit codes.
       - name: grants.sh lists and revokes through the running node
