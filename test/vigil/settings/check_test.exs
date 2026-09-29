@@ -33,6 +33,7 @@ defmodule Vigil.Settings.CheckTest do
     reload_rate_limit_rpm: 6,
     oauth_rate_limit_rpm: 30,
     oauth_register_rate_limit_rpm: 5,
+    read_fetch_interval: 60,
     https_required: true
   ]
 
@@ -89,6 +90,27 @@ defmodule Vigil.Settings.CheckTest do
     test "a port above 65535 is refused" do
       assert [message] = refused(port: 70_000)
       assert message =~ "VIGIL_PORT"
+    end
+  end
+
+  # The one integer setting where 0 means something: it turns fetching before
+  # reads off (docs/design.md, "Reads see what another clone pushed").
+  describe "the read fetch interval" do
+    test "zero is accepted, and turns fetching before reads off" do
+      assert {:ok, %{read_fetch_interval: 0}} = check_with(read_fetch_interval: 0)
+    end
+
+    test "a positive number of seconds is accepted" do
+      assert {:ok, %{read_fetch_interval: 300}} = check_with(read_fetch_interval: 300)
+    end
+
+    test "a negative value or one that is not an integer is refused, naming the variable" do
+      for bad <- [-1, "sixty", "60s"] do
+        assert [message] = refused(read_fetch_interval: bad)
+        assert message =~ "VIGIL_READ_FETCH_INTERVAL"
+        assert message =~ "non-negative integer"
+        assert message =~ inspect(bad)
+      end
     end
   end
 

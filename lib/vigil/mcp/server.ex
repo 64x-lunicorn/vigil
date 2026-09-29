@@ -156,13 +156,18 @@ defmodule Vigil.MCP.Server do
   # it is what `update.sh` waits on after a start, before any token exists.
   # So it answers only a request made on this host, and 404 to every other,
   # as if it were not there. 200 when the index is loaded and the writer
-  # answers, 503 otherwise. The push's error text is left out — git's words
-  # can name the remote's URL, and that is the `status` tool's to show, behind
-  # a token.
+  # answers, 503 otherwise. The error text of the last push and of a failed
+  # update (`stale`) is left out — git's words can name the remote's URL, and
+  # that is the `status` tool's to show, behind a token.
   get "/healthz" do
     if on_this_host?(conn) do
       status = Store.status(conn.private.store)
-      report = Map.update!(status, :last_push, &without_error/1)
+
+      report =
+        status
+        |> Map.update!(:last_push, &without_error/1)
+        |> Map.update!(:stale, &without_error/1)
+
       send_json(conn, if(status.healthy, do: 200, else: 503), report)
     else
       send_resp(conn, 404, "")
@@ -208,7 +213,7 @@ defmodule Vigil.MCP.Server do
   defp loopback?(_ip), do: false
 
   defp without_error(nil), do: nil
-  defp without_error(last_push), do: Map.delete(last_push, :error)
+  defp without_error(report), do: Map.delete(report, :error)
 
   ## MCP handling
 
@@ -562,15 +567,19 @@ defmodule Vigil.MCP.Server do
   # session's state too: a failed first call is still a call the session
   # made, and repeating the long first form on the next one would be a lie
   # about which response is first.
-  defp build_tool_call_result(result, envelope) do
-    case result do
-      {:ok, value} ->
-        %{content: [text_content(%{result: value}, envelope)]}
+  #
+  # What a result says about itself beside its value — `stale: true` for a
+  # read answered from a vault that could not be brought up to date — sits
+  # next to `result` or `error`, so it reads the same on every tool whatever
+  # the result's own shape.
+  defp build_tool_call_result({tag, value}, envelope),
+    do: build_tool_call_result({tag, value, %{}}, envelope)
 
-      {:error, message} ->
-        %{content: [text_content(%{error: message}, envelope)], isError: true}
-    end
-  end
+  defp build_tool_call_result({:ok, value, beside}, envelope),
+    do: %{content: [text_content(Map.put(beside, :result, value), envelope)]}
+
+  defp build_tool_call_result({:error, message, beside}, envelope),
+    do: %{content: [text_content(Map.put(beside, :error, message), envelope)], isError: true}
 
   defp text_content(payload, envelope) do
     %{type: "text", text: Jason.encode!(Map.merge(payload, envelope))}

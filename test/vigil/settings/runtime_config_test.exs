@@ -27,7 +27,7 @@ defmodule Vigil.Settings.RuntimeConfigTest do
              ~w(VIGIL_PORT VIGIL_TZ VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
                 VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
                 VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_CONSENT_FAILURES_PER_HOUR
-                VIGIL_ALLOWED_ORIGINS
+                VIGIL_ALLOWED_ORIGINS VIGIL_READ_FETCH_INTERVAL
                 VIGIL_GIT_REMOTE VIGIL_GIT_BRANCH)
 
   setup do
@@ -56,13 +56,14 @@ defmodule Vigil.Settings.RuntimeConfigTest do
     assert checked.port == 4000
     assert checked.rate_limit_rpm == 60
     assert checked.consent_failures_per_hour == 50
+    assert checked.read_fetch_interval == 60
   end
 
   test "a non-integer reaches the check as written and is refused by name" do
     for var <-
           ~w(VIGIL_PORT VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM VIGIL_RELOAD_RATE_LIMIT_RPM
              VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM
-             VIGIL_CONSENT_FAILURES_PER_HOUR) do
+             VIGIL_CONSENT_FAILURES_PER_HOUR VIGIL_READ_FETCH_INTERVAL) do
       System.put_env(var, "12abc")
 
       assert {:error, [message]} = check(prod_config())
@@ -78,6 +79,12 @@ defmodule Vigil.Settings.RuntimeConfigTest do
 
     assert {:error, [message]} = check(prod_config())
     assert message =~ "VIGIL_SKILLKEY_TTL"
+  end
+
+  test "a read fetch interval of zero is accepted" do
+    System.put_env("VIGIL_READ_FETCH_INTERVAL", "0")
+
+    assert {:ok, %{read_fetch_interval: 0}} = check(prod_config())
   end
 
   test "the remote defaults to github, and an unset branch to the clone's" do

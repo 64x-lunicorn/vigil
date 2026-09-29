@@ -537,6 +537,89 @@ defmodule Vigil.MCP.ServerTest do
     assert Map.has_key?(payload, "_")
   end
 
+  # docs/design.md, "Reads see what another clone pushed": a read answered
+  # while the vault could not be brought up to date says so beside its
+  # result, and `status` says since when and why.
+  describe "a remote that cannot be reached" do
+    setup %{vault: vault} do
+      :ok = stop_supervised(Store)
+      git = %{Vigil.Git.CommitLog.new(vault) | fetch: fn _, _, _ -> {:error, "unreachable"} end}
+
+      start_supervised!(
+        {Store, vault_path: vault, git: git, name: @store, read_fetch_interval: 60}
+      )
+
+      :ok
+    end
+
+    defp tool_payload(persistence, token, name, arguments) do
+      conn =
+        post(
+          persistence,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 3,
+            method: "tools/call",
+            params: %{name: name, arguments: arguments}
+          },
+          [{"mcp-session-id", "session-stale"}]
+        )
+
+      conn.resp_body
+      |> Jason.decode!()
+      |> get_in(["result", "content"])
+      |> hd()
+      |> Map.fetch!("text")
+      |> Jason.decode!()
+    end
+
+    @tag :capture_log
+    test "a read succeeds from the current index, with stale: true beside its result", %{
+      persistence: persistence,
+      token: token
+    } do
+      payload = tool_payload(persistence, token, "search", %{query: "tires", domain: "bike"})
+
+      assert [_ | _] = payload["result"]
+      assert payload["stale"] == true
+    end
+
+    @tag :capture_log
+    test "status says since when and why; /healthz leaves out why", %{
+      persistence: persistence,
+      token: token
+    } do
+      assert %{"stale" => %{"at" => _, "error" => "unreachable"}} =
+               tool_payload(persistence, token, "status", %{})["result"]
+
+      conn =
+        conn(:get, "/healthz") |> Map.put(:host, "localhost") |> Server.call(opts(persistence))
+
+      assert conn.status == 200
+      assert %{"healthy" => true, "stale" => stale} = Jason.decode!(conn.resp_body)
+      assert Map.keys(stale) == ["at"]
+    end
+  end
+
+  test "a fresh vault's read carries no stale field", %{persistence: persistence, token: token} do
+    conn =
+      post(
+        persistence,
+        token,
+        %{
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: %{name: "search", arguments: %{query: "tires"}}
+        },
+        [{"mcp-session-id", "session-fresh"}]
+      )
+
+    text = conn.resp_body |> Jason.decode!() |> get_in(["result", "content"]) |> hd()
+    refute Map.has_key?(Jason.decode!(text["text"]), "stale")
+  end
+
   test "second call in the same session gets the time-only envelope", %{
     persistence: persistence,
     token: token

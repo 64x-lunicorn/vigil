@@ -18,8 +18,8 @@ lies.
 **2. One writer.** Only vigil writes to *its* working tree. Nothing else edits
 files there. A human who edits — in Obsidian with Obsidian Git, or in any
 other editor — does so in a clone of their own, commits under their own name
-and pushes to the remote. vigil adopts those commits before its next write, at
-boot and on `reload`. What vigil committed and has not pushed yet is its own
+and pushes to the remote. vigil adopts those commits before its next write,
+before a read at most once per interval, at boot and on `reload`. What vigil committed and has not pushed yet is its own
 to move: its single-file commits are rebased onto whatever the remote holds,
 merge commits included, and pushed again. vigil never merges a human's work
 and never overwrites it. A rebase that conflicts is aborted, vigil's commit
@@ -814,9 +814,10 @@ attributable to either the assistant or the human.
 **A human edit arrives as a commit, never as a file.** Nothing but vigil
 touches its working tree, so a human change — made in Obsidian with Obsidian
 Git, or by hand — is made in a clone, committed under the human's own
-identity and pushed to the remote. The next load — a restart or a `reload` —
-and the next write fetch it and rebuild the index from the result (see "The
-server stays in step with the remote"). With no unpushed commits of its own
+identity and pushed to the remote. The next load (a restart or a `reload`),
+the next write and, once an interval has passed, the next read fetch it and
+rebuild the index from the result (see "The server stays in step with the
+remote" and "Reads see what another clone pushed"). With no unpushed commits of its own
 vigil fast-forwards. With some — typically one whose push was refused
 because the human pushed first — it rebases them onto the remote: vigil's
 commits are its own single-file changes, and replaying them on top of the
@@ -883,8 +884,8 @@ questions: `add`, `remove`, `move`, `commit`, `snapshot_index`,
 `tracking`, which only the boot check asks (see "The vault's remote and branch
 are checked against the clone"), and `divergence`, `fetch`, `fast_forward`,
 `rebase` and `abort_rebase`, which bring the vault up to date at boot, on
-`reload`, before a write and after a refused push (see "The server stays in
-step with the remote"). Staging and committing are separate questions, which is
+`reload`, before a write, before a read once per interval and after a refused
+push (see "The server stays in step with the remote"). Staging and committing are separate questions, which is
 what lets a test make a commit fail *after* its `git rm` has happened (see "A
 failed commit leaves the vault as it was"). `log_metadata` belongs to the load, and
 `Vigil.Store` asks it directly. A seam drawn around the write effect alone
@@ -1075,8 +1076,8 @@ unreachable remote, a conflict — is what `reload` reports as `pull_failed`,
 and the vault is read as it stands regardless.
 
 The decision is in that one function on purpose, so that what it adopts and
-when — freshening before reads at a bounded rate, next — is a change to it
-rather than a second path beside it.
+when is a change to it rather than a second path beside it — which is how
+reads came to use it too (see "Reads see what another clone pushed").
 
 **Nothing about it can fail a write.** A fetch, a fast-forward or a rebase
 that fails is logged, and the write goes ahead on the vault as it was; its
@@ -1089,9 +1090,11 @@ Git value like every other (see "Git is reached through a value"); only
 
 **`status` and `/healthz` say whether it is.** Both report the same facts: is
 the index loaded, does the writer answer, how many commits is the vault
-`ahead` of the remote and `behind` it, and the last push's result and time.
-`ahead` and `behind` are read locally — `behind` is as fresh as the last
-fetch, which happens before every write. A conflict shows here as a vault both
+`ahead` of the remote and `behind` it, the last push's result and time, and
+`stale` — `null` while the last attempt to bring the vault up to date
+succeeded, otherwise when it failed and why. `ahead` and `behind` are read
+locally — `behind` is as fresh as the last fetch, which happens before every
+write and, at most once per interval, before a read. A conflict shows here as a vault both
 ahead and behind, with the path in the last push's error. `Vigil.Store.status/2` answers in the
 caller's process: whether the index is loaded is read from the writer's table,
 and the writer is asked the rest with a timeout of five seconds, so a writer
@@ -1115,14 +1118,60 @@ carries none of the headers a proxy adds (`Forwarded`, `X-Forwarded-For`,
 `X-Real-IP`, `CF-Connecting-IP`, or the one `VIGIL_TRUSTED_PROXY_HEADER`
 names). Every other request gets a 404, as if the route were not there. The
 host check also refuses a page that rebinds its own name onto 127.0.0.1. The
-push's error text is left out of `/healthz` — git's words can name the remote —
-and shown by `status`, behind a token.
+error text of the last push and of `stale` is left out of `/healthz` — git's
+words can name the remote — and shown by `status`, behind a token.
 
 **A failed push is also a telemetry event**, `[:vigil, :push, :failed]`,
 emitted by `Vigil.Commit.push/4` — the one place every push, a note's and a
 skill's, goes through — with the vault path, remote, branch and git's reason.
 It is what leaves the vault and its remote apart, and watching for it should
 not mean reading logs.
+
+---
+
+## Reads see what another clone pushed
+
+With the vault brought up to date only before a write, at boot and on
+`reload`, a human who pushed from Obsidian and wrote nothing through vigil
+afterwards saw `search` and `read` answer from the old state until somebody
+remembered `reload`.
+
+**Before a read, the vault is brought up to date — at most once per
+interval.** The read tools — every operation the index answers: `search`,
+`read`, `links`, `lint`, `current`, and any read added to that set — go
+through `bring_up_to_date/1` first, the function a write goes through, when
+the vault last asked the remote at least `VIGIL_READ_FETCH_INTERVAL` seconds
+ago (60 by default). Any update counts, a write's and `reload`'s and the
+load's at boot as well as a read's, so a read right after a write does not
+fetch again. The index is rebuilt only when the update moved the branch; a
+remote that holds nothing new costs a fetch and nothing else. `0` turns the
+behaviour off: reads then answer exactly as they did before, and a human's
+commits arrive with the next write, `reload` or restart. The interval is one
+entry in `Vigil.Settings.Check` and has to be a non-negative integer.
+`status`, `reload`, `skill_list` and `skill_read` are not reads of the index
+and do not fetch.
+
+**Inside the single writer, with a timeout of its own.** Reads already wait
+behind the writer (see "Known trade-offs"), and the fetch is made there too, so
+it cannot race a write. That is why it is bounded more tightly than a write's:
+five seconds, after which the writer stops waiting and answers. The fetch runs
+in a process of its own that is killed when the time is up; a `git fetch` it
+started goes on within `Vigil.Git`'s own network bounds, and what it brings is
+adopted by the next update. A slow remote delays one read by at most the
+timeout, once per interval.
+
+**A failed fetch never fails the read.** A fetch that fails or does not
+answer in time, and a rebase that conflicts, leave the index as it stands; the
+read is answered from it, and the response carries `"stale": true` beside
+`result` (or `error`) — one field, the same on every read tool whatever the
+result's own shape, and absent when the vault is in step. `status` carries
+the detail as `stale: {at, error}`, and `/healthz` the same without the error
+text. The flag stays until an update succeeds, whichever call makes it. With
+the interval at `0` reads are not flagged; `status` still reports a failed
+update.
+
+It keeps the non-goals "No file watcher" and "No scheduler": nothing runs
+unless a tool is called.
 
 ---
 
@@ -1442,7 +1491,10 @@ the SkillKey TTL refuse boot when they are not positive integers. A TTL of `0`
 used to boot and then fail every `skill_read` and every write, and a budget
 that fell back to its default with a warning was a limit quietly not the one
 configured. `Vigil.RateLimit.budget/3` keeps its fallback for a router built
-outside the supervision tree, but a deployment never reaches it.
+outside the supervision tree, but a deployment never reaches it. The one
+integer where `0` is a setting rather than a typo is
+`VIGIL_READ_FETCH_INTERVAL`: it turns fetching before reads off, so it must be
+a non-negative integer.
 
 **An unknown `VIGIL_TZ` refuses boot; it does not fall back.** Of refusing
 and falling back to UTC with a logged warning, refusing is the simpler and the
@@ -2036,7 +2088,8 @@ Not built, and not "prepared for" either:
 - No Phoenix, no Ecto, no database
 - No LLM call inside the server
 - No file watcher — vigil is the only writer of its working tree; a human's
-  commits arrive through the remote and are adopted on restart or `reload`
+  commits arrive through the remote and are adopted on read (at most once per
+  `VIGIL_READ_FETCH_INTERVAL`), write, restart or `reload`
 - No `create_domain` tool — the server creates no structure, because it would
   then be deciding its own filing system
 - No write access to `_domains.yml`
@@ -2050,7 +2103,9 @@ Not built, and not "prepared for" either:
 plain value held in `Vigil.Store`'s process state, so every read is a
 `GenServer.call`. For a single-user knowledge base this is a feature — it
 makes writes atomic with respect to reads — but it is a real ceiling if the
-workload ever becomes concurrent.
+workload ever becomes concurrent. A read that is due to fetch (see "Reads see
+what another clone pushed") holds every call behind it for up to the fetch's
+five-second timeout, once per interval.
 
 **The full index rebuild on every write is O(vault), not O(change).** Cheap at
 the sizes this targets, measured above. It would need revisiting an order of

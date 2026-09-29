@@ -426,7 +426,7 @@ defmodule Vigil.MCP.Tools do
       name: "status",
       title: "Server status",
       description:
-        "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), and the last push's result and time.",
+        "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), the last push's result and time, and, as stale, when and why the vault last failed to update from the remote.",
       write: false,
       call: :status,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
@@ -609,7 +609,9 @@ defmodule Vigil.MCP.Tools do
   parameter) is reported as a tool error before the Store's mailbox is
   reached, naming every violation rather than only the first. Undeclared
   parameters are ignored. What is left is the call the row declares.
-  Returns `{:ok, result}` or `{:error, message}`.
+  Returns `{:ok, result}` or `{:error, message}` — with a third element,
+  `%{stale: true}`, for a read answered while the vault could not be brought
+  up to date with its remote.
 
   `args` is whatever the client sent as `arguments`, and a JSON object is the
   only container a parameter can be looked up in. Anything else is refused
@@ -633,7 +635,7 @@ defmodule Vigil.MCP.Tools do
   secret is a gate a test cannot hand another deployment.
   """
   @spec dispatch(GenServer.server(), String.t(), term(), DateTime.t(), SkillKey.t()) ::
-          {:ok, term()} | {:error, String.t()}
+          {:ok, term()} | {:error, String.t()} | {:ok | :error, term(), %{stale: true}}
   def dispatch(store \\ Store.default_name(), name, args, now, key) do
     case find_tool(name) do
       nil ->
@@ -792,6 +794,17 @@ defmodule Vigil.MCP.Tools do
   # off the shape it returns — a `raw: true` in the table would be a second
   # statement of it, free to disagree with the Store, and removing that class
   # of twin is what the table is for.
+  #
+  # A read answered from a vault that could not be brought up to date comes
+  # back tagged (`Vigil.Store`, docs/design.md, "Reads see what another clone
+  # pushed"), and the tag becomes a third element the router puts beside the
+  # result as `stale: true` — on every read tool, from the one clause that
+  # answers them all, rather than as a field in each result's own shape.
+  defp to_result({:stale, answer}) do
+    {tag, value} = to_result(answer)
+    {tag, value, %{stale: true}}
+  end
+
   defp to_result({:ok, _} = result), do: result
   defp to_result({:error, _} = result), do: result
   defp to_result(value), do: {:ok, value}

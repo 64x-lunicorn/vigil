@@ -53,7 +53,8 @@ defmodule Vigil.Settings.Check do
     {:rate_limit_rpm, "VIGIL_RATE_LIMIT_RPM", :positive_integer},
     {:reload_rate_limit_rpm, "VIGIL_RELOAD_RATE_LIMIT_RPM", :positive_integer},
     {:oauth_rate_limit_rpm, "VIGIL_OAUTH_RATE_LIMIT_RPM", :positive_integer},
-    {:oauth_register_rate_limit_rpm, "VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", :positive_integer}
+    {:oauth_register_rate_limit_rpm, "VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", :positive_integer},
+    {:read_fetch_interval, "VIGIL_READ_FETCH_INTERVAL", :non_negative_integer}
   ]
 
   @min_password_length 12
@@ -193,6 +194,15 @@ defmodule Vigil.Settings.Check do
     if is_integer(value) and value > 0,
       do: {:ok, value},
       else: {:error, "a positive integer, got #{inspect(value)}"}
+  end
+
+  # Seconds, and the one integer where 0 is a setting rather than a typo: it
+  # turns fetching before reads off (docs/design.md, "Reads see what another
+  # clone pushed").
+  defp check_value(:non_negative_integer, value, _config) do
+    if is_integer(value) and value >= 0,
+      do: {:ok, value},
+      else: {:error, "a non-negative integer, got #{inspect(value)}"}
   end
 
   defp check_value(:port, value, _config) do

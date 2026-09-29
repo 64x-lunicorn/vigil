@@ -544,7 +544,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), and the last push's result and time.",
+    "description": "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), the last push's result and time, and, as stale, when and why the vault last failed to update from the remote.",
     "inputSchema": {
       "properties": {},
       "type": "object"

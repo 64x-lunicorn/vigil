@@ -77,6 +77,10 @@ config :vigil,
   # `:dets` row and fsyncs it.
   oauth_rate_limit_rpm: integer.("VIGIL_OAUTH_RATE_LIMIT_RPM", "30"),
   oauth_register_rate_limit_rpm: integer.("VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM", "5"),
+  # Seconds between two fetches a read may trigger: a read brings the vault up
+  # to date first, at most once per this many seconds. 0 turns it off, and a
+  # human's commits then arrive with the next write, `reload` or restart.
+  read_fetch_interval: integer.("VIGIL_READ_FETCH_INTERVAL", "60"),
   # Shape the writing instructions the server hands to the MCP client. These
   # describe the *vault*, not the server: whose notes these are, and which
   # language they are written in. The server's own output is always English.

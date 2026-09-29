@@ -1397,6 +1397,227 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # docs/design.md, "Reads see what another clone pushed": a read brings the
+  # vault up to date first, the way a write does, but at most once per
+  # interval, with a fetch bounded by a timeout of its own. Time is the
+  # writer's `clock_ms`, advanced by hand, so "within one interval" is stated
+  # rather than slept through.
+  describe "reads see what another clone pushed" do
+    @elsewhere "---\ntype: reference\n---\n# Pushed elsewhere\nA zanzibar quokka.\n"
+
+    defp freshening_store(vault, opts \\ []) do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+      git = Keyword.get(opts, :wrap, & &1).(git)
+      clock = :counters.new(1, [])
+
+      start_supervised!(
+        {Store,
+         vault_path: vault,
+         git: git,
+         name: @store,
+         read_fetch_interval: Keyword.get(opts, :interval, 60),
+         read_fetch_timeout: Keyword.get(opts, :timeout, 5_000),
+         clock_ms: fn -> :counters.get(clock, 1) end}
+      )
+
+      {log, clock}
+    end
+
+    defp advance(clock, seconds), do: :counters.add(clock, 1, seconds * 1_000)
+
+    defp fetches(log), do: Enum.count(CommitLog.calls(log), &match?({:fetch, _, _}, &1))
+
+    defp quokkas, do: search(%{query: "zanzibar quokka"})
+
+    # A fetch that answers `answer` from its `n`-th call on; the ones before
+    # it — the load at boot — reach the commit log's remote as usual.
+    defp fetch_from(git, n, answer) do
+      asked = :counters.new(1, [])
+
+      %{
+        git
+        | fetch: fn vault, remote, branch ->
+            :counters.add(asked, 1, 1)
+
+            if :counters.get(asked, 1) >= n,
+              do: answer.(),
+              else: git.fetch.(vault, remote, branch)
+          end
+      }
+    end
+
+    test "a commit pushed from another clone shows up in search within one interval, with no reload",
+         %{vault: vault} do
+      {log, clock} = freshening_store(vault)
+      CommitLog.push_from_elsewhere(log, "bike/elsewhere.md", @elsewhere)
+
+      # The load at boot fetched a moment ago: the read does not fetch again.
+      assert quokkas() == []
+
+      advance(clock, 60)
+
+      assert [%{id: "bike/elsewhere.md" <> _} | _] = quokkas()
+    end
+
+    test "within one interval no second fetch happens, whichever read asks", %{vault: vault} do
+      {log, clock} = freshening_store(vault)
+      assert fetches(log) == 1
+
+      advance(clock, 60)
+      quokkas()
+      assert fetches(log) == 2
+
+      quokkas()
+      Store.call(@store, :read, %{id: "bike/via-carolina.md", backlinks: false})
+      Store.call(@store, :links, %{id: "bike/via-carolina.md", direction: :both, depth: 1})
+      Store.call(@store, :lint, %{})
+      Store.call(@store, :current, %{})
+      advance(clock, 59)
+      quokkas()
+      assert fetches(log) == 2
+
+      advance(clock, 1)
+
+      for op <- [:lint, :current] do
+        Store.call(@store, op, %{})
+        advance(clock, 60)
+      end
+
+      assert fetches(log) == 4
+    end
+
+    test "a write's fetch counts: a read right after it does not fetch again", %{vault: vault} do
+      {log, clock} = freshening_store(vault)
+      advance(clock, 60)
+
+      {:ok, _} =
+        Store.call(@store, :create, %{
+          path: "bike/written.md",
+          type: "reference",
+          content: "# Written\ntext",
+          force: true
+        })
+
+      assert fetches(log) == 2
+      quokkas()
+      assert fetches(log) == 2
+    end
+
+    test "an interval of 0 turns it off", %{vault: vault} do
+      {log, clock} = freshening_store(vault, interval: 0)
+      CommitLog.push_from_elsewhere(log, "bike/elsewhere.md", @elsewhere)
+      advance(clock, 3_600)
+
+      assert quokkas() == []
+      assert fetches(log) == 1
+    end
+
+    test "the index is rebuilt only when the remote moved", %{vault: vault} do
+      loads = :counters.new(1, [])
+
+      counting = fn git ->
+        %{
+          git
+          | log_metadata: fn vault ->
+              :counters.add(loads, 1, 1)
+              git.log_metadata.(vault)
+            end
+        }
+      end
+
+      {log, clock} = freshening_store(vault, wrap: counting)
+      assert :counters.get(loads, 1) == 1
+
+      advance(clock, 60)
+      quokkas()
+      assert :counters.get(loads, 1) == 1
+
+      CommitLog.push_from_elsewhere(log, "bike/elsewhere.md", @elsewhere)
+      advance(clock, 60)
+      quokkas()
+      assert :counters.get(loads, 1) == 2
+    end
+
+    @tag :capture_log
+    test "an unreachable remote: the read succeeds from the current index, flagged, and status says so",
+         %{vault: vault} do
+      {_log, clock} =
+        freshening_store(vault,
+          wrap: &fetch_from(&1, 2, fn -> {:error, "fatal: unable to access remote"} end)
+        )
+
+      assert %{stale: nil} = Store.status(@store)
+      advance(clock, 60)
+
+      assert {:stale, [_ | _] = hits} = search(%{query: "tires"})
+      assert Enum.all?(hits, &Map.has_key?(&1, :preview))
+
+      assert %{healthy: true, stale: %{at: %DateTime{}, error: error}} = Store.status(@store)
+      assert error =~ "unable to access remote"
+
+      # Flagged for as long as the vault stays behind: the next read in the
+      # interval does not fetch, and is still answered from the old index.
+      assert {:stale, {:ok, _note}} =
+               Store.call(@store, :read, %{id: "bike/via-carolina.md", backlinks: false})
+    end
+
+    @tag :capture_log
+    test "the flag is lifted by the next update that succeeds", %{vault: vault} do
+      reachable = :atomics.new(1, [])
+
+      flaky = fn git ->
+        %{
+          git
+          | fetch: fn vault, remote, branch ->
+              if :atomics.get(reachable, 1) == 1,
+                do: git.fetch.(vault, remote, branch),
+                else: {:error, "unreachable"}
+            end
+        }
+      end
+
+      :atomics.put(reachable, 1, 1)
+      {_log, clock} = freshening_store(vault, wrap: flaky)
+
+      :atomics.put(reachable, 1, 0)
+      advance(clock, 60)
+      assert {:stale, _} = quokkas()
+
+      :atomics.put(reachable, 1, 1)
+      advance(clock, 60)
+      assert quokkas() == []
+      assert %{stale: nil} = Store.status(@store)
+    end
+
+    @tag :capture_log
+    test "a fetch that does not answer delays the read by its timeout, once per interval",
+         %{vault: vault} do
+      {_log, clock} =
+        freshening_store(vault,
+          timeout: 50,
+          wrap:
+            &fetch_from(&1, 2, fn ->
+              Process.sleep(2_000)
+              :ok
+            end)
+        )
+
+      advance(clock, 60)
+
+      {micros, answer} = :timer.tc(fn -> search(%{query: "tires"}) end)
+      assert {:stale, [_ | _]} = answer
+      assert micros < 1_000_000
+
+      assert %{stale: %{error: error}} = Store.status(@store)
+      assert error =~ "did not answer within 50 ms"
+
+      # The next read in the interval does not ask again.
+      {micros, _answer} = :timer.tc(fn -> search(%{query: "tires"}) end)
+      assert micros < 50_000
+    end
+  end
+
   # docs/design.md, "The write path": perform the action, commit, reparse into
   # the index, then push. Until git became a value this was the one part of the
   # write path no test could fail on, because exercising it meant building a

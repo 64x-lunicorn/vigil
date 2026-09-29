@@ -22,6 +22,7 @@ defmodule Vigil.Application do
            exclude: Application.fetch_env!(:vigil, :exclude),
            git_remote: checked.git_remote,
            git_branch: checked.git_branch,
+           read_fetch_interval: checked.read_fetch_interval,
            settings: settings},
           Vigil.MCP.Envelope,
           Vigil.RateLimit,

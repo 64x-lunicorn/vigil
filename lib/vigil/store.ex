@@ -107,13 +107,21 @@ defmodule Vigil.Store do
   # the client saw an error, retried, and the content landed twice.
   @call_timeout 120_000
 
+  # How long a read waits for the fetch it may trigger before it is answered
+  # from the index as it stands (freshen/1). Far inside the above, and short:
+  # a fetch that finds nothing new is one round trip, and one that finds a
+  # human's commit is a handful of small objects.
+  @read_fetch_timeout 5_000
+
   defp request(store, op, params), do: GenServer.call(store, {op, params}, @call_timeout)
 
   defp with_now(store, params),
     do: Map.put_new_lazy(params, :now, fn -> Clock.now(published_tz(store)) end)
 
   # The five the index answers. Each names the Vigil.Index function that
-  # answers it, which is what lets one `handle_call` clause cover all of them.
+  # answers it, which is what lets one `handle_call` clause cover all of them —
+  # and that clause is where a read brings the vault up to date first
+  # (freshen/1), so a read added here is freshened without a word more.
   @read_ops [:search, :read, :links, :lint, :current]
 
   # The eight that go through the write path (docs/design.md, "The write
@@ -195,6 +203,14 @@ defmodule Vigil.Store do
     # only for a write that arrived without an instant of its own.
     settings = Keyword.get_lazy(opts, :settings, &Settings.from_env/0)
 
+    # docs/design.md, "Reads see what another clone pushed". The interval is
+    # the deployment's (VIGIL_READ_FETCH_INTERVAL, checked at boot and handed
+    # in by Vigil.Application); a writer handed none does not fetch before
+    # reads. The timeout and the clock are only ever handed in by a test.
+    read_fetch_interval = Keyword.get(opts, :read_fetch_interval, 0) * 1_000
+    read_fetch_timeout = Keyword.get(opts, :read_fetch_timeout, @read_fetch_timeout)
+    clock_ms = Keyword.get(opts, :clock_ms, fn -> System.monotonic_time(:millisecond) end)
+
     if :ets.whereis(name) == :undefined do
       :ets.new(name, [:set, :named_table, :public, read_concurrency: true])
     end
@@ -213,7 +229,15 @@ defmodule Vigil.Store do
       index: %Index{},
       requests: RequestLog.new(),
       # The last push this writer made: nil until the first one.
-      last_push: nil
+      last_push: nil,
+      read_fetch_interval: read_fetch_interval,
+      read_fetch_timeout: read_fetch_timeout,
+      clock_ms: clock_ms,
+      # When the vault last asked the remote, on clock_ms: set by every
+      # update, whatever asked for it and however it ended.
+      fetched_at: nil,
+      # nil while the last update succeeded; otherwise when it failed and why.
+      stale: nil
     }
 
     {state, pull_result} = do_full_load(state)
@@ -251,9 +275,15 @@ defmodule Vigil.Store do
   # The dispatch coverage in Vigil.MCP.ServerTest drives every declared tool
   # end to end, which is where a row whose `call:` no longer names an index
   # function fails (docs/design.md, "MCP tool schemas are authoritative").
+  #
+  # A read is answered from the vault brought up to date first (freshen/1),
+  # and as `{:stale, answer}` while the last attempt to do that failed
+  # (flagged/2) — Vigil.MCP.Tools turns the tag into the response's `stale`
+  # field.
   @impl true
   def handle_call({op, params}, _from, state) when op in @read_ops do
-    {:reply, apply(Index, op, [state.index, params]), state}
+    state = freshen(state)
+    {:reply, flagged(apply(Index, op, [state.index, params]), state), state}
   end
 
   def handle_call({op, params}, _from, state) when op in @write_ops do
@@ -286,7 +316,8 @@ defmodule Vigil.Store do
         {:error, _reason} -> {nil, nil}
       end
 
-    {:reply, %{ahead: ahead, behind: behind, last_push: state.last_push}, state}
+    {:reply, %{ahead: ahead, behind: behind, last_push: state.last_push, stale: state.stale},
+     state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
@@ -377,33 +408,105 @@ defmodule Vigil.Store do
   # lands on top of what the human pushed. Anything else — a fetch that fails,
   # a rebase that conflicts — is logged and changes nothing: the write goes
   # ahead on the vault as it was, and its push says what is in the way.
-  defp bring_up_to_date(state) do
-    case update(state) do
-      :moved ->
+  #
+  # A read asks it too (freshen/1), with a fetch bounded by `fetch_timeout`.
+  defp bring_up_to_date(state, fetch_timeout \\ :infinity) do
+    case update(state, fetch_timeout) do
+      {:moved, state} ->
         load(state)
 
-      :in_step ->
+      {:in_step, state} ->
         state
 
-      {_error_or_conflict, reason} ->
+      {{_error_or_conflict, reason}, state} ->
         Logger.warning("vigil: could not bring the vault up to date: #{reason}")
         state
     end
   end
 
+  ## Reads see what another clone pushed
+  #
+  # docs/design.md, "Reads see what another clone pushed". A read brings the
+  # vault up to date the way a write does, through the same function, but at
+  # most once per interval — counted from the last time the vault asked the
+  # remote, by a read, a write, `reload` or the load at boot. An interval of 0
+  # never does. Nothing runs unless a tool is called.
+  #
+  # It happens here, inside the single writer, so the fetch cannot race a
+  # write; and because every read waits behind it, the fetch has a timeout of
+  # its own, shorter than anything a write waits for: a remote that stalls
+  # delays one read by at most that, once per interval. A fetch that fails or
+  # does not answer in time never fails the read — it is answered from the
+  # index as it stands, flagged.
+  #
+  # How long that is by default is stated beside the write's own timeout, at
+  # the top of this module (@read_fetch_timeout).
+
+  defp freshen(%{read_fetch_interval: 0} = state), do: state
+
+  defp freshen(state) do
+    if due?(state), do: bring_up_to_date(state, state.read_fetch_timeout), else: state
+  end
+
+  defp due?(%{fetched_at: nil}), do: true
+  defp due?(state), do: state.clock_ms.() - state.fetched_at >= state.read_fetch_interval
+
+  # Flagged while the last update failed, whichever call made it. Not with
+  # the behaviour turned off: a read then answers exactly as it always did,
+  # and `status` is where a failed update shows.
+  defp flagged(answer, %{read_fetch_interval: 0}), do: answer
+  defp flagged(answer, %{stale: nil}), do: answer
+  defp flagged(answer, _stale), do: {:stale, answer}
+
+  # The fetch, bounded when a timeout is given. It runs in a process of its
+  # own so that the writer can stop waiting for it; that process is killed
+  # when the time is up. A `git fetch` it started is not: it goes on within
+  # Vigil.Git's own network bounds, and what it brings is adopted by the next
+  # update. Monitored rather than linked, so a fetch that crashes is a failed
+  # fetch, not a crashed writer.
+  defp fetch(state, :infinity),
+    do: state.git.fetch.(state.vault_path, state.git_remote, state.git_branch)
+
+  defp fetch(state, timeout) do
+    {pid, ref} = spawn_monitor(fn -> exit({:fetched, fetch(state, :infinity)}) end)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, {:fetched, result}} ->
+        result
+
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        {:error, "fetch from #{state.git_remote}/#{state.git_branch} failed: #{inspect(reason)}"}
+    after
+      timeout ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+
+        {:error,
+         "fetch from #{state.git_remote}/#{state.git_branch} did not answer within #{timeout} ms"}
+    end
+  end
+
   # What the remote holds, adopted — with no index rebuilt, which is the
-  # caller's: the load builds one regardless, a write only when something
-  # moved. `:moved | :in_step | {:conflict, reason} | {:error, reason}`.
+  # caller's: the load builds one regardless, a write or a read only when
+  # something moved. `{:moved | :in_step | {:conflict, reason} | {:error,
+  # reason}, state}` — the state noting when the remote was asked, and whether
+  # the vault is now as far as it knows in step with it (`stale`, for `status`
+  # and for the reads answered until the next update succeeds).
   #
   # With no unpushed commits of its own the vault fast-forwards. With some, it
   # rebases them onto the remote — vigil's own single-file commits replayed on
   # top of whatever was pushed, merge commits included (principle 2). A rebase
   # that conflicts is aborted at once: vigil's commits stay local, nothing on
   # the remote is overwritten, and which paths are in the way is the answer.
-  defp update(state) do
+  defp update(state, fetch_timeout \\ :infinity) do
+    outcome = adopt_remote(state, fetch_timeout)
+    {outcome, noted(state, outcome)}
+  end
+
+  defp adopt_remote(state, fetch_timeout) do
     %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
 
-    with :ok <- git.fetch.(vault_path, remote, branch),
+    with :ok <- fetch(state, fetch_timeout),
          {:ok, %{behind: behind} = divergence} when behind > 0 <- divergence(state),
          :ok <- adopt(git, vault_path, remote, branch, divergence) do
       Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch}")
@@ -414,6 +517,13 @@ defmodule Vigil.Store do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp noted(state, {_error_or_conflict, reason}) do
+    at = DateTime.utc_now() |> DateTime.truncate(:second)
+    %{state | fetched_at: state.clock_ms.(), stale: %{at: at, error: reason}}
+  end
+
+  defp noted(state, _moved_or_in_step), do: %{state | fetched_at: state.clock_ms.(), stale: nil}
 
   defp adopt(git, vault_path, remote, branch, %{ahead: 0}),
     do: git.fast_forward.(vault_path, remote, branch)
@@ -464,7 +574,7 @@ defmodule Vigil.Store do
 
   defp push_again({:ok, %{pushed: false} = report} = result, state, retries) do
     case update(state) do
-      :moved ->
+      {:moved, state} ->
         state = load(state)
 
         case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
@@ -472,10 +582,10 @@ defmodule Vigil.Store do
           {:error, _reason} -> push_again(result, state, retries - 1)
         end
 
-      {:conflict, reason} ->
+      {{:conflict, reason}, state} ->
         {{:ok, more_push_error(report, reason)}, state}
 
-      _in_step_or_error ->
+      {_in_step_or_error, state} ->
         {result, state}
     end
   end
@@ -558,7 +668,8 @@ defmodule Vigil.Store do
           healthy: false,
           ahead: nil,
           behind: nil,
-          last_push: nil
+          last_push: nil,
+          stale: nil
         }
     end
   end
@@ -580,8 +691,10 @@ defmodule Vigil.Store do
   # conflict — is what `reload` reports as `pull_failed`; the vault is read
   # regardless, as it stands.
   defp do_full_load(state) do
+    {outcome, state} = update(state)
+
     pull_result =
-      case update(state) do
+      case outcome do
         {_error_or_conflict, reason} -> {:error, reason}
         _moved_or_in_step -> :ok
       end

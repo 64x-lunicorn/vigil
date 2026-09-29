@@ -390,6 +390,23 @@ defmodule Vigil.MCP.ToolsDispatchTest do
                {:error, "no such note"}
     end
 
+    # docs/design.md, "Reads see what another clone pushed": a read answered
+    # while the vault could not be brought up to date carries `stale: true`
+    # beside its result, whatever the result is.
+    test "a stale answer is lifted the same way, and says it is stale" do
+      store = start_store({:stale, [%{id: "bike/x.md#a"}]})
+
+      assert Tools.dispatch(store, "search", %{"query" => "tires"}, @now, @key) ==
+               {:ok, [%{id: "bike/x.md#a"}], %{stale: true}}
+    end
+
+    test "a stale error says it is stale too" do
+      store = start_store({:stale, {:error, "Not found: bike/nope.md"}})
+
+      assert Tools.dispatch(store, "read", %{"id" => "bike/nope.md"}, @now, @key) ==
+               {:error, "Not found: bike/nope.md", %{stale: true}}
+    end
+
     test "an {:ok, value} answer is not wrapped twice" do
       store = start_store({:ok, %{title: "X"}})
 

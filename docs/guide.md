@@ -301,7 +301,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `lint` | – | notes that are not UTF-8, duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
-| `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push}` | RO/RW | – |
+| `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push, stale}` | RO/RW | – |
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content, confirm? | `{name, pushed}` | RW | ✓ |
@@ -314,6 +314,15 @@ read-only. `delete_note`, `move_note`, `rewrite_note`, `delete_section`,
 still neither read-only nor closed-world: it moves the vault to whatever the
 remote holds, and has its own, smaller rate limit
 (`VIGIL_RELOAD_RATE_LIMIT_RPM`), since each call pulls and reparses the vault.
+
+**Reads fetch first, at most once a minute.** Before `search`, `read`,
+`links`, `lint` or `current` answers, the server fetches from the remote and
+adopts what a human pushed, the way it does before a write — but only when
+it last asked the remote at least `VIGIL_READ_FETCH_INTERVAL` seconds ago (60
+by default; `0` turns it off). The fetch gives up after five seconds. If it
+fails or gives up, the read is still answered, from the vault as the server
+last saw it, and the response says so with `"stale": true` beside the
+result; `status` says since when and why.
 
 `limit` is 1–25 (default 10) and `depth` is 1 or 2. A value outside the range
 is a tool error naming the range, not a silently clamped result: a caller told
@@ -585,6 +594,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
 | `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
 | `VIGIL_RELOAD_RATE_LIMIT_RPM` | `6` | max `reload` per minute per access token, on top of the budget above |
+| `VIGIL_READ_FETCH_INTERVAL` | `60` | seconds between two fetches a read may trigger: a read adopts what was pushed from another clone at most this long after it was pushed. `0` turns fetching before reads off |
 | `VIGIL_OAUTH_RATE_LIMIT_RPM` | `30` | max `/oauth/authorize` and `/oauth/token` per minute per client address |
 | `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM` | `5` | max `/oauth/register` per minute per client address |
 | `VIGIL_CONSENT_FAILURES_PER_HOUR` | `50` | max wrong consent passwords per hour from every address together; past it the consent form answers 429 until the hour is up |
@@ -602,6 +612,8 @@ failed and what it expected, all in one message:
   the two OAuth budgets and `VIGIL_CONSENT_FAILURES_PER_HOUR` must be positive
   integers. `0`, `-5` or `60rpm` is
   refused, not replaced by the default.
+- `VIGIL_READ_FETCH_INTERVAL` must be a non-negative integer: `0` is allowed
+  and turns fetching before reads off.
 - `VIGIL_TZ` must be a timezone name the timezone database knows, such as
   `Europe/Berlin`. An unknown one is refused rather than quietly becoming UTC.
 - `VIGIL_BIND` must be an IP address.
@@ -751,16 +763,20 @@ seconds, 503 otherwise:
 
 ```json
 {"healthy": true, "index_loaded": true, "writer_answers": true,
- "ahead": 0, "behind": 0, "last_push": {"pushed": true, "at": "2026-09-29T08:12:03Z"}}
+ "ahead": 0, "behind": 0, "last_push": {"pushed": true, "at": "2026-09-29T08:12:03Z"},
+ "stale": null}
 ```
 
 `ahead` counts commits the server holds and has not pushed; `behind` counts
 commits the remote holds and the server has not adopted, as of the last fetch —
-the server fetches before every write. `last_push` is `null` until the first
-write since the service started. Neither decides the status code: a failed push
-is reported, not a reason to call the service down. `/healthz` leaves out the
-push's error text; the `status` tool, which needs a token, carries it as
-`last_push.error`.
+the server fetches before every write, and before a read at most once per
+`VIGIL_READ_FETCH_INTERVAL`. `last_push` is `null` until the first write since
+the service started. `stale` is `null` while the last attempt to bring the
+vault up to date with the remote succeeded, and otherwise says when it failed
+(`at`). None of them decides the status code: a failed push or fetch is
+reported, not a reason to call the service down. `/healthz` leaves out git's
+error text; the `status` tool, which needs a token, carries it as
+`last_push.error` and `stale.error`.
 
 `update.sh` waits for `/healthz` after every start, and its acceptance check
 asks it too. A push that fails also emits the telemetry event
@@ -909,9 +925,10 @@ server as a commit through the remote, not as a file edited in
 4. **Call `reload`, or don't.** The server fetches and rebuilds its index; a
    `vault:read` token is enough. Without it, the server adopts your commits
    before its next write anyway, so the write lands on top of yours and its
-   push goes through. If it holds commits of its own it has not pushed yet, it
-   rebases them onto yours — never a merge. `reload` is what makes your edit
-   visible to reads before then.
+   push goes through, and before a read once `VIGIL_READ_FETCH_INTERVAL` (a
+   minute by default) has passed since it last fetched. If it holds commits of
+   its own it has not pushed yet, it rebases them onto yours — never a merge.
+   `reload` is what makes your edit visible to reads straight away.
 
    If you and vigil changed the same note, the rebase conflicts and is
    aborted: vigil's commit stays on the server, your commit stays on the
