@@ -254,8 +254,8 @@ defmodule Vigil.Settings.Check do
   # origin: a client that finds the one by the other's metadata must be able
   # to trust it is talking to the same server.
   defp check_value(:resource, value, config) do
-    with {:ok, uri} <- url(value, config),
-         :ok <- same_origin(uri, Keyword.get(config, :issuer), config) do
+    with {:ok, _uri} <- url(value, config),
+         :ok <- same_origin(value, Keyword.get(config, :issuer), config) do
       {:ok, value}
     end
   end
@@ -361,6 +361,14 @@ defmodule Vigil.Settings.Check do
         {:error,
          "at least #{@min_secret_bytes} random bytes, base64 or hex encoded; #{@generate_secret}"}
 
+      # Decoding to 32 bytes is what random bytes do, and what 43 letters do
+      # as well: a phrase without spaces is valid base64. What `openssl rand`
+      # prints lacks a digit or a sign fewer than once in half a million
+      # tries; a value of letters alone is a person's.
+      value =~ ~r/\A[A-Za-z]+\z/ ->
+        {:error,
+         "random bytes, base64 or hex encoded, not a phrase of letters; #{@generate_secret}"}
+
       true ->
         {:ok, value}
     end
@@ -417,18 +425,16 @@ defmodule Vigil.Settings.Check do
   end
 
   # Only in :prod, like https. An issuer that is unset or no URL is reported
-  # on its own entry and not a second time here.
-  defp same_origin(uri, issuer, config) do
+  # on its own entry and not a second time here. Compared as `Vigil.Origin`
+  # compares a browser's: serialized, the host lowercase.
+  defp same_origin(resource, issuer, config) do
     with true <- Keyword.get(config, :https_required, false),
          true <- is_binary(issuer),
-         {:ok, %URI{host: host} = issuer_uri} when host not in [nil, ""] <- URI.new(issuer),
-         false <- origin(uri) == origin(issuer_uri) do
-      {:error, "on the issuer's origin #{origin(issuer_uri)}, got #{inspect(URI.to_string(uri))}"}
+         {:ok, issuer_origin} <- Vigil.Origin.of(issuer),
+         false <- Vigil.Origin.of(resource) == {:ok, issuer_origin} do
+      {:error, "on the issuer's origin #{issuer_origin}, got #{inspect(resource)}"}
     else
       _ -> :ok
     end
   end
-
-  defp origin(%URI{scheme: scheme, host: host, port: port}),
-    do: URI.to_string(%URI{scheme: scheme, host: host, port: port})
 end

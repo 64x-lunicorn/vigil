@@ -691,9 +691,12 @@ message:
 - `VIGIL_AUTH_PASSWORD` must be at least 12 characters. The message names the
   variable and never shows the value.
 - `VIGIL_SKILLKEY_SECRET` must be set and decode, as base64 or hex, to at least
-  32 bytes — a long phrase is refused however long it is — and must not be the
-  consent password. The message names the variable, says how to generate one
-  and never shows the value.
+  32 bytes, and must not be the consent password. The check measures what the
+  value decodes to, not how random it is: a phrase with spaces or punctuation
+  decodes to nothing and is refused, and so is one of letters alone, but a
+  chosen value that happens to be valid base64 is not caught. Use what
+  `openssl rand -base64 48` prints. The message names the variable, says how to
+  generate one and never shows the value.
 - In prod, `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be `https` URLs, and the
   resource must sit on the issuer's origin (same scheme, host and port):
   `https://vault.example.org` and `https://vault.example.org/mcp`, not

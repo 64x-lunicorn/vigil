@@ -158,6 +158,22 @@ defmodule Vigil.Settings.CheckTest do
       end
     end
 
+    # An origin's host is compared lowercase (RFC 6454 §6.2), as a browser's
+    # `Origin` is compared against the issuer's.
+    test "in prod, the issuer's host in capitals is the resource's origin all the same" do
+      assert {:ok, _} =
+               check_with(
+                 issuer: "https://Vault.example.org",
+                 resource: "https://vault.example.org/mcp"
+               )
+
+      assert {:ok, _} =
+               check_with(
+                 issuer: "https://vault.example.org",
+                 resource: "https://VAULT.example.org:443/mcp"
+               )
+    end
+
     test "an issuer that is no URL at all is refused" do
       assert Enum.any?(refused(issuer: "vault.example.org"), &(&1 =~ "VIGIL_ISSUER"))
     end
@@ -337,6 +353,25 @@ defmodule Vigil.Settings.CheckTest do
       assert message =~ "VIGIL_SKILLKEY_SECRET"
       assert message =~ "openssl rand -base64 48"
       refute message =~ phrase
+    end
+
+    # Fifty-two letters decode as base64 to 39 bytes, and nothing but a person
+    # writes them: `openssl rand` prints a value without a digit or a sign
+    # in it fewer than once in half a million tries.
+    test "a phrase of letters alone is refused, though it decodes to 32 bytes" do
+      phrase = "correcthorsebatterystaplecorrecthorsebatterystaplexy"
+      assert byte_size(Base.decode64!(phrase, padding: false)) >= 32
+
+      for value <- [
+            phrase,
+            String.upcase(phrase),
+            "CorrectHorseBatteryStapleCorrectHorseBatteryStapleXy"
+          ] do
+        assert [message] = refused(skillkey_secret: value)
+        assert message =~ "VIGIL_SKILLKEY_SECRET"
+        assert message =~ "openssl rand -base64 48"
+        refute message =~ value
+      end
     end
 
     test "the consent password is refused as the secret, and neither is echoed" do

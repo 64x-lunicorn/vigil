@@ -1694,12 +1694,17 @@ expected and nothing about what it got — and so does `VIGIL_SKILLKEY_SECRET`'s
 **The SkillKey secret is random bytes, not a long string.** It must decode, as
 hex or as base64, to at least 32 bytes, and must not equal the consent
 password. Length alone would let a chosen phrase through, and a chosen secret
-is exactly what an exposed HMAC output lets someone guess at offline; a value
-that decodes to 32 bytes is almost certainly what `openssl rand` printed. Hex
-is tried first, because every hex string is also valid base64 and would count
-half again the randomness it holds. The message for an unset one says how to
-generate one (`openssl rand -base64 48`, what `init.sh` runs), because the
-operator most likely to meet it is one whose host predates the setting.
+is exactly what an exposed HMAC output lets someone guess at offline. What is
+measured is what the value decodes to, not its randomness, so it is a filter
+for mistakes rather than a proof: a phrase with a space or a comma in it
+decodes to nothing, and one of letters alone — valid base64, and 43 letters
+decode to 32 bytes — is refused as well, since `openssl rand` prints a value
+without a digit or a sign in it fewer than once in half a million tries. A
+chosen value that mixes in digits still passes. Hex is tried first, because
+every hex string is also valid base64 and would count half again the
+randomness it holds. The message for an unset one says how to generate one
+(`openssl rand -base64 48`, what `init.sh` runs), because the operator most
+likely to meet it is one whose host predates the setting.
 
 ---
 

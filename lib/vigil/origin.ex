@@ -34,13 +34,7 @@ defmodule Vigil.Origin do
   """
   @spec allowed(String.t(), [String.t()]) :: allowed
   def allowed(issuer, listed) do
-    issuer_origin =
-      case URI.new(issuer) do
-        {:ok, uri} -> serialize(uri)
-        {:error, _} -> :error
-      end
-
-    for {:ok, origin} <- [issuer_origin | Enum.map(listed, &parse/1)],
+    for {:ok, origin} <- [of(issuer) | Enum.map(listed, &parse/1)],
         into: MapSet.new(),
         do: origin
   end
@@ -60,6 +54,19 @@ defmodule Vigil.Origin do
 
   defp member?({:ok, origin}, allowed), do: MapSet.member?(allowed, origin)
   defp member?(:error, _allowed), do: false
+
+  @doc """
+  The origin of the URL `url`, serialized, whatever path it has: what the
+  issuer's origin is, and what `Vigil.Settings.Check` asks of the resource.
+  `:error` when it has no `http` or `https` scheme or no host.
+  """
+  @spec of(String.t()) :: {:ok, String.t()} | :error
+  def of(url) when is_binary(url) do
+    case URI.new(url) do
+      {:ok, uri} -> serialize(uri)
+      {:error, _} -> :error
+    end
+  end
 
   @doc """
   `value` in its serialized form, or `:error` when it is not an origin: an

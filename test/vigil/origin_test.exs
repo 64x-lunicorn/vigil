@@ -51,6 +51,18 @@ defmodule Vigil.OriginTest do
     refute Origin.allowed?(from(["http://127.0.0.1:4000"]), allowed)
   end
 
+  describe "of/1" do
+    test "a URL's origin comes back serialized, whatever its path" do
+      assert Origin.of("https://Vault.Example.org:443/mcp") == {:ok, "https://vault.example.org"}
+      assert Origin.of("http://localhost:4000/mcp") == {:ok, "http://localhost:4000"}
+    end
+
+    test "a URL without an http scheme or a host has none" do
+      assert Origin.of("vault.example.org") == :error
+      assert Origin.of("ftp://vault.example.org") == :error
+    end
+  end
+
   describe "parse/1" do
     test "an origin comes back serialized" do
       assert Origin.parse("https://Claude.AI/") == {:ok, "https://claude.ai"}
