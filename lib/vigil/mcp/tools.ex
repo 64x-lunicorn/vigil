@@ -122,6 +122,16 @@ defmodule Vigil.MCP.Tools do
       "Optional: the section's hash from read. The edit is refused if the id no longer holds that content."
   }
 
+  # Declared on the two rows that answer page by page (docs/design.md, "Reads
+  # that enumerate are paged").
+  @cursor_param %{
+    name: "cursor",
+    type: :string,
+    max_length: @short_max,
+    description:
+      "Optional: next_cursor from the previous page, with the same other parameters. Refused once a write changed the answer."
+  }
+
   @type_enum ["reference", "decision", "event"]
 
   @type param_type :: :string | :boolean | {:integer, Range.t()} | {:enum, [String.t()]}
@@ -156,7 +166,7 @@ defmodule Vigil.MCP.Tools do
       name: "search",
       title: "Search the vault",
       description:
-        "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl).",
+        "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl). Results come a page at a time, with next_cursor for the next one.",
       write: false,
       call: :search,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
@@ -185,7 +195,39 @@ defmodule Vigil.MCP.Tools do
           type: {:integer, 1..25},
           default: 10,
           description: "Maximum number of hits (default 10)."
-        }
+        },
+        @cursor_param
+      ]
+    },
+    %{
+      name: "list",
+      title: "List notes",
+      description:
+        "Lists notes as cards (id, title, type, updated_at), never bodies, page by page: the whole vault or one domain, most recently updated first or by title. journal is listed only when named as the domain.",
+      write: false,
+      call: :list,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
+      params: [
+        %{
+          name: "domain",
+          type: :string,
+          max_length: @short_max,
+          description: "Only notes in this domain."
+        },
+        %{name: "type", type: {:enum, @type_enum}, description: "Only notes of this type."},
+        %{
+          name: "sort",
+          type: {:enum, ["updated", "title"]},
+          default: "updated",
+          description: "updated (most recent first, the default) or title."
+        },
+        %{
+          name: "limit",
+          type: {:integer, 1..100},
+          default: 25,
+          description: "Maximum number of notes per page (default 25)."
+        },
+        @cursor_param
       ]
     },
     %{
@@ -245,7 +287,8 @@ defmodule Vigil.MCP.Tools do
           name: "depth",
           type: {:integer, 1..2},
           default: 1,
-          description: "Defaults to 1; 2 adds each directly connected note's own depth-1 view."
+          description:
+            "Defaults to 1; 2 adds each directly connected note's own depth-1 view, for at most 25 notes (truncated: true when there were more)."
         }
       ]
     },
@@ -542,7 +585,7 @@ defmodule Vigil.MCP.Tools do
       name: "lint",
       title: "Check the vault",
       description:
-        "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+        "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes. Each category lists at most 50; totals counts them all and truncated says whether any were cut.",
       write: false,
       call: :lint,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},

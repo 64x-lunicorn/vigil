@@ -448,10 +448,56 @@ result shape.
   updated chunk, then on the id, so the same query over the same vault answers
   in the same order.
 - Results carry only `id`, `title`, `type`, `score`, `preview` — and `hub` when
-  the note has exactly one incoming link. Never bodies.
+  the note has exactly one incoming link. Never bodies. They come a page at a
+  time, as `{results, next_cursor}` (see "Reads that enumerate are paged").
 - Still literal: no stemming, no fuzzy matching, no synonyms, no embeddings
   (see "Deliberate non-goals"). A word matches wherever its folded letters
   appear, inside a longer word too, as the phrase always did.
+
+---
+
+## Reads that enumerate are paged
+
+`search` needs a query and drops what scores 0, and `read` resolves one note
+at a time, so nothing answered "what is in `training`?" or "what changed this
+week?". **`list` enumerates notes**: a card per note — `id` (its path),
+`title`, `type`, `updated_at` — never a body, filtered by `domain` and `type`,
+sorted by `updated` (most recent first, a note git knows no date for last) or
+by `title` (folded as search folds, so `Äpfel` sorts with `apfel`), ties
+broken on the path. `journal/` is left out unless it is the `domain` asked
+for — the same rule, the same function, as `search`'s. Its `limit` is
+`1..100`, default 25: a card is a line, a search hit is a preview.
+
+**`search` and `list` answer page by page**, as `{results | notes,
+next_cursor}`; `next_cursor` is `null` on the last page and is always there,
+so the shape does not depend on the answer. The cursor is an offset into the
+whole ordered answer together with a fingerprint of that answer — the call
+(the operation and every parameter except `limit` and `cursor`) and the sort
+key of every item, in order — base64url-encoded and opaque to the caller.
+While nothing is written the same call orders the same items the same way,
+the fingerprint matches, and the pages together hold every item once, in the
+order a single long page would have. `limit` may change between pages.
+
+**A cursor made stale by a write is refused, not continued.** A write that
+changes what the call answers, or the order, changes the fingerprint, and the
+call is a tool error saying to start again without a cursor. Continuing at the
+old offset would skip an item or show one twice without a word, and a caller
+paging through "everything in `training`" would take the gap for the answer.
+Keying the cursor on the last item's sort key instead would continue past a
+write, but it is as long as the item's id — a path near its 1,024-character
+bound does not fit in a parameter of the same bound — and a note that moved in
+the order would still be skipped silently. A write the call does not see (a
+note in another domain, for a `list` of one) leaves the cursor valid. The
+fingerprint is a 32-bit hash, so a stale cursor accepted by collision is
+possible and vanishingly rare; the cost of one is one misplaced page.
+
+**The other unbounded answers are capped and say so.** `lint` lists at most
+50 findings per category, each category in a fixed order (by path or id) so
+the same 50 come back on every call; `totals` counts every finding per
+category and `truncated` is `true` when any was cut. `links` at depth 2
+describes at most 25 neighbouring notes, the first by path, with `truncated`
+beside them. A cap that says nothing is the silent clamp "MCP tool schemas
+are authoritative" refuses for `limit`.
 
 ---
 
@@ -634,7 +680,7 @@ the index function that reads it, and nothing in between: not a client
 function, not a message shape, not a `handle_call` clause, and not an argument
 list that unpacks the map back into the positional triple it replaced.
 
-The five reads share a single `handle_call` clause and so do the eight writes,
+The seven reads share a single `handle_call` clause and so do the eight writes,
 because in both groups the operation is the only difference: it names the
 `Vigil.Index` function that answers a read, and `Vigil.Vault.Policy` and
 `Vigil.Vault.Plan` already take a write as an argument. What stays per
@@ -642,8 +688,8 @@ operation is the contract — the head that matches what a call cannot do
 without.
 
 A bound is part of that declaration, not a correction applied afterwards.
-Integer parameters carry a range in the table (`limit` is `1..25`, `depth` is
-`1..2`), the range is published as `minimum`/`maximum`, and a value outside it
+Integer parameters carry a range in the table (`search`'s `limit` is
+`1..25`, `list`'s `1..100`, `depth` is `1..2`), the range is published as `minimum`/`maximum`, and a value outside it
 is refused there. Nothing downstream clamps: `limit: 100` is an error, not a
 quiet 25, because a caller told it received the 25 best hits of 100 asked for
 cannot tell that from having asked for 25.
@@ -670,7 +716,7 @@ them):
 | Parameter | `maxLength` |
 |---|---|
 | `content` (`create`, `append`, `replace_section`, `rewrite_note`, `skill_write`) | 1,000,000 |
-| every other string — `path`, `id`, `from`, `to`, `query`, `domain`, `heading`, `name`, `starts`, `ends`, `if_match`, `request_id`, `skill_key` | 1,024 |
+| every other string — `path`, `id`, `from`, `to`, `query`, `domain`, `heading`, `name`, `starts`, `ends`, `if_match`, `cursor`, `request_id`, `skill_key` | 1,024 |
 
 A million characters is a book rather than a note, and nothing a real vault
 holds comes near it; it exists to put a ceiling on the parse, not to shape how
@@ -1215,7 +1261,7 @@ remembered `reload`.
 
 **Before a read, the vault is brought up to date — at most once per
 interval.** The read tools — every operation the index answers: `search`,
-`read`, `links`, `lint`, `current`, and any read added to that set — go
+`list`, `read`, `links`, `lint`, `current`, and any read added to that set — go
 through `bring_up_to_date/1` first, the function a write goes through, when
 the vault last asked the remote at least `VIGIL_READ_FETCH_INTERVAL` seconds
 ago (60 by default). Any update counts, a write's and `reload`'s and the

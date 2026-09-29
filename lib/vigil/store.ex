@@ -70,6 +70,7 @@ defmodule Vigil.Store do
   def call(store \\ @default_name, op, params)
 
   def call(store, :search, %{limit: _} = params), do: request(store, :search, params)
+  def call(store, :list, %{sort: _, limit: _} = params), do: request(store, :list, params)
   def call(store, :read, %{id: _, backlinks: _} = params), do: request(store, :read, params)
 
   def call(store, :links, %{id: _, direction: _, depth: _} = params),
@@ -122,13 +123,13 @@ defmodule Vigil.Store do
   defp with_now(store, params),
     do: Map.put_new_lazy(params, :now, fn -> Clock.now(published_tz(store)) end)
 
-  # The six reads. Five are answered by the index and name the Vigil.Index
+  # The seven reads. Six are answered by the index and name the Vigil.Index
   # function that answers them; `history`, and `read` at a revision, are
   # answered out of the Git history by Vigil.History (read_answer/3). One
   # `handle_call` clause covers all of them — and that clause is where a read
   # brings the vault up to date first (freshen/1), so a read added here is
   # freshened without a word more.
-  @read_ops [:search, :read, :links, :lint, :current, :history]
+  @read_ops [:search, :list, :read, :links, :lint, :current, :history]
 
   # The eight that go through the write path (docs/design.md, "The write
   # path"): Vigil.Vault.Policy and Vigil.Vault.Plan already take the operation
@@ -267,7 +268,7 @@ defmodule Vigil.Store do
     Git.over_repository()
   end
 
-  # One message shape for all of them: {operation, params}. The five reads and
+  # One message shape for all of them: {operation, params}. The six reads and
   # the eight writes share one clause each, because in both groups the
   # operation is the only difference: Vigil.Index names each read's answer,
   # and Vigil.Vault.Policy and Vigil.Vault.Plan already take the write as an

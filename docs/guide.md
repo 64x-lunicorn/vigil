@@ -279,7 +279,7 @@ starts — `skill_write` refuses that skill (see [Tools](#tools)).
 
 ## Tools
 
-Nineteen tools. "RW" means the token needs the `vault` scope; a token with
+Twenty tools. "RW" means the token needs the `vault` scope; a token with
 any other scope, `vault:read` included, is not shown them on `tools/list` and
 gets an explicit error if it calls one anyway. "Key" means the call must carry
 a current `skill_key`. Every write also takes an optional `request_id` (see
@@ -287,9 +287,10 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 
 | Tool | Parameters | Returns | Role | Key |
 |---|---|---|---|:--:|
-| `search` | query, domain?, type?, prefer?, limit? | ranked hits with previews, plus `hub` when unambiguous | RO/RW | – |
+| `search` | query, domain?, type?, prefer?, limit?, cursor? | `{results, next_cursor}`: ranked hits with previews, plus `hub` when unambiguous | RO/RW | – |
+| `list` | domain?, type?, sort?, limit?, cursor? | `{notes, next_cursor}`: a card per note (`id`, `title`, `type`, `updated_at`), newest first or by title | RO/RW | – |
 | `read` | id, backlinks?, at? | one chunk with its `hash`, or a note's `body` (the text before its first `##`) and table of contents (each entry with its `hash`) plus `links` counters; with `at`, as it was at that commit | RO/RW | – |
-| `links` | id, direction?, depth? | resolved outgoing/incoming references | RO/RW | – |
+| `links` | id, direction?, depth? | resolved outgoing/incoming references; at depth 2 up to 25 neighbours and `truncated` | RO/RW | – |
 | `history` | path, limit? | `{path, commits}`: each commit's `commit`, `date`, `author`, `by` (`vigil`/`human`), `message` and the `path` the note had then, newest first, across renames | RO/RW | – |
 | `create` | path, type, content, starts?, ends?, force?, create_dirs? | `{path, pushed, path_normalized_from?}` | RW | ✓ |
 | `append` | path, heading?, content | `{path, pushed}` | RW | ✓ |
@@ -299,7 +300,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `update_frontmatter` | path, type, starts?, ends? | `{path, pushed}` | RW | ✓ |
 | `delete_note` | path, confirm | `{path, deleted, pushed, broken_backlinks}` | RW | ✓ |
 | `move_note` | from, to, confirm, update_links? | `{from, to, pushed, broken_backlinks, updated_links?}` | RW | ✓ |
-| `lint` | – | notes that are not UTF-8, duplicate/sentence headings, broken links, overlong notes, stale decisions | RO/RW | – |
+| `lint` | – | notes that are not UTF-8, duplicate/sentence headings, broken links, overlong notes, stale decisions — at most 50 each, with `totals` and `truncated` | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
 | `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, last_push, stale}` | RO/RW | – |
@@ -316,8 +317,8 @@ still neither read-only nor closed-world: it moves the vault to whatever the
 remote holds, and has its own, smaller rate limit
 (`VIGIL_RELOAD_RATE_LIMIT_RPM`), since each call pulls and reparses the vault.
 
-**Reads fetch first, at most once a minute.** Before `search`, `read`,
-`links`, `history`, `lint` or `current` answers, the server fetches from the remote and
+**Reads fetch first, at most once a minute.** Before `search`, `list`,
+`read`, `links`, `history`, `lint` or `current` answers, the server fetches from the remote and
 adopts what a human pushed, the way it does before a write — but only when
 it last asked the remote at least `VIGIL_READ_FETCH_INTERVAL` seconds ago (60
 by default; `0` turns it off). The fetch gives up after five seconds. If it
@@ -332,16 +333,28 @@ for each whether vigil or a human made it (by the author address,
 returns the note or section as it was then, under the path it had then; a
 revision that names no commit is a tool error.
 
-`search`'s `limit` is 1–25 (default 10), `history`'s 1–100 (default 20), and
-`depth` is 1 or 2. A value outside the range
-is a tool error naming the range, not a silently clamped result: a caller told
-it got 25 hits of the 100 it asked for could not tell that from having asked
-for 25.
+`limit` is 1–25 for `search` (default 10), 1–100 for `list` (default 25)
+and 1–100 for `history` (default 20), and `depth` is 1 or 2. A value outside the range is a tool error naming
+the range, not a silently clamped result: a caller told it got 25 hits of the
+100 it asked for could not tell that from having asked for 25.
+
+**`search` and `list` answer page by page.** Each page carries
+`next_cursor`, `null` on the last one; hand it back as `cursor`, with the
+other parameters unchanged, for the next page. While nothing is written the
+pages are stable: together they hold every hit exactly once, in the order one
+long page would have. A write that changes what the call answers, or in what
+order, makes the cursor stale, and it is refused with an error telling you to
+start again without one — rather than continuing at an offset that would now
+skip a note or show one twice. A write that does not touch the answer leaves
+the cursor valid. `list` is what answers "what is in `training`?"
+(`domain: "training"`) and "what changed this week?" (the default
+`sort: "updated"`); like `search`, it leaves `journal/` out unless you name it
+as the domain.
 
 Every string argument has a maximum length, published as `maxLength` on
 `tools/list` and counted in characters: `content` takes up to 1,000,000,
 every other string (`path`, `id`, `from`, `to`, `query`, `domain`, `heading`,
-`name`, `starts`, `ends`, `if_match`, `at`, `request_id`, `skill_key`) up to
+`name`, `starts`, `ends`, `if_match`, `at`, `cursor`, `request_id`, `skill_key`) up to
 1,024.
 A longer value is a tool error naming the parameter, e.g. `Invalid parameter
 content: expected at most 1000000 characters`. The `/mcp` request body is read
@@ -1190,8 +1203,8 @@ to return the best 25 and say nothing — and a caller cannot tell 25 of 100 fro
 25 of 25. Every parameter bound is declared in the tool table, published in the
 schema the server itself hands out, and refused there.
 
-**`search` hides `journal/` unless asked.** A chronological log otherwise
-dominates every result set.
+**`search` and `list` hide `journal/` unless asked.** A chronological log
+otherwise dominates every result set.
 
 **The write path is crash-safe by construction.** File system errors are
 converted to error tuples, never allowed to propagate and take the GenServer

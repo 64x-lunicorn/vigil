@@ -9,7 +9,10 @@ defmodule Vigil.StoreDomainsYmlTest do
 
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
   # every real call, so `Store.call(@store, :search, ...)` requires one rather than defaulting.
-  defp search(params), do: Store.call(@store, :search, Map.put_new(params, :limit, 10))
+  defp search(params) do
+    {:ok, %{results: results}} = Store.call(@store, :search, Map.put_new(params, :limit, 10))
+    results
+  end
 
   defp empty_vault(tmp) do
     File.mkdir_p!(tmp)

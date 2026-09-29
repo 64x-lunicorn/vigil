@@ -549,14 +549,14 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 400
   end
 
-  test "tools/list contains exactly nineteen tools", %{persistence: persistence, token: token} do
+  test "tools/list contains exactly twenty tools", %{persistence: persistence, token: token} do
     conn =
       post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
         {"mcp-session-id", "abc"}
       ])
 
     body = Jason.decode!(conn.resp_body)
-    assert length(body["result"]["tools"]) == 19
+    assert length(body["result"]["tools"]) == 20
   end
 
   # A reader is shown what it may call. Offering it the writes only to refuse
@@ -600,7 +600,7 @@ defmodule Vigil.MCP.ServerTest do
     body = Jason.decode!(conn.resp_body)
     text = hd(body["result"]["content"])["text"]
     payload = Jason.decode!(text)
-    assert is_list(payload["result"])
+    assert %{"results" => [_ | _], "next_cursor" => nil} = payload["result"]
     assert Map.has_key?(payload, "_")
   end
 
@@ -648,7 +648,7 @@ defmodule Vigil.MCP.ServerTest do
     } do
       payload = tool_payload(persistence, token, "search", %{query: "tires", domain: "bike"})
 
-      assert [_ | _] = payload["result"]
+      assert %{"results" => [_ | _]} = payload["result"]
       assert payload["stale"] == true
     end
 
@@ -1894,9 +1894,15 @@ defmodule Vigil.MCP.ServerTest do
       {"search", %{query: "tires", domain: "bike"},
        fn %{payload: payload} ->
          assert Enum.any?(
-                  payload["result"],
+                  payload["result"]["results"],
                   &String.starts_with?(&1["id"], "bike/via-carolina.md")
                 )
+       end},
+      {"list", %{domain: "bike", sort: "title"},
+       fn %{payload: payload} ->
+         # By title: "Via Carolina" before "WTB Terra Speed 40C".
+         assert Enum.map(payload["result"]["notes"], & &1["id"]) ==
+                  ["bike/via-carolina.md", "bike/terra-speed.md"]
        end},
       {"read", %{id: "projects/vigil/vigil.md"},
        fn %{payload: payload} -> assert payload["result"]["title"] == "vigil" end},

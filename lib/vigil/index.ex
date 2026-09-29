@@ -380,51 +380,158 @@ defmodule Vigil.Index do
   words hit; within each, the higher score first, then the more recently
   updated chunk, then the lower id — so the order is the same on every call.
 
-  `opts` inside `params`: `:prefer`, and `:limit`, which is required. The
-  bound on `limit` is declared in `Vigil.MCP.Tools`' table and refused there;
-  a limit that arrives here has already been validated against it, so this
-  function takes the caller at its word rather than silently returning fewer
-  hits than asked for.
+  `opts` inside `params`: `:prefer`, `:cursor`, and `:limit`, which is
+  required. The bound on `limit` is declared in `Vigil.MCP.Tools`' table and
+  refused there; a limit that arrives here has already been validated against
+  it, so this function takes the caller at its word rather than silently
+  returning fewer hits than asked for.
+
+  Answers `{:ok, %{results:, next_cursor:}}`: `next_cursor` is `nil` on the
+  last page, and handed back as `:cursor` it answers the page after. A cursor
+  that does not match the call is `{:error, message}` (see "Paging" below).
   """
   def search(index, params) do
     query = Map.fetch!(params, :query)
     domain = Map.get(params, :domain)
     type_filter = Map.get(params, :type)
     prefer = Map.get(params, :prefer)
-    limit = Map.fetch!(params, :limit)
 
-    index.chunks
-    |> Map.values()
-    |> Enum.filter(&search_filter?(&1, domain, type_filter))
-    |> rank(query, %{limit: limit, prefer: prefer})
-    |> Enum.map(&attach_hub(index, &1))
+    ranked =
+      index.chunks
+      |> Map.values()
+      |> Enum.filter(&(visible?(&1.domain, domain) and of_type?(&1, type_filter)))
+      |> rank(query, prefer)
+
+    with {:ok, hits, next_cursor} <- page(ranked, :search, params) do
+      results =
+        Enum.map(hits, fn {score, chunk} ->
+          attach_hub(index, to_search_result(chunk, score))
+        end)
+
+      {:ok, %{results: results, next_cursor: next_cursor}}
+    end
   end
 
-  defp search_filter?(chunk, domain, type_filter) do
-    domain_ok =
-      case domain do
-        nil -> chunk.domain != "journal"
-        d -> chunk.domain == d
-      end
+  # The one rule for what a read that enumerates shows by default: `journal/`
+  # only when it is the domain asked for (docs/design.md, "Search"). `search`
+  # and `list` both ask it.
+  defp visible?(item_domain, nil), do: item_domain != "journal"
+  defp visible?(item_domain, domain), do: item_domain == domain
 
-    type_ok = type_filter == nil or chunk.type == type_filter
-    domain_ok and type_ok
-  end
+  defp of_type?(_item, nil), do: true
+  defp of_type?(item, type), do: item.type == type
 
-  defp rank(chunks, query, opts) do
+  # Every hit, sorted, each beside the key it was sorted on — the key is what
+  # a page's cursor is checked against (page/3).
+  defp rank(chunks, query, prefer) do
     phrase = query |> String.trim() |> Slug.fold()
     words = query_words(phrase)
-    limit = Map.fetch!(opts, :limit)
-    prefer = Map.get(opts, :prefer)
 
     chunks
     |> Enum.map(&{match(&1, phrase, words, prefer), &1})
     |> Enum.filter(fn {{_group, score}, _} -> score > 0 end)
-    |> Enum.sort_by(fn {{group, score}, chunk} ->
-      {group, -score, negated_time(chunk.updated_at), chunk.id}
+    |> Enum.map(fn {{group, score}, chunk} ->
+      {{group, -score, negated_time(chunk.updated_at), chunk.id}, {score, chunk}}
     end)
-    |> Enum.take(limit)
-    |> Enum.map(fn {{_group, score}, chunk} -> to_search_result(chunk, score) end)
+    |> Enum.sort_by(&elem(&1, 0))
+  end
+
+  @doc """
+  Answers the `list` tool: a card per note — `id` (its path), `title`, `type`,
+  `updated_at` — never a body, with the same `journal/` rule `search/2`
+  follows. `domain` and `type` filter; `sort` is `:updated` (most recently
+  updated first, a note git knows no date for last) or `:title` (folded as
+  search folds, so case and accents do not split the order). Ties break on the
+  path, so the order is the same on every call.
+
+  `params` carries `:sort` and `:limit`, both required and both supplied by
+  `Vigil.MCP.Tools`' table, and an optional `:cursor` from the page before.
+  Answers `{:ok, %{notes:, next_cursor:}}`, or `{:error, message}` for a
+  cursor that does not match the call (see "Paging" below).
+  """
+  def list(index, params) do
+    domain = Map.get(params, :domain)
+    type = Map.get(params, :type)
+    sort = Map.fetch!(params, :sort)
+
+    sorted =
+      index.notes
+      |> Map.values()
+      |> Enum.filter(&(visible?(&1.domain, domain) and of_type?(&1, type)))
+      |> Enum.map(&{list_key(&1, sort), &1})
+      |> Enum.sort_by(&elem(&1, 0))
+
+    with {:ok, notes, next_cursor} <- page(sorted, :list, params) do
+      {:ok, %{notes: Enum.map(notes, &card/1), next_cursor: next_cursor}}
+    end
+  end
+
+  defp list_key(note, :updated), do: {negated_time(note.updated_at), note.path}
+  defp list_key(note, :title), do: {Slug.fold(note.title || ""), note.path}
+
+  defp card(note) do
+    %{id: note.path, title: note.title, type: note.type, updated_at: iso(note.updated_at)}
+  end
+
+  ## Paging
+  #
+  # docs/design.md, "Reads that enumerate are paged". A cursor is an offset
+  # into the whole ordered answer, together with a fingerprint of that answer:
+  # the call it came from (the operation and every parameter but `limit` and
+  # `cursor`) and the sort key of every item, in order. While nothing is
+  # written the same call orders the same items the same way, so the
+  # fingerprint matches and the offset lands where the last page ended. A
+  # write that changes what the call would answer, or in what order, changes
+  # the fingerprint, and the cursor is refused rather than continued at an
+  # offset that no longer means what it meant — a note skipped or shown twice
+  # without a word is the thing paging must not do. A write elsewhere leaves
+  # the cursor valid.
+  #
+  # Opaque to the caller, short whatever the ids are, and nothing in it is
+  # trusted beyond two bounded integers.
+  @fingerprint_range 4_294_967_296
+
+  defp page(sorted, op, params) do
+    limit = Map.fetch!(params, :limit)
+    call = Map.drop(params, [:limit, :cursor])
+    fingerprint = :erlang.phash2({op, call, Enum.map(sorted, &elem(&1, 0))}, @fingerprint_range)
+
+    with {:ok, offset} <- cursor_offset(Map.get(params, :cursor), fingerprint, op) do
+      items = sorted |> Enum.drop(offset) |> Enum.take(limit) |> Enum.map(&elem(&1, 1))
+      next = offset + limit
+      next_cursor = if next < length(sorted), do: encode_cursor(next, fingerprint)
+
+      {:ok, items, next_cursor}
+    end
+  end
+
+  defp cursor_offset(nil, _fingerprint, _op), do: {:ok, 0}
+
+  defp cursor_offset(cursor, fingerprint, op) do
+    case decode_cursor(cursor) do
+      {:ok, offset, ^fingerprint} ->
+        {:ok, offset}
+
+      {:ok, _offset, _other} ->
+        {:error,
+         "The cursor no longer matches: the vault changed since it was issued, " <>
+           "or #{op} was called with other parameters. Call #{op} again without a cursor."}
+
+      :error ->
+        {:error, "Invalid cursor: pass next_cursor from the previous page unchanged."}
+    end
+  end
+
+  defp encode_cursor(offset, fingerprint),
+    do: Base.url_encode64("#{offset}.#{fingerprint}", padding: false)
+
+  defp decode_cursor(cursor) do
+    with {:ok, raw} <- Base.url_decode64(cursor, padding: false),
+         [_, offset, fingerprint] <- Regex.run(~r/\A(\d{1,9})\.(\d{1,10})\z/, raw) do
+      {:ok, String.to_integer(offset), String.to_integer(fingerprint)}
+    else
+      _ -> :error
+    end
   end
 
   # The words of a folded query: its runs of letters and digits, each once.
@@ -722,7 +829,9 @@ defmodule Vigil.Index do
   link to an existing note with a missing fragment names the fragment),
   incoming references, direction `:out`/`:in`/`:both`, depth 1, depth 2
   adding each directly connected note's own depth-1 view with no further
-  recursion, and the same lenient id resolution `read/2` uses.
+  recursion, and the same lenient id resolution `read/2` uses. Depth 2
+  describes at most 25 neighbours, the first by path, and says `truncated:
+  true` when there were more.
 
   `params` is the `links` tool's own parameter map: `:id`, `:direction` and
   `:depth`, under the names `Vigil.MCP.Tools`' table gives them. `depth` is
@@ -759,7 +868,29 @@ defmodule Vigil.Index do
         do: Map.put(base, :incoming, incoming_for(index, id)),
         else: base
 
-    if depth == 2, do: Map.put(base, :neighbors, neighbors_for(index, base, id)), else: base
+    if depth == 2, do: with_neighbors(base, index, id), else: base
+  end
+
+  # How many directly connected notes depth 2 describes. A hub note links to
+  # and from dozens, and each neighbour brings its own out/in lists: the
+  # answer grows with the square of how connected the vault is. The first
+  # ones by path are kept, and `truncated` says whether that was all of them.
+  @neighbors_max 25
+
+  defp with_neighbors(base, index, id) do
+    paths = neighbor_paths(base, id)
+
+    neighbors =
+      paths
+      |> Enum.take(@neighbors_max)
+      |> Map.new(fn note_path ->
+        chunk_ids = note_chunk_ids(index, note_path)
+
+        {note_path,
+         %{outgoing: outgoing_for(index, chunk_ids), incoming: incoming_for(index, note_path)}}
+      end)
+
+    Map.merge(base, %{neighbors: neighbors, truncated: length(paths) > @neighbors_max})
   end
 
   defp outgoing_for(index, chunk_ids) do
@@ -806,7 +937,7 @@ defmodule Vigil.Index do
   # depth: 2 — for each directly connected note its own depth-1 out/in, with
   # no further recursion. Beyond that the value drops off fast while the
   # response size does not.
-  defp neighbors_for(index, base, own_id) do
+  defp neighbor_paths(base, own_id) do
     own_note = own_id |> String.split("#", parts: 2) |> hd()
 
     outgoing_notes =
@@ -823,12 +954,7 @@ defmodule Vigil.Index do
     (outgoing_notes ++ incoming_notes)
     |> Enum.uniq()
     |> Enum.reject(&(&1 == own_note))
-    |> Map.new(fn note_path ->
-      chunk_ids = note_chunk_ids(index, note_path)
-
-      {note_path,
-       %{outgoing: outgoing_for(index, chunk_ids), incoming: incoming_for(index, note_path)}}
-    end)
+    |> Enum.sort()
   end
 
   defp note_chunk_ids(index, note_path) do
@@ -848,6 +974,9 @@ defmodule Vigil.Index do
   other two are this module's own: a broken link is the link index's verdict,
   and the stale-decision horizon is a constant here.
 
+  Each category holds at most 50 findings, in a fixed order; `totals` counts
+  every finding per category and `truncated` is `true` when any was cut.
+
   `params` carries `:now` — the instant the response's envelope was decided
   at. This module is a pure value and reads no clock of its own; a caller with
   no envelope to share one resolves it before calling.
@@ -864,6 +993,25 @@ defmodule Vigil.Index do
       overlong_notes: lint_overlong_notes(index, notes),
       stale_decisions: lint_stale_decisions(notes, now)
     }
+    |> capped()
+  end
+
+  # How many findings one category reports. A vault imported from elsewhere
+  # can carry thousands of broken links, and an answer that size is one no
+  # assistant reads to the end. Each category is in a fixed order, so the
+  # findings kept are the same on every call; `totals` says how many there
+  # are, and `truncated` whether any category was cut.
+  @findings_max 50
+
+  defp capped(findings) do
+    totals = Map.new(findings, fn {category, list} -> {category, length(list)} end)
+
+    findings
+    |> Map.new(fn {category, list} -> {category, Enum.take(list, @findings_max)} end)
+    |> Map.merge(%{
+      totals: totals,
+      truncated: Enum.any?(totals, fn {_category, total} -> total > @findings_max end)
+    })
   end
 
   # Per note, because that is the scope a chunk id is unique in — and what
@@ -894,6 +1042,7 @@ defmodule Vigil.Index do
     chunks
     |> Enum.filter(fn c -> c.heading && Rules.sentence_heading?(c.heading) end)
     |> Enum.map(fn c -> %{id: c.id, heading: c.heading} end)
+    |> Enum.sort_by(& &1.id)
   end
 
   defp lint_orphaned_links(index) do
@@ -903,6 +1052,7 @@ defmodule Vigil.Index do
     |> Enum.filter(&(&1.status == :broken))
     |> Enum.map(&link_label/1)
     |> Enum.uniq()
+    |> Enum.sort()
   end
 
   # "Overlong" is Vigil.Vault.Rules' definition, the same one Vigil.VaultCheck
@@ -913,6 +1063,7 @@ defmodule Vigil.Index do
     |> Enum.map(fn note -> {note, Rules.note_length(note_chunks(index, note))} end)
     |> Enum.filter(fn {_note, length} -> Rules.overlong?(length) end)
     |> Enum.map(fn {note, length} -> Map.put(length, :path, note.path) end)
+    |> Enum.sort_by(& &1.path)
   end
 
   defp note_chunks(index, note) do
@@ -933,6 +1084,7 @@ defmodule Vigil.Index do
         DateTime.compare(n.updated_at, cutoff) == :lt
     end)
     |> Enum.map(fn n -> %{path: n.path, updated_at: iso(n.updated_at)} end)
+    |> Enum.sort_by(& &1.path)
   end
 
   @doc """

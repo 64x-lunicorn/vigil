@@ -16,7 +16,12 @@ defmodule Vigil.StoreTest do
 
   # Vigil.MCP.Tools declares limit (1..25, default 10) and supplies it on
   # every real call, so `Store.call(@store, :search, ...)` requires one rather than defaulting.
-  defp search(params), do: Store.call(@store, :search, Map.put_new(params, :limit, 10))
+  defp search(params) do
+    case Store.call(@store, :search, Map.put_new(params, :limit, 10)) do
+      {:ok, %{results: results}} -> results
+      {:stale, {:ok, %{results: results}}} -> {:stale, results}
+    end
+  end
 
   # Every Store in this file reaches git through the commit log
   # (docs/design.md, "Git is reached through a value"). What these tests
@@ -1598,12 +1603,12 @@ defmodule Vigil.StoreTest do
 
       advance(clock, 1)
 
-      for op <- [:lint, :current] do
-        Store.call(@store, op, %{})
+      for {op, params} <- [{:lint, %{}}, {:current, %{}}, {:list, %{sort: :updated, limit: 10}}] do
+        Store.call(@store, op, params)
         advance(clock, 60)
       end
 
-      assert fetches(log) == 4
+      assert fetches(log) == 5
     end
 
     test "a write's fetch counts: a read right after it does not fetch again", %{vault: vault} do

@@ -63,8 +63,19 @@ defmodule Vigil.MCP.ToolsDispatchTest do
                domain: nil,
                type: nil,
                prefer: nil,
-               limit: 10
+               limit: 10,
+               cursor: nil
              }
+    end
+
+    test "list sends its declared operation, its defaults and the enum's atom" do
+      store = start_store()
+
+      assert {:ok, :stub_result} =
+               Tools.dispatch(store, "list", %{"domain" => "bike", "sort" => "title"}, @now, @key)
+
+      assert_receive {:store_call, {:list, params}}
+      assert params == %{domain: "bike", type: nil, sort: :title, limit: 25, cursor: nil}
     end
 
     test "a parameterless tool sends an empty params map" do

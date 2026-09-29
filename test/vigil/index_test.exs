@@ -14,7 +14,10 @@ defmodule Vigil.IndexTest do
   # The `limit` the MCP table supplies on every real call. Vigil.MCP.Tools
   # declares it (1..25, default 10) and refuses anything else, so search/2
   # requires one rather than inventing a second default.
-  defp search(index, params), do: Index.search(index, Map.put_new(params, :limit, 10))
+  defp search(index, params) do
+    {:ok, %{results: results}} = Index.search(index, Map.put_new(params, :limit, 10))
+    results
+  end
 
   # search/2 is pure over an %Index{} — no GenServer, no fixture vault, no
   # Parser needed to reach it. These build the bare struct directly, the way
@@ -970,6 +973,220 @@ defmodule Vigil.IndexTest do
                      body: "steady baseline intake across the day."
                    }
                }
+    end
+  end
+
+  describe "list/2" do
+    defp listed(index, params) do
+      {:ok, page} = Index.list(index, Map.merge(%{sort: :updated, limit: 100}, params))
+      page
+    end
+
+    defp dated(path, content, day) do
+      at = DateTime.new!(Date.new!(2026, 3, day), ~T[10:00:00], "Etc/UTC")
+      {:ok, file} = Parser.parse(path, content, %{@git_meta | updated_at: at})
+      file
+    end
+
+    test "cards every note outside journal/, never a body", %{index: index} do
+      page = listed(index, %{})
+
+      assert Enum.map(page.notes, & &1.id) |> Enum.sort() == [
+               "bike/terra-speed.md",
+               "bike/via-carolina.md",
+               "garden/raised-bed.md",
+               "home/diacritics-äöü-café.md",
+               "projects/vigil/vigil-mcp-config.md",
+               "projects/vigil/vigil-ranking.md",
+               "projects/vigil/vigil.md",
+               "training/note-without-anything.md",
+               "work/secret.md"
+             ]
+
+      assert %{id: "bike/terra-speed.md", type: :reference, updated_at: "2026-01-01T10:00:00Z"} =
+               card = Enum.find(page.notes, &(&1.id == "bike/terra-speed.md"))
+
+      assert Map.keys(card) |> Enum.sort() == [:id, :title, :type, :updated_at]
+      assert page.next_cursor == nil
+    end
+
+    test "journal/ is listed only when it is the domain asked for", %{index: index} do
+      refute Enum.any?(listed(index, %{}).notes, &String.starts_with?(&1.id, "journal/"))
+      assert [%{id: "journal/2026-07-09.md"}] = listed(index, %{domain: "journal"}).notes
+    end
+
+    test "within one domain, and by type", %{index: index} do
+      assert Enum.map(listed(index, %{domain: "bike"}).notes, & &1.id) |> Enum.sort() ==
+               ["bike/terra-speed.md", "bike/via-carolina.md"]
+
+      assert listed(index, %{domain: "nowhere"}).notes == []
+
+      assert Enum.all?(listed(index, %{type: :decision}).notes, &(&1.type == :decision))
+    end
+
+    test "sorted by most recently updated, then by path" do
+      index =
+        Index.build([
+          dated("a/old.md", "# Zebra", 1),
+          dated("a/new.md", "# Apple", 20),
+          dated("b/tie-2.md", "# Mango", 10),
+          dated("b/tie-1.md", "# mango", 10)
+        ])
+
+      assert Enum.map(listed(index, %{}).notes, & &1.id) ==
+               ["a/new.md", "b/tie-1.md", "b/tie-2.md", "a/old.md"]
+    end
+
+    test "sorted by title, folded, then by path" do
+      index =
+        Index.build([
+          dated("a/z.md", "# zebra", 1),
+          dated("a/a.md", "# Äpfel", 2),
+          dated("a/b.md", "# Banana", 3),
+          dated("b/b.md", "# banana", 4)
+        ])
+
+      assert Enum.map(listed(index, %{sort: :title}).notes, & &1.title) ==
+               ["Äpfel", "Banana", "banana", "zebra"]
+    end
+  end
+
+  describe "paging" do
+    defp many(count) do
+      for n <- 1..count do
+        {:ok, file} =
+          Parser.parse(
+            "notes/n#{String.pad_leading("#{n}", 3, "0")}.md",
+            "# Note #{n}\n\nPaging tomatoes.\n",
+            @git_meta
+          )
+
+        file
+      end
+    end
+
+    defp all_pages(fun, cursor \\ nil, acc \\ []) do
+      {:ok, page} = fun.(cursor)
+      items = Map.get(page, :notes) || Map.get(page, :results)
+
+      case page.next_cursor do
+        nil -> acc ++ items
+        next -> all_pages(fun, next, acc ++ items)
+      end
+    end
+
+    test "list pages cover every note once, in the order of one long page" do
+      index = Index.build(many(23))
+      params = %{sort: :title, limit: 5}
+
+      pages = all_pages(&Index.list(index, Map.put(params, :cursor, &1)))
+      {:ok, whole} = Index.list(index, %{params | limit: 100})
+
+      assert Enum.map(pages, & &1.id) == Enum.map(whole.notes, & &1.id)
+      assert length(pages) == 23
+    end
+
+    test "search pages cover every hit once, in ranked order" do
+      index = Index.build(many(12))
+      params = %{query: "tomatoes", limit: 5}
+
+      pages = all_pages(&Index.search(index, Map.put(params, :cursor, &1)))
+      {:ok, whole} = Index.search(index, %{params | limit: 25})
+
+      assert Enum.map(pages, & &1.id) == Enum.map(whole.results, & &1.id)
+      assert length(pages) == 12
+    end
+
+    test "a page is the same every time it is asked for while nothing is written" do
+      index = Index.build(many(12))
+      {:ok, first} = Index.list(index, %{sort: :updated, limit: 5})
+      params = %{sort: :updated, limit: 5, cursor: first.next_cursor}
+
+      assert Index.list(index, params) == Index.list(index, params)
+      assert Index.list(Index.build(many(12)), params) == Index.list(index, params)
+    end
+
+    test "a write that changes the answer refuses the cursor, one elsewhere does not" do
+      index = Index.build(many(12))
+      {:ok, first} = Index.list(index, %{domain: "notes", sort: :title, limit: 5})
+      params = %{domain: "notes", sort: :title, limit: 5, cursor: first.next_cursor}
+
+      {:ok, other} = Parser.parse("elsewhere/x.md", "# X\n", @git_meta)
+      assert {:ok, _page} = Index.list(Index.put(index, other), params)
+
+      {:ok, added} = Parser.parse("notes/n000.md", "# Note 0\n", @git_meta)
+      assert {:error, message} = Index.list(Index.put(index, added), params)
+      assert message =~ "no longer matches"
+      assert message =~ "without a cursor"
+    end
+
+    test "a cursor from other parameters is refused" do
+      index = Index.build(many(12))
+      {:ok, first} = Index.list(index, %{sort: :title, limit: 5})
+
+      assert {:error, message} =
+               Index.list(index, %{sort: :updated, limit: 5, cursor: first.next_cursor})
+
+      assert message =~ "no longer matches"
+
+      assert {:error, _} =
+               Index.search(index, %{query: "tomatoes", limit: 5, cursor: first.next_cursor})
+    end
+
+    test "a cursor that is not one is refused" do
+      index = Index.build(many(3))
+
+      for cursor <- ["", "nonsense!", Base.url_encode64("x.y", padding: false)] do
+        assert {:error, "Invalid cursor" <> _} =
+                 Index.list(index, %{sort: :title, limit: 5, cursor: cursor})
+      end
+    end
+  end
+
+  describe "caps" do
+    test "lint lists at most 50 findings per category and says it cut them" do
+      body = Enum.map_join(1..60, " ", &"[[missing-#{&1}]]")
+      {:ok, file} = Parser.parse("bike/broken.md", "# Broken\n\n#{body}\n", @git_meta)
+      report = Index.lint(Index.build([file]), %{now: ~U[2026-01-01 10:00:00Z]})
+
+      assert length(report.orphaned_links) == 50
+      assert report.orphaned_links == Enum.take(Enum.sort(report.orphaned_links), 50)
+      assert report.totals.orphaned_links == 60
+      assert report.truncated == true
+    end
+
+    test "lint says truncated: false when nothing was cut", %{index: index} do
+      report = Index.lint(index, %{now: ~U[2026-01-01 10:00:00Z]})
+
+      assert report.truncated == false
+      assert report.totals.orphaned_links == length(report.orphaned_links)
+    end
+
+    test "links at depth 2 describes at most 25 neighbours and says it cut them" do
+      hub_body = Enum.map_join(1..30, " ", &"[[spoke-#{String.pad_leading("#{&1}", 2, "0")}]]")
+      {:ok, hub} = Parser.parse("hub/hub.md", "# Hub\n\n#{hub_body}\n", @git_meta)
+
+      spokes =
+        for n <- 1..30 do
+          name = "spoke-#{String.pad_leading("#{n}", 2, "0")}"
+          {:ok, file} = Parser.parse("hub/#{name}.md", "# #{name}\n", @git_meta)
+          file
+        end
+
+      index = Index.build([hub | spokes])
+      {:ok, deep} = Index.links(index, %{id: "hub/hub.md", direction: :both, depth: 2})
+
+      assert map_size(deep.neighbors) == 25
+      assert Map.keys(deep.neighbors) |> Enum.sort() |> List.last() == "hub/spoke-25.md"
+      assert deep.truncated == true
+
+      {:ok, shallow} = Index.links(index, %{id: "hub/spoke-01.md", direction: :both, depth: 2})
+      assert shallow.truncated == false
+
+      refute Map.has_key?(
+               elem(Index.links(index, %{id: "hub/hub.md", direction: :both, depth: 1}), 1),
+               :truncated
+             )
     end
   end
 end

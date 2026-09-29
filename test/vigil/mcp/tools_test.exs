@@ -15,9 +15,9 @@ defmodule Vigil.MCP.ToolsTest do
   @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete_note move_note skill_write)
 
   describe "definitions/0 is derived from the declaration table" do
-    test "nineteen tools, matching write_tool?/1 to the write: flag" do
+    test "twenty tools, matching write_tool?/1 to the write: flag" do
       definitions = Tools.definitions()
-      assert length(definitions) == 19
+      assert length(definitions) == 20
 
       for %{name: name} <- definitions do
         assert Tools.write_tool?(name) == name in @write_tools
@@ -48,6 +48,28 @@ defmodule Vigil.MCP.ToolsTest do
                maximum: 25,
                description: "Maximum number of hits (default 10)."
              }
+    end
+
+    test "list: nothing required, read-only, sort carries its enum, limit its range" do
+      [list] = Enum.filter(Tools.definitions(), &(&1.name == "list"))
+      props = list.inputSchema.properties
+
+      refute Map.has_key?(list.inputSchema, :required)
+      assert list.title == "List notes"
+
+      assert list.annotations == %{
+               readOnlyHint: true,
+               destructiveHint: false,
+               idempotentHint: true,
+               openWorldHint: false
+             }
+
+      assert props.sort.enum == ["updated", "title"]
+      assert props.type.enum == ["reference", "decision", "event"]
+      assert %{type: "integer", minimum: 1, maximum: 100} = props.limit
+      assert %{type: "string", maxLength: 1_024} = props.domain
+      assert %{type: "string", maxLength: 1_024} = props.cursor
+      refute Map.has_key?(props.cursor, :minLength)
     end
 
     test "links: direction carries the out/in/both enum, depth publishes its range" do
@@ -309,6 +331,13 @@ defmodule Vigil.MCP.ToolsTest do
                  )
 
         assert message =~ "Invalid parameter limit: expected an integer between 1 and 25"
+      end
+    end
+
+    test "a list limit outside 1..100 is refused rather than clamped" do
+      for out_of_range <- [101, 0] do
+        assert {:error, message} = Tools.dispatch("list", %{"limit" => out_of_range}, @now, @key)
+        assert message =~ "Invalid parameter limit: expected an integer between 1 and 100"
       end
     end
 

@@ -122,7 +122,10 @@ defmodule Vigil.Vault.Facts do
       # `Index.strength(:title)`, which means "the query names this note" only
       # for a search with no preferred type.
       find_similar: fn query, domain, depth ->
-        Index.search(index, %{query: query, domain: domain, limit: depth})
+        {:ok, %{results: results}} =
+          Index.search(index, %{query: query, domain: domain, limit: depth})
+
+        results
       end,
       count_headings: fn path -> Index.count_headings(index, path) end,
       find_chunk: fn id -> Index.find_chunk(index, id) end,

@@ -6,9 +6,14 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl).",
+    "description": "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl). Results come a page at a time, with next_cursor for the next one.",
     "inputSchema": {
       "properties": {
+        "cursor": {
+          "description": "Optional: next_cursor from the previous page, with the same other parameters. Refused once a write changed the answer.",
+          "maxLength": 1024,
+          "type": "string"
+        },
         "domain": {
           "description": "Restrict results to this domain.",
           "maxLength": 1024,
@@ -60,6 +65,55 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
+    "description": "Lists notes as cards (id, title, type, updated_at), never bodies, page by page: the whole vault or one domain, most recently updated first or by title. journal is listed only when named as the domain.",
+    "inputSchema": {
+      "properties": {
+        "cursor": {
+          "description": "Optional: next_cursor from the previous page, with the same other parameters. Refused once a write changed the answer.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "domain": {
+          "description": "Only notes in this domain.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum number of notes per page (default 25).",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "updated (most recent first, the default) or title.",
+          "enum": [
+            "updated",
+            "title"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "description": "Only notes of this type.",
+          "enum": [
+            "reference",
+            "decision",
+            "event"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "list",
+    "title": "List notes"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Reads a chunk, or a note: its body (the text before its first ## heading) and its table of contents. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
     "inputSchema": {
       "properties": {
@@ -98,7 +152,7 @@
     "inputSchema": {
       "properties": {
         "depth": {
-          "description": "Defaults to 1; 2 adds each directly connected note's own depth-1 view.",
+          "description": "Defaults to 1; 2 adds each directly connected note's own depth-1 view, for at most 25 notes (truncated: true when there were more).",
           "maximum": 2,
           "minimum": 1,
           "type": "integer"
@@ -575,7 +629,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+    "description": "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes. Each category lists at most 50; totals counts them all and truncated says whether any were cut.",
     "inputSchema": {
       "properties": {},
       "type": "object"
