@@ -1080,7 +1080,7 @@ that does not answer is reported instead of waited on.
 *Healthy* means the index is loaded and the writer answers — `/healthz` is 200
 then and 503 otherwise. A failed push or a vault that is ahead is reported in
 the body, not in the status code: the service is serving, the commits are
-safe locally, and the safety-net cron pushes them without the writer ever
+safe locally, and the push safety net pushes them without the writer ever
 noticing, so a status code tied to the last push would stay red after the
 problem was gone. Deciding otherwise would also make `update.sh` roll back a
 release because of the network.
@@ -1459,8 +1459,9 @@ a branch on the remote, and `main` otherwise — what a clone of a `master`
 vault already says about itself. The scripts read both from `/etc/vigil/env`
 (`vault_git_remote` and `vault_git_branch` in `scripts/lib.sh`, which apply
 the same rule and name the two defaults once), init.sh writes both there, and
-the push safety net is `scripts/push_pending.sh`, run by cron as root because
-root is who can read that file.
+the push safety net's `scripts/push_pending.sh` gets them from systemd, which
+reads the file for its unit (see "The push safety net runs in the service's
+sandbox").
 
 **The secret is named, never echoed.** A check that wants the offending value
 in its message puts it there itself, so `VIGIL_AUTH_PASSWORD`'s says what it
@@ -1964,6 +1965,39 @@ is enforced where a unit is installed: `setup.sh` and
 `MemoryDenyWriteExecute` stays off because the BEAM's JIT writes the code it
 runs; it goes on only after a boot and a write under it in the target
 container.
+
+**The push safety net runs in the service's sandbox.** It was a cron line run
+as root: it named the vault path, took its lock in world-writable `/tmp`, ran
+git outside the sandbox and so ran the vault's hooks, had no timeout, and a
+failure went to syslog and nowhere else. It is now `deploy/vigil-push.service`,
+started by `vigil-push.timer`, running `scripts/push_pending.sh` as `vigil`
+with `vigil.service`'s sandbox block copied unchanged and scored against the
+same target. It is not given root to read `/etc/vigil/env`: systemd reads the
+file for it (`EnvironmentFile=`) and hands it the values, and `lib.sh`'s
+`env_file_value` asks the environment when the file cannot be read, so the
+script and the root scripts read one file. The lock is in the unit's
+`RuntimeDirectory=` (`/run/vigil-push`, 0700, the service user's), and the
+script refuses a lock directory anyone else could write to — `/run/lock`, the
+first replacement for `/tmp`, is writable by everyone too. Hooks are off
+(`core.hooksPath=/dev/null`); the push has the server's ssh options and
+`VIGIL_PUSH_TIMEOUT` seconds, the unit five minutes.
+
+**Every failed run fails the unit, and the unit says so.** A failed or stopped
+push exits non-zero, which puts the reason in the unit's journal and starts
+`OnFailure=vigil-notify@%N.service`. There is no grace period for a failure
+that might be transient: a push that is retried every 15 minutes and fails
+every time says so every time, which is noisier than necessary and never
+silent. Separately, commits that have waited longer than
+`VIGIL_PUSH_ALERT_AFTER` minutes (60 by default; the oldest pending commit's
+committer date is when the wait began) fail the run on their own, so a run
+that could not push for a reason it did not see — the lock taken — still
+reports what matters. The notification is a template whose shipped command
+logs one line at priority `crit`; what an operator is actually told by is
+theirs to set in a drop-in (`docs/guide.md`, "The push safety net"), because
+vigil has no mail, pager or webhook of its own to assume. `init.sh` installs
+the three units; `update.sh` reinstalls them on every update rather than
+behind `--update-unit`, since the timer runs a script from the checkout the
+update has just moved, and removes the cron file on a host that still has it.
 
 ---
 

@@ -61,6 +61,10 @@ VAULT="${VIGIL_VAULT_DIR:-${STATE_DIR}/vault}"
 ENV_FILE="${VIGIL_ENV_FILE:-/etc/vigil/env}"
 # shellcheck disable=SC2034 # read by the sourcing script
 UNIT_FILE="${VIGIL_UNIT_FILE:-/etc/systemd/system/vigil.service}"
+# Where the push safety net's units go: beside the service's.
+SYSTEMD_DIR="$(dirname "$UNIT_FILE")"
+# The cron line the push safety net used to be, removed wherever it is found.
+OLD_PUSH_CRON_FILE="${VIGIL_PUSH_CRON_FILE:-/etc/cron.d/vigil-push-safety-net}"
 
 SERVICE="${VIGIL_SERVICE_NAME:-vigil}"
 SERVICE_USER="${VIGIL_SERVICE_USER:-vigil}"
@@ -92,11 +96,18 @@ DEFAULT_GIT_REMOTE="github"
 DEFAULT_GIT_BRANCH="main"
 
 # env_file_value <NAME> — what the env file sets NAME to, without the quotes a
-# value with a space is written in; empty when the file or the line is
-# missing. Read rather than sourced, so that asking for one value does not
-# bring the whole VIGIL_* namespace into the calling shell.
+# value with a space is written in; empty when the line is missing. Read
+# rather than sourced, so that asking for one value does not bring the whole
+# VIGIL_* namespace into the calling shell.
+#
+# A caller that cannot read the file is a unit's process: systemd read it as
+# root (EnvironmentFile=) and exported every line, so the value is asked of
+# the environment instead — the same file, read by the one who may.
 env_file_value() {
-  [ -r "$ENV_FILE" ] || return 0
+  if [ ! -r "$ENV_FILE" ]; then
+    printenv "$1" 2>/dev/null || true
+    return 0
+  fi
   sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 | sed -e 's/^"\(.*\)"$/\1/'
 }
 
@@ -373,6 +384,61 @@ check_unit_exposure() {
   err "systemd-analyze security scores the unit above $((UNIT_EXPOSURE_THRESHOLD / 10)).$((UNIT_EXPOSURE_THRESHOLD % 10)):"
   echo "$report" | tail -25 >&2
   return 1
+}
+
+## ── The push safety net (shared by init.sh/update.sh) ────────────────────
+
+# The units that make it, all from deploy/: the push itself, the timer that
+# starts it, and the notification its OnFailure= starts.
+PUSH_UNITS=(vigil-push.service vigil-push.timer vigil-notify@.service)
+
+# install_push_timer <deploy dir> — installs the three units, removes the cron
+# file they replace, and enables the timer. Idempotent: init.sh runs it once,
+# update.sh on every update, which is how a host set up with the cron line
+# moves over. The push unit is verified and its sandbox scored before any file
+# is replaced, as update.sh does for the service's unit, so a unit that would
+# not load or that loosened the sandbox is not installed. Returns 1 then,
+# having changed nothing.
+install_push_timer() {
+  local source_dir="$1" candidate_dir unit analysis unexpected
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY RUN] install ${PUSH_UNITS[*]} into ${SYSTEMD_DIR}, remove ${OLD_PUSH_CRON_FILE}, enable vigil-push.timer"
+    return 0
+  fi
+
+  candidate_dir="$(mktemp -d)"
+  for unit in "${PUSH_UNITS[@]}"; do
+    cp "${source_dir}/${unit}" "${candidate_dir}/${unit}"
+  done
+  # The candidate directory first in the unit path, so OnFailure='s template
+  # and the timer's service are found among the candidates. Same filter as
+  # setup.sh: a missing executable is expected on a host whose code checkout
+  # is not in place yet, anything else is not.
+  analysis="$(SYSTEMD_UNIT_PATH="${candidate_dir}:" systemd-analyze verify \
+    "${candidate_dir}/vigil-push.service" "${candidate_dir}/vigil-push.timer" 2>&1 || true)"
+  unexpected="$(echo "$analysis" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
+  if [ -n "$unexpected" ]; then
+    rm -rf "$candidate_dir"
+    err "systemd-analyze verify reports problems with the push safety net's units:"
+    echo "$unexpected" >&2
+    return 1
+  fi
+  if ! check_unit_exposure "${candidate_dir}/vigil-push.service"; then
+    rm -rf "$candidate_dir"
+    return 1
+  fi
+
+  for unit in "${PUSH_UNITS[@]}"; do
+    install -m 0644 "${candidate_dir}/${unit}" "${SYSTEMD_DIR}/${unit}"
+  done
+  rm -rf "$candidate_dir"
+  if [ -e "$OLD_PUSH_CRON_FILE" ]; then
+    rm -f "$OLD_PUSH_CRON_FILE"
+    ok "Removed the push safety net's cron file (${OLD_PUSH_CRON_FILE})."
+  fi
+  systemctl daemon-reload
+  systemctl enable --now vigil-push.timer >/dev/null
+  ok "Push safety net: vigil-push.timer enabled, failures start vigil-notify@vigil-push.service."
 }
 
 ## ── Token bootstrap (shared by init.sh/update.sh) ────────────────────────

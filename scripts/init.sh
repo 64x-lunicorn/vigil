@@ -861,13 +861,11 @@ fi
 record_done "service started, tokens seeded, conventions skill created"
 
 # The push safety net: a write whose push failed is committed and answered
-# `pushed: false`; this pushes it within 15 minutes if no later write does.
-if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] install /etc/cron.d/vigil-push-safety-net"
-else
-  install -m 0644 -o root -g root "${SCRIPT_DIR}/../deploy/vigil-push-safety-net.cron" /etc/cron.d/vigil-push-safety-net
-  ok "Installed the push safety net (/etc/cron.d/vigil-push-safety-net)."
-fi
+# `pushed: false`; vigil-push.timer pushes it within 15 minutes if no later
+# write does, and a push that fails starts vigil-notify@. The cron line it
+# replaces is removed if this host still has one.
+install_push_timer "${SCRIPT_DIR}/../deploy" || exit 1
+record_done "push safety net: vigil-push.timer enabled"
 
 ## ── Step 8 — verify() ────────────────────────────────────────────────────
 

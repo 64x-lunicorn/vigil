@@ -115,7 +115,8 @@ stays local and `push_error` names the path a human has to resolve. If only the 
 `pushed: false` and carries the reason in `push_error`, so the client knows
 without being invited to retry — a retried `append` would append twice, unless
 it carries the same `request_id` as the first call. The commit goes out with
-the next successful push, or within 15 minutes through the safety-net cron job. A write whose *commit* fails is an error, and the vault is
+the next successful push, or within 15 minutes through the
+[push safety net](#the-push-safety-net). A write whose *commit* fails is an error, and the vault is
 left as it was: a deleted note is back, a moved note is at its old path, and
 nothing is left staged for the next commit to pick up.
 
@@ -268,8 +269,8 @@ can be revoked sooner (see [revoking access](#revoking-access)). With
 `--keep-token` — moving an instance whose clients keep the tokens they hold —
 no token is minted for the owner and none is printed; the skill bootstrap and
 the acceptance check use two of their own that live 15 minutes. It also
-installs the push safety net as `/etc/cron.d/vigil-push-safety-net`, which
-runs `scripts/push_pending.sh` every 15 minutes. An adopted vault keeps its
+installs the [push safety net](#the-push-safety-net), `vigil-push.timer`,
+which runs `scripts/push_pending.sh` every 15 minutes. An adopted vault keeps its
 own `vigil-vault-conventions` skill; the template is only written when the
 vault has none.
 
@@ -582,6 +583,8 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_CONSENT_FAILURES_PER_HOUR` | `50` | max wrong consent passwords per hour from every address together; past it the consent form answers 429 until the hour is up |
 | `VIGIL_VAULT_OWNER` | `the vault owner` | who the notes belong to — shapes the writing instructions |
 | `VIGIL_VAULT_LANGUAGE` | `English` | language the **notes** are written in; vigil's own output is always English |
+| `VIGIL_PUSH_TIMEOUT` | `120` | seconds the [push safety net](#the-push-safety-net)'s push is given before it is stopped and the run fails |
+| `VIGIL_PUSH_ALERT_AFTER` | `60` | minutes vault commits may wait unpushed before the push safety net's run fails on that alone |
 
 Every setting is checked once, when the service starts and before anything
 else does. A bad one stops the start, and the journal names every variable that
@@ -620,7 +623,11 @@ The scripts read the remote and the branch from `/etc/vigil/env` too, so a
 vault on `master`, or a remote called `origin`, is two lines there and nothing
 else.
 
-The last two only affect the instructions handed to the MCP client on connect.
+`VIGIL_PUSH_TIMEOUT` and `VIGIL_PUSH_ALERT_AFTER` are read by the push safety
+net only; the server does not check them.
+
+`VIGIL_VAULT_OWNER` and `VIGIL_VAULT_LANGUAGE` only affect the instructions
+handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
 will keep writing German notes.
 
@@ -768,6 +775,63 @@ from `skill_read`, as after any rotation. The consent password and every OAuth
 token are untouched.
 
 ---
+
+### The push safety net
+
+A write whose push fails is still a write: it is committed, and answered
+`pushed: false`. `vigil-push.timer` starts `vigil-push.service` five minutes
+after boot and then 15 minutes after each run ends, and the service runs
+`scripts/push_pending.sh`, which pushes the vault's pending commits if there
+are any and does nothing otherwise.
+
+```bash
+systemctl list-timers vigil-push.timer         # when it runs next
+sudo systemctl start vigil-push.service        # push now, the same way
+journalctl -u vigil-push -n 50                 # what the runs said
+```
+
+It runs as `vigil` under the same sandbox as the service, with the settings
+of `/etc/vigil/env` handed to it by systemd; the lock is in
+`/run/vigil-push/`, which only `vigil` can enter; the vault's git hooks are
+not run; and the push is stopped after `VIGIL_PUSH_TIMEOUT` seconds, the whole
+run after five minutes. A run **fails** — the unit shows as failed and the
+reason is in its journal — when the push fails or is stopped, and when
+commits have been waiting longer than `VIGIL_PUSH_ALERT_AFTER` minutes, even
+if this run could not tell why.
+
+**Being told.** A failed run starts `vigil-notify@vigil-push.service`
+(`OnFailure=`). As shipped it logs one line at priority `crit`:
+
+```bash
+journalctl -p crit -t vigil-notify
+```
+
+To be told another way, override its `ExecStart=` in a drop-in, which
+`init.sh` and `update.sh` leave alone when they reinstall the units. `%i` is
+the failed unit's name, `%H` the host's:
+
+```bash
+sudo systemctl edit vigil-notify@.service
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/notify-me "%i failed on %H"
+# The shipped unit allows Unix sockets only; a command that talks to the
+# network needs the others back:
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+```
+
+The command runs as a throwaway user (`DynamicUser=`) that can read neither
+the vault nor the env file; a secret it needs goes in the drop-in
+(`Environment=` or `LoadCredential=`). Try it with
+`sudo systemctl start vigil-notify@vigil-push.service`.
+
+`init.sh` installs and enables the three units; `update.sh` reinstalls them on
+every update, scoring `vigil-push.service`'s sandbox like the service's. A host
+set up before the timer has its cron file, `/etc/cron.d/vigil-push-safety-net`,
+removed by its next `update.sh`.
 
 ## Revoking access
 
@@ -924,7 +988,7 @@ editing the vault in another tool.
 | Client gets 401 | token wrong, expired or revoked (`sudo ./scripts/grants.sh list`) | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
 | A write tool answers "Read-only token: write access denied." | the token's scope is not `vault` (for example `vault:read`) | connect with a `vault` token |
 | Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client | fix the Access configuration — never disable Access to "solve" this |
-| Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | the safety-net cron retries every 15 minutes; check `journalctl -t vigil-push` and `git -C /var/lib/vigil/vault rev-list --count @{u}..` |
+| Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | `vigil-push.timer` retries every 15 minutes; check `journalctl -u vigil-push`, `systemctl list-timers vigil-push.timer` and `git -C /var/lib/vigil/vault rev-list --count @{u}..` |
 
 ---
 

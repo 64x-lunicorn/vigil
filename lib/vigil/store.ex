@@ -912,7 +912,7 @@ defmodule Vigil.Store do
   # in the index, so the answer is a success that says it was not pushed —
   # reported as an error, it invited the client to retry, and an `append`
   # retried is an `append` twice. The commit goes out with the next push that
-  # succeeds, or with the safety-net cron.
+  # succeeds, or with the push safety net.
   defp push(state, success, failure_prefix) do
     case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
       :ok ->

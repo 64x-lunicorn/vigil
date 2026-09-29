@@ -152,6 +152,11 @@ build_repo() {
   git -C "$repo" config user.name "Update Test"
   mkdir -p "${repo}/deploy"
   echo "[Unit]" >"${repo}/deploy/vigil.service"
+  # The push safety net's units as this checkout ships them: update.sh
+  # installs them on every update.
+  for unit in vigil-push.service vigil-push.timer vigil-notify@.service; do
+    cp "${REPO_ROOT}/deploy/${unit}" "${repo}/deploy/${unit}"
+  done
   echo "v1" >"${repo}/version"
   git -C "$repo" add -A
   git -C "$repo" commit -q -m "v1"
@@ -267,6 +272,7 @@ run_update() {
     VIGIL_VAULT_DIR="$VAULT" \
     VIGIL_ENV_FILE="$ENV_FILE" \
     VIGIL_UNIT_FILE="${WORK}/etc/vigil.service" \
+    VIGIL_PUSH_CRON_FILE="${WORK}/etc/cron.d/vigil-push-safety-net" \
     VIGIL_SERVICE_USER="$(id -un)" \
     VIGIL_SERVICE_GROUP="$(id -gn)" \
     FAKE_MIX_LOG="$FAKE_MIX_LOG" \
@@ -654,6 +660,61 @@ if grep -q "^MemoryDenyWriteExecute=" "$SHIPPED_UNIT"; then
 else
   pass "MemoryDenyWriteExecute stays off for the JIT"
 fi
+
+## ── 9. The push safety net ───────────────────────────────────────────────
+
+section "9/9  An update moves the push safety net from cron to the timer"
+
+build_host
+mkdir -p "${WORK}/etc/cron.d"
+echo "*/15 * * * * root /opt/vigil/repo/scripts/push_pending.sh" \
+  >"${WORK}/etc/cron.d/vigil-push-safety-net"
+: >"${WORK}/systemd-analyze.log"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if [ -e "${WORK}/etc/cron.d/vigil-push-safety-net" ]; then
+  fail "the cron file is removed"
+else
+  pass "the cron file is removed"
+fi
+for unit in vigil-push.service vigil-push.timer vigil-notify@.service; do
+  if cmp -s "${REPO_ROOT}/deploy/${unit}" "${WORK}/etc/${unit}"; then
+    pass "${unit} is installed as shipped"
+  else
+    fail "${unit} is installed as shipped"
+  fi
+done
+if grep -qx "enable --now vigil-push.timer" "${PREFIX}/.systemctl-units.log" 2>/dev/null &&
+  grep -qx "daemon-reload" "${PREFIX}/.systemctl-units.log"; then
+  pass "systemd is reloaded and the timer enabled and started"
+else
+  fail "systemd is reloaded and the timer enabled and started" \
+    "systemctl calls: $(paste -sd'|' "${PREFIX}/.systemctl-units.log" 2>/dev/null)"
+fi
+if grep -qE "^security --offline=true --threshold=30 .*/vigil-push\.service$" "${WORK}/systemd-analyze.log"; then
+  pass "the push unit's sandbox was scored against the 3.0 target"
+else
+  fail "the push unit's sandbox was scored against the 3.0 target" \
+    "systemd-analyze calls: $(paste -sd'|' "${WORK}/systemd-analyze.log")"
+fi
+
+section "9b   A push unit above the exposure target stops the update before the switch"
+
+build_host
+FAKE_SA_EXPOSED="${WORK}/unit-is-exposed"
+touch "$FAKE_SA_EXPOSED"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+FAKE_SA_EXPOSED=""
+
+assert_eq "exits 1" "1" "$RC"
+if [ -e "${WORK}/etc/vigil-push.service" ]; then
+  fail "the exposed push unit was not installed"
+else
+  pass "the exposed push unit was not installed"
+fi
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 

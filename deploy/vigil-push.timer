@@ -1,0 +1,19 @@
+[Unit]
+Description=vigil - push the vault's pending commits every 15 minutes
+Documentation=file:///opt/vigil/repo/docs/guide.md
+
+# The push safety net. vigil pushes on every write; when that push fails
+# (GitHub briefly unreachable, say) the write still succeeds, answers
+# `pushed: false`, and the commit waits locally. vigil-push.service is the
+# next push if no write comes along to make it. Installed and enabled by
+# scripts/init.sh and scripts/update.sh, which also remove the cron file this
+# replaces (/etc/cron.d/vigil-push-safety-net).
+
+[Timer]
+OnBootSec=5min
+# Counted from the end of the last run, so a slow push never overlaps the next.
+OnUnitInactiveSec=15min
+Unit=vigil-push.service
+
+[Install]
+WantedBy=timers.target

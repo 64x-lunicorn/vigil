@@ -78,6 +78,7 @@ bash scripts/test/update_test.sh
 bash scripts/test/verify_test.sh
 bash scripts/test/secrets_test.sh
 bash scripts/test/git_settings_test.sh
+bash scripts/test/push_safety_net_test.sh
 bash scripts/test/grants_test.sh
 ```
 
@@ -105,6 +106,12 @@ password and the SkillKey secret are generated apart and both written.
 `git_settings_test.sh` checks that the scripts read the vault's remote and
 branch from the env file — against a real repository on `master` — and that no
 script or deploy file names `github` or `main` as either again.
+
+`push_safety_net_test.sh` drives `push_pending.sh` against real repositories —
+the lock directory it refuses, a refusing pre-push hook that must not run, an
+ssh that never answers, a remote that is gone, commits older than the alert —
+and `install_push_timer` against a throwaway systemd directory, with
+`systemctl` and `systemd-analyze` as stand-ins on `PATH`.
 
 `grants_test.sh` drives `grants.sh`, the operator's command for listing and
 revoking grants, against a fake release that records what it is asked to

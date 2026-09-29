@@ -138,6 +138,8 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
         echo "stop $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
         ;;
       is-active) [ -f "${PREFIX}/.service-active" ] ;;
+      # Recorded apart from start and stop, whose log is the switchover's.
+      daemon-reload | enable | disable) echo "$@" >>"${PREFIX}/.systemctl-units.log" ;;
       *) : ;;
     esac
   }
@@ -406,6 +408,19 @@ if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
     record_next_step "run update.sh --update-unit to adopt the changed systemd unit"
   fi
 fi
+
+## ── The push safety net ──────────────────────────────────────────────────
+
+# On every update rather than behind a flag: the timer runs a script from the
+# code checkout this update has just moved, so the units that run it move with
+# it. A host still on the cron line (/etc/cron.d/vigil-push-safety-net) is
+# moved to the timer here. Nothing is switched yet, so a refusal leaves the
+# running service as it was.
+if ! install_push_timer "${REPO}/deploy"; then
+  err "Not installing the push safety net's units; the running service is untouched."
+  exit 1
+fi
+record_done "push safety net: vigil-push.timer enabled"
 
 ## ── Step 6 — switch over ─────────────────────────────────────────────────
 

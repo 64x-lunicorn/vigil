@@ -33,7 +33,9 @@ trap cleanup EXIT INT TERM
 export VIGIL_STATE_DIR="${WORK}/state"
 export VIGIL_VAULT_DIR="${WORK}/state/vault"
 export VIGIL_ENV_FILE="${WORK}/env"
-export VIGIL_PUSH_LOCK="${WORK}/push.lock"
+# The unit's RuntimeDirectory=, where push_pending.sh takes its lock.
+export RUNTIME_DIRECTORY="${WORK}/run"
+mkdir -m 0700 "$RUNTIME_DIRECTORY"
 UPSTREAM="${WORK}/upstream.git"
 mkdir -p "$VIGIL_STATE_DIR"
 
@@ -100,7 +102,7 @@ assert_eq "with no env file at all, the remote is the default" "github" "$(ask v
 section "2/3  push_pending.sh pushes the configured branch to the configured remote"
 
 push_pending() {
-  VIGIL_PUSH_TEST_STUBS=1 bash "${REPO_ROOT}/scripts/push_pending.sh" >"${WORK}/out.txt" 2>&1
+  bash "${REPO_ROOT}/scripts/push_pending.sh" >"${WORK}/out.txt" 2>&1
 }
 
 env_file "VIGIL_GIT_REMOTE=upstream" "VIGIL_GIT_BRANCH=master"

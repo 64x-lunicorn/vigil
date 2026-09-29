@@ -193,7 +193,7 @@ record_done "preflight passed"
 step "2/9  Install packages"
 
 PACKAGES=(
-  git curl ca-certificates jq openssl util-linux openssh-client cron gnupg
+  git curl ca-certificates jq openssl util-linux openssh-client gnupg
   build-essential libssl-dev
   erlang-base erlang-dev erlang-crypto erlang-ssl erlang-public-key
   erlang-inets erlang-xmerl erlang-tools elixir

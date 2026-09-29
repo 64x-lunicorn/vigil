@@ -1,0 +1,35 @@
+[Unit]
+Description=vigil - %i failed
+Documentation=file:///opt/vigil/repo/docs/guide.md
+
+# Started by OnFailure= in vigil-push.service, with the failed unit's name as
+# the instance (%i). As shipped it writes one line at priority crit to the
+# journal, where anything that watches the journal for crit sees it:
+#
+#   journalctl -p crit -t vigil-notify
+#
+# To be told some other way — mail, a push notification, a webhook — replace
+# ExecStart= in a drop-in rather than editing this file, which init.sh and
+# update.sh overwrite:
+#
+#   sudo systemctl edit vigil-notify@.service
+#
+#   [Service]
+#   ExecStart=
+#   ExecStart=/usr/local/bin/notify-me "%i failed on %H"
+#
+# The command runs as a dynamic user with no access to the vault or the env
+# file; a drop-in that needs the network or a secret says so itself
+# (docs/guide.md, "The push safety net").
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p user.crit -t vigil-notify "%i failed on %H - journalctl -u %i -n 50"
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
