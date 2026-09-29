@@ -78,8 +78,9 @@ defmodule Vigil.Vault.Plan do
 
   Returns `{:ok, plan}`, or `{:error, message}` when the content cannot be
   shaped: an edit whose chunk is gone, a note whose frontmatter block never
-  closes, or a rewrite of a note that has no block to preserve. Each is the
-  caller's message to hand back verbatim.
+  closes, a rewrite of a note that has no block to preserve, or a block
+  `update_frontmatter` cannot edit without losing the keys it does not own.
+  Each is the caller's message to hand back verbatim.
 
   A note's `current` content is shaped as `Vigil.Markdown.decode/1` reads it,
   and what comes back is written in the note's own style — the byte order mark
@@ -105,7 +106,7 @@ defmodule Vigil.Vault.Plan do
 
   defp shape(:create, %Decision.Create{} = resolved, request, _current) do
     content = Map.fetch!(request, :content)
-    frontmatter = frontmatter(resolved.type, resolved.starts, resolved.ends)
+    frontmatter = block(Edit.owned_block(owned(resolved)))
 
     {:ok,
      %__MODULE__{
@@ -175,10 +176,14 @@ defmodule Vigil.Vault.Plan do
   # front of it. That is an explicit call to write frontmatter, not the server
   # repairing a note on its own initiative (docs/design.md, "Frontmatter —
   # exactly one required field").
+  #
+  # With a block, only the keys vigil owns change; the lines around them are
+  # the human's. A block that cannot be edited without losing one of them is
+  # refused, and nothing is written.
   defp shape(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
     case Markdown.split_frontmatter(current) do
-      {:ok, _old_frontmatter, body} -> {:ok, frontmatter_plan(resolved, body)}
-      :none -> {:ok, frontmatter_plan(resolved, current)}
+      {:ok, block, body} -> update_frontmatter(resolved, block, body)
+      :none -> {:ok, frontmatter_plan(resolved, Edit.owned_block(owned(resolved)), current)}
       :unterminated -> unterminated(resolved.path)
     end
   end
@@ -224,8 +229,24 @@ defmodule Vigil.Vault.Plan do
   defp updated_links(false, _rewrites), do: %{}
   defp updated_links(true, rewrites), do: %{updated_links: Enum.map(rewrites, &elem(&1, 0))}
 
-  defp frontmatter_plan(resolved, body) do
-    content = frontmatter(resolved.type, resolved.starts, resolved.ends) <> body
+  # `block` is the whole block, both markers and its final newline.
+  defp update_frontmatter(resolved, block, body) do
+    yaml_lines = block |> String.split("\n") |> Enum.slice(1..-3//1)
+
+    case Edit.set_frontmatter(yaml_lines, owned(resolved)) do
+      {:ok, lines} ->
+        {:ok, frontmatter_plan(resolved, lines, body)}
+
+      {:error, reason} ->
+        {:error,
+         "The frontmatter of #{resolved.path} was not changed: #{reason}. " <>
+           "update_frontmatter keeps every key it does not own, so it will not rewrite " <>
+           "a block it cannot edit line by line. Fix the block by hand, then try again."}
+    end
+  end
+
+  defp frontmatter_plan(resolved, yaml_lines, body) do
+    content = block(yaml_lines) <> body
 
     plan(
       resolved.path,
@@ -258,18 +279,18 @@ defmodule Vigil.Vault.Plan do
   defp normalized_from(nil), do: %{}
   defp normalized_from(from), do: %{path_normalized_from: from}
 
-  defp frontmatter(type, starts, ends) do
-    lines = ["---", "type: #{type}"]
-
-    lines =
-      if type == :event do
-        lines ++ ["starts: #{DateTime.to_iso8601(starts)}", "ends: #{DateTime.to_iso8601(ends)}"]
-      else
-        lines
-      end
-
-    Enum.join(lines ++ ["---", ""], "\n")
+  # The keys vigil owns, as the block states them.
+  defp owned(%{type: :event, starts: starts, ends: ends}) do
+    [
+      {"type", "event"},
+      {"starts", DateTime.to_iso8601(starts)},
+      {"ends", DateTime.to_iso8601(ends)}
+    ]
   end
+
+  defp owned(%{type: type}), do: [{"type", to_string(type)}]
+
+  defp block(yaml_lines), do: Enum.join(["---" | yaml_lines] ++ ["---", ""], "\n")
 
   # What the commit message quotes back: the first line with anything on it,
   # capped so a commit subject stays a subject.

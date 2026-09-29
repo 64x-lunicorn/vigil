@@ -316,7 +316,10 @@ is a tool error naming the range, not a silently clamped result: a caller told
 it got 25 hits of the 100 it asked for could not tell that from having asked
 for 25.
 
-`update_frontmatter` also gives a note without frontmatter the block it lacks,
+`update_frontmatter` changes only `type`, `starts` and `ends`; every other key
+in the block (`tags`, `aliases`, …) stays as it was, line for line. A block
+that does not parse as YAML, or one it cannot edit line by line, is refused
+and left alone. It also gives a note without frontmatter the block it lacks,
 leaving everything already in the file as its body. `rewrite_note` preserves
 the block it finds, so it refuses a note that has none and points at
 `update_frontmatter`. Both refuse a block that opens and never closes; that one

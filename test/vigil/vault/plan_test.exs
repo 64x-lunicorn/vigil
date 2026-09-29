@@ -273,6 +273,192 @@ defmodule Vigil.Vault.PlanTest do
     end
   end
 
+  # docs/design.md, "Frontmatter — exactly one required field": vigil owns
+  # `type`, `starts` and `ends`, and every other line of the block is the
+  # human's, kept byte for byte and in its order.
+  describe "update_frontmatter keeps the keys it does not own" do
+    @adopted """
+    ---
+    # adopted from Obsidian
+    aliases: [Terra, "Terra Speed"]
+    type: reference
+    tags:
+      - bike
+      - tyres
+    cssclass:   wide
+    ---
+    # Terra Speed
+
+    ## Fueling
+    Old body.
+    """
+
+    defp update(request, current) do
+      Plan.build(:update_frontmatter, decide(:update_frontmatter, request), request, current)
+    end
+
+    test "only the type line changes" do
+      assert {:ok, plan} = update(%{path: @path, type: "decision"}, @adopted)
+
+      assert written(plan) == String.replace(@adopted, "type: reference", "type: decision")
+    end
+
+    test "a block without a type is given one at its top, the other lines untouched" do
+      note = String.replace(@adopted, "type: reference\n", "")
+
+      assert {:ok, plan} = update(%{path: @path, type: "decision"}, note)
+
+      assert written(plan) ==
+               String.replace(note, "---\n# adopted", "---\ntype: decision\n# adopted")
+    end
+
+    test "an event gains starts and ends after its type, and keeps the rest" do
+      request = %{
+        path: @path,
+        type: "event",
+        starts: "2026-05-01T08:00:00Z",
+        ends: "2026-05-01T18:00:00Z"
+      }
+
+      assert {:ok, plan} = update(request, @adopted)
+
+      assert written(plan) ==
+               String.replace(
+                 @adopted,
+                 "type: reference\n",
+                 "type: event\nstarts: 2026-05-01T08:00:00Z\nends: 2026-05-01T18:00:00Z\n"
+               )
+    end
+
+    test "an event's starts and ends are replaced where they stand" do
+      note = """
+      ---
+      starts: 2026-04-01T08:00:00+02:00
+      tags: [race]
+      type: event
+      ends: 2026-04-01T18:00:00+02:00
+      source: flyer
+      ---
+      # Race
+      """
+
+      request = %{
+        path: @path,
+        type: "event",
+        starts: "2026-05-01T08:00:00Z",
+        ends: "2026-05-01T18:00:00Z"
+      }
+
+      assert {:ok, plan} = update(request, note)
+
+      assert written(plan) ==
+               note
+               |> String.replace("2026-04-01T08:00:00+02:00", "2026-05-01T08:00:00Z")
+               |> String.replace("2026-04-01T18:00:00+02:00", "2026-05-01T18:00:00Z")
+    end
+
+    # Only an event may carry timestamps, so a note that stops being one loses
+    # them — they are vigil's keys, not the human's.
+    test "a note that stops being an event loses its starts and ends, and nothing else" do
+      note = """
+      ---
+      type: event
+      starts: 2026-04-01T08:00:00Z
+      ends: 2026-04-01T18:00:00Z
+      tags: [race]
+      ---
+      # Race
+      """
+
+      assert {:ok, plan} = update(%{path: @path, type: "decision"}, note)
+
+      assert written(plan) == "---\ntype: decision\ntags: [race]\n---\n# Race\n"
+    end
+
+    test "a note written on Windows keeps its other keys, its CRLF and its byte order mark" do
+      crlf = "\uFEFF" <> String.replace(@adopted, "\n", "\r\n")
+
+      assert {:ok, plan} = update(%{path: @path, type: "decision"}, crlf)
+
+      assert written(plan) == String.replace(crlf, "type: reference", "type: decision")
+    end
+
+    test "an event on a CRLF note gains its timestamps in CRLF" do
+      crlf = String.replace(@adopted, "\n", "\r\n")
+
+      request = %{
+        path: @path,
+        type: "event",
+        starts: "2026-05-01T08:00:00Z",
+        ends: "2026-05-01T18:00:00Z"
+      }
+
+      assert {:ok, plan} = update(request, crlf)
+
+      assert written(plan) ==
+               String.replace(
+                 crlf,
+                 "type: reference\r\n",
+                 "type: event\r\nstarts: 2026-05-01T08:00:00Z\r\nends: 2026-05-01T18:00:00Z\r\n"
+               )
+    end
+
+    test "frontmatter that does not parse is refused, and says why" do
+      note = "---\ntype: reference\ntags: [bike\n---\n# Terra Speed\n"
+
+      assert {:error, message} = update(%{path: @path, type: "decision"}, note)
+
+      assert message =~ @path
+      assert message =~ "does not parse"
+    end
+
+    test "frontmatter that is not a mapping is refused" do
+      note = "---\n- type\n- reference\n---\n# Terra Speed\n"
+
+      assert {:error, message} = update(%{path: @path, type: "decision"}, note)
+
+      assert message =~ "not a mapping"
+    end
+
+    # Replacing only the `type:` line would leave its indented value behind,
+    # as a line that belongs to no key.
+    test "a type whose value runs over several lines is refused rather than cut in half" do
+      note = "---\ntype: >\n  reference\ntags: [bike]\n---\n# Terra Speed\n"
+
+      assert {:error, message} = update(%{path: @path, type: "decision"}, note)
+
+      assert message =~ "type"
+      assert message =~ "several lines"
+    end
+
+    test "a key vigil owns that appears twice is refused" do
+      note = "---\ntype: reference\ntags: [bike]\ntype: decision\n---\n# Terra Speed\n"
+
+      assert {:error, message} =
+               update(
+                 %{
+                   path: @path,
+                   type: "event",
+                   starts: "2026-05-01T08:00:00Z",
+                   ends: "2026-05-01T18:00:00Z"
+                 },
+                 note
+               )
+
+      assert message =~ "more than once"
+    end
+
+    # A key written in a form the line edit does not recognise — quoted, or
+    # inside a flow mapping — would survive the edit beside the new line.
+    test "a type the line edit cannot find is refused rather than duplicated" do
+      note = "---\n\"type\": reference\ntags: [bike]\n---\n# Terra Speed\n"
+
+      assert {:error, message} = update(%{path: @path, type: "decision"}, note)
+
+      assert message =~ "type"
+    end
+  end
+
   test "every plan ends the file the way Vigil.Markdown says a file ends" do
     request = %{path: "bike/x.md", type: "reference", content: "# T\n\nbody\n\n\n"}
 

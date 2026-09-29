@@ -63,7 +63,7 @@ defmodule Vigil.Vault.Decision do
   end
 
   defmodule UpdateFrontmatter do
-    @moduledoc "A note's frontmatter block, replaced by the type it now claims."
+    @moduledoc "The keys vigil owns in a note's frontmatter block, set to the type it now claims."
     @enforce_keys [:path, :type, :starts, :ends]
     defstruct @enforce_keys
 

@@ -282,6 +282,29 @@ and its refusal names `update_frontmatter`. A block that opens and never closes
 is refused by both: where it ends, and so where the body starts, is not
 something the file says, and neither write guesses.
 
+**`update_frontmatter` changes only the keys vigil owns.** Those are `type`,
+`starts` and `ends`; every other key in the block — `tags`, `aliases`, whatever
+an adopted vault's author or another tool put there — is the human's, and
+survives the call. The rule above is what vigil *writes*, not what it demands
+of a block it did not write: "no `tags`" means vigil never adds one, not that
+it removes one it finds. The edit works by line, in `Vigil.Vault.Edit`: an
+owned key already in the block is replaced where it stands, a missing one goes
+after the owned key before it (`type` at the top of the block), and `starts`
+and `ends` are removed when the note stops being an event, since only an event
+may carry them. Every other line stays byte for byte and in its order,
+comments and blank lines included, and the file keeps its line endings and
+byte order mark ("How a file is written").
+
+YAML decides only whether the block may be edited that way. It must parse to
+a mapping before the edit and after it, and the keys vigil does not own must
+parse to the same values after it as before. A block that does not parse, or
+where the line edit cannot tell what to replace — an owned key whose value
+runs over several lines, one written twice, one quoted or inside a flow
+mapping — is refused with a message naming the reason, and nothing is
+written. Silently dropping a human's keys is the failure this rule replaced:
+the tool used to write a fresh block holding only the owned keys, so the first
+type fix in an adopted vault lost everything else the block said.
+
 ### Derived metadata
 
 | Metadatum | Source |

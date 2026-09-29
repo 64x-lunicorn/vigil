@@ -329,7 +329,7 @@ defmodule Vigil.MCP.Tools do
       name: "update_frontmatter",
       title: "Update frontmatter",
       description:
-        "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
+        "Sets type/starts/ends in the frontmatter of an existing note, keeping every other key, and writes the block if the note has none; the body is untouched.",
       write: true,
       call: :update_frontmatter,
       hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},

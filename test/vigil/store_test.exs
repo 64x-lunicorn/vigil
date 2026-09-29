@@ -737,6 +737,38 @@ defmodule Vigil.StoreTest do
       assert msg =~ "Unterminated frontmatter"
       assert File.read!(Path.join(vault, path)) == content
     end
+
+    test "keeps the keys it does not own", %{vault: vault} do
+      path = "bike/adopted.md"
+
+      content =
+        "---\naliases: [Adopted]\ntype: reference\ntags:\n  - bike\n---\n# Adopted\n\n## Notes\nBody.\n"
+
+      File.write!(Path.join(vault, path), content)
+      assert %{reloaded: true} = Store.call(@store, :reload, %{})
+
+      assert {:ok, _} = Store.call(@store, :update_frontmatter, %{path: path, type: "decision"})
+
+      assert File.read!(Path.join(vault, path)) ==
+               String.replace(content, "type: reference", "type: decision")
+
+      {:ok, result} = Store.call(@store, :read, %{id: path, backlinks: false})
+      assert result.type == :decision
+    end
+
+    test "refuses frontmatter that does not parse, and writes nothing", %{vault: vault} do
+      path = "bike/broken-yaml.md"
+      content = "---\ntype: reference\ntags: [bike\n---\n# Broken\n\n## Notes\nBody.\n"
+
+      File.write!(Path.join(vault, path), content)
+      assert %{reloaded: true} = Store.call(@store, :reload, %{})
+
+      assert {:error, msg} =
+               Store.call(@store, :update_frontmatter, %{path: path, type: "decision"})
+
+      assert msg =~ "does not parse"
+      assert File.read!(Path.join(vault, path)) == content
+    end
   end
 
   describe "rewrite_note on a note without frontmatter" do
