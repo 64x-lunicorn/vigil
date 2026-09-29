@@ -1078,6 +1078,76 @@ else
   pass "no comparison for the running commit"
 fi
 
+## ── 13. The target's own update.sh finishes the run ────────────────────
+
+section "13   The run is handed to the target checkout's update.sh"
+
+# A target commit whose scripts/update.sh is the one given, with lib.sh beside
+# it: a recorder, or the real pair from this checkout.
+commit_target_scripts() {
+  local repo="${PREFIX}/repo" kind="$1"
+  git -C "$repo" checkout -q main
+  mkdir -p "${repo}/scripts"
+  if [ "$kind" = "recorder" ]; then
+    cat >"${repo}/scripts/update.sh" <<'REC'
+#!/usr/bin/env bash
+{
+  echo "args: $*"
+  echo "guard: ${VIGIL_UPDATE_REEXEC:-none}"
+  echo "head: $(git -C "$(dirname "$0")/.." rev-parse --short HEAD)"
+} >"${FAKE_MIX_LOG%/*}/target-update.log"
+exit 0
+REC
+    : >"${repo}/scripts/lib.sh"
+  else
+    cp "$UPDATE_SH" "${REPO_ROOT}/scripts/lib.sh" "${repo}/scripts/"
+  fi
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm "scripts (${kind})"
+  SCRIPTS_SHA="$(git -C "$repo" rev-parse --short HEAD)"
+  git -C "$repo" checkout -q "$OLD_SHA"
+}
+
+build_host
+commit_target_scripts recorder
+rm -f "${WORK}/target-update.log"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive --accept-id-changes)"
+
+assert_eq "the target's script decides the exit code" "0" "$RC"
+assert_eq "it was given the arguments the run was started with" \
+  "args: --to ${SCRIPTS_SHA} --non-interactive --accept-id-changes" \
+  "$(sed -n 1p "${WORK}/target-update.log" 2>/dev/null)"
+assert_eq "and the running revision, which also stops a second hand-over" \
+  "guard: ${OLD_SHA}" "$(sed -n 2p "${WORK}/target-update.log" 2>/dev/null)"
+assert_eq "the checkout is on the target when it starts" \
+  "head: ${SCRIPTS_SHA}" "$(sed -n 3p "${WORK}/target-update.log" 2>/dev/null)"
+assert_eq "the script it started with switched nothing" "v0" "$(current_release)"
+assert_eq "and built nothing" "0" "$(grep -c '^release' "$FAKE_MIX_LOG" || true)"
+
+section "13b  The target's real update.sh runs the update once"
+
+build_host
+commit_target_scripts real
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the target" "$SCRIPTS_SHA" "$(current_release)"
+assert_eq "handed over exactly once" "1" "$(grep -c "Continuing with the target's own" "${WORK}/out.log")"
+assert_eq "the suite ran once, in the target's run" "1" "$(grep -cx 'test' "$FAKE_MIX_LOG")"
+
+section "13c  A handed-over run that fails puts the checkout back"
+
+build_host
+commit_target_scripts real
+FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
+touch "$FAKE_MIX_TEST_FAILS"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive)"
+FAKE_MIX_TEST_FAILS=""
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
 ## ── Summary ──────────────────────────────────────────────────────────────
 
 if [ "$FAIL" -gt 0 ]; then

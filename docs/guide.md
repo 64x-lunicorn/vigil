@@ -929,6 +929,15 @@ audit or suite, a failed build, an automatic rollback, a dry run, and
 `--rollback`. So after any `update.sh` the checkout shows what is running, and
 an update that failed can simply be run again.
 
+Once the checkout is on the target, `update.sh` hands the run over to the
+target's own `scripts/update.sh`, with the same arguments: it starts again
+from its preflight, and everything from there on — what is checked, how the
+release is built and judged, which units are installed — is the new version's.
+Without that, bash would go on reading the old script. It happens once per
+run. An update from a version before this hand-over existed (0.2) runs the old
+script to the end, so for that one step check the target out first, as its
+[changelog](../CHANGELOG.md) entry says, and run the new `update.sh` from there.
+
 ### Chunk ids across an update
 
 Before it switches, `update.sh` compares the chunk ids the two releases derive

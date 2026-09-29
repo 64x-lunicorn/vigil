@@ -47,8 +47,9 @@ for a in "$@"; do
   fi
 done
 
-# Kept for require_root's hint, which repeats the command as it was given —
-# the loop below shifts every argument out of "$@".
+# Kept for require_root's hint, which repeats the command as it was given, and
+# for the run of the target's own update.sh (step 3), which is given the same
+# arguments — the loop below shifts every argument out of "$@".
 ORIGINAL_ARGS=("$@")
 
 while [ $# -gt 0 ]; do
@@ -269,6 +270,13 @@ release_revision() {
 # always shows what is running. A successful switch clears it.
 CHECKOUT_TARGET=""
 
+# Set by a run that handed over to the target checkout's own update.sh (step
+# 3), to the revision that is running: that is where the checkout goes back
+# to if this run ends before it has read the running revision itself.
+if [ -n "${VIGIL_UPDATE_REEXEC:-}" ]; then
+  CHECKOUT_TARGET="$VIGIL_UPDATE_REEXEC"
+fi
+
 restore_checkout() {
   [ -n "$CHECKOUT_TARGET" ] || return 0
   local head
@@ -456,6 +464,24 @@ record_done "fetched target revision ${TARGET_SHA}"
 step "3/8  Dependency audit"
 
 as_vigil git -C "$REPO" checkout -q "$TARGET_SHA"
+
+# From here on the run is the target's: its update.sh, with its lib.sh, runs
+# again from the start with the same arguments — preflight included — and
+# this process is replaced by it. Otherwise the steps that depend on the new
+# version (what its preflight checks, how its release is built and judged,
+# which units it installs) would be this, the old version's, which bash has
+# open and keeps reading however the checkout moves. Once per update:
+# VIGIL_UPDATE_REEXEC marks the run that was handed over, and carries the
+# running revision for the checkout to go back to. `exec` runs no EXIT trap,
+# so the checkout stays on the target for the new run.
+if [ -z "${VIGIL_UPDATE_REEXEC:-}" ]; then
+  if [ -f "${REPO}/scripts/update.sh" ]; then
+    log "Continuing with the target's own scripts/update.sh (${TARGET_SHA})."
+    exec env VIGIL_UPDATE_REEXEC="$CURRENT_SHA" \
+      bash "${REPO}/scripts/update.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+  fi
+  warn "The target checkout has no scripts/update.sh — this run goes on with the one it started with."
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] mix deps.get && mix hex.audit && mix deps.audit"

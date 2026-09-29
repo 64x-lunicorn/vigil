@@ -23,6 +23,24 @@ dir first (the [backups](docs/guide.md#backups) section of the guide): the
 OAuth state is migrated on first boot, and a release before this one cannot
 read it afterwards.
 
+- **Check out this version first, then run `update.sh`.** Bash keeps reading
+  the script it started with, so `update.sh` from 0.2 would run this update
+  with 0.2's steps: none of this version's preflight checks, and an
+  acceptance check this version refuses (0.2's sessions), which rolls back
+  after the OAuth state was already migrated — every client would authorize
+  again. Move the checkout yourself, so that this version's `update.sh` is the
+  one that runs:
+
+  ```bash
+  sudo -u vigil git -C /opt/vigil/repo fetch --tags
+  sudo -u vigil git -C /opt/vigil/repo checkout v1.0.0
+  cd /opt/vigil/repo && sudo ./scripts/update.sh --to v1.0.0
+  ```
+
+  The running revision is read from the release, not the checkout, and a run
+  that stops puts the checkout back on it. From this version on `update.sh`
+  hands the run to the target's own `update.sh` once it has moved the
+  checkout, so later updates need no such step.
 - **Add `VIGIL_SKILLKEY_SECRET` to `/etc/vigil/env`.** The SkillKey now has a
   secret of its own instead of the consent password, and the service refuses to
   boot without one. `update.sh` checks for the line before it changes anything
@@ -178,6 +196,9 @@ read it afterwards.
 - `update.sh` reads the running revision from the release, puts the code
   checkout back on it whenever a run does not end on the target, and rolls
   back a release that never comes up.
+- `update.sh` hands the run to the target checkout's own `update.sh`, with the
+  same arguments, as soon as it has moved the checkout, so an update is always
+  made by the version it installs.
 - `setup.sh` reaches GitHub over SSH on port 443 by default
   (`--github-ssh-port`).
 
