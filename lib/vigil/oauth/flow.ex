@@ -187,9 +187,15 @@ defmodule Vigil.OAuth.Flow do
   authorization code can be wrong reports `invalid_grant`, so a caller
   learns nothing from which check rejected it.
   """
-  def grant(persistence, params, now \\ System.system_time(:second))
+  def grant(persistence, params, now \\ System.system_time(:second)) do
+    # Redeeming a code and rotating a refresh token are each a lookup followed
+    # by a delete, not one step. Two requests racing on the same code or the
+    # same refresh token must not both succeed, so grants run one at a time.
+    # The token endpoint is rate-limited and rare; the lock costs nothing.
+    :global.trans({__MODULE__, :grant}, fn -> do_grant(persistence, params, now) end)
+  end
 
-  def grant(persistence, %{"grant_type" => "authorization_code"} = params, now) do
+  defp do_grant(persistence, %{"grant_type" => "authorization_code"} = params, now) do
     case Code.redeem(persistence, params["code"] || "", params, now) do
       # Unknown, expired, the wrong client, the wrong redirect URI, a verifier
       # that does not match the challenge — RFC 6749 §5.2 answers all five with
@@ -203,7 +209,7 @@ defmodule Vigil.OAuth.Flow do
     end
   end
 
-  def grant(persistence, %{"grant_type" => "refresh_token"} = params, now) do
+  defp do_grant(persistence, %{"grant_type" => "refresh_token"} = params, now) do
     refresh_token = params["refresh_token"] || ""
 
     case Token.fetch_refresh(persistence, refresh_token) do
@@ -214,7 +220,7 @@ defmodule Vigil.OAuth.Flow do
     end
   end
 
-  def grant(_persistence, _params, _now), do: {:error, 400, "unsupported_grant_type"}
+  defp do_grant(_persistence, _params, _now), do: {:error, 400, "unsupported_grant_type"}
 
   defp redeemed(persistence, record, params, now) do
     aud = Code.audience_of(record)
