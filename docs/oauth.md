@@ -465,8 +465,15 @@ If `client_id` is an `https://` URL, the document is fetched and validated:
    on the chunk that crosses the cap — so an oversized response is never
    buffered in full.
 2. `client_id` inside the document must equal the URL exactly.
-3. Required fields present: `client_id`, `client_name`, `redirect_uris`.
-4. Result cached for one hour.
+3. Required fields present: `client_id`, `client_name` (a string),
+   `redirect_uris` (a non-empty list of redirect URIs).
+4. `client_name` and `redirect_uris` within the caps registration has
+   (`Vigil.OAuth.Client.check_metadata/2`, one check for both paths): a CIMD
+   client's name and redirect URIs are cached and shown on the consent page
+   just as a registered one's are, and a 64 KB document can hold far more of
+   either than any client needs. A document over a cap is refused like any
+   other invalid one.
+5. Result cached for one hour.
 
 **SSRF protection.** HTTPS only, and redirects are not followed, so a 302 into
 the private range cannot be followed either.

@@ -1366,7 +1366,9 @@ retry rather than a replay that revokes its grant.
 **The client table is bounded in size, count and lifetime.** Registration is
 free to anyone the per-address limit lets through, and a budget bounds only
 how fast rows arrive. So the body is read up to 16 KB, `client_name` and
-`redirect_uris` are capped, at most 1000 clients are stored — past that,
+`redirect_uris` are capped — by `Vigil.OAuth.Client.check_metadata/2`, which a
+CIMD document passes through as well, since its name and URIs are cached and
+shown the same way — at most 1000 clients are stored — past that,
 registration answers 503 `temporarily_unavailable` and warns in the journal —
 and the janitor drops a client that received no code within 24 hours of
 registering. The caps are constants, not settings: nothing real comes near

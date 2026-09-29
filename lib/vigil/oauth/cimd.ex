@@ -12,7 +12,7 @@ defmodule Vigil.OAuth.Cimd do
   guard shaped that way.
   """
   alias Vigil.Cidr
-  alias Vigil.OAuth.RedirectUri
+  alias Vigil.OAuth.Client
 
   @timeout 5_000
   @max_bytes 65_536
@@ -416,13 +416,13 @@ defmodule Vigil.OAuth.Cimd do
 
   ## The document
 
+  # The name and the redirect URIs pass the check a registration does, caps
+  # included: they are cached and shown on the consent page the same way.
   defp validate_document(%{"client_id" => doc_client_id} = json, url) do
     cond do
       doc_client_id != url -> :error
       not is_binary(Map.get(json, "client_name")) -> :error
-      not is_list(Map.get(json, "redirect_uris")) -> :error
-      Map.get(json, "redirect_uris") == [] -> :error
-      not Enum.all?(json["redirect_uris"], &RedirectUri.valid_candidate?/1) -> :error
+      Client.check_metadata(json["client_name"], json["redirect_uris"]) != :ok -> :error
       true -> :ok
     end
   end

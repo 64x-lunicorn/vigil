@@ -28,10 +28,20 @@ defmodule Vigil.OAuth.Client do
 
   require Logger
 
-  alias Vigil.OAuth.{Cimd, Persistence}
+  alias Vigil.OAuth.{Cimd, Persistence, RedirectUri}
 
   @max_clients 1_000
   @unused_ttl 86_400
+
+  # What one client may say about itself (`docs/oauth.md`, "Client
+  # registration"), registered or CIMD alike: both are shown on the consent
+  # page, and a registered one is stored as well. Generous for any client
+  # that exists — claude.ai registers one redirect URI and a short name — and
+  # small enough that `max_clients/0` records stay a few megabytes on the disk
+  # that also holds the vault.
+  @max_client_name 200
+  @max_redirect_uris 10
+  @max_redirect_uri_bytes 2_000
 
   @doc "How many registered clients are stored at most."
   @spec max_clients() :: pos_integer()
@@ -40,6 +50,52 @@ defmodule Vigil.OAuth.Client do
   @doc "How long a registered client may wait for its first code, in seconds."
   @spec unused_ttl() :: pos_integer()
   def unused_ttl, do: @unused_ttl
+
+  @doc "How many characters a client's name may have."
+  @spec max_client_name() :: pos_integer()
+  def max_client_name, do: @max_client_name
+
+  @doc "How many redirect URIs a client may list."
+  @spec max_redirect_uris() :: pos_integer()
+  def max_redirect_uris, do: @max_redirect_uris
+
+  @doc """
+  Whether a client's name and redirect URIs are ones this server keeps and
+  shows — the one check registration and a CIMD document both pass through,
+  so a client that names itself by URL is held to the caps a registered one
+  is.
+
+  `:ok`, or the RFC 7591 error: `{:error, "invalid_redirect_uri"}` when
+  `redirect_uris` is not a non-empty list of redirect URIs, and `{:error,
+  error, description}`, the description naming the field, when a field is
+  over its cap.
+  """
+  @spec check_metadata(String.t(), term()) ::
+          :ok | {:error, String.t()} | {:error, String.t(), String.t()}
+  def check_metadata(name, redirect_uris) when is_binary(name) do
+    cond do
+      String.length(name) > @max_client_name ->
+        {:error, "invalid_client_metadata",
+         "client_name is longer than #{@max_client_name} characters"}
+
+      not valid_redirect_uris?(redirect_uris) ->
+        {:error, "invalid_redirect_uri"}
+
+      length(redirect_uris) > @max_redirect_uris ->
+        {:error, "invalid_redirect_uri",
+         "redirect_uris holds more than #{@max_redirect_uris} URIs"}
+
+      Enum.any?(redirect_uris, &(byte_size(&1) > @max_redirect_uri_bytes)) ->
+        {:error, "invalid_redirect_uri",
+         "a URI in redirect_uris is longer than #{@max_redirect_uri_bytes} bytes"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp valid_redirect_uris?([_ | _] = uris), do: Enum.all?(uris, &RedirectUri.valid_candidate?/1)
+  defp valid_redirect_uris?(_), do: false
 
   @doc """
   Writes a newly registered client's record and answers it in the shape

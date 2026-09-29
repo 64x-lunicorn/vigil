@@ -7,7 +7,7 @@ defmodule Vigil.OAuth.CimdTest do
 
   use ExUnit.Case, async: true
 
-  alias Vigil.OAuth.Cimd
+  alias Vigil.OAuth.{Cimd, Client}
 
   @url "https://client.example.org/metadata.json"
   @public {93, 184, 216, 34}
@@ -454,6 +454,57 @@ defmodule Vigil.OAuth.CimdTest do
   test "a document whose client_name is not a string is refused", %{persistence: persistence} do
     assert :error =
              Cimd.fetch(persistence, @url, @now, net(body: document(%{"client_name" => 42})))
+  end
+
+  # The caps registration has (`Vigil.OAuth.Client`): a CIMD client's name and
+  # redirect URIs are cached and shown on the consent page exactly as a
+  # registered client's are, and a document under the fetch's 64 KB cap can
+  # still hold far more of either than any client needs.
+  test "a document whose client_name is over the registration cap is refused", %{
+    persistence: persistence
+  } do
+    long = String.duplicate("a", 60_000)
+
+    assert :error =
+             Cimd.fetch(persistence, @url, @now, net(body: document(%{"client_name" => long})))
+
+    assert :error = persistence.cimd_cache_get.(@url, @now)
+  end
+
+  test "a document with more redirect_uris than the registration cap is refused", %{
+    persistence: persistence
+  } do
+    uris = for i <- 1..500, do: "https://client.example.org/cb/#{i}"
+
+    assert :error =
+             Cimd.fetch(persistence, @url, @now, net(body: document(%{"redirect_uris" => uris})))
+  end
+
+  test "a document with a redirect URI over the registration's length cap is refused", %{
+    persistence: persistence
+  } do
+    long = "https://client.example.org/" <> String.duplicate("a", 2_000)
+
+    assert :error =
+             Cimd.fetch(
+               persistence,
+               @url,
+               @now,
+               net(body: document(%{"redirect_uris" => [long]}))
+             )
+  end
+
+  test "a document at the caps is accepted", %{persistence: persistence} do
+    uris = for i <- 1..Client.max_redirect_uris(), do: "https://client.example.org/cb/#{i}"
+    name = String.duplicate("é", Client.max_client_name())
+
+    assert {:ok, %{name: ^name, redirect_uris: ^uris}} =
+             Cimd.fetch(
+               persistence,
+               @url,
+               @now,
+               net(body: document(%{"client_name" => name, "redirect_uris" => uris}))
+             )
   end
 
   test "a document whose redirect_uris is not a list is refused", %{persistence: persistence} do

@@ -35,14 +35,6 @@ defmodule Vigil.OAuth.Flow do
   alias Vigil.OAuth
   alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Server, Token}
 
-  # What one registration may store (`docs/oauth.md`, "Client registration").
-  # Generous for any client that exists — claude.ai registers one redirect URI
-  # and a short name — and small enough that `Vigil.OAuth.Client.max_clients/0`
-  # records stay a few megabytes on the disk that also holds the vault.
-  @max_client_name 200
-  @max_redirect_uris 10
-  @max_redirect_uri_bytes 2_000
-
   # The consent lockout (`docs/oauth.md`, "Is the rate limit per client, per
   # address, or global"): five wrong passwords per address in fifteen
   # minutes, and a budget per hour for every address together, which the
@@ -70,8 +62,10 @@ defmodule Vigil.OAuth.Flow do
     do: {:error, "invalid_client_metadata"}
 
   def register(persistence, json, now) do
-    with {:ok, name} <- client_name(json),
-         {:ok, redirect_uris} <- redirect_uris(json) do
+    name = client_name(json)
+    redirect_uris = Map.get(json, "redirect_uris", [])
+
+    with :ok <- Client.check_metadata(name, redirect_uris) do
       client = Client.register(persistence, name, redirect_uris, now)
 
       {:ok,
@@ -89,39 +83,9 @@ defmodule Vigil.OAuth.Flow do
     Persistence.Unavailable -> :unavailable
   end
 
-  defp redirect_uris(json) do
-    uris = Map.get(json, "redirect_uris", [])
-
-    cond do
-      not valid_redirect_uris?(uris) ->
-        {:error, "invalid_redirect_uri"}
-
-      length(uris) > @max_redirect_uris ->
-        {:error, "invalid_redirect_uri",
-         "redirect_uris holds more than #{@max_redirect_uris} URIs"}
-
-      Enum.any?(uris, &(byte_size(&1) > @max_redirect_uri_bytes)) ->
-        {:error, "invalid_redirect_uri",
-         "a URI in redirect_uris is longer than #{@max_redirect_uri_bytes} bytes"}
-
-      true ->
-        {:ok, uris}
-    end
-  end
-
-  defp valid_redirect_uris?([_ | _] = uris), do: Enum.all?(uris, &RedirectUri.valid_candidate?/1)
-  defp valid_redirect_uris?(_), do: false
-
   # Shown on the consent page, so it must be a string whatever the client sent.
-  defp client_name(%{"client_name" => name}) when is_binary(name) and name != "" do
-    if String.length(name) > @max_client_name,
-      do:
-        {:error, "invalid_client_metadata",
-         "client_name is longer than #{@max_client_name} characters"},
-      else: {:ok, name}
-  end
-
-  defp client_name(_json), do: {:ok, "Unnamed client"}
+  defp client_name(%{"client_name" => name}) when is_binary(name) and name != "", do: name
+  defp client_name(_json), do: "Unnamed client"
 
   @doc """
   Checks an `/authorize` request.
