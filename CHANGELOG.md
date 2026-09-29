@@ -23,6 +23,14 @@ dir first (the [backups](docs/guide.md#backups) section of the guide): the
 OAuth state is migrated on first boot, and a release before this one cannot
 read it afterwards.
 
+- **A rollback puts the OAuth state back.** `update.sh` now copies the OAuth
+  state to `/opt/vigil/oauth-state-snapshot/` while the service is stopped for
+  the switch, and its automatic rollback restores that copy before it starts
+  the old release, so the old release does not meet the state this version
+  migrated. `--rollback` restores it when it was taken for the release it
+  returns to, and otherwise warns. 0.2's `update.sh` takes no copy — one more
+  reason to run this version's, as the next item says — and the copy is no
+  backup: take the one above.
 - **Check out this version first, then run `update.sh`.** Bash keeps reading
   the script it started with, so `update.sh` from 0.2 would run this update
   with 0.2's steps: none of this version's preflight checks, and an

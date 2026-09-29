@@ -162,7 +162,9 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
   # deploy/vigil.service): a release that crashes on boot is restarted by
   # Restart=on-failure until the limit is used up, and from then on every
   # start is refused until `reset-failed`. A release holding .start-fails is
-  # one whose start systemd reports as failed.
+  # one whose start systemd reports as failed. One holding an executable
+  # .on-start runs it, handed the state dir, as the release does at boot what
+  # it does to the state dir — a migration of the OAuth state.
   systemctl() {
     case "${1:-}" in
       start | restart)
@@ -171,6 +173,9 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
           return 1
         fi
         echo "start $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+        if [ -x "$(readlink -f "$CURRENT")/.on-start" ]; then
+          "$(readlink -f "$CURRENT")/.on-start" "$STATE_DIR"
+        fi
         [ -f "$(readlink -f "$CURRENT")/.start-fails" ] && return 1
         : >"${PREFIX}/.service-active"
         if [ -f "$(readlink -f "$CURRENT")/.boot-fails" ]; then
@@ -325,6 +330,61 @@ on_exit() {
 }
 trap 'on_exit $?' EXIT
 
+## ── The OAuth state follows the running release ─────────────────────────
+
+# A release whose OAuth state format is newer migrates the state dir when it
+# boots, and marks it with its schema version (oauth_meta.dets); the release
+# before it refuses to start on that (docs/compatibility.md, "The OAuth
+# state"). So the switch takes a copy of every `*.dets` in the state dir while
+# the service is stopped for it — the state as the release that ran left it —
+# and a rollback to that release puts the copy back before starting it.
+#
+# The copy is root's: a directory under the release root, 0700, which the
+# service's sandbox (ProtectSystem=strict) cannot write and the service
+# account, whose `mix` runs every dependency's code during an update, cannot
+# open. Only the last one is kept, with the release it was taken for, so a
+# `--rollback` restores it only to the release it belongs to.
+OAUTH_SNAPSHOT="${PREFIX}/oauth-state-snapshot"
+
+# snapshot_oauth_state <release> — copies the state dir's `*.dets`, modes and
+# owners kept, into a fresh snapshot for <release>, replacing the last one only
+# once the copy is complete. Returns non-zero when it could not.
+snapshot_oauth_state() {
+  local release="$1" fresh="${OAUTH_SNAPSHOT}.new" file
+  rm -rf "$fresh"
+  install -d -m 0700 "$fresh" || return 1
+  for file in "$STATE_DIR"/*.dets; do
+    [ -f "$file" ] || continue
+    cp -p "$file" "${fresh}/" || return 1
+  done
+  echo "$release" >"${fresh}/release" || return 1
+  rm -rf "$OAUTH_SNAPSHOT"
+  mv "$fresh" "$OAUTH_SNAPSHOT"
+}
+
+# restore_oauth_state — the state dir's `*.dets` back to the snapshot: the
+# files the release switched to wrote or migrated go, the copies come back
+# with their modes and owners. For a stopped service only. Returns non-zero
+# when it could not.
+restore_oauth_state() {
+  local file
+  [ -f "${OAUTH_SNAPSHOT}/release" ] || return 1
+  for file in "$STATE_DIR"/*.dets; do
+    [ -f "$file" ] || continue
+    rm -f "$file" || return 1
+  done
+  for file in "$OAUTH_SNAPSHOT"/*.dets; do
+    [ -f "$file" ] || continue
+    cp -p "$file" "${STATE_DIR}/" || return 1
+  done
+}
+
+# The release the snapshot was taken for, resolved, or nothing.
+oauth_snapshot_release() {
+  [ -f "${OAUTH_SNAPSHOT}/release" ] || return 0
+  readlink -f "$(cat "${OAUTH_SNAPSHOT}/release")" 2>/dev/null || true
+}
+
 ## ── Rollback mode: short, separate path ──────────────────────────────────
 
 if [ "$ROLLBACK" = "1" ]; then
@@ -367,6 +427,20 @@ if [ "$ROLLBACK" = "1" ]; then
   # The release gone back to may predate /healthz.
   ACCEPT_PRE_HEALTHZ_RELEASE=1
   systemctl stop "$SERVICE"
+
+  # The OAuth state as the release gone back to left it, when the snapshot
+  # is that release's; otherwise it stays as it is, and the operator is told
+  # what to do if that release cannot read it.
+  if [ "$(oauth_snapshot_release)" = "$(readlink -f "$OLD_RELEASE")" ]; then
+    if restore_oauth_state; then
+      log "OAuth state put back as $(basename "$OLD_RELEASE") left it, from ${OAUTH_SNAPSHOT}: registrations and grants made since the update are gone."
+    else
+      warn "Could not put the OAuth state back from ${OAUTH_SNAPSHOT}. If $(basename "$OLD_RELEASE") refuses the state dir at boot, restore the backup taken before the update (docs/guide.md, Backups)."
+    fi
+  else
+    warn "No snapshot of the OAuth state for $(basename "$OLD_RELEASE"): the state dir stays as the running release left it. If $(basename "$OLD_RELEASE") refuses it at boot (an older OAuth state format), restore the backup taken before the update (docs/guide.md, Backups)."
+  fi
+
   ln -sfn "$OLD_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   start_service start || true
@@ -738,6 +812,11 @@ roll_back_automatically() {
   systemctl stop "$SERVICE" || true
   ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
+  if restore_oauth_state; then
+    log "OAuth state put back as $(basename "$PREVIOUS_RELEASE") left it."
+  else
+    warn "Could not put the OAuth state back from ${OAUTH_SNAPSHOT}. If $(basename "$PREVIOUS_RELEASE") refuses the state dir at boot, restore the backup taken before the update (docs/guide.md, Backups)."
+  fi
   restore_unit
   start_service start || true
 
@@ -759,9 +838,17 @@ roll_back_automatically() {
 step "6/8  Switch over"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] systemctl stop ${SERVICE}; symlink to $(basename "$RELEASE_DIR"); systemctl start ${SERVICE}"
+  log "[DRY RUN] systemctl stop ${SERVICE}; snapshot the OAuth state to ${OAUTH_SNAPSHOT}; symlink to $(basename "$RELEASE_DIR"); systemctl start ${SERVICE}"
 else
   systemctl stop "$SERVICE"
+  # Taken while nothing has the tables open, and before anything is switched:
+  # without it there is nothing the automatic rollback below could put back.
+  if ! snapshot_oauth_state "$PREVIOUS_RELEASE"; then
+    err "Could not snapshot the OAuth state into ${OAUTH_SNAPSHOT} — not switching. Starting $(basename "$PREVIOUS_RELEASE") again."
+    rm -rf "${OAUTH_SNAPSHOT}.new"
+    start_service start || true
+    exit 1
+  fi
   ln -sfn "$RELEASE_DIR" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   echo "$PREVIOUS_RELEASE" >"$PREVIOUS_RELEASE_FILE"

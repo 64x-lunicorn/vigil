@@ -938,6 +938,19 @@ with `--rollback`, may be one from before `/healthz`, which 0.2 answers with
 `/.well-known/oauth-protected-resource` answering 200 instead. A release
 switched *to* is held to `/healthz`.
 
+A release with a newer [OAuth state format](compatibility.md#the-oauth-state)
+migrates the state dir when it boots, and the release before it refuses to
+start on the result. So while the service is stopped for the switch,
+`update.sh` copies every `*.dets` in the state dir, modes and owners kept, to
+`/opt/vigil/oauth-state-snapshot/` — root's, `0700`, out of the service's
+reach — together with the name of the release that left them. Only the last
+snapshot is kept. The automatic rollback puts it back before it starts the old
+release. `--rollback` puts it back when it was taken for the release it
+returns to, and says so — registrations and grants made since the update are
+gone with it; for any other release it leaves the state dir as it is and warns
+that, should that release refuse it at boot, the [backup](#backups) taken
+before the update is what restores it.
+
 Which commit is running is read from the release `current` points at — each
 release records it in its `REVISION` file — not from the code checkout in
 `/opt/vigil/repo`. The checkout is moved to the target for the build, and put
@@ -1021,6 +1034,11 @@ and `init.sh --existing-vault --keep-token` as for a new host, then put the
 four `:dets` files back and restart, and every client keeps its grant. A backup
 from an older release is read and migrated; one written by a newer release
 than the one installed is refused at boot, and says so.
+
+`update.sh` keeps a copy of the OAuth state of its own — the tables as the
+release it replaced left them, in `/opt/vigil/oauth-state-snapshot/`, for its
+rollbacks (see [Operations](#operations)). It is one copy, replaced by the
+next update, and no backup: take the one above before an update anyway.
 
 ### Erlang/OTP security updates
 

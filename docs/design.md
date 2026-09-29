@@ -2421,6 +2421,21 @@ rollback leaves the old units, or the cron line, to the old release. The
 service's own unit (`--update-unit`) is installed before the switch, since the
 new release may need it to boot, and the rollback puts the old one back.
 
+**A rollback puts back the OAuth state the old release left.** A release with
+a newer OAuth state format migrates the state dir at boot, and the release
+before it refuses the result (`docs/compatibility.md`, "The OAuth state"), so
+a rollback that only moved the symlink would go back to a release that cannot
+start. `update.sh` copies every `*.dets` in the state dir, modes and owners
+kept, while the service is stopped for the switch, and records the release
+that left them; its automatic rollback puts the copy back before it starts
+that release, and `--rollback` does so only when the copy is the release's it
+returns to, warning otherwise. The copy is root's, `0700`, under the release
+root (`/opt/vigil/oauth-state-snapshot`) rather than the state dir: the
+service's sandbox cannot write there, nor can the account whose `mix` runs
+every dependency's code during an update, and the preflight's ownership check
+of the state dir stays true. Only the last copy is kept — it is a rollback
+aid, not a backup, and the guide says to take one.
+
 **The operator scripts never expose a secret.** A secret reaches no argument
 vector, no trace and no journal line. `verify()` hands curl the bearer, the
 session id and the body (which carries the SkillKey) as a config on its stdin

@@ -327,6 +327,7 @@ run_update() {
     VIGIL_UPDATE_TEST_STUBS=1 \
     VIGIL_PREFIX="${PREFIX_OVERRIDE:-$PREFIX}" \
     VIGIL_VAULT_DIR="$VAULT" \
+    VIGIL_STATE_DIR="$(dirname "$VAULT")" \
     VIGIL_ENV_FILE="$ENV_FILE" \
     VIGIL_UNIT_FILE="${WORK}/etc/vigil.service" \
     VIGIL_PUSH_CRON_FILE="${WORK}/etc/cron.d/vigil-push-safety-net" \
@@ -545,6 +546,95 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
 assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_fingerprint)"
+
+## ── 5d. A rollback puts back the OAuth state the old release left ───────
+
+section "5d   A rollback puts back the OAuth state the release it returns to left"
+
+# A release whose OAuth state format is newer migrates the state dir when it
+# boots, and the release before it cannot read the result (docs/compatibility.md,
+# "The OAuth state"). A release holding an executable .on-start is one that
+# does something to the state dir when it starts, the way that migration does:
+# it rewrites the tables and marks them with oauth_meta.dets.
+migrating_release() {
+  local dir="${PREFIX}/releases/$1"
+  mkdir -p "$dir"
+  cat >"${dir}/.on-start" <<'HOOK'
+#!/usr/bin/env bash
+for table in clients codes tokens; do
+  echo "migrated-${table}" >"$1/oauth_${table}.dets"
+done
+echo "2" >"$1/oauth_meta.dets"
+chmod 600 "$1"/oauth_*.dets
+HOOK
+  chmod +x "${dir}/.on-start"
+  echo "$dir"
+}
+
+SNAPSHOT="${PREFIX}/oauth-state-snapshot"
+
+build_host
+BEFORE="$(state_fingerprint)"
+touch "$(migrating_release "$NEW_SHA")/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+assert_eq "the automatic rollback put the tables back, and took the new release's marker away" \
+  "$BEFORE" "$(state_fingerprint)"
+
+build_host
+BEFORE="$(state_fingerprint)"
+migrating_release "$NEW_SHA" >/dev/null
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "an update to a release that migrates the state exits 0" "0" "$RC"
+if [ "$BEFORE" != "$(state_fingerprint)" ]; then
+  pass "the new release migrated the state"
+else
+  fail "the new release migrated the state" "the tables are unchanged"
+fi
+assert_eq "the snapshot is kept outside the state dir, for root alone" "700" "$(mode_of "$SNAPSHOT")"
+assert_eq "it holds the tables with their modes" "600 600 600" \
+  "$(for t in clients codes tokens; do mode_of "${SNAPSHOT}/oauth_${t}.dets"; done | paste -sd' ' -)"
+assert_eq "and names the release it was taken for" "${PREFIX}/releases/v0" \
+  "$(cat "${SNAPSHOT}/release")"
+
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback to that release exits 0" "0" "$RC"
+assert_eq "--rollback put the tables back as that release left them" \
+  "$BEFORE" "$(state_fingerprint)"
+if grep -q "OAuth state" "${WORK}/out.log"; then
+  pass "--rollback says it put the OAuth state back"
+else
+  fail "--rollback says it put the OAuth state back" "$(tail -3 "${WORK}/out.log")"
+fi
+
+# Only the last snapshot is kept: a later update replaces it.
+build_host
+migrating_release "$NEW_SHA" >/dev/null
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+RC="$(run_update --rebuild --non-interactive)"
+assert_eq "a second update exits 0" "0" "$RC"
+assert_eq "its snapshot replaced the first, and names the release it replaced" \
+  "${PREFIX}/releases/${NEW_SHA}" "$(cat "${SNAPSHOT}/release")"
+assert_eq "one snapshot, no leftovers beside it" "oauth-state-snapshot" \
+  "$(find "$PREFIX" -maxdepth 1 -name 'oauth-state-snapshot*' -exec basename {} \; | paste -sd' ' -)"
+
+# A --rollback to a release the snapshot was not taken for leaves the state
+# as it is and says what the operator's backup is for.
+build_host
+migrating_release "$NEW_SHA" >/dev/null
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+AFTER_UPDATE="$(state_fingerprint)"
+echo "${PREFIX}/releases/other" >"${PREFIX}/.previous_release"
+make_release other >/dev/null
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback to another release exits 0" "0" "$RC"
+assert_eq "it leaves the state as it is" "$AFTER_UPDATE" "$(state_fingerprint)"
+if grep -q "backup" "${WORK}/out.log"; then
+  pass "and warns that the state may need the operator's backup"
+else
+  fail "and warns that the state may need the operator's backup" "$(tail -3 "${WORK}/out.log")"
+fi
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 

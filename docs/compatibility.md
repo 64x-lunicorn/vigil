@@ -163,7 +163,9 @@ of the other three.
   version than it knows, names both versions in the journal, and changes
   nothing. This is what a rollback past a schema change meets: run the newer
   release again, or restore the state dir from the backup taken before the
-  update.
+  update. `update.sh`'s own rollbacks put back the copy of the state it took
+  at the switch, when it was taken for the release they return to (see the
+  guide's [Operations](guide.md#operations)).
 
 A new schema version with an automatic migration is a minor change; the
 changelog says under "Upgrading" that a rollback past it needs that backup.
