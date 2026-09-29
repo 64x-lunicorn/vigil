@@ -671,17 +671,32 @@ check_unit_exposure() {
 # starts it, and the notification its OnFailure= starts.
 PUSH_UNITS=(vigil-push.service vigil-push.timer vigil-notify@.service)
 
-# install_push_timer <deploy dir> — installs the three units, removes the cron
-# file they replace, and enables the timer. Idempotent: init.sh runs it once,
-# update.sh on every update, which is how a host set up with the cron line
-# moves over. The push unit is verified and its sandbox scored before any file
-# is replaced, as update.sh does for the service's unit, so a unit that would
-# not load or that loosened the sandbox is not installed. Returns 1 then,
-# having changed nothing.
-install_push_timer() {
-  local source_dir="$1" candidate_dir unit analysis unexpected
+# The units are taken in two steps, so that a caller can take them before it
+# runs any code that is not its own, and install them only once it is sure it
+# wants them:
+#
+#   prepare_push_units <deploy dir> — copies the three units into a directory
+#     of root's own (PUSH_UNITS_CANDIDATE), and judges the copies there: the
+#     push unit and the timer are verified and the push unit's sandbox scored,
+#     as update.sh does for the service's unit, and the notification template
+#     must run as a dynamic user — it is started by every failure, and nothing
+#     scores it. Returns 1 then, having installed nothing. The checkout the
+#     units come from belongs to the service account, whose `mix` runs every
+#     dependency's code: a copy taken before that is one nothing it ran can
+#     have changed.
+#   install_push_units — installs the prepared copies, removes the cron file
+#     they replace, and enables the timer.
+#
+# install_push_timer <deploy dir> is both at once. Idempotent: init.sh runs
+# the pair once, update.sh on every update, which is how a host set up with
+# the cron line moves over.
+PUSH_UNITS_CANDIDATE=""
+
+prepare_push_units() {
+  local source_dir="$1" candidate_dir unit analysis unexpected notify
+  PUSH_UNITS_CANDIDATE=""
   if [ "$DRY_RUN" = "1" ]; then
-    log "[DRY RUN] install ${PUSH_UNITS[*]} into ${SYSTEMD_DIR}, remove ${OLD_PUSH_CRON_FILE}, enable vigil-push.timer"
+    log "[DRY RUN] verify ${PUSH_UNITS[*]} from ${source_dir}, score vigil-push.service"
     return 0
   fi
 
@@ -706,11 +721,26 @@ install_push_timer() {
     rm -rf "$candidate_dir"
     return 1
   fi
+  notify="${candidate_dir}/vigil-notify@.service"
+  if ! grep -qx 'DynamicUser=yes' "$notify" || grep -qE '^(User|Group)=' "$notify"; then
+    rm -rf "$candidate_dir"
+    err "vigil-notify@.service does not run as a dynamic user (DynamicUser=yes, no User= or Group=), as the one deploy/ ships does."
+    return 1
+  fi
+  PUSH_UNITS_CANDIDATE="$candidate_dir"
+}
 
+install_push_units() {
+  local unit
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY RUN] install ${PUSH_UNITS[*]} into ${SYSTEMD_DIR}, remove ${OLD_PUSH_CRON_FILE}, enable vigil-push.timer"
+    return 0
+  fi
   for unit in "${PUSH_UNITS[@]}"; do
-    install -m 0644 "${candidate_dir}/${unit}" "${SYSTEMD_DIR}/${unit}"
+    install -m 0644 "${PUSH_UNITS_CANDIDATE}/${unit}" "${SYSTEMD_DIR}/${unit}"
   done
-  rm -rf "$candidate_dir"
+  rm -rf "$PUSH_UNITS_CANDIDATE"
+  PUSH_UNITS_CANDIDATE=""
   if [ -e "$OLD_PUSH_CRON_FILE" ]; then
     rm -f "$OLD_PUSH_CRON_FILE"
     ok "Removed the push safety net's cron file (${OLD_PUSH_CRON_FILE})."
@@ -718,6 +748,11 @@ install_push_timer() {
   systemctl daemon-reload
   systemctl enable --now vigil-push.timer >/dev/null
   ok "Push safety net: vigil-push.timer enabled, failures start vigil-notify@vigil-push.service."
+}
+
+install_push_timer() {
+  prepare_push_units "$1" || return 1
+  install_push_units
 }
 
 ## ── Token bootstrap (shared by init.sh/update.sh) ────────────────────────

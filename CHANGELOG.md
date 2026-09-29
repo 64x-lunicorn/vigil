@@ -79,7 +79,7 @@ read it afterwards.
   `VIGIL_PUSH_ALERT_AFTER` (60).
 - **The push safety net is a systemd timer.** `update.sh` installs
   `vigil-push.service`, `vigil-push.timer` and `vigil-notify@.service` on every
-  update, removes `/etc/cron.d/vigil-push-safety-net` and enables the timer.
+  update that stands, removes `/etc/cron.d/vigil-push-safety-net` and enables the timer.
   Replace the notification unit's `ExecStart=` in a drop-in to be told about a
   failed push ([the push safety net](docs/guide.md#the-push-safety-net)).
 - **Adopt the hardened unit with `update.sh --update-unit`.** The shipped

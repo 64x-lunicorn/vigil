@@ -966,8 +966,9 @@ switched, and its error is printed.
   `reload`. No code change, no restart.
 - **A changed unit:** `update.sh` says so when `deploy/vigil.service` differs
   from the installed one, and keeps the old one until it is run with
-  `--update-unit`, which verifies the new unit, scores its sandbox and then
-  installs it.
+  `--update-unit`, which verifies the new unit and scores its sandbox before
+  it builds anything, installs it just before the switch, and puts the old
+  one back if the update rolls back.
 
 ### Backups
 
@@ -1150,9 +1151,13 @@ the vault nor the env file; a secret it needs goes in the drop-in
 `sudo systemctl start vigil-notify@vigil-push.service`.
 
 `init.sh` installs and enables the three units; `update.sh` reinstalls them on
-every update, scoring `vigil-push.service`'s sandbox like the service's. A host
-set up before the timer has its cron file, `/etc/cron.d/vigil-push-safety-net`,
-removed by its next `update.sh`.
+every update that stands, after its acceptance check — one that rolls back
+leaves the units it found, or the cron line. Both take the units from the
+checkout and judge them before the first `mix` step: `vigil-push.service`'s
+sandbox is scored like the service's, and `vigil-notify@.service` must run as
+a dynamic user (`DynamicUser=yes`, no `User=`); a unit that fails either is not
+installed. A host set up before the timer has its cron file,
+`/etc/cron.d/vigil-push-safety-net`, removed by its next `update.sh`.
 
 ## Revoking access
 

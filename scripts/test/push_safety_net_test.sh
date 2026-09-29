@@ -398,8 +398,34 @@ for refusal in exposed broken; do
   fi
 done
 
+# The notification template runs on every failure and is not scored: what is
+# asked of it is that it runs as a dynamic user, as the shipped one does.
+fresh_host
+cp -R "${REPO_ROOT}/deploy" "${WORK}/deploy-root-notify"
+sed -i.bak 's/^DynamicUser=yes$/User=root/' "${WORK}/deploy-root-notify/vigil-notify@.service"
+set +e
+# shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
+env VIGIL_UNIT_FILE="${SYSTEMD}/vigil.service" VIGIL_PUSH_CRON_FILE="$CRON" \
+  FAKE_SYSTEMCTL_LOG="${WORK}/systemctl.log" FAKE_SA_LOG="${WORK}/sa.log" \
+  bash -c 'source "$1/scripts/lib.sh"; trap - EXIT; install_push_timer "$2"' \
+  _ "$REPO_ROOT" "${WORK}/deploy-root-notify" >"$OUT" 2>&1
+RC=$?
+set -e
+assert_eq "a notification unit with User=root: returns 1" "1" "$RC"
+if [ -n "$(ls -A "$SYSTEMD")" ] || [ ! -e "$CRON" ]; then
+  fail "a notification unit with User=root: nothing installed, the cron file kept"
+else
+  pass "a notification unit with User=root: nothing installed, the cron file kept"
+fi
+if grep -qx "DynamicUser=yes" "${REPO_ROOT}/deploy/vigil-notify@.service"; then
+  pass "the shipped vigil-notify@.service runs as a dynamic user"
+else
+  fail "the shipped vigil-notify@.service runs as a dynamic user"
+fi
+
 # shellcheck disable=SC2016 # the text init.sh contains, not an expansion
-if grep -q 'install_push_timer "${SCRIPT_DIR}/../deploy"' "${REPO_ROOT}/scripts/init.sh" &&
+if grep -q 'prepare_push_units "${SCRIPT_DIR}/../deploy"' "${REPO_ROOT}/scripts/init.sh" &&
+  grep -q '^install_push_units$' "${REPO_ROOT}/scripts/init.sh" &&
   ! grep -q "cron" <(grep -v '^ *#' "${REPO_ROOT}/scripts/init.sh"); then
   pass "init.sh installs the timer and writes no cron file"
 else

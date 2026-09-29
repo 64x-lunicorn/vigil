@@ -289,12 +289,38 @@ restore_checkout() {
   fi
 }
 
+## ── The systemd unit follows the running release ────────────────────────
+
+# The candidate for --update-unit, taken in step 3, and the unit it replaced,
+# kept while the release that needs it is not yet known to stand.
+UNIT_CANDIDATE=""
+UNIT_CANDIDATE_DIR=""
+UNIT_BACKUP_DIR=""
+
+# restore_unit — puts back the unit the old release ran under, when this run
+# replaced it: an automatic rollback returns to the old release under its own
+# unit, not the new one. Never ends the run; the health wait judges.
+restore_unit() {
+  [ -n "$UNIT_BACKUP_DIR" ] || return 0
+  if [ -f "${UNIT_BACKUP_DIR}/unit" ]; then
+    install -m 0644 "${UNIT_BACKUP_DIR}/unit" "$UNIT_FILE" || true
+  else
+    rm -f "$UNIT_FILE"
+  fi
+  systemctl daemon-reload || true
+  rm -rf "$UNIT_BACKUP_DIR"
+  UNIT_BACKUP_DIR=""
+  log "Put back the systemd unit ${PREVIOUS_RELEASE} ran under."
+}
+
 # Replaces lib.sh's EXIT trap with one that restores the checkout first and
-# then prints the same summary, with the exit code the script ended on.
+# then prints the same summary, with the exit code the script ended on. The
+# units' temp copies go with it.
 # shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap below
 on_exit() {
   local rc="$1"
   restore_checkout || true
+  rm -rf "${UNIT_CANDIDATE_DIR:-}" "${UNIT_BACKUP_DIR:-}" "${PUSH_UNITS_CANDIDATE:-}"
   summary "$rc"
 }
 trap 'on_exit $?' EXIT
@@ -483,6 +509,48 @@ if [ -z "${VIGIL_UPDATE_REEXEC:-}" ]; then
   warn "The target checkout has no scripts/update.sh — this run goes on with the one it started with."
 fi
 
+# The units this update installs are taken from the checkout now, into
+# directories of root's own, and judged there — before the first mix step:
+# the checkout belongs to the service account, whose `mix` runs every
+# dependency's code, and a unit root installs is one nothing it ran can have
+# changed. A unit refused here leaves the running service as it was.
+UNIT_SOURCE="${REPO}/deploy/vigil.service"
+UNIT_CHANGED=0
+if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
+  UNIT_CHANGED=1
+fi
+if [ "$UNIT_CHANGED" = "1" ] && [ "$UPDATE_UNIT" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+  # Verified before it replaces the installed unit: a rejected unit left in
+  # /etc/systemd/system would be picked up by the next daemon-reload. Same
+  # filter as setup.sh — a release binary that does not exist yet is
+  # expected, anything else is not. Then its sandbox is scored against the
+  # recorded target, so a unit that loosened it is not adopted either. A
+  # directory rather than `mktemp --suffix`: the candidate keeps the unit's
+  # own name, and GNU's --suffix is the one flag here macOS lacks.
+  UNIT_CANDIDATE_DIR="$(mktemp -d)"
+  UNIT_CANDIDATE="${UNIT_CANDIDATE_DIR}/$(basename "$UNIT_FILE")"
+  cp "$UNIT_SOURCE" "$UNIT_CANDIDATE"
+  ANALYSIS="$(systemd-analyze verify "$UNIT_CANDIDATE" 2>&1 || true)"
+  UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
+  if [ -n "$UNEXPECTED" ]; then
+    err "systemd-analyze verify reports problems with the new unit:"
+    echo "$UNEXPECTED" >&2
+    exit 1
+  fi
+  if ! check_unit_exposure "$UNIT_CANDIDATE"; then
+    err "Not adopting the new unit; the running service is untouched."
+    exit 1
+  fi
+elif [ "$UNIT_CHANGED" = "1" ] && [ "$UPDATE_UNIT" != "1" ]; then
+  warn "deploy/vigil.service changed — adopt it with --update-unit, otherwise the old unit stays active."
+  record_next_step "run update.sh --update-unit to adopt the changed systemd unit"
+fi
+
+if ! prepare_push_units "${REPO}/deploy"; then
+  err "Not installing the push safety net's units; the running service is untouched."
+  exit 1
+fi
+
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] mix deps.get && mix hex.audit && mix deps.audit"
 else
@@ -628,61 +696,23 @@ else
 fi
 record_done "compared chunk ids"
 
-## ── Optional: adopt the systemd unit ─────────────────────────────────────
+## ── Adopt the systemd unit, keeping the one it replaces ──────────────────
 
-UNIT_SOURCE="${REPO}/deploy/vigil.service"
-if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
-  if [ "$UPDATE_UNIT" = "1" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      log "[DRY RUN] adopt the changed systemd unit"
-    else
-      # Verified before it replaces the installed unit: a rejected unit left
-      # in /etc/systemd/system would be picked up by the next daemon-reload.
-      # Same filter as setup.sh — a release binary that does not exist yet is
-      # expected, anything else is not. Then its sandbox is scored against the
-      # recorded target, so a unit that loosened it is not adopted either.
-      # A directory rather than `mktemp --suffix`: the candidate keeps the
-      # unit's own name, and GNU's --suffix is the one flag here macOS lacks.
-      UNIT_CANDIDATE_DIR="$(mktemp -d)"
-      UNIT_CANDIDATE="${UNIT_CANDIDATE_DIR}/$(basename "$UNIT_FILE")"
-      cp "$UNIT_SOURCE" "$UNIT_CANDIDATE"
-      ANALYSIS="$(systemd-analyze verify "$UNIT_CANDIDATE" 2>&1 || true)"
-      UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
-      if [ -n "$UNEXPECTED" ]; then
-        rm -rf "$UNIT_CANDIDATE_DIR"
-        err "systemd-analyze verify reports problems with the new unit:"
-        echo "$UNEXPECTED" >&2
-        exit 1
-      fi
-      if ! check_unit_exposure "$UNIT_CANDIDATE"; then
-        rm -rf "$UNIT_CANDIDATE_DIR"
-        err "Not adopting the new unit; the running service is untouched."
-        exit 1
-      fi
-      install -m 0644 "$UNIT_CANDIDATE" "$UNIT_FILE"
-      rm -rf "$UNIT_CANDIDATE_DIR"
-      systemctl daemon-reload
-      ok "systemd unit adopted."
-    fi
-    record_done "systemd unit updated"
-  else
-    warn "deploy/vigil.service changed — adopt it with --update-unit, otherwise the old unit stays active."
-    record_next_step "run update.sh --update-unit to adopt the changed systemd unit"
+# Installed just before the switch rather than after verify(): the release
+# switched to may need its unit to boot. So the unit it replaces is kept, and
+# the automatic rollback puts it back with the old release (restore_unit).
+if [ -n "$UNIT_CANDIDATE" ]; then
+  UNIT_BACKUP_DIR="$(mktemp -d)"
+  if [ -f "$UNIT_FILE" ]; then
+    cp -p "$UNIT_FILE" "${UNIT_BACKUP_DIR}/unit"
   fi
+  install -m 0644 "$UNIT_CANDIDATE" "$UNIT_FILE"
+  systemctl daemon-reload
+  ok "systemd unit adopted."
+  record_done "systemd unit updated"
+elif [ "$UPDATE_UNIT" = "1" ] && [ "$DRY_RUN" = "1" ] && [ "$UNIT_CHANGED" = "1" ]; then
+  log "[DRY RUN] adopt the changed systemd unit"
 fi
-
-## ── The push safety net ──────────────────────────────────────────────────
-
-# On every update rather than behind a flag: the timer runs a script from the
-# code checkout this update has just moved, so the units that run it move with
-# it. A host still on the cron line (/etc/cron.d/vigil-push-safety-net) is
-# moved to the timer here. Nothing is switched yet, so a refusal leaves the
-# running service as it was.
-if ! install_push_timer "${REPO}/deploy"; then
-  err "Not installing the push safety net's units; the running service is untouched."
-  exit 1
-fi
-record_done "push safety net: vigil-push.timer enabled"
 
 ## ── Automatic rollback ───────────────────────────────────────────────────
 
@@ -702,6 +732,7 @@ roll_back_automatically() {
   systemctl stop "$SERVICE" || true
   ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
+  restore_unit
   start_service start || true
 
   if wait_until_healthy; then
@@ -759,6 +790,17 @@ else
     roll_back_automatically
   fi
 fi
+
+## ── The push safety net ──────────────────────────────────────────────────
+
+# On every update rather than behind a flag: the timer runs a script from the
+# code checkout this update has moved, so the units that run it move with it.
+# A host still on the cron line (/etc/cron.d/vigil-push-safety-net) is moved
+# to the timer here. Only now that the target stands: a rollback or a refusal
+# leaves the old units, or the cron line, to the old release. The copies were
+# taken and judged in step 3, before any mix step ran.
+install_push_units
+record_done "push safety net: vigil-push.timer enabled"
 
 ## ── Step 8 — cleanup ─────────────────────────────────────────────────────
 

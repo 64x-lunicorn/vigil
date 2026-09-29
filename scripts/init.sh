@@ -560,6 +560,17 @@ require_command mix
 # halfway through the run.
 require_command jq
 
+# The push safety net's units, taken from the checkout into a directory of
+# root's own and judged there now, before the first mix step runs any
+# dependency's code as the service account that owns the checkout; installed
+# in step 7 from that copy (scripts/lib.sh, prepare_push_units).
+if ! prepare_push_units "${SCRIPT_DIR}/../deploy"; then
+  err "Not installing the push safety net's units."
+  exit 2
+fi
+# The copy goes when the run ends, whichever way; the summary keeps its code.
+trap 'rc=$?; rm -rf "${PUSH_UNITS_CANDIDATE:-}"; summary "$rc"' EXIT
+
 if [ -f "$ENV_FILE" ]; then
   if [ "$FORCE" != "1" ]; then
     err "${ENV_FILE} already exists. init.sh is idempotent but will not overwrite secrets without --force."
@@ -893,8 +904,9 @@ record_done "service (re)started, tokens seeded, conventions skill created"
 # The push safety net: a write whose push failed is committed and answered
 # `pushed: false`; vigil-push.timer pushes it within 15 minutes if no later
 # write does, and a push that fails starts vigil-notify@. The cron line it
-# replaces is removed if this host still has one.
-install_push_timer "${SCRIPT_DIR}/../deploy" || exit 1
+# replaces is removed if this host still has one. The units are the copies
+# the preflight took and judged.
+install_push_units
 record_done "push safety net: vigil-push.timer enabled"
 
 ## ── Step 8 — verify() ────────────────────────────────────────────────────

@@ -83,6 +83,15 @@ build_fake_mix() {
 set -euo pipefail
 echo "$*" >>"${FAKE_MIX_LOG}"
 case "${1:-}" in
+  deps.get)
+    # A dependency's code runs as the service account here, in the checkout
+    # it owns: the test says when it rewrites the units it finds there.
+    if [ -f "${FAKE_MIX_TAMPERS:-/nonexistent}" ]; then
+      for unit in deploy/vigil.service deploy/vigil-push.service deploy/vigil-notify@.service; do
+        echo "ExecStartPre=/tmp/planted" >>"$unit"
+      done
+    fi
+    ;;
   test)
     [ -f "${FAKE_MIX_TEST_FAILS:-/nonexistent}" ] && exit 1
     echo "42 tests, 0 failures"
@@ -330,6 +339,7 @@ run_update() {
     FAKE_SA_LOG="${WORK}/systemd-analyze.log" \
     FAKE_SA_EXPOSED="${FAKE_SA_EXPOSED:-/nonexistent}" \
     FAKE_SLUG_DIFF_CHANGES="${FAKE_SLUG_DIFF_CHANGES:-/nonexistent}" \
+    FAKE_MIX_TAMPERS="${FAKE_MIX_TAMPERS:-/nonexistent}" \
     bash "$UPDATE_SH" "$@" <"${UPDATE_STDIN:-/dev/null}" >"${WORK}/out.log" 2>&1
   local rc=$?
   set -e
@@ -679,6 +689,47 @@ fi
 assert_eq "current still points at the old release" "v0" "$(current_release)"
 assert_eq "the service was never stopped" "yes" "$(service_running)"
 
+section "8c2  An automatic rollback puts the old unit back"
+
+# The release switched to may need its unit to boot, so --update-unit
+# installs it before the switch; the old release goes back under its own.
+build_host
+commit_shipped_unit
+printf '[Unit]\n# the unit v0 runs under\n' >"${WORK}/etc/vigil.service"
+cp "${WORK}/etc/vigil.service" "${WORK}/old-unit"
+BROKEN_TARGET="${PREFIX}/releases/${UNIT_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+
+assert_eq "rolled back (exit 3)" "3" "$RC"
+if cmp -s "${WORK}/old-unit" "${WORK}/etc/vigil.service"; then
+  pass "the installed unit is the old one again"
+else
+  fail "the installed unit is the old one again" "$(head -3 "${WORK}/etc/vigil.service")"
+fi
+assert_eq "systemd was reloaded for each unit" "2" \
+  "$(grep -cx 'daemon-reload' "${PREFIX}/.systemctl-units.log" 2>/dev/null || true)"
+
+section "8c3  The unit installed is the one taken before any mix step ran"
+
+build_host
+commit_shipped_unit
+touch "${WORK}/mix-tampers"
+RC="$(FAKE_MIX_TAMPERS="${WORK}/mix-tampers" run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+rm -f "${WORK}/mix-tampers"
+
+assert_eq "exits 0" "0" "$RC"
+for pair in "vigil.service:${SHIPPED_UNIT}" \
+  "vigil-push.service:${REPO_ROOT}/deploy/vigil-push.service" \
+  "vigil-notify@.service:${REPO_ROOT}/deploy/vigil-notify@.service"; do
+  if cmp -s "${pair#*:}" "${WORK}/etc/${pair%%:*}"; then
+    pass "${pair%%:*} is installed as committed, not as the build left it"
+  else
+    fail "${pair%%:*} is installed as committed, not as the build left it"
+  fi
+done
+
 section "8d   The shipped unit carries the sandbox"
 
 # The options #217 asked for, one line each. `systemd-analyze security` on a
@@ -748,6 +799,49 @@ if grep -qE "^security --offline=true --threshold=30 .*/vigil-push\.service$" "$
 else
   fail "the push unit's sandbox was scored against the 3.0 target" \
     "systemd-analyze calls: $(paste -sd'|' "${WORK}/systemd-analyze.log")"
+fi
+
+section "9a2  A rolled-back update leaves the old push safety net in place"
+
+build_host
+mkdir -p "${WORK}/etc/cron.d"
+echo "*/15 * * * * root /opt/vigil/repo/scripts/push_pending.sh" \
+  >"${WORK}/etc/cron.d/vigil-push-safety-net"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "rolled back (exit 3)" "3" "$RC"
+if [ -e "${WORK}/etc/cron.d/vigil-push-safety-net" ] && [ ! -e "${WORK}/etc/vigil-push.service" ]; then
+  pass "the cron file is kept and no push unit installed"
+else
+  fail "the cron file is kept and no push unit installed"
+fi
+
+section "9a3  A notification unit that is not a dynamic user's is refused"
+
+build_host
+git -C "${PREFIX}/repo" checkout -q main
+sed -i.bak 's/^DynamicUser=yes$/User=root/' "${PREFIX}/repo/deploy/vigil-notify@.service"
+rm -f "${PREFIX}/repo/deploy/vigil-notify@.service.bak"
+git -C "${PREFIX}/repo" commit -qam "notify as root"
+ROOT_NOTIFY_SHA="$(git -C "${PREFIX}/repo" rev-parse --short HEAD)"
+git -C "${PREFIX}/repo" checkout -q "$OLD_SHA"
+RC="$(run_update --to "$ROOT_NOTIFY_SHA" --non-interactive)"
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never cycled" "(none)" "$(systemctl_calls)"
+if grep -q "dynamic user" "${WORK}/out.log"; then
+  pass "says why"
+else
+  fail "says why" "$(tail -3 "${WORK}/out.log")"
+fi
+if [ -s "$FAKE_MIX_LOG" ]; then
+  fail "refused before any mix step" "mix log: $(paste -sd'|' "$FAKE_MIX_LOG")"
+else
+  pass "refused before any mix step"
 fi
 
 section "9b   A push unit above the exposure target stops the update before the switch"
