@@ -37,9 +37,10 @@ Prerequisite: setup.sh has already run.
   --allow-unprotected         skip the Cloudflare Access check in verify()
   --force                     regenerate existing secrets (requires typing "yes")
   --ignore-audit              continue despite a failed dependency audit
-  --keep-token                also print how to carry over OAuth clients and
-                              tokens (the dets files) from the old container;
-                              verify() still seeds its own tokens
+  --keep-token                mint no token for the owner, who keeps the ones
+                              carried over from the old container (the dets
+                              files; how is printed). The skill bootstrap and
+                              verify() get two that live 15 minutes
   --dry-run                   log changes with [DRY RUN] instead of applying
   --non-interactive           run through without any prompts
   --verbose                   extra debug output (set -x)
@@ -792,8 +793,18 @@ else
   systemctl start vigil
   wait_until_healthy || exit 1
 
-  RW_TOKEN="$(vigil_seed_token "$RESOURCE" vault)"
-  RO_TOKEN="$(vigil_seed_token "$RESOURCE" vault:read)"
+  # The owner's pair lives 90 days (vigil_seed_token's default) and is printed
+  # in step 9. Under --keep-token the owner keeps the tokens carried over from
+  # the old container and nothing is printed, so nothing long-lived is minted:
+  # the skill bootstrap and verify() still need a bearer each, and theirs live
+  # 15 minutes, like the pair update.sh mints for verify().
+  if [ "$KEEP_TOKEN" = "1" ]; then
+    RW_TOKEN="$(vigil_seed_token "$RESOURCE" vault 900)"
+    RO_TOKEN="$(vigil_seed_token "$RESOURCE" vault:read 900)"
+  else
+    RW_TOKEN="$(vigil_seed_token "$RESOURCE" vault)"
+    RO_TOKEN="$(vigil_seed_token "$RESOURCE" vault:read)"
+  fi
 
   if [ "$KEEP_TOKEN" = "1" ] && [ ! -s /var/lib/vigil/oauth_tokens.dets ]; then
     warn "--keep-token: /var/lib/vigil/oauth_tokens.dets is missing or empty — no previous tokens to carry over."
@@ -897,8 +908,9 @@ if [ "$DRY_RUN" != "1" ] && [ "$KEEP_TOKEN" != "1" ]; then
   echo "  ${RO_TOKEN}"
   echo "  ──────────────────────────────────────────────────────"
   echo
-  echo "  These values are stored nowhere except in"
-  echo "  /var/lib/vigil/oauth_tokens.dets — readable by root only from here on."
+  echo "  Both live 90 days. Neither value is stored anywhere — the server keeps"
+  echo "  only its digest — so copy them now. List or revoke them, and every"
+  echo "  other grant, with: sudo ./scripts/grants.sh list"
   echo
 fi
 

@@ -23,7 +23,7 @@ cannot exist with a lookup. The audience is stored at issue time and compared
 at verification time.
 
 **Persistence is reached through a value.** What the server remembers is
-declared as fifteen questions in `Vigil.OAuth.Persistence` — a struct of
+declared as nineteen questions in `Vigil.OAuth.Persistence` — a struct of
 functions with no defaults — and the `:dets`/`:ets` implementation is an
 adapter behind it, `Vigil.OAuth.Store.over_tables/0`. The six modules that
 read and write records ask through the value they are handed rather than
@@ -37,7 +37,7 @@ follows.
 
 **The token record has one owner.** `Vigil.OAuth.Token` is the module that
 says what a stored token is. It writes every one that exists — the pair a
-grant redemption produces, the lone long-lived token that
+grant redemption produces, the lone token (90 days by default) that
 `mix vigil.seed_token` seeds, and the spent marker rotation leaves behind —
 it classifies one (`access`, `refresh`, `spent_refresh`), and it answers
 whether a token is a valid access token for a resource and at what scope.
@@ -792,6 +792,37 @@ production defaults, so a test can drive one sweep rather than wait five
 minutes for it, and drive it against an adapter of its own. The instant is a
 function, not a value: the janitor outlives any single one.
 
+### Revoking a grant
+
+A grant is the unit of revocation, and the operator revokes on the host with
+`scripts/grants.sh` (`docs/guide.md`, "Revoking access"): one grant, every
+grant, or a client with every grant it holds. The script goes through
+`bin/vigil rpc` into the running node and calls `Vigil.OAuth.Grants`, which
+asks persistence four questions nothing on a request path asks:
+`list_tokens`, `list_clients`, `delete_client` and `revoke_all`.
+
+- **A grant is read off its tokens.** Every token record carries its
+  `grant_id` and `granted_at` — when the grant began, handed on unchanged by
+  each rotation — and a refresh token names its client. An access token names
+  none, and a seeded token has no client at all, which is how the list tells
+  a seeded grant apart. The list is built from the records alone: the store
+  keeps no token value, and the digest never leaves the adapter.
+- **Revoking is deleting**, the same `revoke_grant` a replay uses. Nothing is
+  cached: `/mcp` and the refresh grant look the record up on every request, so
+  a revoked token is refused on the next one.
+- **Revoke-all** deletes every token and every authorization code not yet
+  redeemed — a code minted a moment earlier would otherwise redeem into a
+  fresh pair. It reaches tokens from before grants existed, which no
+  `revoke_grant` does.
+- **Deleting a client** deletes its record and its codes, then revokes every
+  grant whose refresh token names it. Redemption and refresh check the code
+  and the token, not the client, so the codes and grants have to go with it.
+
+Seeded tokens live 90 days by default, not ten years: a bearer token nobody
+rotates is bounded by its lifetime, and by revocation. `init.sh --keep-token`
+mints none for the owner; the two its skill bootstrap and acceptance check
+need live 15 minutes, like the pair `update.sh` mints for its check.
+
 > **Note:** `:dets` is not safe for concurrent access from multiple OS
 > processes. Seeding a token while the service is running must go through
 > `bin/vigil rpc` in the running node, not a second `mix` process. See
@@ -832,8 +863,9 @@ cannot authenticate anyone is worse than no service.
 - No JWT, no signing keys, no JWKS
 - No `client_credentials` grant
 - No `client_secret` — every client is public and uses PKCE
-- No revocation *endpoint* — a replayed refresh token revokes its grant from
-  the inside, but there is nothing for a client to call (delete the `.dets`
-  file)
+- No revocation *endpoint* (RFC 7009) — a replayed refresh token revokes its
+  grant from the inside, and the operator revokes from the host with
+  `scripts/grants.sh` (see "Revoking a grant" above), but there is nothing for
+  a client to call
 - No OpenID Connect discovery
 - No session cookie after login

@@ -371,12 +371,13 @@ wait_until_healthy() {
 # `mix vigil.seed_token` does — and `Vigil.ScriptCallsTest` holds its arity to
 # the one `Vigil.OAuth.Token` exports, which is how it fell behind once already.
 #
-# An optional third argument is the lifetime in seconds, ten years by default.
-# The tokens init.sh prints for the owner keep the default; the pair update.sh
-# mints only to run verify() gets minutes, so updates do not pile up live
-# full-access tokens nobody holds.
+# An optional third argument is the lifetime in seconds, 90 days by default —
+# the same default as `mix vigil.seed_token`. The tokens init.sh prints for
+# the owner keep the default; the ones init.sh --keep-token and update.sh mint
+# only to run verify() get minutes, so nobody piles up live full-access tokens
+# nobody holds. Any of them can be revoked early with scripts/grants.sh.
 vigil_seed_token() {
-  local resource="$1" scope="$2" ttl_seconds="${3:-315360000}"
+  local resource="$1" scope="$2" ttl_seconds="${3:-7776000}"
   if systemctl is-active --quiet "$SERVICE"; then
     local ausdruck
     ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(Vigil.OAuth.Store.over_tables(), \"${resource}\", \"${scope}\", String.to_integer(\"${ttl_seconds}\"), System.system_time(:second)))"

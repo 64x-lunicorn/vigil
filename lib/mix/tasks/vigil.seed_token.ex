@@ -1,5 +1,5 @@
 defmodule Mix.Tasks.Vigil.SeedToken do
-  @shortdoc "Seeds a long-lived OAuth access token directly into the dets store"
+  @shortdoc "Seeds an OAuth access token (90 days by default) directly into the dets store"
   @moduledoc """
   For first access and for `verify()` during a rebuild: mints an access token
   through `Vigil.OAuth.Token` straight into `oauth_tokens.dets`, without going
@@ -7,14 +7,23 @@ defmodule Mix.Tasks.Vigil.SeedToken do
   on its own for this (no `Application.start`, no Bandit, no port conflict with
   a running service).
 
+  The token lives 90 days unless `--ttl-days` or `--ttl-seconds` says
+  otherwise. It is a bearer credential nobody rotates, so its lifetime is
+  what bounds it; it can also be revoked early like any grant
+  (`docs/guide.md`, "Revoking access").
+
   Prints **only the token, on stdout** — no `Logger`, so it never reaches
   journald. The caller is responsible for not logging the output either.
 
       mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault
-      mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault:read --ttl-days 3650
+      mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault:read --ttl-days 30
       mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault --ttl-seconds 900
   """
   use Mix.Task
+
+  # Short on purpose: it used to be ten years, which made a seeded token the
+  # one credential nothing but deleting the state dir ever took back.
+  @default_ttl_days 90
 
   @impl true
   def run(args) do
@@ -38,9 +47,7 @@ defmodule Mix.Tasks.Vigil.SeedToken do
     state_dir = Keyword.fetch!(opts, :state_dir)
     resource = Keyword.fetch!(opts, :resource)
     scope = Keyword.get(opts, :scope, "vault")
-    # --ttl-seconds wins over --ttl-days: short-lived tokens for verify() are
-    # counted in minutes, not days.
-    ttl_seconds = Keyword.get(opts, :ttl_seconds, Keyword.get(opts, :ttl_days, 3650) * 86_400)
+    ttl_seconds = ttl_seconds(opts)
 
     # The scopes are `Vigil.OAuth`'s, the same list its metadata publishes: a
     # scope the flow issues is one this task can seed, and no other.
@@ -73,4 +80,13 @@ defmodule Mix.Tasks.Vigil.SeedToken do
     # The token is the only line this task prints.
     IO.puts(token)
   end
+
+  @doc """
+  The lifetime the parsed options ask for, in seconds: `--ttl-seconds`, else
+  `--ttl-days`, else #{@default_ttl_days} days. `--ttl-seconds` wins because
+  the short-lived tokens for verify() are counted in minutes, not days.
+  """
+  @spec ttl_seconds(keyword()) :: pos_integer()
+  def ttl_seconds(opts),
+    do: Keyword.get(opts, :ttl_seconds, Keyword.get(opts, :ttl_days, @default_ttl_days) * 86_400)
 end

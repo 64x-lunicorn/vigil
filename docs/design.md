@@ -962,11 +962,13 @@ atoms. Nothing varied across it, so there was nowhere to substitute, and the
 lockout had no test of their own: they were exercised incidentally, through
 endpoint tests.
 
-**The value is the whole of what those six ask.** Fifteen questions,
-declared in `Vigil.OAuth.Persistence`: a client written, read and counted, a code
-written and taken, a token written, read, deleted and revoked by family, the
-consent attempts counted per address, the CIMD cache read and written — and
-the sweep. The sweep is part of this surface rather than a concern beside it:
+**The value is the whole of what those six ask.** Nineteen questions,
+declared in `Vigil.OAuth.Persistence`: a client written, read, counted, listed
+and deleted, a code written and taken, a token written, read, listed, deleted
+and revoked by family or all at once, the consent attempts counted per
+address, the CIMD cache read and written — and the sweep. The four that list
+and delete are the operator's (`Vigil.OAuth.Grants`), asked only from the
+host. The sweep is part of this surface rather than a concern beside it:
 every expiry it drops belongs to one of the tables above, and the janitor asks
 for it through the value it was handed like any other caller.
 
@@ -1652,6 +1654,20 @@ rotated refresh token is marked **spent** rather than deleted, because deleting
 it makes a replay indistinguishable from a token that never existed — and the
 replay is the signal that one of two holders is an attacker. See
 [oauth.md](oauth.md) for the full walk.
+
+**The operator revokes by grant too.** `scripts/grants.sh` lists the live
+grants — id, client, scope, when the grant began and when it expires, never a
+token value — and revokes one, all, or a client with every grant it holds,
+through `bin/vigil rpc` in the running node (`docs/guide.md`, "Revoking
+access"). The id the operator types reaches the node base64-encoded rather
+than spliced into the Elixir it evaluates, so no id is code. Revoke-all takes
+the unredeemed codes too, and a deleted client its codes, since redemption
+checks the code rather than the client. When a grant was last *used* is not
+recorded: it would be a disk write on the `/mcp` hot path for a column. Of an
+RFC 7009 endpoint and nothing, nothing: the operator is on the host, and a
+client has never needed to give a token back. Seeded tokens live 90 days,
+not ten years, and `init.sh --keep-token` mints none for the owner — its
+bootstrap and acceptance check get two that live 15 minutes.
 
 The SkillKey creates a bootstrap problem: `skill_write` needs a key, but a
 fresh vault has no conventions skill to read one from. Resolved by having

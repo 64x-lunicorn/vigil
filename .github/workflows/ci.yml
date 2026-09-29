@@ -247,6 +247,11 @@ jobs:
       - name: The scripts read the vault's remote and branch from the env file
         run: bash scripts/test/git_settings_test.sh
 
+      # The operator's revocation command: what it sends into the node, what
+      # it asks before revoking everything, and the exit codes.
+      - name: grants.sh lists and revokes through the running node
+        run: bash scripts/test/grants_test.sh
+
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest

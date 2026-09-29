@@ -4,14 +4,18 @@ defmodule Vigil.OAuth.Persistence do
   than a module they name (`docs/design.md`, "OAuth persistence is reached
   through a value").
 
-  This is the **contract**: fifteen questions, which is the whole of what the
-  OAuth modules ask of storage. A registered client written, read and
-  counted, an authorization code written and taken, a token written, read, deleted and
-  revoked by family, the consent password attempts counted per address, the
-  CIMD cache read and written — and the janitor's sweep, which is part of this
-  surface rather than a concern of its own: it asks persistence to drop what
-  has expired, and every expiry it drops belongs to one of the tables above —
-  a registered client that never received a code included.
+  This is the **contract**: nineteen questions, which is the whole of what the
+  OAuth modules ask of storage. A registered client written, read, counted,
+  listed and deleted, an authorization code written and taken, a token
+  written, read, listed, deleted and revoked by family or all at once, the
+  consent password attempts counted per address, the CIMD cache read and
+  written — and the janitor's sweep, which is part of this surface rather than
+  a concern of its own: it asks persistence to drop what has expired, and
+  every expiry it drops belongs to one of the tables above — a registered
+  client that never received a code included.
+
+  The listing and deleting questions are the operator's (`Vigil.OAuth.Grants`,
+  `scripts/grants.sh`): nothing on a request path asks them.
 
   The **production adapter** is `Vigil.OAuth.Store.over_tables/0`, a function
   beside the `:dets`/`:ets` implementation it wires, rather than closures
@@ -41,6 +45,13 @@ defmodule Vigil.OAuth.Persistence do
     # How many client records are stored: a non-negative integer. What the
     # registration cap (`Vigil.OAuth.Client.max_clients/0`) is checked against.
     :count_clients,
+    # Every stored client, as [{client_id, attrs}] in no particular order.
+    :list_clients,
+    # Delete a client's record and every authorization code issued to it, so
+    # none is redeemed after the client is gone. Its tokens are not touched
+    # here: they are revoked by grant, above the seam. :ok, also for a client
+    # that was never stored.
+    :delete_client,
 
     ## Authorization codes
     #
@@ -69,6 +80,14 @@ defmodule Vigil.OAuth.Persistence do
     # Delete every token descended from one authorization grant — the replay
     # defence of RFC 9700 §4.14.2. A nil grant revokes nothing. :ok.
     :revoke_grant,
+    # Every stored token record — access, refresh and spent refresh alike — as
+    # a list of attrs, in no particular order. The attrs only: a token's value
+    # is not stored, and its digest never leaves the adapter.
+    :list_tokens,
+    # Delete every token and every authorization code: every grant at once,
+    # a record from before grants existed included. Clients stay registered.
+    # :ok.
+    :revoke_all,
 
     ## Consent password attempts, per address
     # Whether this address is locked out at `now`. boolean.
@@ -149,7 +168,7 @@ defmodule Vigil.OAuth.Persistence do
   def stored!({:error, reason}), do: raise(Unavailable, reason: reason)
 
   @doc """
-  Builds a persistence adapter from an answer to every one of the fifteen
+  Builds a persistence adapter from an answer to every one of the nineteen
   questions.
 
   Raises `ArgumentError` when a field is missing or unknown, which is the

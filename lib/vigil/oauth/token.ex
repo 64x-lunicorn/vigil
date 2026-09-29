@@ -90,9 +90,11 @@ defmodule Vigil.OAuth.Token do
     refresh_token = random()
     {aud, scope} = inherited(record)
     grant_id = grant_for_issue(record)
+    granted_at = granted_at(record, now)
 
     persistence.put_token.(access_token, %{
       grant_id: grant_id,
+      granted_at: granted_at,
       aud: aud,
       scope: scope,
       expires_at: now + @access_ttl
@@ -102,6 +104,7 @@ defmodule Vigil.OAuth.Token do
     persistence.put_token.(refresh_token, %{
       type: :refresh,
       grant_id: grant_id,
+      granted_at: granted_at,
       client_id: record.client_id,
       aud: aud,
       scope: scope,
@@ -136,6 +139,7 @@ defmodule Vigil.OAuth.Token do
 
     persistence.put_token.(token, %{
       grant_id: Vigil.Uuid.v4(),
+      granted_at: now,
       aud: aud,
       scope: scope,
       expires_at: now + ttl_seconds
@@ -155,6 +159,20 @@ defmodule Vigil.OAuth.Token do
   # With the code record owned, it can be asked instead.
   defp inherited(%{aud: aud} = record), do: {aud, scope_of(record)}
   defp inherited(code), do: {Code.audience_of(code), Code.scope_of(code)}
+
+  # When the grant began, which is what an operator listing grants reads as
+  # "issued": a code is redeemed the moment its grant begins, and a refresh
+  # token hands on the instant it inherited, so rotation does not make an old
+  # grant look new. A family from before the field has none to hand on and
+  # keeps none, rather than being dated by its latest rotation.
+  defp granted_at(%{aud: _} = refresh, _now), do: Map.get(refresh, :granted_at)
+  defp granted_at(_code, now), do: now
+
+  @doc """
+  When the grant a token record belongs to began, or `nil` for a record
+  written before that was kept.
+  """
+  def granted_at_of(record), do: Map.get(record, :granted_at)
 
   ## Classification
 

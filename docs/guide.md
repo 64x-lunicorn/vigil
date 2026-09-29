@@ -30,6 +30,7 @@ folder of Markdown files and their full history.
 - [Security model](#security-model)
 - [Configuration](#configuration)
 - [Operations](#operations)
+- [Revoking access](#revoking-access)
 - [Editing by hand](#editing-by-hand)
 - [Adopting an existing vault](#adopting-an-existing-vault)
 - [Troubleshooting](#troubleshooting)
@@ -253,9 +254,13 @@ seeds two OAuth tokens, and finishes with an acceptance check.
 
 `init.sh` prints both tokens **once** at the end. After that they exist
 nowhere: `/var/lib/vigil/oauth_tokens.dets` keeps only their SHA-256 digests,
-so a lost token is seeded again, not recovered. It also installs the push
-safety net as `/etc/cron.d/vigil-push-safety-net`, which runs
-`scripts/push_pending.sh` every 15 minutes. An adopted vault keeps its
+so a lost token is seeded again, not recovered. Each lives 90 days, and either
+can be revoked sooner (see [revoking access](#revoking-access)). With
+`--keep-token` — moving an instance whose clients keep the tokens they hold —
+no token is minted for the owner and none is printed; the skill bootstrap and
+the acceptance check use two of their own that live 15 minutes. It also
+installs the push safety net as `/etc/cron.d/vigil-push-safety-net`, which
+runs `scripts/push_pending.sh` every 15 minutes. An adopted vault keeps its
 own `vigil-vault-conventions` skill; the template is only written when the
 vault has none.
 
@@ -649,6 +654,49 @@ token are untouched.
 
 ---
 
+## Revoking access
+
+A **grant** is one authorization: a client that got past the consent page, or
+a token `init.sh` seeded. It is the unit of revocation — its access and
+refresh tokens go together, and are refused from the very next request on,
+at `/mcp` and at `/oauth/token` alike. `scripts/grants.sh` lists and revokes
+them on the host, through `bin/vigil rpc` against the running service; it
+never prints a token value, because the server does not keep one.
+
+```bash
+sudo ./scripts/grants.sh list                    # grant id, client, client id, scope, issued, expires
+sudo ./scripts/grants.sh clients                 # registered clients and how many grants each holds
+sudo ./scripts/grants.sh revoke <grant-id>       # one grant: its access and refresh tokens
+sudo ./scripts/grants.sh revoke-all              # every grant; asks you to type "yes" (or pass --yes)
+sudo ./scripts/grants.sh delete-client <client-id>  # a client, and every grant it holds
+```
+
+- **A seeded grant** shows `(seeded)` as its client: it came from `init.sh` or
+  `mix vigil.seed_token`, not from a consent. Seeded tokens live **90 days**
+  by default (`--ttl-days`/`--ttl-seconds` on the task say otherwise), so one
+  nobody revokes still ends.
+- **Issued** is when the grant began. Rotating a refresh token keeps its grant
+  and its date; **expires** is when its last token does, 30 days after the
+  latest rotation for a client's grant. When a grant was last *used* is not
+  recorded: counting it would be a disk write on every request.
+- **Revoking everything** also drops any authorization code not yet
+  redeemed. Clients stay registered — a registration grants nothing without
+  the consent password — and every client has to consent again. Do this after
+  **rotating the consent password**: a new password stops new consents and
+  revokes nothing already granted.
+- **Deleting a client** deletes its registration and its outstanding codes
+  and revokes every grant it holds. A client that named itself by a metadata
+  URL has no registration; deleting it revokes its grants. Either can come
+  back only through the consent page.
+- Tokens from before grants existed carry none; they are listed together
+  under `(none)`, and only `revoke-all` reaches them.
+
+Exit codes: 0 done, 1 refused by the service (an unknown id, printed behind
+`error:`) or `rpc` failed, 2 wrong arguments or the service is not running, 4
+`revoke-all` not confirmed.
+
+---
+
 ## Editing by hand
 
 vigil is the only writer of the vault on the server. You can still change
@@ -743,7 +791,7 @@ editing the vault in another tool.
 | Writes fail with "Missing or expired SkillKey" | key not passed, or older than two rotation windows | call `skill_read` on `vigil-vault-conventions` and use the key it returns — the error case returns one too |
 | `create` fails with "does not match the schema for domain" | the domain has a `naming.pattern` the path does not satisfy | the error contains a valid suggestion; or adjust `naming` in `_domains.yml` |
 | Chunk ids change unexpectedly after a deploy | the slug logic changed without checking the migration diff | run `mix vigil.slug_diff <vault>` *before* deploying |
-| Client gets 401 | token wrong or expired | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
+| Client gets 401 | token wrong, expired or revoked (`sudo ./scripts/grants.sh list`) | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
 | A write tool answers "Read-only token: write access denied." | the token's scope is not `vault` (for example `vault:read`) | connect with a `vault` token |
 | Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client | fix the Access configuration — never disable Access to "solve" this |
 | Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | the safety-net cron retries every 15 minutes; check `journalctl -t vigil-push` and `git -C /var/lib/vigil/vault rev-list --count @{u}..` |
@@ -765,7 +813,9 @@ stray `VIGIL_VAULT_PATH` cannot make a green test run meaningless.
 `scripts/*.sh` are covered separately — outside `mix test` — by
 `bash scripts/test/check_only_test.sh`, which exercises `init.sh --check-only`
 against a throwaway fixture vault without needing root or a real
-`/opt/vigil/repo` install (see the `VIGIL_INIT_TEST_STUBS` seam in `init.sh`).
+`/opt/vigil/repo` install (see the `VIGIL_INIT_TEST_STUBS` seam in `init.sh`),
+and by `bash scripts/test/grants_test.sh`, which drives `grants.sh` against a
+fake release (the `VIGIL_GRANTS_TEST_STUBS` seam).
 
 ```
 lib/vigil/
@@ -809,7 +859,7 @@ lib/vigil/
         └── decision.ex  # which envelope a response carries, as a pure function
 
 lib/mix/tasks/
-├── vigil.seed_token.ex  # seed a long-lived OAuth access token
+├── vigil.seed_token.ex  # seed an OAuth access token, 90 days by default
 ├── vigil.slug_diff.ex   # migration diff for slug logic changes
 └── vigil.vault_check.ex # JSON report used by init.sh
 ```

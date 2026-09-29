@@ -78,6 +78,7 @@ bash scripts/test/update_test.sh
 bash scripts/test/verify_test.sh
 bash scripts/test/secrets_test.sh
 bash scripts/test/git_settings_test.sh
+bash scripts/test/grants_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -104,6 +105,12 @@ password and the SkillKey secret are generated apart and both written.
 `git_settings_test.sh` checks that the scripts read the vault's remote and
 branch from the env file — against a real repository on `master` — and that no
 script or deploy file names `github` or `main` as either again.
+
+`grants_test.sh` drives `grants.sh`, the operator's command for listing and
+revoking grants, against a fake release that records what it is asked to
+evaluate: the arguments it accepts, the confirmation before revoking
+everything, that an id reaches the node as data, and the exit codes. It also
+holds `init.sh --keep-token` to minting no long-lived token.
 
 Those two and `release_smoke.sh` source
 [`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the

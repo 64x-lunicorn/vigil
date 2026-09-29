@@ -248,6 +248,10 @@ export VIGIL_SKILLKEY_SECRET
 export VIGIL_PORT="$PORT"
 export VIGIL_ISSUER="$ISSUER"
 export VIGIL_RESOURCE="$RESOURCE"
+# A node name of this run's own: section 5c reaches the node through
+# `bin/vigil rpc`, as scripts/grants.sh does, and two runs on one host must
+# not answer for each other.
+export RELEASE_NODE="vigil_smoke_${PORT}"
 
 # A remote or a branch the clone does not have stops boot, and says which
 # setting is wrong. Checked against the release because that is where the
@@ -591,6 +595,46 @@ else
     pass "the replay revoked the whole token family"
   fi
 fi
+
+## ── 5c. Revoking access through bin/vigil rpc ────────────────────────────
+
+section "5c/6  Revoking access"
+
+# What scripts/grants.sh sends, sent the same way: into the running node, the
+# words base64-encoded one per line. The unit suite holds what the node does
+# with it; this is the one place a built release is asked.
+grants_rpc() {
+  local encoded
+  encoded="$(printf '%s\n' "$@" | openssl base64 -A)"
+  "$RELEASE_BIN" rpc "Vigil.OAuth.Grants.rpc(Vigil.OAuth.Store.over_tables(), System.system_time(:second), \"${encoded}\")" 2>&1 || true
+}
+
+GRANTS_LIST="$(grants_rpc list)"
+RO_GRANT="$(printf '%s\n' "$GRANTS_LIST" | awk '$2 == "(seeded)" && $4 == "vault:read" { print $1 }')"
+
+if printf '%s\n' "$GRANTS_LIST" | head -1 | grep -q '^GRANT  *CLIENT  *CLIENT ID  *SCOPE  *ISSUED  *EXPIRES$' &&
+  [ -n "$RO_GRANT" ]; then
+  pass "the grant list names the seeded read-only grant"
+else
+  fail "the grant list names the seeded read-only grant" "$GRANTS_LIST"
+fi
+
+case "$GRANTS_LIST" in
+  *"$RW_TOKEN"* | *"$RO_TOKEN"*) fail "the grant list prints no token value" ;;
+  *) pass "the grant list prints no token value" ;;
+esac
+
+REVOKED="$(grants_rpc revoke "${RO_GRANT:-none}")"
+case "$REVOKED" in
+  "Revoked grant ${RO_GRANT}"*) pass "the read-only grant is revoked" ;;
+  *) fail "the read-only grant is revoked" "$REVOKED" ;;
+esac
+
+mcp_call "$RO_TOKEN" "current" > /dev/null
+assert_eq "its token is refused by /mcp at once" "401" "$(mcp_status)"
+
+mcp_call "$RW_TOKEN" "current" > /dev/null
+assert_eq "the other grant's token is still accepted" "200" "$(mcp_status)"
 
 ## ── 6. reload, then shut down cleanly ────────────────────────────────────
 

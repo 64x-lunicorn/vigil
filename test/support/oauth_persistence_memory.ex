@@ -58,6 +58,8 @@ defmodule Vigil.OAuth.Persistence.Memory do
         put_client: &put(tables, :clients, &1, &2),
         get_client: &fetch(tables, :clients, &1),
         count_clients: fn -> count(tables, :clients) end,
+        list_clients: fn -> Agent.get(tables, &Map.to_list(&1.clients)) end,
+        delete_client: &delete_client(tables, &1),
         # Codes and tokens under their digest, as the `:dets` adapter keeps
         # them: a test that reads this table sees what a backup would.
         put_code: &put(tables, :codes, Token.digest(&1), &2),
@@ -66,6 +68,8 @@ defmodule Vigil.OAuth.Persistence.Memory do
         get_token: &fetch(tables, :tokens, Token.digest(&1)),
         delete_token: &drop(tables, :tokens, Token.digest(&1)),
         revoke_grant: &revoke_grant(tables, &1),
+        list_tokens: fn -> Agent.get(tables, &Map.values(&1.tokens)) end,
+        revoke_all: fn -> Agent.update(tables, &%{&1 | tokens: %{}, codes: %{}}) end,
         rate_limited?: &rate_limited?(tables, &1, &2),
         record_failure: &record_failure(tables, &1, &2),
         reset_rate_limit: &drop(tables, :rate_limits, &1),
@@ -108,6 +112,20 @@ defmodule Vigil.OAuth.Persistence.Memory do
         nil -> {:error, state}
         attrs -> {{:ok, attrs}, update_in(state[table], &Map.delete(&1, key))}
       end
+    end)
+  end
+
+  ## Clients
+
+  # The client and every code issued to it, in one update: a code left behind
+  # would redeem for a client that no longer exists.
+  defp delete_client(tables, client_id) do
+    Agent.update(tables, fn state ->
+      %{
+        state
+        | clients: Map.delete(state.clients, client_id),
+          codes: Map.reject(state.codes, fn {_key, attrs} -> attrs.client_id == client_id end)
+      }
     end)
   end
 

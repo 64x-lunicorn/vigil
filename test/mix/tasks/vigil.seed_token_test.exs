@@ -22,4 +22,12 @@ defmodule Mix.Tasks.Vigil.SeedTokenTest do
       ])
     end
   end
+
+  # A seeded token is a bearer credential nobody rotates: its lifetime is what
+  # bounds it, and it used to be ten years.
+  test "a token lives 90 days unless the options say otherwise" do
+    assert SeedToken.ttl_seconds([]) == 90 * 86_400
+    assert SeedToken.ttl_seconds(ttl_days: 1) == 86_400
+    assert SeedToken.ttl_seconds(ttl_days: 1, ttl_seconds: 900) == 900
+  end
 end

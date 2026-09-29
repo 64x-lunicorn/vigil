@@ -39,12 +39,16 @@ defmodule Vigil.OAuth.PersistenceTest do
     put_client: 2,
     get_client: 1,
     count_clients: 0,
+    list_clients: 0,
+    delete_client: 1,
     put_code: 2,
     take_code: 1,
     put_token: 2,
     get_token: 1,
     delete_token: 1,
     revoke_grant: 1,
+    list_tokens: 0,
+    revoke_all: 0,
     rate_limited?: 2,
     record_failure: 2,
     reset_rate_limit: 1,
@@ -227,6 +231,79 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert persistence.get_token.("refresh-1") == :error
         assert {:ok, _} = persistence.get_token.("other-family")
         assert {:ok, _} = persistence.get_token.("no-family")
+      end
+
+      # What an operator lists grants from: the records, and never a value or
+      # a digest a caller could present — the store keeps no value, and the
+      # digest stays inside the adapter.
+      test "every token record is listed, and only its record", %{persistence: persistence} do
+        :ok = persistence.put_token.("access-1", token_attrs(%{}))
+        :ok = persistence.put_token.("refresh-1", refresh_attrs(%{}))
+
+        listed = persistence.list_tokens.()
+
+        assert Enum.sort_by(listed, &Map.has_key?(&1, :type)) ==
+                 [token_attrs(%{}), refresh_attrs(%{})]
+
+        refute inspect(listed) =~ "access-1"
+        refute inspect(listed) =~ "refresh-1"
+        refute inspect(listed) =~ "sha256"
+      end
+
+      test "the clients are listed by their id", %{persistence: persistence} do
+        :ok = persistence.put_client.("client-1", %{name: "One", redirect_uris: []})
+        :ok = persistence.put_client.("client-2", %{name: "Two", redirect_uris: []})
+
+        assert Enum.sort(persistence.list_clients.()) == [
+                 {"client-1", %{name: "One", redirect_uris: []}},
+                 {"client-2", %{name: "Two", redirect_uris: []}}
+               ]
+      end
+
+      # A code outstanding for a deleted client would still redeem: redemption
+      # checks the code, not the client.
+      test "deleting a client takes its record and its codes, and nothing else", %{
+        persistence: persistence
+      } do
+        # Each code is minted for a client of its own; reading one back and
+        # writing it again is how the test learns whose it is.
+        [{code, client_id}, {other, other_client}] =
+          for _ <- 1..2 do
+            code = mint_code(persistence)
+            {:ok, attrs} = persistence.take_code.(code)
+            :ok = persistence.put_code.(code, attrs)
+            {code, attrs.client_id}
+          end
+
+        :ok = persistence.put_token.("refresh-1", refresh_attrs(%{client_id: client_id}))
+
+        assert :ok = persistence.delete_client.(client_id)
+
+        assert :error = persistence.get_client.(client_id)
+        assert :error = persistence.take_code.(code)
+        assert {:ok, _} = persistence.get_client.(other_client)
+        assert {:ok, _} = persistence.take_code.(other)
+        # Tokens are revoked by grant, above the seam, not here.
+        assert {:ok, _} = persistence.get_token.("refresh-1")
+
+        assert :ok = persistence.delete_client.("never-registered")
+      end
+
+      test "revoking everything takes every token and code, and leaves the clients", %{
+        persistence: persistence
+      } do
+        code = mint_code(persistence)
+        :ok = persistence.put_token.("access-1", token_attrs(%{}))
+        :ok = persistence.put_token.("refresh-1", refresh_attrs(%{}))
+        :ok = persistence.put_token.("other-family", token_attrs(%{grant_id: "grant-2"}))
+        :ok = persistence.put_token.("no-family", token_attrs(%{}) |> Map.delete(:grant_id))
+
+        assert :ok = persistence.revoke_all.()
+
+        assert persistence.list_tokens.() == []
+        assert :error = persistence.get_token.("no-family")
+        assert :error = persistence.take_code.(code)
+        assert persistence.count_clients.() == 1
       end
 
       # "Every token whose grant is unknown" is not a family, so one replay

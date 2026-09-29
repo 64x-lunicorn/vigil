@@ -26,7 +26,7 @@ defmodule Vigil.OAuth.Store do
   their `client_id`, which is public. State written before that change is
   rekeyed when the tables are opened, in `init/1`.
 
-  Everything below `over_tables/0` is private, the fifteen answers included.
+  Everything below `over_tables/0` is private, the nineteen answers included.
   They are captured from inside this module, so the value is the only way to
   reach them and the sentence above is a fact rather than a convention.
   """
@@ -192,12 +192,16 @@ defmodule Vigil.OAuth.Store do
       put_client: &put_client/2,
       get_client: &get_client/1,
       count_clients: &count_clients/0,
+      list_clients: &list_clients/0,
+      delete_client: &delete_client/1,
       put_code: &put_code/2,
       take_code: &take_code/1,
       put_token: &put_token/2,
       get_token: &get_token/1,
       delete_token: &delete_token/1,
       revoke_grant: &revoke_grant/1,
+      list_tokens: &list_tokens/0,
+      revoke_all: &revoke_all/0,
       rate_limited?: &rate_limited?/2,
       record_failure: &record_failure/2,
       reset_rate_limit: &reset_rate_limit/1,
@@ -219,6 +223,18 @@ defmodule Vigil.OAuth.Store do
   end
 
   defp count_clients, do: :dets.info(@clients, :size)
+
+  defp list_clients, do: all_rows(@clients)
+
+  # The codes first: a code outstanding for a client that is gone would still
+  # redeem into a pair, since redemption checks the code, not the client.
+  defp delete_client(client_id) do
+    Enum.each(all_rows(@codes), fn {key, attrs} ->
+      if attrs.client_id == client_id, do: delete_key(@codes, key)
+    end)
+
+    delete_key(@clients, client_id)
+  end
 
   ## Authorization codes
   #
@@ -272,6 +288,19 @@ defmodule Vigil.OAuth.Store do
     Enum.each(all_rows(@tokens), fn {key, attrs} ->
       if Token.grant_of(attrs) == grant_id, do: delete_key(@tokens, key)
     end)
+  end
+
+  defp list_tokens, do: for({_digest, attrs} <- all_rows(@tokens), do: attrs)
+
+  # Codes too: one minted a moment ago would otherwise redeem into a fresh
+  # pair after everything else was revoked.
+  defp revoke_all do
+    for table <- [@tokens, @codes] do
+      :ok = :dets.delete_all_objects(table)
+      :ok = :dets.sync(table)
+    end
+
+    :ok
   end
 
   # A write is stored or it is an error: `:dets.insert/2` answers
