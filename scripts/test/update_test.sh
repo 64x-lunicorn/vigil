@@ -341,6 +341,7 @@ run_update() {
     FAKE_SA_EXPOSED="${FAKE_SA_EXPOSED:-/nonexistent}" \
     FAKE_SLUG_DIFF_CHANGES="${FAKE_SLUG_DIFF_CHANGES:-/nonexistent}" \
     FAKE_MIX_TAMPERS="${FAKE_MIX_TAMPERS:-/nonexistent}" \
+    VIGIL_UPDATE_REEXEC="${INHERITED_REEXEC:-}" \
     bash "$UPDATE_SH" "$@" <"${UPDATE_STDIN:-/dev/null}" >"${WORK}/out.log" 2>&1
   local rc=$?
   set -e
@@ -1291,6 +1292,16 @@ commit_target_scripts() {
 exit 0
 REC
     : >"${repo}/scripts/lib.sh"
+  elif [ "$kind" = "older" ]; then
+    # An update.sh from before the hand-over (0.2's, or an older tag's): it
+    # knows nothing of the guard, and would run the update again from the
+    # start — handing over to it is not what it expects.
+    cat >"${repo}/scripts/update.sh" <<'REC'
+#!/usr/bin/env bash
+echo "older script ran" >"${FAKE_MIX_LOG%/*}/target-update.log"
+exit 0
+REC
+    : >"${repo}/scripts/lib.sh"
   else
     cp "$UPDATE_SH" "${REPO_ROOT}/scripts/lib.sh" "${repo}/scripts/"
   fi
@@ -1339,6 +1350,41 @@ FAKE_MIX_TEST_FAILS=""
 assert_eq "exits 1" "1" "$RC"
 assert_eq "current is unchanged" "v0" "$(current_release)"
 assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "13d  A target whose update.sh cannot take the run over is not handed it"
+
+# `--to <older tag>`: the target's script predates the hand-over.
+build_host
+commit_target_scripts older
+rm -f "${WORK}/target-update.log"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive --accept-id-changes)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "the older script was not run" "no" \
+  "$([ -f "${WORK}/target-update.log" ] && echo yes || echo no)"
+assert_eq "the script it started with switched to the target" "$SCRIPTS_SHA" "$(current_release)"
+if grep -q "cannot take the run over" "${WORK}/out.log"; then
+  pass "says it goes on with the script it started with"
+else
+  fail "says it goes on with the script it started with" "$(grep -i "update.sh" "${WORK}/out.log" | tail -3)"
+fi
+
+section "13e  A VIGIL_UPDATE_REEXEC from the environment that names no revision is ignored"
+
+build_host
+commit_target_scripts recorder
+rm -f "${WORK}/target-update.log"
+INHERITED_REEXEC="1; left over from a shell"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive --accept-id-changes)"
+INHERITED_REEXEC=""
+
+assert_eq "the run is handed over all the same" "guard: ${OLD_SHA}" \
+  "$(sed -n 2p "${WORK}/target-update.log" 2>/dev/null)"
+if grep -q "Ignoring VIGIL_UPDATE_REEXEC" "${WORK}/out.log"; then
+  pass "says it ignored the variable"
+else
+  fail "says it ignored the variable" "$(head -5 "${WORK}/out.log")"
+fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 

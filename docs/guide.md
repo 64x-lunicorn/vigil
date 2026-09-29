@@ -964,7 +964,8 @@ target's own `scripts/update.sh`, with the same arguments: it starts again
 from its preflight, and everything from there on — what is checked, how the
 release is built and judged, which units are installed — is the new version's.
 Without that, bash would go on reading the old script. It happens once per
-run. An update from a version before this hand-over existed (0.2) runs the old
+run, and only to a script that knows the hand-over: `--to` a tag older than
+it goes on with the script it started with, and says so. An update from a version before this hand-over existed (0.2) runs the old
 script to the end, so for that one step check the target out first, as its
 [changelog](../CHANGELOG.md) entry says, and run the new `update.sh` from there.
 

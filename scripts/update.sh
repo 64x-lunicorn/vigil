@@ -277,9 +277,17 @@ CHECKOUT_TARGET=""
 
 # Set by a run that handed over to the target checkout's own update.sh (step
 # 3), to the revision that is running: that is where the checkout goes back
-# to if this run ends before it has read the running revision itself.
+# to if this run ends before it has read the running revision itself. Only
+# a short sha is that: anything else was left in the environment by something
+# other than a hand-over, and taken as one it would stop this run's own
+# hand-over and send the checkout somewhere that is not a revision.
 if [ -n "${VIGIL_UPDATE_REEXEC:-}" ]; then
-  CHECKOUT_TARGET="$VIGIL_UPDATE_REEXEC"
+  if [[ "$VIGIL_UPDATE_REEXEC" =~ ^[0-9a-f]{7,40}$ ]]; then
+    CHECKOUT_TARGET="$VIGIL_UPDATE_REEXEC"
+  else
+    warn "Ignoring VIGIL_UPDATE_REEXEC from the environment: it names no revision, so this run was not handed over."
+    unset VIGIL_UPDATE_REEXEC
+  fi
 fi
 
 restore_checkout() {
@@ -579,14 +587,20 @@ as_vigil git -C "$REPO" checkout -q "$TARGET_SHA"
 # open and keeps reading however the checkout moves. Once per update:
 # VIGIL_UPDATE_REEXEC marks the run that was handed over, and carries the
 # running revision for the checkout to go back to. `exec` runs no EXIT trap,
-# so the checkout stays on the target for the new run.
+# so the checkout stays on the target for the new run. Only a script that
+# knows that variable takes the run over: one from before the hand-over — an
+# older tag's, `--to` going back — would take the handed-over run for a new
+# one, and this run goes on instead.
 if [ -z "${VIGIL_UPDATE_REEXEC:-}" ]; then
-  if [ -f "${REPO}/scripts/update.sh" ]; then
+  if [ -f "${REPO}/scripts/update.sh" ] && grep -q "VIGIL_UPDATE_REEXEC" "${REPO}/scripts/update.sh"; then
     log "Continuing with the target's own scripts/update.sh (${TARGET_SHA})."
     exec env VIGIL_UPDATE_REEXEC="$CURRENT_SHA" \
       bash "${REPO}/scripts/update.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+  elif [ -f "${REPO}/scripts/update.sh" ]; then
+    warn "The target's scripts/update.sh (${TARGET_SHA}) predates the hand-over and cannot take the run over — this run goes on with the one it started with."
+  else
+    warn "The target checkout has no scripts/update.sh — this run goes on with the one it started with."
   fi
-  warn "The target checkout has no scripts/update.sh — this run goes on with the one it started with."
 fi
 
 # The units this update installs are taken from the checkout now, into
