@@ -8,5 +8,5 @@
   out: nil,
   threshold: "low",
   ignore: [],
-  ignore_files: []
+  ignore_files: ["config/test.exs"]
 ]

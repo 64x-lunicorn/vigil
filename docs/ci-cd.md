@@ -408,7 +408,12 @@ carries its reason:
   [`.sobelow-skips`](../.sobelow-skips), with its reason in that file's header.
   Those entries are keyed by line: when the line moves the finding comes back
   and the gate fails, which is the prompt to check the reason still holds and
-  re-mark it with `mix sobelow --mark-skip-all`.
+  re-mark it with `mix sobelow --mark-skip-all`. Only `Config.HTTPS` is left
+  there, and it sits on line 0, which does not move.
+- `config/test.exs` is left out of the scan (`ignore_files` in
+  [`.sobelow-conf`](../.sobelow-conf)). It holds the suite's consent password
+  and SkillKey secret, which key nothing outside the suite, and nothing else
+  that Sobelow checks.
 
 **Behaviour.** `mix test`, in `MIX_ENV=test` against the fixture vault.
 

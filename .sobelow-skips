@@ -12,10 +12,6 @@
 # this check looks for does not exist in a Plug app; https for the issuer
 # and resource is enforced at boot by Vigil.Settings.Check instead.
 #
-# Config.Secrets (config/runtime.exs:124 and :125) - the auth_password and
-# skillkey_secret of the test environment only, inside
-# `if config_env() == :test`. They key nothing outside the suite; in prod
-# both come from /etc/vigil/env.
+# Config.Secrets - not skipped here: the suite's two literal secrets live in
+# config/test.exs, which .sobelow-conf leaves out of the scan.
 Config.HTTPS: HTTPS Not Enabled,config/prod.exs:0,2B5C077
-Config.Secrets: Hardcoded Secret,config/runtime.exs:124,676AF68
-Config.Secrets: Hardcoded Secret,config/runtime.exs:125,7530331
