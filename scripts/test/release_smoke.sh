@@ -104,6 +104,19 @@ BASE_URL="http://127.0.0.1:${PORT}"
 # and an "is this an error response?" check reads that as "no error" — a
 # rejected call would silently score as a pass. Instead the status code is
 # recorded next to the body and checked explicitly.
+# A tool call is made in a session, and a session is issued by `initialize`
+# and bound to the token that asked for it: an id the server did not issue
+# gets 404. So every call starts one, the way a client does after a restart.
+# Prints the issued id, or nothing if initialize did not issue one.
+mcp_session() {
+  local token="$1"
+  curl -sS -o /dev/null -D - -X POST "${BASE_URL}/mcp" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}' \
+    2>/dev/null | tr -d '\r' | awk 'tolower($1) == "mcp-session-id:" { print $2; exit }' || true
+}
+
 mcp_call() {
   local token="$1" tool="$2"
   # Do NOT write this as "${3:-{}}": bash ends the parameter expansion at the
@@ -112,11 +125,13 @@ mcp_call() {
   # scripts/lib.sh — an empty default plus an explicit fallback avoids it.
   local args="${3:-}"
   [ -z "$args" ] && args="{}"
+  local session_id
+  session_id="$(mcp_session "$token")"
   curl -sS -o "${WORK}/.mcp_body" -w '%{http_code}' \
     -X POST "${BASE_URL}/mcp" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
-    -H "mcp-session-id: smoke-$$-${RANDOM}" \
+    -H "mcp-session-id: ${session_id}" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}" \
     > "${WORK}/.mcp_status" 2>/dev/null || true
   cat "${WORK}/.mcp_body" 2>/dev/null || true
@@ -269,6 +284,32 @@ if echo "$current_response" | mcp_is_error; then
 else
   pass "current answers with a valid RW token"
 fi
+
+# A session is issued at initialize and ended by DELETE; an ended one is a 404,
+# which is what tells a client to initialize again.
+session_id="$(mcp_session "$RW_TOKEN")"
+if [ -n "$session_id" ]; then
+  pass "initialize issues a session id"
+else
+  fail "initialize issues a session id"
+fi
+
+ping_status() {
+  curl -o /dev/null -s -w '%{http_code}' -X POST "${BASE_URL}/mcp" \
+    -H "Authorization: Bearer ${RW_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "mcp-session-id: $1" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+}
+
+assert_eq "a request in the issued session is answered" "200" "$(ping_status "$session_id")"
+assert_eq "a session id the server never issued gets 404" "404" "$(ping_status "smoke-$$-unissued")"
+
+status="$(curl -o /dev/null -s -w '%{http_code}' -X DELETE "${BASE_URL}/mcp" \
+  -H "Authorization: Bearer ${RW_TOKEN}" \
+  -H "mcp-session-id: ${session_id}")"
+assert_eq "DELETE /mcp ends the session with 204" "204" "$status"
+assert_eq "an ended session gets 404" "404" "$(ping_status "$session_id")"
 
 # Reading the diacritics note by its non-ASCII path is the actual locale guard.
 read_response="$(mcp_call "$RO_TOKEN" read '{"id":"home/diacritics-äöü-café.md"}')"

@@ -3,7 +3,7 @@ defmodule Vigil.MCP.Server do
   use Plug.Router
   require Logger
 
-  alias Vigil.MCP.{Tools, Envelope}
+  alias Vigil.MCP.{Tools, Envelope, Session}
   alias Vigil.RateLimit
   alias Vigil.SkillKey
   alias Vigil.Store
@@ -120,8 +120,19 @@ defmodule Vigil.MCP.Server do
     send_resp(conn, 405, "")
   end
 
+  # Ends the session the header names — the transport's way for a client to
+  # say it is done. Authenticated and counted like every other request, and
+  # answered as a request in an unknown session is: only the token the session
+  # is bound to can end it, and every other answer is 404.
   delete "/mcp" do
-    send_resp(conn, 405, "")
+    authenticate(conn, fn conn, auth ->
+      with_header_session(conn, fn session_id ->
+        case Session.finish(conn.private.sessions, session_id, auth.token_digest, unix_now()) do
+          :ok -> send_resp(conn, 204, "")
+          :error -> send_resp(conn, 404, "")
+        end
+      end)
+    end)
   end
 
   # Everything that is not /mcp is the authorization server's: discovery
@@ -132,7 +143,12 @@ defmodule Vigil.MCP.Server do
 
   ## MCP handling
 
-  defp handle_mcp(conn) do
+  defp handle_mcp(conn), do: authenticate(conn, &handle_mcp_authenticated/2)
+
+  # The token is validated and counted before anything else about the request
+  # is looked at, on every method that reaches it; `fun` gets what the token
+  # says about the caller.
+  defp authenticate(conn, fun) do
     case validate_access_token(conn) do
       {:ok, scope, token} ->
         budget = conn.private.rate_limit_budget
@@ -145,7 +161,7 @@ defmodule Vigil.MCP.Server do
         if conn.private.rate_limiter.limited?.(digest, budget, now) do
           send_resp(conn, 429, "")
         else
-          handle_mcp_authenticated(conn, %{scope: scope, token_digest: digest})
+          fun.(conn, %{scope: scope, token_digest: digest})
         end
 
       {:error, :challenge} ->
@@ -236,8 +252,10 @@ defmodule Vigil.MCP.Server do
     })
   end
 
-  defp handle_message(conn, %{"method" => "initialize"} = msg, _auth) do
-    session_id = Vigil.Uuid.v4()
+  # `initialize` is the one message outside a session, because it is the one
+  # that starts one: bound to the token that sent it, under the token's digest.
+  defp handle_message(conn, %{"method" => "initialize"} = msg, auth) do
+    session_id = Session.issue(conn.private.sessions, auth.token_digest, unix_now())
 
     result = %{
       protocolVersion: @protocol_version,
@@ -256,27 +274,34 @@ defmodule Vigil.MCP.Server do
     |> send_json(200, %{jsonrpc: "2.0", id: msg["id"], result: result})
   end
 
-  defp handle_message(conn, %{"method" => "notifications/initialized"}, _auth) do
+  # Every other message is sent in a session, and is answered only in a live
+  # one of this token's.
+  defp handle_message(conn, msg, auth) do
+    with_session(conn, auth, &handle_in_session(&1, msg, auth, &2))
+  end
+
+  defp handle_in_session(conn, %{"method" => "notifications/initialized"}, _auth, _session_id) do
     send_resp(conn, 202, "")
   end
 
-  defp handle_message(conn, %{"method" => "ping"} = msg, _auth) do
-    with_session(conn, fn _session_id ->
-      send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{}})
-    end)
+  defp handle_in_session(conn, %{"method" => "ping"} = msg, _auth, _session_id) do
+    send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{}})
   end
 
   # A token that may not write is shown only the tools it may call. Listing the
   # writes to refuse each of them on the call is how users learn to approve
   # whatever is asked.
-  defp handle_message(conn, %{"method" => "tools/list"} = msg, auth) do
-    with_session(conn, fn _session_id ->
-      tools = Tools.definitions(writes: OAuth.may_write?(auth.scope))
-      send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{tools: tools}})
-    end)
+  defp handle_in_session(conn, %{"method" => "tools/list"} = msg, auth, _session_id) do
+    tools = Tools.definitions(writes: OAuth.may_write?(auth.scope))
+    send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{tools: tools}})
   end
 
-  defp handle_message(conn, %{"method" => "tools/call", "params" => params} = msg, _auth)
+  defp handle_in_session(
+         conn,
+         %{"method" => "tools/call", "params" => params} = msg,
+         _auth,
+         _session_id
+       )
        when not is_map(params) and not is_nil(params) do
     send_json(conn, 200, %{
       jsonrpc: "2.0",
@@ -285,38 +310,36 @@ defmodule Vigil.MCP.Server do
     })
   end
 
-  defp handle_message(conn, %{"method" => "tools/call"} = msg, auth) do
-    with_session(conn, fn session_id ->
-      params = msg["params"] || %{}
-      name = params["name"]
-      arguments = params["arguments"] || %{}
+  defp handle_in_session(conn, %{"method" => "tools/call"} = msg, auth, session_id) do
+    params = msg["params"] || %{}
+    name = params["name"]
+    arguments = params["arguments"] || %{}
 
-      Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
+    Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
 
-      store = conn.private.store
+    store = conn.private.store
 
-      {envelope, now} =
-        Envelope.for_tool(conn.private.sessions, session_id, name, store, settings(conn).tz)
+    {envelope, now} =
+      Envelope.for_tool(conn.private.sessions, session_id, name, store, settings(conn).tz)
 
-      result =
-        cond do
-          Tools.write_tool?(name) and not OAuth.may_write?(auth.scope) ->
-            {:error, "Read-only token: write access denied."}
+    result =
+      cond do
+        Tools.write_tool?(name) and not OAuth.may_write?(auth.scope) ->
+          {:error, "Read-only token: write access denied."}
 
-          reload_limited?(conn, name, auth.token_digest) ->
-            {:error,
-             "Rate limit exceeded for reload: at most #{conn.private.reload_rate_limit_budget} per minute. Try again in #{RateLimit.window_seconds()} seconds."}
+        reload_limited?(conn, name, auth.token_digest) ->
+          {:error,
+           "Rate limit exceeded for reload: at most #{conn.private.reload_rate_limit_budget} per minute. Try again in #{RateLimit.window_seconds()} seconds."}
 
-          true ->
-            Tools.dispatch(store, name, arguments, now, SkillKey.key(settings(conn)))
-        end
+        true ->
+          Tools.dispatch(store, name, arguments, now, SkillKey.key(settings(conn)))
+      end
 
-      body = build_tool_call_result(result, envelope)
-      send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: body})
-    end)
+    body = build_tool_call_result(result, envelope)
+    send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: body})
   end
 
-  defp handle_message(conn, msg, _auth) do
+  defp handle_in_session(conn, msg, _auth, _session_id) do
     if Map.has_key?(msg, "id") do
       send_json(conn, 200, %{
         jsonrpc: "2.0",
@@ -343,12 +366,28 @@ defmodule Vigil.MCP.Server do
 
   defp reload_limited?(_conn, _name, _token_digest), do: false
 
-  defp with_session(conn, fun) do
+  # A request in a session names it in one non-empty header, or is a 400. An
+  # id that is not a live session of this token's — never issued, another
+  # token's, expired, ended, or issued before a restart — is a 404, which the
+  # transport tells a client to answer by initializing a new one. Nothing
+  # here adds a row: only `initialize` does (`Vigil.MCP.Session`).
+  defp with_session(conn, auth, fun) do
+    with_header_session(conn, fn session_id ->
+      case Session.resume(conn.private.sessions, session_id, auth.token_digest, unix_now()) do
+        :ok -> fun.(conn, session_id)
+        :error -> send_resp(conn, 404, "")
+      end
+    end)
+  end
+
+  defp with_header_session(conn, fun) do
     case get_req_header(conn, "mcp-session-id") do
       [session_id] when session_id != "" -> fun.(session_id)
       _ -> send_resp(conn, 400, "")
     end
   end
+
+  defp unix_now, do: System.system_time(:second)
 
   # The envelope is attached around both outcomes rather than inside the
   # success branch, so "every tool response carries exactly one of `_`, `_t` or

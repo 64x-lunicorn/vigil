@@ -295,6 +295,7 @@ and take no `Plug.Conn`.
 | `/oauth/authorize` | POST | process consent, issue code, redirect |
 | `/oauth/token` | POST | code → access token, refresh → access token |
 | `/mcp` | POST | the MCP endpoint itself |
+| `/mcp` | DELETE | ends the MCP session its `Mcp-Session-Id` names (204; 404 for one that is not a live session of the token) |
 
 No revocation endpoint and no introspection endpoint — neither is needed for a
 single-user deployment.
@@ -712,7 +713,7 @@ endpoint and registration answer 503 `temporarily_unavailable`, the consent
 redirects with the same code, and `mix vigil.seed_token` dies without printing a token. A value
 that was never stored is never handed out.
 
-`Vigil.OAuth.Janitor` runs every five minutes and sweeps six tables, which is
+`Vigil.OAuth.Janitor` runs every five minutes and sweeps seven tables, which is
 every table that holds something with an expiry. `oauth_clients.dets` is among
 them for one kind of row only: a client that received no code within 24 hours
 of registering. A client that did stays until it is deleted.
@@ -725,6 +726,7 @@ of registering. A client that did stays until it is deleted.
 | consent-failure counters | OAuth persistence | the 15-minute lockout window has elapsed |
 | CIMD cache entries | OAuth persistence | the cached hour is up |
 | request-limit windows | `Vigil.RateLimit` | the one-minute window has elapsed |
+| MCP sessions | `Vigil.MCP.Session`, in the table `Vigil.MCP.Envelope` owns | an hour has passed without a request in the session |
 
 The first five are one question — persistence's `sweep_expired` — asked
 through the value the janitor holds; `Vigil.OAuth.Store` is the adapter that
@@ -732,7 +734,7 @@ answers it today.
 
 No cron, no job library — just `Process.send_after/3`.
 
-The last row is both request limiters, not one of them: `Vigil.RateLimit`
+The request-limit row is both request limiters, not one of them: `Vigil.RateLimit`
 holds a single table for `/mcp` keyed by the access token's digest *and* the
 OAuth endpoints keyed by client address, so one sweep covers both. Only the
 fourth row is the 15-minute consent lockout, and it covers wrong passwords on

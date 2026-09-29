@@ -1434,6 +1434,27 @@ time — and, since the deployment is resolved once too, which timezone to stamp
 the response with. Session state is per router rather than one table for the
 node.
 
+**A session is issued, bound, expires and can be ended.** `initialize` issues
+the one `Mcp-Session-Id` a session has and binds it to the token that sent it,
+kept as the token's digest (`Vigil.OAuth.Token.digest/1`), never as the token.
+Every other message is sent in a session: no id is a 400, and an id that is not
+a live session of the token presenting it — never issued, another token's,
+expired, ended, or issued before a restart — is a 404, which the transport
+tells a client to answer by initializing again. **A session lives one hour
+without a request**, and every request in it starts that hour over. One hour
+because that is how long an access token lives: a session bound to its token
+cannot be used past it anyway, and a client that refreshes initializes a new
+one. `DELETE /mcp` with the id ends it, 204, and the id is a 404 from then on.
+`Vigil.MCP.Session` decides all of this over rows of the session table
+`Vigil.MCP.Envelope` owns, and the envelope's state is one field of a session.
+
+Only `initialize` adds a row. Before this, any non-empty id was accepted and
+each distinct one was a row never removed; now an id nobody issued is refused
+without writing anything, so the table holds only sessions a valid token asked
+for, at the rate its budget allows. `Vigil.OAuth.Janitor` drops the ones whose
+hour has run out, and a request that finds its session expired before the
+sweep does is refused the same way and drops it on the spot.
+
 This is the reason the assistant never has to guess what time it is.
 
 ---
@@ -1480,7 +1501,8 @@ Five layers, each doing one job:
    belongs to OAuth persistence. Every one of them is swept by
    `Vigil.OAuth.Janitor`, whose list of what to ask is its own: it asks
    persistence for the expiries persistence owns, and the limiter for the
-   windows it does not — each through a value it was handed, neither by name.
+   windows it does not — each through a value it was handed, neither by name
+   — and drops expired MCP sessions from the session table it was named.
    A budget bounds how fast rows arrive and a sweep bounds how many there are,
    and neither substitutes for the other.
 

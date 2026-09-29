@@ -7,10 +7,10 @@ defmodule Vigil.OAuth.Janitor do
   was the OAuth store's in effect, the one swept table that store does not own
   was swept by nobody; `docs/oauth.md` records what that cost.
 
-  Five facts it needs are arguments with production defaults: the interval it
+  Six facts it needs are arguments with production defaults: the interval it
   sleeps for, the instant it sweeps against, the persistence whose expiries it
-  sweeps, the rate limiter whose elapsed windows it reclaims, and the name it
-  registers under. The first two baked in, the only way to observe a sweep was
+  sweeps, the rate limiter whose elapsed windows it reclaims, the MCP session
+  table whose expired sessions it drops, and the name it registers under. The first two baked in, the only way to observe a sweep was
   to wait five minutes; the next two baked in, a sweep could only ever be
   observed against the one globally registered `:dets` store and the one
   globally named limiter table.
@@ -28,6 +28,7 @@ defmodule Vigil.OAuth.Janitor do
   """
   use GenServer
 
+  alias Vigil.MCP.{Envelope, Session}
   alias Vigil.OAuth.Store
   alias Vigil.RateLimit
 
@@ -48,7 +49,8 @@ defmodule Vigil.OAuth.Janitor do
       interval: Keyword.get(opts, :interval, @interval),
       now: Keyword.get(opts, :now, fn -> System.system_time(:second) end),
       persistence: Keyword.get_lazy(opts, :persistence, &Store.over_tables/0),
-      limiter: Keyword.get_lazy(opts, :limiter, &RateLimit.over_table/0)
+      limiter: Keyword.get_lazy(opts, :limiter, &RateLimit.over_table/0),
+      sessions: Keyword.get_lazy(opts, :sessions, &Envelope.default_name/0)
     }
 
     schedule(state)
@@ -64,11 +66,18 @@ defmodule Vigil.OAuth.Janitor do
   end
 
   # Each takes the instant to sweep against, and each is asked through a value
-  # the janitor was handed: OAuth persistence sweeps four tables of its own,
-  # the rate limiter sweeps the one table persistence does not own. The list is
-  # the janitor's and names no module — which is the whole point of it
-  # belonging to the janitor rather than to either of the two things on it.
-  defp sweeps(state), do: [state.persistence.sweep_expired, state.limiter.sweep_expired]
+  # the janitor was handed: OAuth persistence sweeps five tables of its own,
+  # the rate limiter sweeps the one table persistence does not own, and the
+  # MCP sessions are dropped from the session table the janitor was named. The
+  # list is the janitor's rather than any one of theirs — which is the whole
+  # point of it belonging to the janitor rather than to the things on it.
+  defp sweeps(state) do
+    [
+      state.persistence.sweep_expired,
+      state.limiter.sweep_expired,
+      &Session.sweep_expired(state.sessions, &1)
+    ]
+  end
 
   defp schedule(state), do: Process.send_after(self(), :sweep, state.interval)
 end

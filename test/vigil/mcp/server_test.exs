@@ -17,6 +17,7 @@ defmodule Vigil.MCP.ServerTest do
   alias Vigil.RateLimit
   alias Vigil.Store
   alias Vigil.MCP.Server
+  alias Vigil.MCP.Session
   alias Vigil.MCP.Tools
   alias Vigil.OAuth
 
@@ -24,6 +25,13 @@ defmodule Vigil.MCP.ServerTest do
   # rather than the registrations production uses.
   @store __MODULE__.Writer
   @sessions __MODULE__.Sessions
+
+  @initialize %{
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: %{protocolVersion: "2025-11-25"}
+  }
 
   setup do
     vault = Vigil.FixtureVault.build()
@@ -83,7 +91,40 @@ defmodule Vigil.MCP.ServerTest do
   # other key would be refused by the gate rather than by the assertion.
   defp deployment_key, do: Vigil.SkillKey.key(Vigil.Settings.from_env())
 
+  # A session is issued at `initialize` and bound to the token that asked for
+  # it, so an `mcp-session-id` a test names is a name, not an id: the first
+  # request under it initializes a session for that token, and every later one
+  # carries the id that came back. `raw_post/4` sends headers as they are, for
+  # the tests about ids nobody issued.
   defp post(persistence, token, body, headers \\ []) do
+    raw_post(persistence, token, body, Enum.map(headers, &issued(persistence, token, &1)))
+  end
+
+  defp issued(persistence, token, {"mcp-session-id", name}),
+    do: {"mcp-session-id", session(persistence, token, name)}
+
+  defp issued(_persistence, _token, header), do: header
+
+  defp session(persistence, token, name) do
+    case Process.get({:session, token, name}) do
+      nil ->
+        id = initialize!(persistence, token)
+        Process.put({:session, token, name}, id)
+        id
+
+      id ->
+        id
+    end
+  end
+
+  defp initialize!(persistence, token) do
+    conn = raw_post(persistence, token, @initialize)
+    assert conn.status == 200
+    [id] = get_resp_header(conn, "mcp-session-id")
+    id
+  end
+
+  defp raw_post(persistence, token, body, headers \\ []) do
     conn =
       conn(:post, "/mcp", Jason.encode!(body))
       |> put_req_header("content-type", "application/json")
@@ -940,19 +981,149 @@ defmodule Vigil.MCP.ServerTest do
     end
   end
 
+  describe "sessions" do
+    defp ping(persistence, token, session_id) do
+      raw_post(persistence, token, %{jsonrpc: "2.0", id: 9, method: "ping"}, [
+        {"mcp-session-id", session_id}
+      ])
+    end
+
+    defp delete(persistence, token, headers) do
+      conn(:delete, "/mcp")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> then(&Enum.reduce(headers, &1, fn {k, v}, c -> put_req_header(c, k, v) end))
+      |> Server.call(opts(persistence))
+    end
+
+    test "initialize issues a session the token then works in", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+
+      conn = ping(persistence, token, session_id)
+      assert conn.status == 200
+      assert Jason.decode!(conn.resp_body)["result"] == %{}
+    end
+
+    test "a request with no session id is a 400", %{persistence: persistence, token: token} do
+      conn = raw_post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"})
+      assert conn.status == 400
+    end
+
+    # 404 is what the transport tells a client to re-initialize on — after a
+    # server restart as much as after an id it made up.
+    test "an unknown session id gets 404", %{persistence: persistence, token: token} do
+      for method <- ["ping", "tools/list", "tools/call", "notifications/initialized"] do
+        conn =
+          raw_post(
+            persistence,
+            token,
+            %{
+              jsonrpc: "2.0",
+              id: 1,
+              method: method,
+              params: %{name: "current", arguments: %{}}
+            },
+            [{"mcp-session-id", "never-issued"}]
+          )
+
+        assert conn.status == 404, method
+        assert conn.resp_body == ""
+      end
+    end
+
+    test "a session id used with a different token gets 404", %{
+      persistence: persistence,
+      token: token,
+      oauth: oauth
+    } do
+      session_id = initialize!(persistence, token)
+      other = seed_token(oauth)
+
+      assert ping(persistence, other, session_id).status == 404
+      assert delete(persistence, other, [{"mcp-session-id", session_id}]).status == 404
+
+      # The other token's attempt neither took the session over nor ended it.
+      assert ping(persistence, token, session_id).status == 200
+    end
+
+    test "an expired session is swept and then gets 404", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+      later = System.system_time(:second) + Session.lifetime_seconds()
+
+      assert Session.sweep_expired(@sessions, later) == 1
+      assert :ets.lookup(@sessions, session_id) == []
+      assert ping(persistence, token, session_id).status == 404
+    end
+
+    test "DELETE /mcp ends the session with 204, and it then gets 404", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+
+      conn = delete(persistence, token, [{"mcp-session-id", session_id}])
+      assert conn.status == 204
+      assert conn.resp_body == ""
+
+      assert ping(persistence, token, session_id).status == 404
+      assert delete(persistence, token, [{"mcp-session-id", session_id}]).status == 404
+    end
+
+    test "DELETE /mcp needs a token and a session id", %{persistence: persistence, token: token} do
+      no_token = conn(:delete, "/mcp") |> Server.call(opts(persistence))
+      assert no_token.status == 401
+      assert [_challenge] = get_resp_header(no_token, "www-authenticate")
+
+      assert delete(persistence, token, []).status == 400
+    end
+
+    # Only `initialize` adds a row. Before this, every distinct id a client
+    # sent was a row of its own, never removed.
+    test "the session table stays bounded under rotating ids", %{
+      persistence: persistence,
+      token: token
+    } do
+      initialize!(persistence, token)
+      size = :ets.info(@sessions, :size)
+
+      for n <- 1..200 do
+        call = %{
+          jsonrpc: "2.0",
+          id: n,
+          method: "tools/call",
+          params: %{name: "current", arguments: %{}}
+        }
+
+        conn = raw_post(persistence, token, call, [{"mcp-session-id", "rotating-#{n}"}])
+        assert conn.status == 404
+      end
+
+      assert :ets.info(@sessions, :size) == size
+    end
+
+    test "the session table keeps the token's digest, never the token", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+      digest = OAuth.Token.digest(token)
+
+      assert [{^session_id, ^digest, _last_active, _state}] = :ets.lookup(@sessions, session_id)
+      refute digest == token
+    end
+  end
+
   describe "Origin" do
     # The deployment's issuer, which this file's routers resolve because it
     # hands them no settings: its origin is allowed without being listed. The
     # listed ones are handed to the authorization server's options, which is
     # where `/mcp` reads them back from.
     @issuer_origin "https://vault.factory-lab.org"
-
-    @initialize %{
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: %{protocolVersion: "2025-11-25"}
-    }
 
     defp initialize_from(persistence, token, origin, listed \\ []) do
       origins = Vigil.Origin.allowed(Vigil.Settings.from_env().issuer, listed)
@@ -1040,7 +1211,11 @@ defmodule Vigil.MCP.ServerTest do
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer #{token}")
 
-      conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+      conn =
+        headers
+        |> Enum.map(&issued(persistence, token, &1))
+        |> Enum.reduce(conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+
       Server.call(conn, opts(persistence, rate_limit_budget: budget, limiter: limiter))
     end
 
@@ -1113,7 +1288,7 @@ defmodule Vigil.MCP.ServerTest do
           )
           |> put_req_header("content-type", "application/json")
           |> put_req_header("authorization", "Bearer #{token}")
-          |> put_req_header("mcp-session-id", "session-reload-rl")
+          |> put_req_header("mcp-session-id", session(persistence, token, "session-reload-rl"))
           |> Server.call(
             opts(persistence,
               rate_limit_budget: 100,

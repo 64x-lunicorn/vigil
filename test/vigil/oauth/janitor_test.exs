@@ -21,6 +21,7 @@ defmodule Vigil.OAuth.JanitorTest do
 
   use ExUnit.Case, async: true
 
+  alias Vigil.MCP.{Envelope, Session}
   alias Vigil.OAuth.{Client, Janitor, Store}
   alias Vigil.OAuthCase
   alias Vigil.RateLimit
@@ -145,6 +146,36 @@ defmodule Vigil.OAuth.JanitorTest do
     assert_received {:limiter_swept, @now}
   end
 
+  ## The MCP sessions
+
+  test "expired MCP sessions are swept from the table the janitor was named", %{
+    persistence: persistence
+  } do
+    # Sessions are issued at `initialize` and expire after a spell without a
+    # request; the sweep is what keeps the table from holding every session a
+    # client ever walked away from. Which sessions it drops is the session's
+    # own claim, in `Vigil.MCP.SessionTest`; here, that the janitor asks.
+    sessions = __MODULE__.Sessions
+    start_supervised!({Envelope, name: sessions})
+
+    expired = Session.issue(sessions, "digest", @now - Session.lifetime_seconds())
+    live = Session.issue(sessions, "digest", @now)
+
+    janitor =
+      start_janitor(
+        interval: :timer.minutes(5),
+        now: fn -> @now end,
+        persistence: persistence,
+        limiter: RateLimit.Counter.new(),
+        sessions: sessions
+      )
+
+    sweep_now(janitor)
+
+    assert :ets.lookup(sessions, expired) == []
+    assert Session.resume(sessions, live, "digest", @now) == :ok
+  end
+
   test "a sweep that reclaims nothing is not an error and leaves the janitor running", %{
     persistence: persistence
   } do
@@ -197,12 +228,13 @@ defmodule Vigil.OAuth.JanitorTest do
 
   ## The production defaults
 
-  test "the interval, the instant, the persistence and the limiter default to production" do
+  test "the interval, the instant, the persistence, the limiter and the sessions default to production" do
     state = start_janitor() |> :sys.get_state()
 
     assert state.interval == :timer.minutes(5)
     assert_in_delta state.now.(), System.system_time(:second), 2
     assert state.persistence == Store.over_tables()
     assert state.limiter == RateLimit.over_table()
+    assert state.sessions == Envelope.default_name()
   end
 end

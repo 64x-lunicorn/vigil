@@ -5,7 +5,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   # comes from is handed in rather than found by default.
   use ExUnit.Case, async: true
 
-  alias Vigil.MCP.Envelope
+  alias Vigil.MCP.{Envelope, Session}
   alias Vigil.Store
 
   # One writer and one session table for this file. Tests inside a module run
@@ -46,9 +46,22 @@ defmodule Vigil.MCP.EnvelopeTest do
   end
 
   # The envelope for one response in this file's session table, decided against
-  # this file's vault.
-  defp for_tool(session_id, tool),
-    do: Envelope.for_tool(@sessions, session_id, tool, @store, @tz)
+  # this file's vault. A session is a row only once it has been issued, so each
+  # name a test uses is issued a session the first time it is used.
+  defp for_tool(name, tool),
+    do: Envelope.for_tool(@sessions, session(name), tool, @store, @tz)
+
+  defp session(name) do
+    case Process.get({:session, name}) do
+      nil ->
+        id = Session.issue(@sessions, "digest", System.system_time(:second))
+        Process.put({:session, name}, id)
+        id
+
+      id ->
+        id
+    end
+  end
 
   defp create_event!(path, title, starts, ends) do
     {:ok, _} =
@@ -127,6 +140,14 @@ defmodule Vigil.MCP.EnvelopeTest do
     start_store(vault)
 
     assert {%{"_t" => _}, _} = for_tool("session-4", "search")
+  end
+
+  # Only an issued session has a row, and the envelope never adds one: a
+  # session ended while its response was being decided stays ended.
+  test "a session that was never issued keeps no state" do
+    assert {%{"_" => _}, _} = Envelope.for_tool(@sessions, "never-issued", "search", @store, @tz)
+    assert {%{"_" => _}, _} = Envelope.for_tool(@sessions, "never-issued", "search", @store, @tz)
+    assert :ets.lookup(@sessions, "never-issued") == []
   end
 
   test "the table is public, so no response pays a call into the owning process" do

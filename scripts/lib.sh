@@ -346,6 +346,19 @@ vigil_seed_token() {
 
 ## ── MCP calls used by verify() ───────────────────────────────────────────
 
+# mcp_session <base_url> <token>  → prints the Mcp-Session-Id `initialize`
+# issues for <token>. A tool call is made in a session, a session is bound to
+# the token that initialized it, and an id the server did not issue is a 404 —
+# so every call starts its own, the way a client does after a restart.
+mcp_session() {
+  local base_url="$1" token="$2"
+  curl -fsS -o /dev/null -D - -X POST "${base_url}/mcp" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"vigil-verify","version":"0"}}}' |
+    tr -d '\r' | awk 'tolower($1) == "mcp-session-id:" { print $2; exit }'
+}
+
 # mcp_call <base_url> <token> <tool> [<json_args>]  → prints the raw JSON-RPC
 # response on stdout.
 mcp_call() {
@@ -364,7 +377,9 @@ mcp_call() {
   if [ -z "$args" ]; then
     args="{}"
   fi
-  local session_id="verify-$$-${RANDOM}"
+  local session_id
+  session_id="$(mcp_session "$base_url" "$token")" || return 1
+  [ -n "$session_id" ] || return 1
   curl -fsS -X POST "${base_url}/mcp" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \

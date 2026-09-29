@@ -772,6 +772,7 @@ lib/vigil/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints
     ├── tools.ex         # one table per tool: schema, validation, dispatch
     ├── envelope.ex      # time envelope, session delta tracking
+    ├── session.ex       # sessions: issued at initialize, bound to a token, expired, ended
     └── envelope/
         └── decision.ex  # which envelope a response carries, as a pure function
 
