@@ -61,6 +61,25 @@ defmodule Vigil.OAuth.StoreSchemaVersionTest do
     keys
   end
 
+  # What the first half of the migration leaves: every raw key moved to its
+  # digest, the raw rows deleted — their bytes still in the file — and no
+  # version written. Answers the raw values.
+  defp rekey_without_rewrite(path) do
+    {:ok, table} = :dets.open_file(make_ref(), file: String.to_charlist(path), type: :set)
+
+    legacy =
+      :dets.foldl(
+        fn {key, _} = row, acc -> if is_binary(key), do: [row | acc], else: acc end,
+        [],
+        table
+      )
+
+    :ok = :dets.insert(table, for({key, attrs} <- legacy, do: {Token.digest(key), attrs}))
+    Enum.each(legacy, fn {key, _attrs} -> :ok = :dets.delete(table, key) end)
+    :ok = :dets.close(table)
+    Enum.map(legacy, &elem(&1, 0))
+  end
+
   defp files(state_dir) do
     state_dir
     |> File.ls!()
@@ -111,6 +130,35 @@ defmodule Vigil.OAuth.StoreSchemaVersionTest do
 
       assert stored_version(state_dir) == [schema_version: 2]
       assert {:ok, _record} = Store.over_tables().get_token.(raw)
+    end
+
+    # The rekey moves every raw key to its digest and syncs; the rewrite that
+    # then drops the raw values from the file's free space is a second step.
+    # A boot that stopped between the two left no binary key behind, so the
+    # rewrite has to be decided by the version, which is written last.
+    test "a boot stopped between the rekey and the rewrite erases the values on the next", %{
+      state_dir: state_dir
+    } do
+      copy_pre_seam(state_dir)
+
+      raw =
+        for file <- ["oauth_tokens.dets", "oauth_codes.dets"],
+            value <- rekey_without_rewrite(Path.join(state_dir, file)),
+            do: {file, value}
+
+      assert raw != []
+
+      for {file, value} <- raw do
+        assert File.read!(Path.join(state_dir, file)) =~ value
+      end
+
+      capture_log(fn -> start_supervised!({Store, state_dir: state_dir}) end)
+
+      for {file, value} <- raw do
+        refute File.read!(Path.join(state_dir, file)) =~ value, "a raw value is still in #{file}"
+      end
+
+      assert stored_version(state_dir) == [schema_version: 2]
     end
 
     test "marked with this version is read as it is", %{state_dir: state_dir} do

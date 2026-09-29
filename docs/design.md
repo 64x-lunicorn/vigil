@@ -1414,8 +1414,12 @@ implement stays in each. Sharing the counting too would make the two identical
 by construction, and a contract suite over two identical implementations
 proves nothing.
 
-**One suite runs against both adapters, and it is the only thing that opens a
-`:dets` file.** Everything persistence actually owns is asserted there, at the
+**One suite runs against both adapters, and it is the only one that opens a
+`:dets` file to ask what persistence answers.** The two others that open one
+are about the files themselves: the schema version the state dir carries, and
+the migration of what an earlier release wrote
+(`test/vigil/oauth/store_schema_version_test.exs`,
+`test/vigil/oauth/store_compatibility_test.exs`). Everything persistence actually owns is asserted there, at the
 seam rather than through an endpoint: that an authorization code is
 single-use, that rotation marks a refresh token spent rather than deleting it
 — the distinction the RFC 9700 §4.14.2 replay defence rests on — that revoking

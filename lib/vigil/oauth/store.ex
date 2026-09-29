@@ -16,8 +16,11 @@ defmodule Vigil.OAuth.Store do
   value they are handed, and not the suite, which asks the same way. The one
   exception is `test/vigil/oauth/persistence_test.exs`, the contract suite,
   which starts this process to run every claim against these tables as well
-  as against `Vigil.OAuth.Persistence.Memory`. It is the only test that opens
-  a `:dets` file at all.
+  as against `Vigil.OAuth.Persistence.Memory`. Beside it, only the two suites
+  about the files themselves open a `:dets` file: the schema version and the
+  migration of state an earlier release wrote
+  (`test/vigil/oauth/store_schema_version_test.exs`,
+  `test/vigil/oauth/store_compatibility_test.exs`).
 
   Codes and tokens are kept under `Vigil.OAuth.Token.digest/1` of their
   value, never the value: `{{:sha256, digest}, attrs}`. Hashing happens here,
@@ -75,7 +78,7 @@ defmodule Vigil.OAuth.Store do
          {:ok, found} <- stored_schema_version(state_dir),
          :ok <- readable(found),
          :ok <- open_dets_files(state_dir),
-         :ok <- rekey_legacy_rows(state_dir),
+         :ok <- rekey_legacy_rows(state_dir, found),
          :ok <- write_schema_version(state_dir) do
       for name <- [@rate_limits, @cimd_cache] do
         if :ets.whereis(name) == :undefined do
@@ -212,24 +215,32 @@ defmodule Vigil.OAuth.Store do
   # connected: the token it holds is looked up by its digest and found.
   #
   # Deleting a row does not erase it: `:dets` reuses the space without
-  # zeroing it, so the old values would still be readable in the file. A table
-  # that was rekeyed is therefore rewritten from its live rows alone.
+  # zeroing it, so the old values would still be readable in the file. Every
+  # table of a state dir written before digests — version 1, or none — is
+  # therefore rewritten from its live rows alone.
+  #
+  # Which is decided by the version, not by whether a binary key was found: a
+  # boot interrupted after the rekey synced and before the rewrite leaves no
+  # binary key, and the raw values in the free space. The version is written
+  # last, so that boot is followed by one that still reads the old version,
+  # and rewrites.
   #
   # Idempotent: the new row goes in before the old one goes out, and a boot
   # interrupted anywhere finds whatever is still binary and writes the same
   # digest again. A boot that cannot write refuses to start rather than serve
   # with credentials still on disk.
-  defp rekey_legacy_rows(state_dir) do
+  defp rekey_legacy_rows(state_dir, found) do
     Enum.reduce_while([@codes, @tokens], :ok, fn table, :ok ->
-      case rekey(table, for({key, _} = row <- all_rows(table), is_binary(key), do: row)) do
-        :unchanged -> {:cont, :ok}
-        :ok -> {:cont, rewrite(table, state_dir)}
+      with :ok <- rekey(table, for({key, _} = row <- all_rows(table), is_binary(key), do: row)),
+           :ok <- if(found in [nil, 1], do: rewrite(table, state_dir), else: :ok) do
+        {:cont, :ok}
+      else
         {:error, reason} -> {:halt, {:error, {:rekey_failed, table, reason}}}
       end
     end)
   end
 
-  defp rekey(_table, []), do: :unchanged
+  defp rekey(_table, []), do: :ok
 
   defp rekey(table, legacy) do
     with :ok <- :dets.insert(table, for({key, attrs} <- legacy, do: {Token.digest(key), attrs})),

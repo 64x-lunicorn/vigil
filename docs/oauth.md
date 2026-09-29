@@ -33,8 +33,10 @@ read and write records ask through the value they are handed rather than
 naming a globally registered module with hard-coded table atoms, and the
 routers resolve the production adapter once, when they are initialized. There
 is a second adapter, `Vigil.OAuth.Persistence.Memory`, which the suite runs on;
-`test/vigil/oauth/persistence_test.exs` runs every claim above against both and
-is the only test that opens a `:dets` file. See [design.md](design.md), "OAuth
+`test/vigil/oauth/persistence_test.exs` runs every claim above against both,
+and is the only test that opens a `:dets` file to ask one; the two others that
+open one are about the files themselves, their schema version and the
+migration of what an earlier release wrote. See [design.md](design.md), "OAuth
 persistence is reached through a value", for the reasoning and the shape it
 follows.
 
@@ -783,6 +785,10 @@ same digest, so its table holds none.
 State written before this change keyed codes and tokens by the raw value. The
 first boot **migrates it**: every binary key is rehashed in place and the file
 is rewritten from its live rows, since `:dets` does not zero what it deletes.
+Whether to rewrite is decided by the schema version the state dir carries
+(none, or 1), not by whether a raw key is left: the version is written last,
+so a boot stopped after the rehash and before the rewrite is followed by one
+that still rewrites.
 The journal says how many rows moved (`rekeyed 4 oauth_tokens rows to their
 digests`), never which. Every client connected before the upgrade stays
 connected. `test/vigil/oauth/store_compatibility_test.exs` holds the

@@ -22,8 +22,9 @@ defmodule Vigil.OAuth.Persistence do
   assembled by a caller — six modules ask these questions, and an adapter
   built at the call site would exist six times. The **second adapter** is
   `Vigil.OAuth.Persistence.Memory`, which the suite runs on;
-  `test/vigil/oauth/persistence_test.exs` holds both to every claim below and
-  is the only test that opens a `:dets` file.
+  `test/vigil/oauth/persistence_test.exs` holds both to every claim below, and
+  is the only test that opens a `:dets` file to ask one; the two others that
+  open one are about the files themselves (see `Vigil.OAuth.Store`).
 
   No field has a default, and the struct is built by `struct!/2` — the same
   shape and the same rule as `Vigil.Git` and `Vigil.Vault.Facts`: a question
