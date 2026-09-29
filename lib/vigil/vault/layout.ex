@@ -289,9 +289,60 @@ defmodule Vigil.Vault.Layout do
   whoever reports on the vault asks for it here and names it with
   `printable_path/1`.
   """
+  #
+  # The walk is by the bytes on disk, not through `Path.wildcard/1`: a VM
+  # under a UTF-8 locale drops a file name that is not UTF-8 from every
+  # listing without a word (Erlang's `+fnu`, which ignores such names), so
+  # the wildcard would never show one. Under any other locale the VM reads
+  # names as latin1, and the wildcard does hand it over — which is why
+  # `note_paths/1` filters it out as well.
   @spec non_utf8_paths(t) :: [Path.t()]
   def non_utf8_paths(%__MODULE__{} = layout) do
-    layout |> all_note_paths() |> Enum.reject(&String.valid?/1)
+    layout.domains
+    |> Enum.flat_map(fn domain ->
+      layout.vault_path
+      |> raw_markdown(domain)
+      |> Enum.reject(&String.valid?/1)
+      |> Enum.filter(&match?({:note, ^domain}, classify(layout, &1)))
+    end)
+    |> Enum.sort()
+  end
+
+  # Every `.md` below `rel`, as a path relative to the vault in the bytes it
+  # has on disk. Dot-prefixed entries are skipped, as the wildcard skips them.
+  defp raw_markdown(vault_path, rel) do
+    case :file.list_dir_all(raw_join(vault_path, rel)) do
+      {:ok, names} ->
+        names
+        |> Enum.map(&raw_name/1)
+        |> Enum.reject(&String.starts_with?(&1, "."))
+        |> Enum.flat_map(fn name ->
+          path = rel <> "/" <> name
+
+          cond do
+            File.dir?(raw_join(vault_path, path)) -> raw_markdown(vault_path, path)
+            String.ends_with?(name, ".md") -> [path]
+            true -> []
+          end
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp raw_join(vault_path, rel), do: IO.chardata_to_string(vault_path) <> "/" <> rel
+
+  # `:file.list_dir_all/1` hands a name the VM cannot decode over as its raw
+  # bytes, and every other name as characters: bytes under latin1, code
+  # points under UTF-8.
+  defp raw_name(name) when is_binary(name), do: name
+
+  defp raw_name(chars) do
+    case :file.native_name_encoding() do
+      :latin1 -> :erlang.list_to_binary(chars)
+      :utf8 -> :unicode.characters_to_binary(chars)
+    end
   end
 
   @doc """
