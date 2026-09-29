@@ -1734,6 +1734,29 @@ allowed — that is one way of fixing it — and takes it out of `lint`.
 
 ---
 
+## A Markdown file that is not a note is reported
+
+Obsidian creates a note wherever its user happens to be: at the vault root,
+one level too deep, or in a directory that is not a domain. `Vigil.Vault.Layout`
+does not call such a file a note, so the load skips it without a word and its
+content never reaches search.
+
+`mix vigil.vault_check` names every one under `b7_ignored_files`, with the
+reason (`root`, `wrong_depth`, `unknown_directory`) and a severity. The reason
+is the layout's own answer (`Layout.ignored_reason/2`), not a second statement
+of the rules. Files in `_`- and dot-prefixed directories at any depth are not
+listed, because those lie deliberately outside the vault model (`_templates/`,
+`.obsidian/`, `.trash/`); neither are skills or anything behind
+`VIGIL_EXCLUDE`, which is the boundary rather than an oversight.
+
+A file at the root is `info`: a Dataview dashboard there is often deliberate,
+and a legitimate root page must not make `init.sh --check-only` fail forever.
+`init.sh` prints it under "Information" and does not count it. Every other
+ignored file is a `warning`, counted as a finding like the rest. Nothing moves
+the file for the author (principle 5: report, do not fix).
+
+---
+
 ## Vault hygiene has one set of rules
 
 `lint` (through `Vigil.Index`) and `mix vigil.vault_check` (through

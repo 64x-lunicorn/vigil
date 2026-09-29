@@ -996,7 +996,10 @@ problems (a note without any can be given a block by `update_frontmatter`),
 non-canonical filenames with a suggested `move_note`, the chunk-id migration
 risk, domains that exist only in the config, unpushed commits, headings that
 have lost the blank line above them, notes past the consolidation threshold, an
-extra remote with unclear purpose.
+extra remote with unclear purpose, Markdown files the server ignores because
+they sit one level too deep or outside a domain. A Markdown file at the vault
+root (a Dataview dashboard, say) is listed as information and is not counted
+as a finding.
 
 The same check runs standalone and strictly read-only:
 

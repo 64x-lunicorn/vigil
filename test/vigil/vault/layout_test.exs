@@ -127,6 +127,53 @@ defmodule Vigil.Vault.LayoutTest do
     end
   end
 
+  # A Markdown file the layout does not call a note is one the server ignores
+  # without a word. Why it is ignored is the layout's answer too, so the
+  # doctor can name the reason without restating the rules that gave it.
+  describe "why a Markdown file is not a note" do
+    @reasons [
+      {"Dashboard.md", :root, "a file at the vault root is in no domain"},
+      {"bike/deep/terra.md", :wrong_depth, "one level too deep"},
+      {"projects/loose.md", :wrong_depth, "one level too shallow for projects/"},
+      {"projects/vigil/deep/x.md", :wrong_depth, "and one too deep for it"},
+      {"garden/x.md", :unknown_directory, "a directory that is not a domain"},
+      {"projects/ghost/x.md", :unknown_directory, "nor is a missing project"},
+      {"bike/terra.md", nil, "a note is not ignored"},
+      {"projects/vigil/vigil.md", nil, "nor is a project note"},
+      {"skills/tdd.md", nil, "a skill is read as a skill"},
+      {"work/secret.md", nil, "an excluded file is behind the boundary, not ignored"},
+      {"_templates/daily.md", nil, "underscore directories are outside the vault model"},
+      {".obsidian/notes.md", nil, "and so are dot directories"},
+      {"bike/_drafts/x.md", nil, "at any depth"},
+      {"bike/terra.txt", nil, "only Markdown files are ever notes"}
+    ]
+
+    test "each reason is the layout's own answer", %{root: root} do
+      layout = Layout.over_vault(root, ["work"])
+
+      for {path, reason, why} <- @reasons do
+        assert Layout.ignored_reason(layout, path) == reason, why
+      end
+    end
+
+    test "every ignored Markdown file on disk is listed with its reason", %{root: root} do
+      for path <-
+            ~w(Dashboard.md bike/deep/terra.md projects/loose.md _internal/x.md
+               .obsidian/x.md bike/_drafts/x.md bike/.trash/x.md work/deep/x.md
+               skills/deep/x.md bike/notes.txt) do
+        abs = Path.join(root, path)
+        File.mkdir_p!(Path.dirname(abs))
+        File.write!(abs, "# X")
+      end
+
+      assert root |> Layout.over_vault(["work"]) |> Layout.ignored_paths() == [
+               {"Dashboard.md", :root},
+               {"bike/deep/terra.md", :wrong_depth},
+               {"projects/loose.md", :wrong_depth}
+             ]
+    end
+  end
+
   # The write gate's answer, reduced to the one thing the layout decides: a
   # path it will not write to at all. A note that is already there is refused
   # for existing, which is a different refusal and not this one.

@@ -66,7 +66,8 @@ defmodule Vigil.VaultCheck do
       b5_separators:
         Enum.flat_map(entries, fn {path, _content, parsed} -> b5_checks(path, parsed) end),
       b6_consolidation:
-        Enum.flat_map(entries, fn {path, _content, parsed} -> b6_checks(path, parsed) end)
+        Enum.flat_map(entries, fn {path, _content, parsed} -> b6_checks(path, parsed) end),
+      b7_ignored_files: b7_ignored(layout)
     }
   end
 
@@ -323,6 +324,39 @@ defmodule Vigil.VaultCheck do
       }
     end)
   end
+
+  ## Ignored Markdown files
+
+  # A Markdown file the layout does not call a note never reaches search, and
+  # the load says nothing about it (docs/design.md, "A Markdown file that is
+  # not a note is reported"). Which files those are and why is
+  # Vigil.Vault.Layout's answer; the doctor only words it. A root page such
+  # as a Dataview dashboard is often deliberate, so it is information and
+  # never fails `init.sh --check-only`; everything else is a warning. The
+  # messages stay ASCII: init.sh reads them through jq.
+  defp b7_ignored(layout) do
+    layout
+    |> Layout.ignored_paths()
+    |> Enum.map(fn {path, reason} ->
+      %{
+        path: path,
+        reason: Atom.to_string(reason),
+        severity: if(reason == :root, do: "info", else: "warning"),
+        message: ignored_message(reason)
+      }
+    end)
+  end
+
+  defp ignored_message(:root),
+    do: "at the vault root, in no domain, so the server ignores this file"
+
+  defp ignored_message(:wrong_depth),
+    do:
+      "not at note depth (<domain>/<name>.md, projects/<project>/<name>.md), " <>
+        "so the server ignores this file"
+
+  defp ignored_message(:unknown_directory),
+    do: "in a directory that is not a domain, so the server ignores this file"
 
   ## Consolidation thresholds
 

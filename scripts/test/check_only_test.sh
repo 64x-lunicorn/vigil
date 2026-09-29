@@ -101,6 +101,14 @@ EOF
 # own): the server skips it, and the report names it with the fix.
 printf -- '---\ntype: reference\n---\n# Caf\351\n\nText.\n' >"${VAULT}/bike/windows-note.md"
 
+# Markdown files the layout ignores: one a level too deep (a warning, with
+# its fix), a root page (information only), and one under a dot directory
+# (outside the vault model, never listed).
+mkdir -p "${VAULT}/bike/deep" "${VAULT}/.trash"
+printf -- '# Too Deep\n' >"${VAULT}/bike/deep/too-deep.md"
+printf -- '# Dashboard\n' >"${VAULT}/Dashboard.md"
+printf -- '# Old\n' >"${VAULT}/.trash/old.md"
+
 # Missing .gitignore entry: no .gitignore at all yet.
 
 # On `master`, with no upstream yet, and the env file naming a remote that is
@@ -166,6 +174,15 @@ assert_eq "exit code reports findings (3) rather than an error" "3" "$EXIT_CODE"
 
 assert_contains "names the note that is not UTF-8, with its fix" "$OUTPUT" \
   "bike/windows-note.md: not valid UTF-8, so the server skips this note"
+assert_contains "names the note at the wrong depth as a finding" "$OUTPUT" \
+  "! bike/deep/too-deep.md: not at note depth"
+assert_contains "names the root page as information only" "$OUTPUT" \
+  "i Dashboard.md: at the vault root, in no domain, so the server ignores this file"
+assert_contains "counts the two warnings, not the root page" "$OUTPUT" "Findings (2):"
+case "$OUTPUT" in
+  *".trash/old.md"*) assert_eq "does not list files under dot directories" "absent" "listed" ;;
+  *) assert_eq "does not list files under dot directories" "absent" "absent" ;;
+esac
 assert_contains "reports the .gitignore fix as pending, not applied" "$OUTPUT" \
   "gitignore: add .obsidian/"
 assert_contains "reports the git identity fix as pending, not applied" "$OUTPUT" \

@@ -162,20 +162,89 @@ defmodule Vigil.Vault.Layout do
   """
   @spec classify(t, Path.t()) :: classification
   def classify(%__MODULE__{} = layout, path) do
+    case shape(layout, path) do
+      {:not_a_note, _why} -> :not_a_note
+      classification -> classification
+    end
+  end
+
+  # `classify/2` with the reason a path is not a note still attached. The write
+  # gate needs none of it; `ignored_reason/2` needs the part that tells a file
+  # at the root from one at the wrong depth, and takes it from here rather than
+  # counting segments a second time.
+  defp shape(layout, path) do
     parts = String.split(path, "/")
     domain = hd(parts)
 
     cond do
-      not String.ends_with?(List.last(parts), ".md") -> :not_a_note
+      not String.ends_with?(List.last(parts), ".md") -> {:not_a_note, :not_markdown}
       domain == "skills" -> :skill
       excluded?(layout, parts) -> :excluded
-      Slug.reserved_segment?(domain) -> :not_a_note
-      length(parts) != segment_count(domain) -> :not_a_note
+      Slug.reserved_segment?(domain) -> {:not_a_note, :reserved}
+      length(parts) == 1 -> {:not_a_note, :root}
+      length(parts) != segment_count(domain) -> {:not_a_note, :wrong_depth}
       domain not in layout.domains -> {:unknown_domain, domain}
       domain == @nesting_domain -> project(layout, domain, Enum.at(parts, 1))
       true -> {:note, domain}
     end
   end
+
+  @typedoc """
+  Why a Markdown file is not a note: it sits at the vault root, at a depth no
+  note has in its domain, or in a directory that is neither a domain nor a
+  project directory.
+  """
+  @type ignored_reason :: :root | :wrong_depth | :unknown_directory
+
+  @doc """
+  Why the server ignores the Markdown file at `path`, or `nil` when it does
+  not.
+
+  `nil` for a note, and for every path the server does not ignore by
+  accident: a skill, an excluded path (the boundary, not an oversight), a
+  file that is not Markdown, and anything in a `_`- or dot-prefixed directory
+  at any depth, which lies deliberately outside the vault model
+  (`_templates/`, `.obsidian/`, `.trash/`).
+  """
+  @spec ignored_reason(t, Path.t()) :: ignored_reason | nil
+  def ignored_reason(%__MODULE__{} = layout, path) do
+    directories = path |> String.split("/") |> Enum.drop(-1)
+
+    if Enum.any?(directories, &Slug.reserved_segment?/1) do
+      nil
+    else
+      case shape(layout, path) do
+        {:not_a_note, reason} when reason in [:root, :wrong_depth] -> reason
+        {:unknown_domain, _domain} -> :unknown_directory
+        {:missing_project, _domain, _project} -> :unknown_directory
+        _ -> nil
+      end
+    end
+  end
+
+  @doc """
+  Every Markdown file the server ignores, with `ignored_reason/2`'s answer,
+  sorted by path.
+
+  Walks what discovery walks — the domains — plus the vault root, and nothing
+  else: every other top-level directory is `skills/`, excluded, or `_`- or
+  dot-prefixed, and none of those holds a file ignored by accident.
+  """
+  @spec ignored_paths(t) :: [{Path.t(), ignored_reason}]
+  def ignored_paths(%__MODULE__{} = layout) do
+    [Path.join(layout.vault_path, "*.md") | Enum.map(layout.domains, &domain_glob(layout, &1))]
+    |> Enum.flat_map(&Path.wildcard/1)
+    |> Enum.map(&Path.relative_to(&1, layout.vault_path))
+    |> Enum.sort()
+    |> Enum.flat_map(fn path ->
+      case ignored_reason(layout, path) do
+        nil -> []
+        reason -> [{path, reason}]
+      end
+    end)
+  end
+
+  defp domain_glob(layout, domain), do: Path.join([layout.vault_path, domain, "**", "*.md"])
 
   # A path is excluded when any of its segments is. `VIGIL_EXCLUDE` names
   # directories, not domains, and the only directories below a domain that
@@ -212,8 +281,8 @@ defmodule Vigil.Vault.Layout do
   end
 
   defp domain_notes(layout, domain) do
-    [layout.vault_path, domain, "**", "*.md"]
-    |> Path.join()
+    layout
+    |> domain_glob(domain)
     |> Path.wildcard()
     |> Enum.map(&Path.relative_to(&1, layout.vault_path))
     |> Enum.filter(&match?({:note, ^domain}, classify(layout, &1)))

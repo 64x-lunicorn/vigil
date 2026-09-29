@@ -585,6 +585,71 @@ defmodule Vigil.VaultCheckTest do
     end
   end
 
+  # docs/design.md, "A Markdown file that is not a note is reported". Obsidian
+  # creates a note wherever its user happens to be; one the layout does not
+  # call a note never reaches search, and this is where somebody is told.
+  describe "ignored Markdown files" do
+    setup %{vault: vault} do
+      for path <-
+            ~w(Dashboard.md domaina/deep/too-deep.md projects/loose.md
+               _templates/daily.md .obsidian/x.md .trash/old.md domaina/_drafts/x.md
+               geheim/deep/x.md skills/deep/x.md) do
+        abs = Path.join(vault, path)
+        File.mkdir_p!(Path.dirname(abs))
+        File.write!(abs, "# X\n")
+      end
+
+      :ok
+    end
+
+    test "a file at the wrong depth is a warning, with its reason", %{vault: vault} do
+      findings = VaultCheck.run(vault, ["geheim"]).b7_ignored_files
+
+      assert %{
+               path: "domaina/deep/too-deep.md",
+               reason: "wrong_depth",
+               severity: "warning",
+               message: message
+             } = Enum.find(findings, &(&1.path == "domaina/deep/too-deep.md"))
+
+      assert message =~ "ignores this file"
+      assert Enum.find(findings, &(&1.path == "projects/loose.md")).reason == "wrong_depth"
+    end
+
+    test "a file at the vault root is information, not a warning", %{vault: vault} do
+      findings = VaultCheck.run(vault, ["geheim"]).b7_ignored_files
+
+      assert %{reason: "root", severity: "info"} =
+               Enum.find(findings, &(&1.path == "Dashboard.md"))
+    end
+
+    test "files under underscore and dot directories, excluded ones and skills are not listed",
+         %{vault: vault} do
+      paths =
+        vault
+        |> VaultCheck.run(["geheim"])
+        |> Map.fetch!(:b7_ignored_files)
+        |> Enum.map(& &1.path)
+
+      assert paths == ["Dashboard.md", "domaina/deep/too-deep.md", "projects/loose.md"]
+    end
+
+    # init.sh reads the report through jq; a non-ASCII byte in a message has
+    # broken that before (#200).
+    test "every message is plain ASCII", %{vault: vault} do
+      for finding <- VaultCheck.run(vault, ["geheim"]).b7_ignored_files do
+        assert finding.message =~ ~r/\A[\x20-\x7E]*\z/, finding.path
+      end
+    end
+
+    test "a vault with nothing ignored lists nothing", %{vault: vault} do
+      for path <- ~w(Dashboard.md domaina/deep/too-deep.md projects/loose.md),
+          do: File.rm!(Path.join(vault, path))
+
+      assert VaultCheck.run(vault, ["geheim"]).b7_ignored_files == []
+    end
+  end
+
   # docs/design.md, "A note that is not UTF-8 is skipped".
   describe "encoding" do
     test "a note that is not UTF-8 is named, and checked for nothing else", %{vault: vault} do

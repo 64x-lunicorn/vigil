@@ -412,6 +412,8 @@ run_vault_adoption() {
         "  ! \(.path): \(.headings) headings, \(.words) words" +
         (if (.duplicate_headings | length) > 0 then ", \(.duplicate_headings | length) duplicate titles" else "" end) +
         "\n      Fix: rewrite_note (mind the shrink threshold, confirm: true)"'
+      echo "$findings_json" | jq -r '.b7_ignored_files[] | select(.severity == "warning") |
+        "  ! \(.path): \(.message)\n      Fix: move it to <domain>/<name>.md (or projects/<project>/<name>.md), then reload"'
     } | sed '/^$/d'
   )"
 
@@ -423,7 +425,8 @@ run_vault_adoption() {
       (.b2_filenames | length) +
       ([.b4_domain_drift[] | select(.message | contains("is configured but does not exist in the vault"))] | length) +
       (.b5_separators | length) +
-      (.b6_consolidation | length)
+      (.b6_consolidation | length) +
+      ([.b7_ignored_files[] | select(.severity == "warning")] | length)
     '
   )"
 
@@ -450,6 +453,16 @@ run_vault_adoption() {
     echo "Findings (${b_count}):"
     echo "$b_lines"
     ADOPTION_TOTAL_FINDINGS=$((ADOPTION_TOTAL_FINDINGS + b_count))
+  fi
+
+  # Information: printed, never counted, so a deliberate root page (a
+  # Dataview dashboard, say) does not fail --check-only forever.
+  local info_lines
+  info_lines="$(echo "$findings_json" | jq -r '.b7_ignored_files[] | select(.severity == "info") |
+    "  i \(.path): \(.message)"')"
+  if [ -n "$info_lines" ]; then
+    echo "Information:"
+    echo "$info_lines"
   fi
 
   # Chunk-id diff, always printed (even when empty)
