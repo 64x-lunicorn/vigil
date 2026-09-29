@@ -806,8 +806,10 @@ defmodule Vigil.OAuth.FlowTest do
       # better, and an address that has guessed nothing yet neither.
       assert :rate_limited = Flow.consent(shared, "10.1.0.5", @settings.auth_password, ctx)
 
-      # Said once, not once per refusal.
-      refute capture_log(fn -> Flow.consent(shared, "10.1.0.6", "x", ctx) end) =~ "warning"
+      # Said once, not once per refusal. Matched on its own words: the suite
+      # runs async, so the capture can hold other tests' warnings too.
+      refute capture_log(fn -> Flow.consent(shared, "10.1.0.6", "x", ctx) end) =~
+               "wrong passwords within the hour"
     end
 
     test "the budget is an hour long", %{shared: shared, ctx: ctx} do
