@@ -200,7 +200,7 @@
           "type": "string"
         },
         "heading": {
-          "description": "Section name; without it, appends at end of file.",
+          "description": "Section name, one non-empty line; without it, appends at end of file.",
           "type": "string"
         },
         "path": {

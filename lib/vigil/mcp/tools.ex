@@ -257,7 +257,7 @@ defmodule Vigil.MCP.Tools do
         %{
           name: "heading",
           type: :string,
-          description: "Section name; without it, appends at end of file."
+          description: "Section name, one non-empty line; without it, appends at end of file."
         },
         %{
           name: "content",

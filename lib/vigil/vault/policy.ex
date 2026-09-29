@@ -259,9 +259,29 @@ defmodule Vigil.Vault.Policy do
   defp append_target(_path, nil, _facts), do: {:ok, :end}
 
   defp append_target(path, heading, facts) do
-    case facts.find_section.(path, heading) do
-      nil -> {:ok, {:new_section, heading}}
-      chunk -> {:ok, {:section, chunk}}
+    with :ok <- one_line_heading(heading) do
+      case facts.find_section.(path, heading) do
+        nil -> {:ok, {:new_section, heading}}
+        chunk -> {:ok, {:section, chunk}}
+      end
+    end
+  end
+
+  # The heading is written as one `## ` line. A line break in it would write
+  # what follows as lines of their own — another heading, or a fence that
+  # swallows the rest of the note — and `## ` with nothing after it is not a
+  # heading at all: the next parse reads the appended content as part of the
+  # section above.
+  defp one_line_heading(heading) do
+    cond do
+      String.contains?(heading, ["\n", "\r"]) ->
+        {:error, "heading must be a single line: it must not contain a line break"}
+
+      String.trim(heading) == "" ->
+        {:error, "heading must not be empty or blank"}
+
+      true ->
+        :ok
     end
   end
 
@@ -380,8 +400,12 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # A replaced section sits mid-note like an append into an existing one, so
+  # the same open-fence rule holds, for the same reason (see below).
   defp replacement_content(content) do
-    refute_headings(content, "content must not contain headings (## through ####)")
+    with :ok <- refute_headings(content, "content must not contain headings (## through ####)") do
+      refute_open_fence(content)
+    end
   end
 
   # A heading spliced into the middle of an existing section splits that
@@ -397,7 +421,8 @@ defmodule Vigil.Vault.Policy do
   # line below the splice point — the whole rest of the note becomes part of
   # the sample, and every section under it loses its chunk id. That is a
   # larger blast than the split this gate exists to prevent, and only the
-  # mid-note targets can suffer it: the other two append at the end of the
+  # mid-note writes can suffer it — an append into an existing section and
+  # `replace_section`: the other two append targets write at the end of the
   # file, where there is nothing below to swallow.
   defp appended_content({:section, _chunk}, content) do
     with :ok <-
@@ -411,10 +436,11 @@ defmodule Vigil.Vault.Policy do
 
   defp appended_content(_target, _content), do: :ok
 
+  # One message for both writes that splice into the middle of a note.
   defp refute_open_fence(content) do
     if Markdown.unclosed_fence?(content) do
       {:error,
-       "content appended to an existing section must not leave a fenced block open: every line below it in the note would become part of the code sample"}
+       "content written into an existing section must not leave a fenced block open: every line below it in the note would become part of the code sample"}
     else
       :ok
     end

@@ -651,7 +651,14 @@ in content appended *into* an existing section is rejected, because the next
 parse would split that section into two chunks one of which nobody asked for.
 Appending at the end of a file, or opening a new section via the heading
 argument, is unaffected — there a heading opens a section rather than cutting
-one in half.
+one in half. Content appended into an existing section must also not leave a
+fenced block open, and neither may a `replace_section` replacement, with the
+same message: both splice into the middle of a note, and an unclosed fence
+would turn every line below it into code, taking the chunk ids and links of
+every section there with it. The heading argument itself is one non-empty
+line: a line break in it would write the rest as lines of their own — another
+heading or a fence — and a blank one writes a `## ` line that is not a
+heading.
 
 **A section id is resolved once, through one function.** `replace_section` and
 `delete_section` take an id, and the policy resolves it through

@@ -441,6 +441,29 @@ defmodule Vigil.Vault.PolicyTest do
       assert msg =~ "must not leave a fenced block open"
     end
 
+    # A heading is one line. A line break in it would write whatever follows
+    # into the note as its own line — another heading, or a fence that swallows
+    # the rest of the note.
+    test "a heading with a line break in it is refused", %{f: f} do
+      for heading <- ["Weather\n## Injected", "Weather\r\n```", "Weather\rmore"] do
+        assert {:error, msg} =
+                 Policy.check(:append, %{path: "bike/x.md", heading: heading, content: "text"}, f)
+
+        assert msg =~ "heading must be a single line"
+      end
+    end
+
+    # `## ` with nothing after it is not a heading: the next parse would read
+    # the appended content as part of the section above it.
+    test "an empty or blank heading is refused", %{f: f} do
+      for heading <- ["", "   ", "\t"] do
+        assert {:error, msg} =
+                 Policy.check(:append, %{path: "bike/x.md", heading: heading, content: "text"}, f)
+
+        assert msg =~ "heading must not be empty"
+      end
+    end
+
     test "the same content is fine at the end of the file and in a new section", %{f: f} do
       content = "## Fine here\ntext"
 
@@ -470,6 +493,35 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:replace_section, %{id: "bike/x.md#s", content: "## Nope"}, f)
 
       assert msg =~ "must not contain headings"
+    end
+
+    # The same blast as for an append into an existing section: a fence the
+    # replacement opens and never closes swallows every section below it.
+    test "replacement content that leaves a fenced block open is refused with append's message" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end,
+          find_chunk: fn _ -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      content = "Sample:\n\n```markdown\n## X\n"
+
+      assert {:error, append_msg} =
+               Policy.check(:append, %{path: "bike/x.md", heading: "Gear", content: content}, f)
+
+      assert {:error, ^append_msg} =
+               Policy.check(:replace_section, %{id: "bike/x.md#gear", content: content}, f)
+
+      assert append_msg =~ "must not leave a fenced block open"
+    end
+
+    test "replacement content with a closed fenced sample goes through" do
+      f = facts(find_chunk: fn _ -> %{heading: "Gear", path: "bike/x.md"} end)
+      content = "Sample:\n\n```markdown\n## X\n```\n"
+
+      assert {:ok, _} =
+               Policy.check(:replace_section, %{id: "bike/x.md#gear", content: content}, f)
     end
   end
 
