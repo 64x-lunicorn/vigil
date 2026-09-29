@@ -89,10 +89,14 @@ case "${1:-}" in
     ;;
   hex.audit)
     if [ -f "${FAKE_MIX_AUDIT_CRITICAL:-/nonexistent}" ]; then
-      echo "Dependency foo 1.0.0 has a CRITICAL advisory"
+      echo "Dependency foo 1.0.0 is retired: security"
+      exit 1
     else
       echo "No retired packages found"
     fi
+    ;;
+  deps.audit)
+    echo "No vulnerabilities found."
     ;;
   release)
     # A release here is a directory with a bin/vigil in it, which is all the
