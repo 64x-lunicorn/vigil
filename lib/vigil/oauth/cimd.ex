@@ -11,6 +11,7 @@ defmodule Vigil.OAuth.Cimd do
   lookups differently, which is DNS rebinding and the standard bypass for a
   guard shaped that way.
   """
+  alias Vigil.Cidr
   alias Vigil.OAuth.RedirectUri
 
   @timeout 5_000
@@ -110,11 +111,8 @@ defmodule Vigil.OAuth.Cimd do
   # reachable — an anycast relay or an AS112 sink is never where a client
   # publishes its metadata.
   cidr = fn block ->
-    [address, length] = String.split(block, "/")
-    {:ok, ip} = :inet.parse_address(String.to_charlist(address))
-    bits = if tuple_size(ip) == 4, do: 8, else: 16
-    value = ip |> Tuple.to_list() |> Enum.reduce(0, &(&2 * Bitwise.bsl(1, bits) + &1))
-    {value, String.to_integer(length)}
+    {:ok, cidr} = Cidr.parse(block)
+    cidr
   end
 
   @ipv4_special Enum.map(
@@ -208,7 +206,7 @@ defmodule Vigil.OAuth.Cimd do
                   cidr
                 )
 
-  defp public?({_, _, _, _} = ip), do: not in_any?(integer(ip, 8), 32, @ipv4_special)
+  defp public?({_, _, _, _} = ip), do: not in_any?(ip, @ipv4_special)
 
   defp public?(ip) do
     case embedded_ipv4(ip) do
@@ -219,8 +217,7 @@ defmodule Vigil.OAuth.Cimd do
         false
 
       :native ->
-        value = integer(ip, 16)
-        in_block?(value, 128, @global_unicast) and not in_any?(value, 128, @ipv6_special)
+        Cidr.member?(ip, @global_unicast) and not in_any?(ip, @ipv6_special)
     end
   end
 
@@ -234,7 +231,7 @@ defmodule Vigil.OAuth.Cimd do
   # rather than by coincidence.
   defp embedded_ipv4({0, 0, 0, 0, 0, 0, 0, a}) when a in [0, 1], do: :native
   # IPv4-mapped — RFC 4291 §2.5.5.2
-  defp embedded_ipv4({0, 0, 0, 0, 0, 0xFFFF, ab, cd}), do: {:carries, [unfold(ab, cd)]}
+  defp embedded_ipv4({0, 0, 0, 0, 0, 0xFFFF, _, _} = ip), do: {:carries, [Cidr.unmap_v4(ip)]}
   # IPv4-compatible, deprecated — RFC 4291 §2.5.5.1
   defp embedded_ipv4({0, 0, 0, 0, 0, 0, ab, cd}), do: {:carries, [unfold(ab, cd)]}
   # NAT64 well-known prefix 64:ff9b::/96 — RFC 6052 §2.1: the last 32 bits
@@ -257,15 +254,7 @@ defmodule Vigil.OAuth.Cimd do
 
   defp unfold(ab, cd), do: {div(ab, 256), rem(ab, 256), div(cd, 256), rem(cd, 256)}
 
-  defp in_any?(value, width, blocks), do: Enum.any?(blocks, &in_block?(value, width, &1))
-
-  defp in_block?(value, width, {prefix, length}) do
-    Bitwise.bsr(value, width - length) == Bitwise.bsr(prefix, width - length)
-  end
-
-  defp integer(ip, bits) do
-    ip |> Tuple.to_list() |> Enum.reduce(0, &(&2 * Bitwise.bsl(1, bits) + &1))
-  end
+  defp in_any?(ip, blocks), do: Enum.any?(blocks, &Cidr.member?(ip, &1))
 
   ## The request
 

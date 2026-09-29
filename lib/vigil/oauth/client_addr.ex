@@ -52,12 +52,12 @@ defmodule Vigil.OAuth.ClientAddr do
   deployment rather than install one.
   """
 
-  import Bitwise
-
   require Logger
 
+  alias Vigil.Cidr
+
   @typedoc "A trust anchor: a network address and how many of its leading bits count."
-  @type cidr :: {:inet.ip_address(), non_neg_integer()}
+  @type cidr :: Cidr.t()
 
   @doc """
   The key to count `conn` under: its address, or its /64 for IPv6.
@@ -104,7 +104,7 @@ defmodule Vigil.OAuth.ClientAddr do
   defp walk([], _trusted), do: nil
 
   defp walk([hop | further_left], trusted) do
-    case parse_address(hop) do
+    case Cidr.parse_address(hop) do
       {:ok, addr} ->
         if trusted?(addr, trusted), do: walk(further_left, trusted), else: key(addr)
 
@@ -136,71 +136,27 @@ defmodule Vigil.OAuth.ClientAddr do
   def parse_trusted(entries) when is_list(entries), do: Enum.flat_map(entries, &parse_cidr/1)
 
   defp parse_cidr(entry) do
-    {address, mask} =
-      case String.split(entry, "/", parts: 2) do
-        [address] -> {address, nil}
-        [address, mask] -> {address, mask}
-      end
+    case Cidr.parse(entry) do
+      {:ok, cidr} ->
+        [cidr]
 
-    with {:ok, addr} <- parse_address(address),
-         {:ok, prefix} <- prefix_bits(mask, bit_size(bits(addr))) do
-      [{addr, prefix}]
-    else
       :error ->
         Logger.warning("ignoring unparseable trusted proxy entry: #{inspect(entry)}")
         []
     end
   end
 
-  defp prefix_bits(nil, width), do: {:ok, width}
-
-  defp prefix_bits(mask, width) do
-    case Integer.parse(mask) do
-      {prefix, ""} when prefix >= 0 and prefix <= width -> {:ok, prefix}
-      _ -> :error
-    end
-  end
-
-  # A hop may be written `[2001:db8::1]`; a hop with a port is not understood
-  # and is refused by `:inet.parse_address/1` rather than guessed at, since
-  # `1.2.3.4:5678` and `1:2:3:4:5:6:7:8` cannot both be split on a colon.
-  defp parse_address(text) do
-    text
-    |> String.trim_leading("[")
-    |> String.trim_trailing("]")
-    |> String.to_charlist()
-    |> :inet.parse_address()
-    |> case do
-      {:ok, addr} -> {:ok, addr}
-      {:error, _reason} -> :error
-    end
-  end
-
-  defp trusted?(addr, trusted), do: Enum.any?(trusted, &within?(addr, &1))
-
-  # A family mismatch is never a match: an IPv4 anchor, `0.0.0.0/0` included,
-  # says nothing about an IPv6 peer.
-  defp within?(addr, {net, prefix}) when tuple_size(addr) == tuple_size(net) do
-    <<subject::bitstring-size(^prefix), _::bitstring>> = bits(addr)
-    <<anchor::bitstring-size(^prefix), _::bitstring>> = bits(net)
-    subject == anchor
-  end
-
-  defp within?(_addr, _cidr), do: false
-
-  defp bits({a, b, c, d}), do: <<a, b, c, d>>
-
-  defp bits({a, b, c, d, e, f, g, h}),
-    do: <<a::16, b::16, c::16, d::16, e::16, f::16, g::16, h::16>>
+  defp trusted?(addr, trusted), do: Enum.any?(trusted, &Cidr.member?(addr, &1))
 
   # The one place an address becomes the key it is counted under. The mapped
   # form is unwrapped before the /64 is taken, since `::ffff:0:0/96` sits
   # inside `::/64`.
-  defp key({0, 0, 0, 0, 0, 0xFFFF, hi, lo}),
-    do: key({hi >>> 8, hi &&& 0xFF, lo >>> 8, lo &&& 0xFF})
-
-  defp key({a, b, c, d, _e, _f, _g, _h}), do: format({a, b, c, d, 0, 0, 0, 0}) <> "/64"
-  defp key(addr), do: format(addr)
+  defp key(addr) do
+    case Cidr.unmap_v4(addr) do
+      {a, b, c, d, _e, _f, _g, _h} -> format({a, b, c, d, 0, 0, 0, 0}) <> "/64"
+      ipv4 -> format(ipv4)
+    end
+  end
 
   defp format(addr), do: addr |> :inet.ntoa() |> List.to_string()
 
