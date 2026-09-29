@@ -741,6 +741,7 @@ defmodule Vigil.Store do
     layout = layout(state)
 
     log_warnings(Domains.mismatches(domains, layout.domains))
+    sweep_temp_files(layout)
 
     loaded =
       layout
@@ -785,6 +786,32 @@ defmodule Vigil.Store do
         Logger.warning("cannot read #{rel_path}: #{inspect(reason)}")
         :unreadable
     end
+  end
+
+  # What a write that crashed between writing its temporary file and renaming
+  # it left behind (Vigil.Commit.temp_file?/1): in the domains and `skills/`,
+  # the only directories vigil writes to, and only under exactly the name
+  # Vigil.Commit gives one. The load runs inside the writer, so no write of
+  # this server's own is between the two steps while it sweeps.
+  # Sobelow: the paths are ones the layout's own directories hold.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp sweep_temp_files(layout) do
+    (layout.domains ++ ["skills"])
+    |> Enum.flat_map(
+      &Path.wildcard(Path.join([layout.vault_path, &1, "**", ".*.tmp"]), match_dot: true)
+    )
+    |> Enum.filter(&Commit.temp_file?(Path.basename(&1)))
+    |> Enum.each(fn path ->
+      case File.rm(path) do
+        :ok ->
+          Logger.info(
+            "removed #{Layout.printable_path(Path.relative_to(path, layout.vault_path))}, left by an interrupted write"
+          )
+
+        {:error, _reason} ->
+          :ok
+      end
+    end)
   end
 
   # A note whose file name is not UTF-8 is skipped like one whose content is
@@ -903,7 +930,6 @@ defmodule Vigil.Store do
     {now, request} = Map.pop(request, :now, Clock.now(published_tz(state.table)))
 
     with {:ok, resolved} <- Policy.check(op, request, facts(state, now)),
-         :ok <- ensure_directories(op, resolved, state),
          {:ok, current} <- current_content(op, resolved, state),
          {:ok, plan} <- Plan.build(op, resolved, request, current) do
       execute(plan, state)
@@ -912,14 +938,11 @@ defmodule Vigil.Store do
     end
   end
 
-  # The policy decides that a project directory may be created; creating it is
-  # this module's job, and only `:create` can ask for one. Vigil.Commit would
-  # mkdir_p the parent anyway, but doing it here keeps a filesystem failure
-  # attributable to the directory.
-  defp ensure_directories(:create, %Decision.Create{} = decision, state),
-    do: create_project_dir(state, decision.create_project_dir)
-
-  defp ensure_directories(_op, _decision, _state), do: :ok
+  # The policy decides that a project directory may be created
+  # (Decision.Create's create_project_dir); creating it is Vigil.Commit's
+  # write, which makes a missing parent directory inside the change it
+  # rolls back — so a create that fails leaves no empty `projects/<name>/`
+  # behind, where creating it here, before the change began, did.
 
   # A create has no current content by definition, and the two git-level
   # operations never look at their own note; every other operation is a
@@ -942,12 +965,6 @@ defmodule Vigil.Store do
 
   defp current_content(_op, resolved, state),
     do: read_existing_file(abs(state, resolved.path))
-
-  defp create_project_dir(_state, nil), do: :ok
-
-  defp create_project_dir(state, project) do
-    Commit.mkdir_p(Path.join(state.vault_path, Layout.project_dir(project)))
-  end
 
   # Where a plan becomes an effect. Every effect is Vigil.Commit's — the write,
   # the delete, the move and the push — and the order they run in is this
@@ -1159,7 +1176,20 @@ defmodule Vigil.Store do
           last_author: commit_meta.last_author
         }
 
-        Parser.parse(rel_path, content, meta)
+        case Parser.parse(rel_path, content, meta) do
+          {:ok, file} ->
+            {:ok, file}
+
+          # Content vigil wrote is UTF-8 — it arrived as JSON, and a note that
+          # is not is refused an edit or a move (Vigil.Vault.Plan,
+          # Vigil.Vault.Policy) — so this is a file changed underneath the
+          # write. It is handled as a failed read is: the index stays as it
+          # was for the path until the next load, which skips the file and
+          # names it.
+          {:error, :invalid_utf8} ->
+            Logger.warning("vigil: could not reparse #{rel_path} after #{verb}: not valid UTF-8")
+            :error
+        end
 
       :error ->
         :error

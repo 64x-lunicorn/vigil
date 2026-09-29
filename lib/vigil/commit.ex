@@ -269,6 +269,18 @@ defmodule Vigil.Commit do
   # Into a temporary file beside the target, then renamed over it: a crash
   # mid-write leaves the note as it was and a stray dotfile, never a truncated
   # note. The rename is atomic because both names are in one directory.
+  #
+  # Atomic is not durable: without a sync the rename can reach the disk
+  # before the data does, and a power cut in between leaves an empty note
+  # under the name. So the temporary file is synced before it is renamed, and
+  # the directory after, so the rename itself is on disk when the commit
+  # follows. The directory's sync is best effort — not every filesystem
+  # answers one, and the note is already in place when it is asked.
+  #
+  # A new file has the mode the umask gives it, so the temporary file takes
+  # the replaced note's mode first: a note its owner kept private stays
+  # private. (`temp_file?/1` is what the load sweeps a crash's leftovers by;
+  # the name built here and that pattern are the same statement.)
   # Sobelow: path is the vault root joined with a safe_path-checked path.
   # sobelow_skip ["Traversal.FileModule"]
   defp write_file(path, content) do
@@ -278,13 +290,56 @@ defmodule Vigil.Commit do
         ".#{Path.basename(path)}.#{System.unique_integer([:positive])}.tmp"
       )
 
-    with :ok <- File.write(tmp, content),
+    with :ok <- write_synced(tmp, content, mode(path)),
          :ok <- File.rename(tmp, path) do
-      :ok
+      sync_directory(Path.dirname(path))
     else
       {:error, reason} ->
         File.rm(tmp)
         {:error, "Could not write file #{path}: #{fs_error(reason)}"}
     end
   end
+
+  # Sobelow: tmp is write_file/2's, beside a safe_path-checked path.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp write_synced(tmp, content, mode) do
+    with {:ok, fd} <- :file.open(tmp, [:write, :raw, :binary, :exclusive]) do
+      result =
+        with :ok <- :file.write(fd, content),
+             :ok <- keep_mode(tmp, mode),
+             do: :file.sync(fd)
+
+      :file.close(fd)
+      result
+    end
+  end
+
+  defp mode(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{mode: mode}} -> Bitwise.band(mode, 0o7777)
+      {:error, _} -> nil
+    end
+  end
+
+  defp keep_mode(_tmp, nil), do: :ok
+  defp keep_mode(tmp, mode), do: File.chmod(tmp, mode)
+
+  defp sync_directory(dir) do
+    with {:ok, fd} <- :file.open(dir, [:read, :raw, :directory]) do
+      :file.sync(fd)
+      :file.close(fd)
+    end
+
+    :ok
+  end
+
+  @doc """
+  Whether `name` — a file name, not a path — is one `write/5` gives the
+  temporary file a note is written to before it is renamed into place:
+  `.<note>.md.<n>.tmp`. A crash between the two leaves one behind, and the
+  load removes it (`Vigil.Store`); nothing else is ever that name, since a
+  dot-prefixed name is no note and no path vigil writes.
+  """
+  @spec temp_file?(String.t()) :: boolean()
+  def temp_file?(name), do: Regex.match?(~r/\A\.[^\/]+\.md\.[0-9]+\.tmp\z/, name)
 end

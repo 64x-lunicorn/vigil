@@ -20,6 +20,20 @@ defmodule Vigil.CommitTest do
 
   defp dir_entries(vault, dir), do: vault |> Path.join(dir) |> File.ls!() |> Enum.sort()
 
+  # The rename puts a new file in the note's place, and a new file has the
+  # mode the umask gives it: a note its owner had kept private (0600) came
+  # back readable by everyone.
+  test "a replaced note keeps its mode", %{git: git, vault: vault} do
+    path = "bike/terra-speed.md"
+    abs = Path.join(vault, path)
+    File.chmod!(abs, 0o600)
+
+    assert {:ok, _} = Commit.write(git, vault, path, "# Replaced\n", "update: #{path}")
+
+    assert Bitwise.band(File.stat!(abs).mode, 0o777) == 0o600
+    assert File.read!(abs) == "# Replaced\n"
+  end
+
   test "a note is replaced by a rename, not written through", %{git: git, vault: vault} do
     path = "bike/terra-speed.md"
     abs = Path.join(vault, path)

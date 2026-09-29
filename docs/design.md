@@ -64,7 +64,9 @@ missing directory level — matching the "one directory per project" rule above
 — when writing the first note into a not-yet-existing project. No other
 domain, and no deeper level, gets this treatment: a two-level path outside
 `projects/` (or a third level inside it) is rejected before directory creation
-is even considered.
+is even considered. The directory is made as part of the write it is for, and
+goes again with it: a `create` that fails — a commit git refuses, say — leaves
+no empty `projects/<name>/` behind.
 
 The main note of a project is named after the project:
 `projects/vigil/vigil.md`. Deliberately **not** `readme.md` — several projects
@@ -1102,7 +1104,17 @@ to a temporary dotfile in the same directory, which is then renamed over the
 note. A rename within one directory is atomic, so a crash mid-write leaves the
 old note and a stray dotfile — never a truncated note. Dotfiles are not notes
 (`Vigil.Vault.Layout` does not list them), so a leftover one is never indexed,
-and vigil stages only the paths it names, so it is never committed either.
+and vigil stages only the paths it names, so it is never committed either. The
+next load removes it: every file in a domain or in `skills/` named exactly as
+`Vigil.Commit` names a temporary file (`.<note>.md.<n>.tmp`), and nothing
+else — an excluded directory is not looked into.
+
+Atomic is not durable, so the temporary file is synced before the rename and
+the directory after it (best effort: not every filesystem answers a
+directory's sync); a power cut between the two otherwise leaves an empty note
+under the name. And the temporary file takes the replaced note's mode before
+it is renamed, so a note kept private (`0600`) does not come back with the
+mode the umask gives a new file.
 
 ---
 

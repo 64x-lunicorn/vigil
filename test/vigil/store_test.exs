@@ -1900,6 +1900,50 @@ defmodule Vigil.StoreTest do
       refute File.exists?(Path.join(vault, "bike/brand-new.md"))
     end
 
+    # A crash between writing a note's temporary file and renaming it leaves
+    # the temporary file behind; the next load removes it, and only files
+    # carrying exactly that name.
+    test "the load sweeps the temporary files a crashed write left", %{vault: vault} do
+      leftovers = [
+        "bike/.terra-speed.md.4711.tmp",
+        "projects/vigil/.vigil.md.12.tmp",
+        "skills/.tdd.md.9.tmp"
+      ]
+
+      kept = [
+        "bike/.terra-speed.md.tmp",
+        "bike/.notes.4711.tmp",
+        "bike/terra-speed.md.4711.tmp",
+        "work/.secret.md.1.tmp"
+      ]
+
+      for path <- leftovers ++ kept, do: File.write!(Path.join(vault, path), "partial")
+
+      :ok = stop_supervised(Store)
+      start_store(vault, exclude: ["work"])
+
+      for path <- leftovers, do: refute(File.exists?(Path.join(vault, path)), path)
+      for path <- kept, do: assert(File.exists?(Path.join(vault, path)), path)
+    end
+
+    # The project directory `create_dirs` asked for is part of the change it
+    # was asked for: when the change does not happen, neither does it.
+    test "a create into a new project whose commit fails leaves no directory", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}
+      start_store(vault, git: git)
+
+      assert {:error, "git commit failed: boom"} =
+               Store.call(@store, :create, %{
+                 path: "projects/newthing/x.md",
+                 type: "reference",
+                 content: "# X\nx",
+                 create_dirs: true
+               })
+
+      refute File.exists?(Path.join(vault, "projects/newthing"))
+    end
+
     test "a delete or a move whose commit fails leaves the note where it was", %{vault: vault} do
       :ok = stop_supervised(Store)
       git = %{CommitLog.new(vault) | commit: fn _, _, _ -> {:error, "boom"} end}

@@ -66,19 +66,14 @@ defmodule Vigil.Vault.Layout do
   defp segment_count(_domain), do: 2
 
   @doc """
-  The one domain that nests, and where a project directory inside it lives.
+  The one domain that nests.
 
-  Callers that build or read a path in the nesting domain ask rather than
-  writing the name themselves: `Vigil.Store` creates the one directory a
-  `create` may create, and `Vigil.Vault.Policy`'s duplicate gate tells two
-  notes in the same project folder apart from two that merely share a domain.
+  Callers that read a path in the nesting domain ask rather than writing the
+  name themselves: `Vigil.Vault.Policy`'s duplicate gate tells two notes in
+  the same project folder apart from two that merely share a domain.
   """
   @spec nesting_domain() :: String.t()
   def nesting_domain, do: @nesting_domain
-
-  @doc "Where `project`'s directory lives, relative to the vault root."
-  @spec project_dir(String.t()) :: Path.t()
-  def project_dir(project), do: Path.join(@nesting_domain, project)
 
   @doc "The project a path lies in, or `nil` when it lies in none."
   @spec project_of(Path.t()) :: String.t() | nil
