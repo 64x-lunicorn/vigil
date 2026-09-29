@@ -50,6 +50,30 @@ defmodule Vigil.StoreEncodingTest do
 
   defp read(id), do: Store.call(@store, :read, %{id: id, backlinks: false})
 
+  # The name, not the content: it used to reach the slug function while the
+  # index was built and raise, which at boot is a restart loop.
+  describe "a note whose file name is not UTF-8" do
+    @describetag :non_utf8_file_names
+
+    @non_utf8_name "bike/caf" <> <<0xE9>> <> ".md"
+
+    test "the vault boots without it, the warning names it, and lint lists it", %{vault: vault} do
+      File.write!(Path.join(vault, @non_utf8_name), "---\ntype: reference\n---\n# Cafe\n")
+
+      log =
+        capture_log(fn ->
+          assert %{reloaded: true} = Store.call(@store, :reload, %{})
+        end)
+
+      assert log =~ "skipping bike/caf\\xE9.md: file name is not valid UTF-8"
+
+      lint = Store.call(@store, :lint, %{})
+      assert lint.invalid_utf8 == ["bike/caf\\xE9.md", @cp1252_path]
+      assert Jason.encode!(lint)
+      assert {:ok, %{type: :reference}} = read("bike/terra-speed.md")
+    end
+  end
+
   describe "a note that is not UTF-8" do
     test "the vault boots without it, and the warning names its path", %{log: log} do
       assert log =~ "skipping #{@cp1252_path}: not valid UTF-8"

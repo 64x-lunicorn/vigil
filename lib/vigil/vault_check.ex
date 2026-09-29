@@ -58,9 +58,15 @@ defmodule Vigil.VaultCheck do
     %{
       overview: overview(vault_path, domain_dirs, entries),
       b0_encoding:
-        Enum.map(invalid_utf8, fn {:invalid_utf8, path} ->
-          %{path: path, message: "not valid UTF-8, so the server skips this note"}
-        end),
+        Enum.map(Layout.non_utf8_paths(layout), fn path ->
+          %{
+            path: Layout.printable_path(path),
+            message: "file name is not valid UTF-8, so the server skips this note"
+          }
+        end) ++
+          Enum.map(invalid_utf8, fn {:invalid_utf8, path} ->
+            %{path: path, message: "not valid UTF-8, so the server skips this note"}
+          end),
       b1_frontmatter:
         Enum.flat_map(entries, fn {path, content, _} -> b1_checks(path, content) end),
       b2_filenames: b2_checks(files),

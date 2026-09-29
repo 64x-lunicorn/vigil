@@ -1844,6 +1844,19 @@ Until then vigil does not write to it. An edit of the note is refused in
 because either would hand the index a note it cannot parse. Deleting it is
 allowed — that is one way of fixing it — and takes it out of `lint`.
 
+**A file name that is not UTF-8 costs the same one note.** Linux keeps a file
+name as the bytes it was given, so a note saved as `bike/caf\xE9.md` is on disk
+with a name that can be neither a chunk id, nor a slug, nor a JSON string;
+building the index raised on it exactly as on a heading. `Vigil.Vault.Layout`
+leaves such a file out of `note_paths/1` — the one walk the load, `mix
+vigil.vault_check`, `mix vigil.slug_diff` and the release's chunk-id listing
+share — and hands it out separately (`non_utf8_paths/1`). The load skips it
+with the same kind of warning, and `lint` (`invalid_utf8`) and `vault_check`
+(`b0_encoding`) name it with every stray byte spelled out as `\xHH`
+(`bike/caf\xE9.md`), so the report is valid JSON and still says which file to
+rename. APFS refuses such a name outright, so on macOS the case cannot arise;
+the tests that need one on disk run where the filesystem holds it.
+
 ---
 
 ## A Markdown file that is not a note is reported

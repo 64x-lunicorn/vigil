@@ -56,6 +56,28 @@ defmodule Vigil.Vault.LayoutTest do
     end
   end
 
+  # docs/design.md, "A note that is not UTF-8 is skipped": a file whose name
+  # is not UTF-8 cannot become a chunk id, a slug or a line of JSON, so the
+  # walk every reader of the vault shares leaves it out and names it apart.
+  describe "a note whose file name is not UTF-8" do
+    @tag :non_utf8_file_names
+    test "is not among the note paths, and is listed apart", %{root: root} do
+      name = "bike/caf" <> <<0xE9>> <> ".md"
+      File.write!(Path.join(root, name), "# Caf\u00e9\n")
+
+      layout = Layout.over_vault(root)
+      refute name in Layout.note_paths(layout)
+      assert Layout.non_utf8_paths(layout) == [name]
+      assert Layout.ignored_paths(layout) == []
+    end
+
+    test "is named with its stray bytes spelled out" do
+      assert Layout.printable_path("bike/caf" <> <<0xE9>> <> ".md") == "bike/caf\\xE9.md"
+      assert Layout.printable_path(<<0xFF, 0xFE>> <> "/x.md") == "\\xFF\\xFE/x.md"
+      assert Layout.printable_path("bike/café.md") == "bike/café.md"
+    end
+  end
+
   describe "note_paths/1" do
     test "notes live one level down, except under projects", %{root: root} do
       assert root |> Layout.over_vault() |> Layout.note_paths() == [

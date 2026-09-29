@@ -748,7 +748,10 @@ defmodule Vigil.Store do
       |> Enum.map(&load_file(state.vault_path, &1, git_meta))
 
     parsed_files = for {:ok, file} <- loaded, do: file
-    invalid_utf8 = for {:invalid_utf8, path} <- loaded, do: path
+
+    invalid_utf8 =
+      Enum.map(Layout.non_utf8_paths(layout), &skip_non_utf8_name/1) ++
+        for {:invalid_utf8, path} <- loaded, do: path
 
     index = Index.build(parsed_files, invalid_utf8)
     sizes = Index.size(index)
@@ -782,6 +785,15 @@ defmodule Vigil.Store do
         Logger.warning("cannot read #{rel_path}: #{inspect(reason)}")
         :unreadable
     end
+  end
+
+  # A note whose file name is not UTF-8 is skipped like one whose content is
+  # not, and named the way a log line and `lint`'s JSON can carry it
+  # (Vigil.Vault.Layout.non_utf8_paths/1 says why it is never loaded).
+  defp skip_non_utf8_name(rel_path) do
+    printable = Layout.printable_path(rel_path)
+    Logger.warning("skipping #{printable}: file name is not valid UTF-8")
+    printable
   end
 
   # Reading the file is this module's job; understanding it is

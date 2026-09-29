@@ -667,6 +667,24 @@ defmodule Vigil.VaultCheckTest do
       assert Jason.encode!(report)
     end
 
+    @tag :non_utf8_file_names
+    test "a note whose file name is not UTF-8 is named, and checked for nothing else", %{
+      vault: vault
+    } do
+      File.write!(Path.join(vault, "domaina/caf" <> <<0xE9>> <> ".md"), "# Cafe\n\n## Part\n")
+
+      report = VaultCheck.run(vault)
+
+      assert report.b0_encoding == [
+               %{
+                 path: "domaina/caf\\xE9.md",
+                 message: "file name is not valid UTF-8, so the server skips this note"
+               }
+             ]
+
+      assert Jason.encode!(report)
+    end
+
     test "the frontmatter of a CRLF note and of a note with a byte order mark is read", %{
       vault: vault
     } do

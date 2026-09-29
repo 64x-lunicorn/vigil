@@ -235,6 +235,7 @@ defmodule Vigil.Vault.Layout do
     [Path.join(layout.vault_path, "*.md") | Enum.map(layout.domains, &domain_glob(layout, &1))]
     |> Enum.flat_map(&Path.wildcard/1)
     |> Enum.map(&Path.relative_to(&1, layout.vault_path))
+    |> Enum.map(&printable_path/1)
     |> Enum.sort()
     |> Enum.flat_map(fn path ->
       case ignored_reason(layout, path) do
@@ -277,8 +278,44 @@ defmodule Vigil.Vault.Layout do
   """
   @spec note_paths(t) :: [Path.t()]
   def note_paths(%__MODULE__{} = layout) do
-    Enum.flat_map(layout.domains, &domain_notes(layout, &1))
+    layout |> all_note_paths() |> Enum.filter(&String.valid?/1)
   end
+
+  @doc """
+  The notes `note_paths/1` leaves out because their file name is not UTF-8,
+  sorted by domain.
+
+  Linux keeps a file name as the bytes it was given, so a note saved under a
+  Windows-1252 name (`caf\\xE9.md`) is a note on disk. It cannot be one in the
+  vault: its name would be a chunk id, a slug and a line of JSON, and none of
+  those can hold it — the slug function used to raise on it while the index
+  was built, which at boot is a restart loop (docs/design.md, "A note that is
+  not UTF-8 is skipped"). So the walk every reader shares leaves it out, and
+  whoever reports on the vault asks for it here and names it with
+  `printable_path/1`.
+  """
+  @spec non_utf8_paths(t) :: [Path.t()]
+  def non_utf8_paths(%__MODULE__{} = layout) do
+    layout |> all_note_paths() |> Enum.reject(&String.valid?/1)
+  end
+
+  @doc """
+  `path` as a message, a log line or a JSON string can carry it: unchanged
+  when it is UTF-8, and otherwise with every byte that is not spelled out as
+  `\\xHH`, so `bike/caf\\xE9.md` still says which file is meant.
+  """
+  @spec printable_path(binary()) :: String.t()
+  def printable_path(path) do
+    path
+    |> String.chunk(:valid)
+    |> Enum.map_join(fn chunk ->
+      if String.valid?(chunk), do: chunk, else: for(<<byte <- chunk>>, into: "", do: hex(byte))
+    end)
+  end
+
+  defp hex(byte), do: "\\x" <> String.pad_leading(Integer.to_string(byte, 16), 2, "0")
+
+  defp all_note_paths(layout), do: Enum.flat_map(layout.domains, &domain_notes(layout, &1))
 
   defp domain_notes(layout, domain) do
     layout
