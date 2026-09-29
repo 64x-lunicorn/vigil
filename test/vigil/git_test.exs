@@ -451,6 +451,39 @@ defmodule Vigil.GitTest do
         assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
       end
 
+      # A rebase stopped at a conflict leaves HEAD detached under git; what
+      # `tracking` reports is the branch it is rebasing, which is where
+      # aborting it puts HEAD back — and that a rebase is in progress.
+      test "a rebase stopped at a conflict is reported by tracking until it is aborted",
+           %{git: git, vault: vault} = ctx do
+        path = "bike/terra-speed.md"
+        push_from_elsewhere(ctx, path, "---\ntype: reference\n---\n# Theirs\nfrom elsewhere\n")
+        File.write!(Path.join(vault, path), "---\ntype: reference\n---\n# Ours\nfrom vigil\n")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+        assert {:ok, %{rebasing: false}} = git.tracking.(vault)
+
+        {:conflict, _paths} = git.rebase.(vault, "origin", "main")
+        assert {:ok, %{head: "main", rebasing: true}} = git.tracking.(vault)
+
+        :ok = git.abort_rebase.(vault)
+        assert {:ok, %{head: "main", rebasing: false}} = git.tracking.(vault)
+      end
+
+      # docs/design.md, "Git is reached through a value": vigil commits onto
+      # the branch it pushes, and on nothing else.
+      test "a commit on a detached HEAD is refused, and tracking reports no branch checked out",
+           %{git: git, vault: vault} = ctx do
+        detach(ctx)
+        path = note(vault, "bike/detached.md", "Detached")
+        :ok = git.add.(vault, [path])
+
+        assert {:error, reason} = git.commit.(vault, [path], "create: #{path}")
+        assert reason =~ "detached"
+        assert {:ok, %{head: nil, rebasing: false}} = git.tracking.(vault)
+        assert {:ok, %{ahead: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
       test "aborting when no rebase is in progress is an error", %{git: git, vault: vault} do
         assert {:error, _reason} = git.abort_rebase.(vault)
       end
@@ -526,6 +559,13 @@ defmodule Vigil.GitTest do
     {_out, 0} = System.cmd("git", ["reset", "-q", "--hard", "HEAD~#{count}"], cd: other)
     {_out, 0} = System.cmd("git", ["push", "-q", "--force", "origin", "main"], cd: other)
     File.rm_rf!(other)
+    :ok
+  end
+
+  defp detach(%{log: log}), do: CommitLog.detach(log)
+
+  defp detach(%{vault: vault}) do
+    {_out, 0} = System.cmd("git", ["checkout", "-q", "--detach"], cd: vault)
     :ok
   end
 
@@ -844,6 +884,40 @@ defmodule Vigil.GitTest do
       for file <- ["side.md", "main.md", path], do: assert(File.exists?(Path.join(vault, file)))
       {parents, 0} = System.cmd("git", ["log", "-1", "--format=%p", "HEAD~1"], cd: vault)
       assert parents |> String.split() |> length() == 2
+    end
+
+    # docs/design.md, "The server stays in step with the remote": a writer
+    # that stopped in the middle of a rebase left the clone with HEAD
+    # detached; the next one aborts it before it loads, so its commits land
+    # on the branch and leave the host — even when the remote does not
+    # answer, and no update gets as far as a rebase of its own.
+    @tag :capture_log
+    test "a writer started on a clone left in the middle of a rebase aborts it", %{
+      git: git,
+      vault: vault,
+      remote: remote
+    } do
+      path = "bike/terra-speed.md"
+      push_from_elsewhere(%{remote: remote, vault: vault}, path, "# Theirs\n")
+      File.write!(Path.join(vault, path), "# Ours\n")
+      {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
+      {:conflict, [^path]} = git.rebase.(vault, "origin", "main")
+      assert {_out, 1} = System.cmd("git", ["symbolic-ref", "-q", "HEAD"], cd: vault)
+
+      start_supervised!(
+        {Vigil.Store,
+         vault_path: vault,
+         git: %{git | fetch: fn _, _, _ -> {:error, "offline"} end},
+         git_remote: "origin",
+         git_branch: "main",
+         name: :"#{__MODULE__}.MidRebase"}
+      )
+
+      assert {"refs/heads/main\n", 0} = System.cmd("git", ["symbolic-ref", "HEAD"], cd: vault)
+      assert {:ok, %{rebasing: false}} = git.tracking.(vault)
+      assert File.read!(Path.join(vault, path)) == "# Ours\n"
+      assert %{on_branch: true} = Vigil.Store.status(:"#{__MODULE__}.MidRebase")
     end
 
     # A hook in the vault's clone is not vigil's to satisfy, and a rebase

@@ -1525,6 +1525,42 @@ defmodule Vigil.StoreTest do
       assert error =~ "unreachable"
     end
 
+    # A writer that stopped in the middle of a rebase left HEAD detached; the
+    # next one aborts it before it does anything else, so nothing it commits
+    # lands on no branch — even offline, when no update of its own gets as
+    # far as a rebase.
+    @tag :capture_log
+    test "a writer started on a vault left in the middle of a rebase aborts it first",
+         %{vault: vault} do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+      path = "bike/via-carolina.md"
+      CommitLog.push_from_elsewhere(log, path, @human_note)
+      File.write!(Path.join(vault, path), "---\ntype: reference\n---\n# Ours\n")
+      :ok = git.add.(vault, [path])
+      {:ok, _} = git.commit.(vault, [path], "update: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
+      {:conflict, [^path]} = git.rebase.(vault, "origin", "main")
+
+      start_store(vault, git: %{git | fetch: fn _, _, _ -> {:error, "offline"} end})
+
+      assert :abort_rebase in CommitLog.calls(log)
+
+      assert {:ok, %{rebasing: false, head: "main"}} = git.tracking.(vault)
+      assert %{healthy: true, on_branch: true} = Store.status(@store)
+    end
+
+    test "status: a HEAD that is not on the branch is not healthy", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      {git, log} = CommitLog.recording(vault, remote: "origin")
+      start_store(vault, git: git)
+      assert %{healthy: true, on_branch: true} = Store.status(@store)
+
+      CommitLog.detach(log)
+
+      assert %{healthy: false, on_branch: false, writer_answers: true} = Store.status(@store)
+    end
+
     test "status: a writer that does not answer is reported, not waited on", %{vault: vault} do
       recording_store(vault)
       writer = Process.whereis(@store)

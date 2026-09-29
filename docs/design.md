@@ -1264,6 +1264,20 @@ The decision is in that one function on purpose, so that what it adopts and
 when is a change to it rather than a second path beside it — which is how
 reads came to use it too (see "Reads see what another clone pushed").
 
+**A rebase left in progress is aborted first.** A rebase stops with `HEAD`
+detached, and a writer that stops in the middle of one — killed, the host
+rebooted — leaves the clone that way. Everything committed after it would be
+on no branch: the push names the branch, finds it up to date, and the write
+is reported pushed while it never leaves the host. So before the load, the
+writer asks `tracking` whether a rebase is in progress and, if so, aborts it
+through the Git value and logs a warning; the branch is back where it stood,
+vigil's commits on it, and the update that follows starts the rebase again if
+it is still due — or, offline, leaves it for the next one. And `commit`
+refuses a detached `HEAD` outright, so a clone that got there some other way
+fails the write, with the staging undone like any failed commit, instead of
+losing it; `status` reports `on_branch: false` and `/healthz` answers 503
+until someone checks the branch out again.
+
 **Nothing about it can fail a write.** A fetch, a fast-forward or a rebase
 that fails is logged, and the write goes ahead on the vault as it was; its
 push then says what is in the way. The fetch is bounded the way `push` is
@@ -1286,8 +1300,8 @@ caller's process: whether the index is loaded is read from the writer's table,
 and the writer is asked the rest with a timeout of five seconds, so a writer
 that does not answer is reported instead of waited on.
 
-*Healthy* means the index is loaded and the writer answers — `/healthz` is 200
-then and 503 otherwise. A failed push or a vault that is ahead is reported in
+*Healthy* means the index is loaded, the writer answers and `HEAD` is the
+branch it pushes (`on_branch`) — `/healthz` is 200 then and 503 otherwise. A failed push or a vault that is ahead is reported in
 the body, not in the status code: the service is serving, the commits are
 safe locally, and the push safety net pushes them without the writer ever
 noticing, so a status code tied to the last push would stay red after the
@@ -1723,8 +1737,15 @@ the git value's `tracking` question, so it stays off the repository in the
 suite like everything else: the remote must be one of the clone's, and the
 branch one of its branches, tracking the branch of the same name on that
 remote — an upstream anywhere else would be a branch pulled from one place and
-pushed to another. A vault path that is no git clone is refused on its own
-entry, and the two say nothing more.
+pushed to another — and the one checked out. Every commit, fast-forward and
+rebase acts on `HEAD` while every push names the branch, so a clone with
+another branch checked out, or a detached `HEAD`, would take every write and
+push none of them while answering `pushed: true`; the message names the
+branch that is checked out and the `git switch` that fixes it. A rebase in
+progress counts as the branch it is rebasing, because the writer aborts it
+before it loads (see "The server stays in step with the remote"). A vault
+path that is no git clone is refused on its own entry, and the two say
+nothing more.
 
 **The remote defaults to `github`; the branch to the clone's.** The remote's
 default was `origin` in `config/runtime.exs` while `scripts/init.sh`, the push

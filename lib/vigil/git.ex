@@ -61,8 +61,8 @@ defmodule Vigil.Git do
     :remove,
     # git mv -- from to. :ok | {:error, reason}.
     :move,
-    # Commit what is staged for paths, authored as vigil.
-    # {:ok, %{updated_at:, last_author:}} | {:error, reason}.
+    # Commit what is staged for paths, authored as vigil — refused on a
+    # detached HEAD. {:ok, %{updated_at:, last_author:}} | {:error, reason}.
     :commit,
     # What the index holds for paths, opaque to the caller.
     # {:ok, snapshot} | {:error, reason}.
@@ -73,8 +73,9 @@ defmodule Vigil.Git do
     # holds commits a force-push took off the remote. :ok | {:error, reason}.
     :push,
     # What the clone's remotes and branches are, for the boot check of
-    # VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH.
-    # {:ok, %{head:, remotes:, branches:}} | {:error, reason} — see tracking/1.
+    # VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH, and whether a rebase was left in
+    # progress. {:ok, %{head:, remotes:, branches:, rebasing:}} |
+    # {:error, reason} — see tracking/1.
     :tracking,
     # How many commits the branch holds that <remote>/<branch> lacks, and the
     # other way round, as the clone last saw the remote — read locally — and
@@ -356,10 +357,23 @@ defmodule Vigil.Git do
   Commits what is staged for `paths` under `message`, authored as
   `vigil <vigil@local>`, and answers the metadata of the last commit that
   touched them: `{:ok, %{updated_at:, last_author:}}` or `{:error, reason}`.
+
+  Refused on a detached HEAD — a rebase that stopped and was never aborted,
+  a checkout by hand: a commit there is on no branch, the push that follows
+  names the branch and finds it up to date, and the write would be reported
+  pushed while it never leaves the host.
   """
   def commit(vault_path, paths, message) do
-    with {:ok, _} <- commit_if_changed(vault_path, paths, message) do
+    with :ok <- on_a_branch(vault_path),
+         {:ok, _} <- commit_if_changed(vault_path, paths, message) do
       last_commit_meta(vault_path, paths)
+    end
+  end
+
+  defp on_a_branch(vault_path) do
+    case checked_out(vault_path) do
+      nil -> {:error, "HEAD is detached: vigil commits only onto a checked-out branch"}
+      _branch -> :ok
     end
   end
 
@@ -592,10 +606,14 @@ defmodule Vigil.Git do
   What the clone at `vault_path` has to say about its remotes and branches,
   read locally — nothing here reaches the network.
 
-  `{:ok, %{head: head, remotes: remotes, branches: branches}}`: `head` is the
-  checked-out branch (`nil` when `HEAD` is detached), `remotes` every
-  configured remote's name, and `branches` every local branch mapped to its
-  upstream as `{remote, branch}`, or to `nil` when it has none.
+  `{:ok, %{head: head, remotes: remotes, branches: branches, rebasing:
+  rebasing}}`: `head` is the checked-out branch (`nil` when `HEAD` is
+  detached), `remotes` every configured remote's name, `branches` every local
+  branch mapped to its upstream as `{remote, branch}`, or to `nil` when it has
+  none, and `rebasing` whether a rebase is in progress — one vigil left
+  behind when it stopped in the middle of it. While one is, `HEAD` is
+  detached and `head` is the branch being rebased: the one aborting it puts
+  `HEAD` back on.
   `{:error, reason}` when `vault_path` is not the top of a git clone — the same
   test `Vigil.Store` puts to it, so that a vault inside another repository is
   not answered for by that repository.
@@ -609,11 +627,14 @@ defmodule Vigil.Git do
              "--format=%(refname:short)%00%(upstream:remotename)%00%(upstream:remoteref)",
              "refs/heads"
            ]) do
+      rebasing = rebasing(vault_path)
+
       {:ok,
        %{
-         head: head(vault_path),
+         head: checked_out(vault_path) || rebasing_branch(rebasing),
          remotes: String.split(remotes, "\n", trim: true),
-         branches: refs |> String.split("\n", trim: true) |> Map.new(&upstream/1)
+         branches: refs |> String.split("\n", trim: true) |> Map.new(&upstream/1),
+         rebasing: rebasing != nil
        }}
     else
       false -> {:error, "#{vault_path} is not a git clone"}
@@ -621,10 +642,38 @@ defmodule Vigil.Git do
     end
   end
 
-  defp head(vault_path) do
+  defp checked_out(vault_path) do
     case run(vault_path, ["symbolic-ref", "--quiet", "--short", "HEAD"]) do
       {:ok, out} -> String.trim(out)
       {:error, _} -> nil
+    end
+  end
+
+  # The state directory of a rebase in progress — `rebase-merge` for the
+  # backend vigil's rebase uses, `rebase-apply` for the one a human's `git
+  # rebase --apply` or `git am` leaves — or nil. Asked of git rather than
+  # joined onto `.git`, which is a file in a worktree.
+  defp rebasing(vault_path) do
+    Enum.find_value(["rebase-merge", "rebase-apply"], fn dir ->
+      case run(vault_path, ["rev-parse", "--git-path", dir]) do
+        {:ok, out} ->
+          path = Path.expand(String.trim(out), vault_path)
+          if File.dir?(path), do: path
+
+        {:error, _} ->
+          nil
+      end
+    end)
+  end
+
+  # Sobelow: a file inside the clone's own git directory, named by git.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp rebasing_branch(nil), do: nil
+
+  defp rebasing_branch(dir) do
+    case File.read(Path.join(dir, "head-name")) do
+      {:ok, "refs/heads/" <> name} -> String.trim(name)
+      _ -> nil
     end
   end
 

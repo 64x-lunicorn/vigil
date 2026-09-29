@@ -248,6 +248,7 @@ defmodule Vigil.Store do
       stale: nil
     }
 
+    abort_left_rebase(git, vault_path)
     {state, pull_result} = do_full_load(state)
 
     case pull_result do
@@ -259,6 +260,25 @@ defmodule Vigil.Store do
     end
 
     {:ok, state}
+  end
+
+  # A rebase a writer started and never finished — it stopped in the middle
+  # of one — leaves HEAD detached, and whatever is committed after it on no
+  # branch. It is aborted before anything else, which puts the branch back
+  # where it stood, vigil's commits on it; the update that follows starts
+  # the rebase again if it is still due.
+  defp abort_left_rebase(git, vault_path) do
+    with {:ok, %{rebasing: true}} <- git.tracking.(vault_path) do
+      case git.abort_rebase.(vault_path) do
+        :ok ->
+          Logger.warning(
+            "vigil: aborted a rebase left in progress; the branch is back where it stood before it"
+          )
+
+        {:error, reason} ->
+          Logger.error("vigil: a rebase is in progress and could not be aborted: #{reason}")
+      end
+    end
   end
 
   defp over_repository!(vault_path) do
@@ -326,11 +346,24 @@ defmodule Vigil.Store do
         {:error, _reason} -> %{ahead: nil, behind: nil, rewritten: nil}
       end
 
-    {:reply, Map.merge(counts, %{last_push: state.last_push, stale: state.stale}), state}
+    report = %{on_branch: on_branch?(state), last_push: state.last_push, stale: state.stale}
+    {:reply, Map.merge(counts, report), state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
     {:reply, domains_yaml_raw(state.vault_path), state}
+  end
+
+  # Whether HEAD is the branch every push names, with no rebase in progress:
+  # a commit anywhere else never leaves the host.
+  defp on_branch?(state) do
+    case state.git.tracking.(state.vault_path) do
+      {:ok, %{head: head} = tracking} ->
+        head == state.git_branch and not Map.get(tracking, :rebasing, false)
+
+      {:error, _reason} ->
+        false
+    end
   end
 
   defp reload_result(:ok), do: %{reloaded: true}
@@ -688,8 +721,9 @@ defmodule Vigil.Store do
   the `status` tool and `/healthz` report (docs/design.md, "The server stays
   in step with the remote").
 
-  Asked in the caller's process: whether the index is loaded is read from the
-  writer's table, and the writer is asked the rest with a timeout of its own,
+  Healthy means the index is loaded, the writer answers, and HEAD is the
+  branch the writer pushes (`on_branch`). Asked in the caller's process:
+  whether the index is loaded is read from the writer's table, and the writer is asked the rest with a timeout of its own,
   so a writer that does not answer is reported rather than waited on.
   `ahead`, `behind` and `rewritten` are `nil` when the writer does not answer
   or the clone cannot count them; `behind` and `rewritten` are as fresh as
@@ -708,13 +742,18 @@ defmodule Vigil.Store do
 
     case sync do
       {:ok, sync} ->
-        Map.merge(sync, %{index_loaded: index_loaded, writer_answers: true, healthy: index_loaded})
+        Map.merge(sync, %{
+          index_loaded: index_loaded,
+          writer_answers: true,
+          healthy: index_loaded and sync.on_branch
+        })
 
       :no_answer ->
         %{
           index_loaded: index_loaded,
           writer_answers: false,
           healthy: false,
+          on_branch: nil,
           ahead: nil,
           behind: nil,
           rewritten: nil,

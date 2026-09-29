@@ -321,7 +321,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | `lint` | – | notes that are not UTF-8, duplicate/sentence headings, broken links, overlong notes, stale decisions — at most 50 each, with `totals` and `truncated` | RO/RW | – |
 | `current` | – | current time plus active and nearby events | RO/RW | – |
 | `reload` | – | `{reloaded, pull_failed?}` | RO/RW | – |
-| `status` | – | `{healthy, index_loaded, writer_answers, ahead, behind, rewritten, last_push, stale}` | RO/RW | – |
+| `status` | – | `{healthy, index_loaded, writer_answers, on_branch, ahead, behind, rewritten, last_push, stale}` | RO/RW | – |
 | `skill_list` | – | skills with their descriptions | RO/RW | – |
 | `skill_read` | name | skill content, prefixed with the current SkillKey | RO/RW | – |
 | `skill_write` | name, content, confirm? | `{name, pushed}` | RW | ✓ |
@@ -641,7 +641,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_PORT` | `4000` | HTTP port |
 | `VIGIL_BIND` | `127.0.0.1` | listen address; loopback keeps the LAN from bypassing Cloudflare Access. Widen it only for a proxy on another host |
 | `VIGIL_GIT_REMOTE` | `github` | remote used for pull **and** push; must be a remote of the vault clone |
-| `VIGIL_GIT_BRANCH` | the clone's checked-out branch when it tracks a branch on the remote, otherwise `main` | branch used for pull **and** push; must exist and track `<remote>/<branch>` (`git branch -vv`) |
+| `VIGIL_GIT_BRANCH` | the clone's checked-out branch when it tracks a branch on the remote, otherwise `main` | branch used for pull **and** push; must exist, track `<remote>/<branch>` (`git branch -vv`) and be the one checked out |
 | `VIGIL_TZ` | `UTC`; `init.sh` asks, suggesting what the file already says | timezone for `current`, envelopes, relative times — an IANA name such as `Europe/Berlin` |
 | `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
 | `VIGIL_ISSUER` | **required in prod**; `http://localhost:4000` in dev | OAuth issuer |
@@ -708,9 +708,10 @@ message:
   `VIGIL_RESOURCE` must be set.
 - `VIGIL_VAULT_PATH` must be a git clone, `VIGIL_GIT_REMOTE` one of its
   remotes, and `VIGIL_GIT_BRANCH` one of its branches, tracking the branch of
-  the same name on that remote. Fix a missing upstream with
-  `git branch --set-upstream-to=<remote>/<branch> <branch>`; the message
-  prints it.
+  the same name on that remote and checked out. Fix a missing upstream with
+  `git branch --set-upstream-to=<remote>/<branch> <branch>`, and another
+  branch checked out with `git -C <vault> switch <branch>`; the message
+  prints both.
 
 The scripts read the remote and the branch from `/etc/vigil/env` too, so a
 vault on `master`, or a remote called `origin`, is two lines there and nothing
@@ -1015,11 +1016,12 @@ another commit builds with the installed runtime anyway.
 a request that did not come from a loopback address, names a host other than
 `localhost`, `127.0.0.1` or `::1`, or arrives through a proxy (it carries
 `X-Forwarded-For`, `Forwarded`, `X-Real-IP` or `CF-Connecting-IP`) gets a 404.
-It answers 200 when the index is loaded and the writer answers within five
-seconds, 503 otherwise:
+It answers 200 when the index is loaded, the writer answers within five
+seconds and the vault clone has `VIGIL_GIT_BRANCH` checked out (`on_branch`),
+503 otherwise:
 
 ```json
-{"healthy": true, "index_loaded": true, "writer_answers": true,
+{"healthy": true, "index_loaded": true, "writer_answers": true, "on_branch": true,
  "ahead": 0, "behind": 0, "rewritten": 0,
  "last_push": {"pushed": true, "at": "2026-09-29T08:12:03Z"}, "stale": null}
 ```

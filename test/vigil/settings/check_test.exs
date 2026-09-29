@@ -402,6 +402,7 @@ defmodule Vigil.Settings.CheckTest do
                check_with([git_branch: nil], master_clone())
     end
 
+    # And main then has to be the one checked out, like any branch.
     test "unset, the branch is main when the checked-out one tracks nothing" do
       untracked =
         clone(
@@ -414,7 +415,64 @@ defmodule Vigil.Settings.CheckTest do
              }}
         )
 
-      assert {:ok, %{git_branch: "main"}} = check_with([git_branch: ""], untracked)
+      assert [message] = refused_by(untracked, git_branch: "")
+      assert message =~ "VIGIL_GIT_BRANCH"
+      assert message =~ ~s(got "main")
+      assert message =~ ~s("draft" is checked out)
+      assert message =~ "the default while it is unset"
+    end
+
+    # Every commit, fast-forward and rebase acts on HEAD while every push
+    # names the branch: a clone with another branch checked out would take
+    # every write and push none of them, answering `pushed: true`.
+    test "a branch that is not the one checked out is refused, naming the setting and HEAD" do
+      two =
+        clone(
+          tracking:
+            {:ok,
+             %{
+               head: "master",
+               remotes: ["github"],
+               branches: %{"master" => {"github", "master"}, "other" => {"github", "other"}}
+             }}
+        )
+
+      assert [message] = refused_by(two, git_branch: "other")
+      assert message =~ "VIGIL_GIT_BRANCH"
+      assert message =~ ~s(got "other")
+      assert message =~ ~s("master" is checked out)
+      assert message =~ "git -C /var/lib/vigil/vault switch other"
+    end
+
+    test "a detached HEAD is refused, naming the setting" do
+      detached =
+        clone(
+          tracking:
+            {:ok,
+             %{head: nil, remotes: ["github"], branches: %{"master" => {"github", "master"}}}}
+        )
+
+      assert [message] = refused_by(detached, git_branch: "master")
+      assert message =~ "VIGIL_GIT_BRANCH"
+      assert message =~ "HEAD is detached"
+    end
+
+    # A rebase vigil left in progress is aborted by the writer before it
+    # loads (Vigil.Store); the branch it puts HEAD back on is what counts.
+    test "a rebase in progress on the branch passes" do
+      rebasing =
+        clone(
+          tracking:
+            {:ok,
+             %{
+               head: "master",
+               remotes: ["github"],
+               branches: %{"master" => {"github", "master"}},
+               rebasing: true
+             }}
+        )
+
+      assert {:ok, %{git_branch: "master"}} = check_with([git_branch: "master"], rebasing)
     end
 
     test "a branch that is set is used as set" do

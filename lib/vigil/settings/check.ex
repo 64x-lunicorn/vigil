@@ -25,7 +25,8 @@ defmodule Vigil.Settings.Check do
   a secret stays out of the journal.
 
   Two entries are checked against the vault clone rather than on their own:
-  the remote and the branch every pull and push names. What the clone has is
+  the remote and the branch every pull and push names — which has to be the
+  branch checked out, since every commit lands on HEAD. What the clone has is
   asked once, through the `Vigil.Git` value `check/2` is handed — its
   `tracking` question — and put beside the configuration as
   `:vault_clone`, so those two checks read it the way the resource reads the
@@ -178,27 +179,36 @@ defmodule Vigil.Settings.Check do
     end
   end
 
-  # The branch exists in the clone and tracks its namesake on the remote:
-  # every pull and every push names the two, so an upstream anywhere else
-  # would be a branch pulled from one place and pushed to another. A remote
-  # that is not there is reported on its own entry, not here as well.
+  # The branch exists in the clone, tracks its namesake on the remote, and is
+  # the one checked out. Every pull and every push names the branch, so an
+  # upstream anywhere else would be a branch pulled from one place and pushed
+  # to another; and every commit, fast-forward and rebase acts on HEAD, so a
+  # clone with another branch checked out — or none — would take every write
+  # and push none of them. A remote that is not there is reported on its own
+  # entry, not here as well.
   defp check_value(:git_branch, value, config) do
     remote = Keyword.get(config, :git_remote)
 
     case Keyword.fetch!(config, :vault_clone) do
-      {:ok, %{branches: branches, remotes: remotes}} ->
+      {:ok, %{branches: branches, remotes: remotes, head: head}} ->
         cond do
           not Map.has_key?(branches, value) ->
             {:error,
              "a branch of the vault clone (#{names(Map.keys(branches))}), got #{inspect(value)}"}
 
-          remote not in remotes or branches[value] == {remote, value} ->
-            {:ok, value}
-
-          true ->
+          remote in remotes and branches[value] != {remote, value} ->
             {:error,
              "a branch tracking #{remote}/#{value} (git branch --set-upstream-to=#{remote}/#{value} #{value}), " <>
                "got #{inspect(value)} #{upstream(branches[value])}"}
+
+          head != value ->
+            {:error,
+             "the branch checked out in the vault clone " <>
+               "(git -C #{Keyword.get(config, :vault_path)} switch #{value}), " <>
+               "got #{inspect(value)} while #{checked_out(head)}"}
+
+          true ->
+            {:ok, value}
         end
 
       {:error, _} ->
@@ -402,6 +412,9 @@ defmodule Vigil.Settings.Check do
 
   defp names([]), do: "it has none"
   defp names(names), do: "it has " <> (names |> Enum.sort() |> Enum.join(", "))
+
+  defp checked_out(nil), do: "HEAD is detached"
+  defp checked_out(head), do: "#{inspect(head)} is checked out"
 
   defp upstream(nil), do: "with no upstream"
   defp upstream({remote, branch}), do: "tracking #{remote}/#{branch}"

@@ -35,7 +35,7 @@ read it afterwards.
   something else needs the line; the boot check refuses a remote the clone does
   not have and names it. `VIGIL_GIT_BRANCH` is new: unset, it is the clone's
   checked-out branch when that tracks one on the remote, `main` otherwise, and
-  it must track `<remote>/<branch>`.
+  it must track `<remote>/<branch>` and be the branch checked out.
 - **Set the trusted-proxy lines for the tunnel.** cloudflared runs on the same
   host, so the peer vigil sees is loopback, and the Cloudflare edge ranges the
   guide used to suggest never matched. A new `init.sh` writes
@@ -121,8 +121,8 @@ read it afterwards.
   updated_at).
 - `history` and `read` with `at`: the commits that touched a note, following
   renames, and a note or chunk as it was at one of them.
-- `status` and `GET /healthz` (loopback only): whether the index is loaded and
-  the writer answers, ahead/behind, the commits a force-push took off the
+- `status` and `GET /healthz` (loopback only): whether the index is loaded,
+  the writer answers and the branch is checked out, ahead/behind, the commits a force-push took off the
   remote (`rewritten`) and the last push; `update.sh` waits on `/healthz`.
 - `move_note` with `update_links` rewrites every link to the moved note in the
   same commit; `rewrite_note` reports `broken_chunk_links`.
