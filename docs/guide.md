@@ -80,6 +80,12 @@ The index only exists in process memory — a plain value held in
 start and on every `reload`. The single source of truth is the vault
 repository; restarting `Vigil.Store` never loses data, only a warm index.
 
+Clients connect to `/mcp` over the Streamable HTTP transport. vigil speaks the
+MCP protocol versions **2025-11-25**, **2025-06-18** and **2025-03-26**, answers
+`initialize` with the client's version when it is one of these and with
+2025-11-25 otherwise, and holds every later request in the session to the
+version it negotiated. See [Protocol versions](design.md#protocol-versions).
+
 ### A note becomes chunks
 
 A note is split at its headings. Each chunk is independently addressable and
@@ -785,7 +791,7 @@ lib/vigil/
     ├── server.ex        # Bandit + Plug: JSON-RPC and OAuth endpoints
     ├── tools.ex         # one table per tool: schema, validation, dispatch
     ├── envelope.ex      # time envelope, session delta tracking
-    ├── session.ex       # sessions: issued at initialize, bound to a token, expired, ended
+    ├── session.ex       # sessions: issued at initialize with the negotiated protocol version, bound to a token, expired, ended
     └── envelope/
         └── decision.ex  # which envelope a response carries, as a pure function
 

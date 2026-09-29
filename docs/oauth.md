@@ -365,6 +365,20 @@ WWW-Authenticate: Bearer resource_metadata="https://vault.example.org/.well-know
 Empty body. **Without this header the client cannot find the authorization
 server** and reports only that it could not reach the MCP server.
 
+A request that presented a token which was not accepted gets the same
+challenge with `error="invalid_token"` first (RFC 6750 §3.1):
+
+```http
+WWW-Authenticate: Bearer error="invalid_token", resource_metadata="…", scope="vault"
+```
+
+"Presented" means one `Authorization` header with the `Bearer` scheme — matched
+case-insensitively, as RFC 9110 has every auth scheme — and a non-empty token.
+No header, another scheme or an empty token is a request with no token, and
+gets the challenge without an error code. Which check refused a presented
+token is still not said: expired, unknown, another resource's and a refresh
+token all read `invalid_token`.
+
 ---
 
 ## Client registration
@@ -664,7 +678,18 @@ Scope decides what the token may call, as an allow-list: `vault` allows
 everything, and a token with any other scope — `vault:read`, or anything else
 a record might hold — is shown only the tools it may call on `tools/list`, and
 has every write tool rejected with an explicit error rather than an
-HTTP-level 403. An empty `scope` is accepted at the authorization endpoint as
+HTTP-level 403.
+
+**vigil never answers `insufficient_scope`.** RFC 6750 and the MCP
+authorization spec's step-up flow would have a read-only token that calls a
+write tool answered 403 with `error="insufficient_scope", scope="vault"`, and
+a client then asks the user to grant the wider scope on the spot. That is the
+prompt the read-only scope exists to avoid: a `vault:read` token is not shown
+the write tools at all, so the only way to reach one is to call a tool it was
+never offered, and answering that with a consent screen is how users learn to
+approve whatever is asked. The refusal stays a tool error the model reads, and
+widening a client's access stays a decision made by connecting it again with
+`vault`. An empty `scope` is accepted at the authorization endpoint as
 "no scope asked for", and the token endpoint issues `vault` for it — for a
 code and for a refresh token alike, so a family redeemed before that rule
 carries `vault` from its next rotation on.

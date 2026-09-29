@@ -567,6 +567,10 @@ defmodule Vigil.MCP.Tools do
     end
   end
 
+  @doc "Whether `name` names a tool this server declares."
+  @spec known?(String.t()) :: boolean()
+  def known?(name), do: find_tool(name) != nil
+
   defp find_tool(name), do: Enum.find(@tools, &(&1.name == name))
 
   @doc """

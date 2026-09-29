@@ -54,7 +54,7 @@ defmodule Vigil.MCP.EnvelopeTest do
   defp session(name) do
     case Process.get({:session, name}) do
       nil ->
-        id = Session.issue(@sessions, "digest", System.system_time(:second))
+        id = Session.issue(@sessions, "digest", "2025-11-25", System.system_time(:second))
         Process.put({:session, name}, id)
         id
 

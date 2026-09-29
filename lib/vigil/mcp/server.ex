@@ -9,7 +9,13 @@ defmodule Vigil.MCP.Server do
   alias Vigil.Store
   alias Vigil.OAuth
 
-  @protocol_version "2025-11-25"
+  # The protocol versions this server speaks, latest first. A tools-only
+  # server looks the same on the wire in all three: what 2025-06-18 and
+  # 2025-11-25 added to it — a tool's and the server's `title`, `websiteUrl`,
+  # a result's `structuredContent` — are fields an older client ignores or
+  # that vigil does not send (`docs/design.md`, "Protocol versions").
+  @protocol_versions ["2025-11-25", "2025-06-18", "2025-03-26"]
+  @latest_protocol_version hd(@protocol_versions)
   @default_rpm 60
 
   # `reload` pulls and reparses the whole vault inside the writer, so it is
@@ -116,8 +122,10 @@ defmodule Vigil.MCP.Server do
     handle_mcp(conn)
   end
 
+  # No server-sent stream: the transport lets a server that offers none
+  # answer GET with 405, and `Allow` names what `/mcp` does answer.
   get "/mcp" do
-    send_resp(conn, 405, "")
+    method_not_allowed(conn)
   end
 
   # Ends the session the header names — the transport's way for a client to
@@ -135,10 +143,22 @@ defmodule Vigil.MCP.Server do
     end)
   end
 
+  # Any other method on the MCP endpoint is the same refusal as GET, not the
+  # authorization server's 404: the path exists, the method does not.
+  match "/mcp" do
+    method_not_allowed(conn)
+  end
+
   # Everything that is not /mcp is the authorization server's: discovery
   # documents, registration, consent and token. Two protocols, two routers.
   match _ do
     Vigil.OAuth.Endpoint.call(conn, conn.private.oauth_opts)
+  end
+
+  defp method_not_allowed(conn) do
+    conn
+    |> put_resp_header("allow", "POST, DELETE")
+    |> send_resp(405, "")
   end
 
   ## MCP handling
@@ -158,28 +178,51 @@ defmodule Vigil.MCP.Server do
         # is as much a copy of what the server holds as the `:dets` files are.
         digest = OAuth.Token.digest(token)
 
+        # `Retry-After` comes from the window itself, as on the authorization
+        # server's 429s, so the wait it names is a fact rather than a guess.
         if conn.private.rate_limiter.limited?.(digest, budget, now) do
-          send_resp(conn, 429, "")
+          conn
+          |> put_resp_header("retry-after", Integer.to_string(RateLimit.window_seconds()))
+          |> send_resp(429, "")
         else
           fun.(conn, %{scope: scope, token_digest: digest})
         end
 
-      {:error, :challenge} ->
-        send_401_challenge(conn)
+      {:error, reason} ->
+        send_401_challenge(conn, reason)
     end
   end
 
   # What makes a token acceptable here is `Vigil.OAuth.Token`'s to say — the
   # record's kind, its audience and its hour are its own facts, not the
   # router's. All this adds is the one thing that is HTTP: the header the
-  # token arrived in, and that every refusal answers the same challenge.
+  # token arrived in, and that every refusal answers the same challenge —
+  # `invalid_token` when a token was presented, nothing more when none was
+  # (RFC 6750 §3.1), so a caller still learns nothing from which check
+  # rejected it.
   defp validate_access_token(conn) do
-    with ["Bearer " <> token] <- get_req_header(conn, "authorization"),
+    with {:ok, token} <- bearer_token(conn),
          {:ok, scope} <-
            OAuth.Token.validate_access(persistence(conn), token, settings(conn).resource) do
       {:ok, scope, token}
     else
-      _ -> {:error, :challenge}
+      :none -> {:error, :missing}
+      :error -> {:error, :invalid_token}
+    end
+  end
+
+  # The auth scheme is case-insensitive (RFC 9110 §11.1), so `bearer` and
+  # `BEARER` name the same one. One header with a non-empty token is a token
+  # presented; anything else — no header, another scheme, two headers — is
+  # none.
+  defp bearer_token(conn) do
+    with [header] <- get_req_header(conn, "authorization"),
+         [scheme, token] <- String.split(header, " ", parts: 2),
+         "bearer" <- String.downcase(scheme),
+         token when token != "" <- String.trim_leading(token, " ") do
+      {:ok, token}
+    else
+      _ -> :none
     end
   end
 
@@ -194,9 +237,11 @@ defmodule Vigil.MCP.Server do
   # the same reason persistence is.
   defp settings(conn), do: conn.private.settings
 
-  defp send_401_challenge(conn) do
+  defp send_401_challenge(conn, reason) do
+    error = if reason == :invalid_token, do: "error=\"invalid_token\", ", else: ""
+
     challenge =
-      "Bearer resource_metadata=\"#{settings(conn).issuer}/.well-known/oauth-protected-resource\", scope=\"#{OAuth.scope()}\""
+      "Bearer #{error}resource_metadata=\"#{settings(conn).issuer}/.well-known/oauth-protected-resource\", scope=\"#{OAuth.scope()}\""
 
     conn
     |> put_resp_header("www-authenticate", challenge)
@@ -233,32 +278,50 @@ defmodule Vigil.MCP.Server do
     end
   end
 
+  # Refused before the body is read when it names no version this server
+  # speaks, or names several. Whether it names the one a session negotiated
+  # is asked once the session is known (`with_session/3`). No header at all is
+  # accepted: a 2025-03-26 client sends none, and the version it speaks is the
+  # one its session negotiated.
   defp check_protocol_version(conn) do
     case get_req_header(conn, "mcp-protocol-version") do
       [] -> {:ok, true, conn}
-      [@protocol_version] -> {:ok, true, conn}
-      _other_or_several -> {:ok, false, conn}
+      [version] -> {:ok, version in @protocol_versions, conn}
+      _several -> {:ok, false, conn}
     end
   end
 
-  # A body that parses but is not one JSON-RPC object — a batch, a scalar.
-  # Batches were removed from MCP in 2025-06-18; either way there is no `id`
-  # to answer to.
-  defp invalid_request(conn) do
+  # The client's version when this server speaks it, otherwise the latest this
+  # server speaks — which the client then accepts or disconnects over.
+  defp negotiate(%{"protocolVersion" => version}) when version in @protocol_versions,
+    do: version
+
+  defp negotiate(_params), do: @latest_protocol_version
+
+  # A body that parses but is not one JSON-RPC message — a batch, a scalar,
+  # an object with no method that is not a response either. Batches were
+  # removed from MCP in 2025-06-18, and vigil receives none in any version
+  # (`docs/design.md`, "Protocol versions"). The `id` is echoed when there is
+  # a usable one.
+  defp invalid_request(conn, id \\ nil) do
     send_json(conn, 200, %{
       jsonrpc: "2.0",
-      id: nil,
+      id: if(is_binary(id) or is_integer(id), do: id),
       error: %{code: -32600, message: "Invalid Request"}
     })
   end
 
   # `initialize` is the one message outside a session, because it is the one
-  # that starts one: bound to the token that sent it, under the token's digest.
+  # that starts one: bound to the token that sent it, under the token's digest,
+  # and speaking the version negotiated here.
   defp handle_message(conn, %{"method" => "initialize"} = msg, auth) do
-    session_id = Session.issue(conn.private.sessions, auth.token_digest, unix_now())
+    protocol_version = negotiate(msg["params"])
+
+    session_id =
+      Session.issue(conn.private.sessions, auth.token_digest, protocol_version, unix_now())
 
     result = %{
-      protocolVersion: @protocol_version,
+      protocolVersion: protocol_version,
       serverInfo: %{
         name: "vigil",
         title: @server_title,
@@ -275,10 +338,22 @@ defmodule Vigil.MCP.Server do
   end
 
   # Every other message is sent in a session, and is answered only in a live
-  # one of this token's.
-  defp handle_message(conn, msg, auth) do
+  # one of this token's. A response the client sends back — it has `result`
+  # or `error` and no `method` — is accepted with 202 like a notification:
+  # vigil sends no requests, so there is nothing to match it to. An object
+  # that is neither is not a JSON-RPC message.
+  defp handle_message(conn, %{"method" => method} = msg, auth) when is_binary(method) do
     with_session(conn, auth, &handle_in_session(&1, msg, auth, &2))
   end
+
+  defp handle_message(conn, msg, auth)
+       when not is_map_key(msg, "method") and
+              (is_map_key(msg, "result") or
+                 is_map_key(msg, "error")) do
+    with_session(conn, auth, fn conn, _session_id -> send_resp(conn, 202, "") end)
+  end
+
+  defp handle_message(conn, msg, _auth), do: invalid_request(conn, msg["id"])
 
   defp handle_in_session(conn, %{"method" => "notifications/initialized"}, _auth, _session_id) do
     send_resp(conn, 202, "")
@@ -310,9 +385,46 @@ defmodule Vigil.MCP.Server do
     })
   end
 
+  # A name that is not a string, or names no tool, is a protocol error rather
+  # than a tool result: nothing was called, so there is no envelope to attach
+  # and no session state to advance.
   defp handle_in_session(conn, %{"method" => "tools/call"} = msg, auth, session_id) do
     params = msg["params"] || %{}
-    name = params["name"]
+
+    case params["name"] do
+      name when is_binary(name) ->
+        if Tools.known?(name) do
+          call_tool(conn, msg, name, params, auth, session_id)
+        else
+          invalid_params(conn, msg, "Unknown tool: #{name}")
+        end
+
+      _ ->
+        invalid_params(conn, msg, "Invalid params: name must be a string")
+    end
+  end
+
+  defp handle_in_session(conn, msg, _auth, _session_id) do
+    if Map.has_key?(msg, "id") do
+      send_json(conn, 200, %{
+        jsonrpc: "2.0",
+        id: msg["id"],
+        error: %{code: -32601, message: "Method not found"}
+      })
+    else
+      send_resp(conn, 202, "")
+    end
+  end
+
+  defp invalid_params(conn, msg, message) do
+    send_json(conn, 200, %{
+      jsonrpc: "2.0",
+      id: msg["id"],
+      error: %{code: -32602, message: message}
+    })
+  end
+
+  defp call_tool(conn, msg, name, params, auth, session_id) do
     arguments = params["arguments"] || %{}
 
     Logger.info("mcp tool_call tool=#{name} session=#{session_id}")
@@ -339,18 +451,6 @@ defmodule Vigil.MCP.Server do
     send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: body})
   end
 
-  defp handle_in_session(conn, msg, _auth, _session_id) do
-    if Map.has_key?(msg, "id") do
-      send_json(conn, 200, %{
-        jsonrpc: "2.0",
-        id: msg["id"],
-        error: %{code: -32601, message: "Method not found"}
-      })
-    else
-      send_resp(conn, 202, "")
-    end
-  end
-
   # `reload`'s own window, per access token, in the same limiter as every
   # other budget and under a key of its own, so the two are counted apart. It
   # answers as a tool error rather than a 429: the request itself was within
@@ -370,12 +470,21 @@ defmodule Vigil.MCP.Server do
   # id that is not a live session of this token's — never issued, another
   # token's, expired, ended, or issued before a restart — is a 404, which the
   # transport tells a client to answer by initializing a new one. Nothing
-  # here adds a row: only `initialize` does (`Vigil.MCP.Session`).
+  # here adds a row: only `initialize` does (`Vigil.MCP.Session`). A
+  # `MCP-Protocol-Version` header naming a version other than the one the
+  # session negotiated is a 400; no header is the negotiated version.
   defp with_session(conn, auth, fun) do
     with_header_session(conn, fn session_id ->
       case Session.resume(conn.private.sessions, session_id, auth.token_digest, unix_now()) do
-        :ok -> fun.(conn, session_id)
-        :error -> send_resp(conn, 404, "")
+        {:ok, protocol_version} ->
+          if get_req_header(conn, "mcp-protocol-version") in [[], [protocol_version]] do
+            fun.(conn, session_id)
+          else
+            send_resp(conn, 400, "")
+          end
+
+        :error ->
+          send_resp(conn, 404, "")
       end
     end)
   end

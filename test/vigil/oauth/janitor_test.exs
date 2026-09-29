@@ -158,8 +158,8 @@ defmodule Vigil.OAuth.JanitorTest do
     sessions = __MODULE__.Sessions
     start_supervised!({Envelope, name: sessions})
 
-    expired = Session.issue(sessions, "digest", @now - Session.lifetime_seconds())
-    live = Session.issue(sessions, "digest", @now)
+    expired = Session.issue(sessions, "digest", "2025-11-25", @now - Session.lifetime_seconds())
+    live = Session.issue(sessions, "digest", "2025-11-25", @now)
 
     janitor =
       start_janitor(
@@ -173,7 +173,7 @@ defmodule Vigil.OAuth.JanitorTest do
     sweep_now(janitor)
 
     assert :ets.lookup(sessions, expired) == []
-    assert Session.resume(sessions, live, "digest", @now) == :ok
+    assert {:ok, _} = Session.resume(sessions, live, "digest", @now)
   end
 
   test "a sweep that reclaims nothing is not an error and leaves the janitor running", %{

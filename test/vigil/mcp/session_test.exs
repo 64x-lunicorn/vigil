@@ -16,14 +16,22 @@ defmodule Vigil.MCP.SessionTest do
   defp lifetime, do: Session.lifetime_seconds()
 
   test "a session issued for a token is resumed with that token" do
-    id = Session.issue(@sessions, "digest-a", @now)
+    id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
     assert is_binary(id) and id != ""
-    assert Session.resume(@sessions, id, "digest-a", @now + 1) == :ok
+    assert {:ok, _} = Session.resume(@sessions, id, "digest-a", @now + 1)
+  end
+
+  test "a session is resumed with the protocol version it was issued for" do
+    old = Session.issue(@sessions, "digest-a", "2025-03-26", @now)
+    new = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
+
+    assert Session.resume(@sessions, old, "digest-a", @now + 1) == {:ok, "2025-03-26"}
+    assert Session.resume(@sessions, new, "digest-a", @now + 1) == {:ok, "2025-11-25"}
   end
 
   test "every session is issued an id of its own" do
-    ids = for _ <- 1..20, do: Session.issue(@sessions, "digest-a", @now)
+    ids = for _ <- 1..20, do: Session.issue(@sessions, "digest-a", "2025-11-25", @now)
     assert length(Enum.uniq(ids)) == 20
   end
 
@@ -35,47 +43,47 @@ defmodule Vigil.MCP.SessionTest do
   # Bound to the token that initialized it: another token presenting the id
   # is told the session does not exist, not that it belongs to someone else.
   test "a session is not resumed with another token" do
-    id = Session.issue(@sessions, "digest-a", @now)
+    id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
     assert Session.resume(@sessions, id, "digest-b", @now) == :error
-    assert Session.resume(@sessions, id, "digest-a", @now) == :ok
+    assert {:ok, _} = Session.resume(@sessions, id, "digest-a", @now)
   end
 
   test "the session table keeps what it was handed for the token, nothing more" do
-    id = Session.issue(@sessions, "digest-a", @now)
-    assert [{^id, "digest-a", @now, nil}] = :ets.lookup(@sessions, id)
+    id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
+    assert [{^id, "digest-a", @now, nil, "2025-11-25"}] = :ets.lookup(@sessions, id)
   end
 
   describe "the lifetime" do
     test "a session expires after its lifetime without a request" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
-      assert Session.resume(@sessions, id, "digest-a", @now + lifetime() - 1) == :ok
+      assert {:ok, _} = Session.resume(@sessions, id, "digest-a", @now + lifetime() - 1)
       assert Session.resume(@sessions, id, "digest-a", @now + 2 * lifetime()) == :error
     end
 
     test "every request starts the lifetime over" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
       for n <- 1..3 do
-        assert Session.resume(@sessions, id, "digest-a", @now + n * (lifetime() - 1)) == :ok
+        assert {:ok, _} = Session.resume(@sessions, id, "digest-a", @now + n * (lifetime() - 1))
       end
     end
 
     test "an expired session stays expired, even before the sweep comes by" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
       assert Session.resume(@sessions, id, "digest-a", @now + lifetime()) == :error
       assert Session.resume(@sessions, id, "digest-a", @now) == :error
     end
 
     test "the sweep removes exactly the expired sessions and says how many" do
-      old = Session.issue(@sessions, "digest-a", @now)
-      fresh = Session.issue(@sessions, "digest-a", @now + 10)
+      old = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
+      fresh = Session.issue(@sessions, "digest-a", "2025-11-25", @now + 10)
 
       assert Session.sweep_expired(@sessions, @now + lifetime()) == 1
       assert :ets.lookup(@sessions, old) == []
-      assert Session.resume(@sessions, fresh, "digest-a", @now + lifetime()) == :ok
+      assert {:ok, _} = Session.resume(@sessions, fresh, "digest-a", @now + lifetime())
     end
 
     # The table belongs to the envelope's process and is gone while that
@@ -87,7 +95,7 @@ defmodule Vigil.MCP.SessionTest do
 
   describe "ending a session" do
     test "an ended session is gone" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
       assert Session.finish(@sessions, id, "digest-a", @now) == :ok
       assert Session.resume(@sessions, id, "digest-a", @now) == :error
@@ -95,14 +103,14 @@ defmodule Vigil.MCP.SessionTest do
     end
 
     test "only the token that holds a session can end it" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
       assert Session.finish(@sessions, id, "digest-b", @now) == :error
-      assert Session.resume(@sessions, id, "digest-a", @now) == :ok
+      assert {:ok, _} = Session.resume(@sessions, id, "digest-a", @now)
     end
 
     test "an unknown or expired session cannot be ended" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
       assert Session.finish(@sessions, "made-up", "digest-a", @now) == :error
       assert Session.finish(@sessions, id, "digest-a", @now + lifetime()) == :error
@@ -111,7 +119,7 @@ defmodule Vigil.MCP.SessionTest do
 
   describe "the envelope's state" do
     test "is nil until the envelope records one, and ends with the session" do
-      id = Session.issue(@sessions, "digest-a", @now)
+      id = Session.issue(@sessions, "digest-a", "2025-11-25", @now)
 
       assert Session.envelope_state(@sessions, id) == nil
       Session.put_envelope_state(@sessions, id, %{some: :state})

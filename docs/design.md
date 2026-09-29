@@ -1484,6 +1484,57 @@ sweep does is refused the same way and drops it on the spot.
 
 This is the reason the assistant never has to guess what time it is.
 
+The envelope's state is which events were active, and nothing about when.
+It used to carry the last response's instant too, so that a session silent
+for more than 24 hours would get the long first line again; a session now
+lives at most as long as the access token it is bound to, one hour, so that
+rule could no longer fire and is gone.
+
+---
+
+## Protocol versions
+
+vigil speaks three MCP protocol versions: **2025-11-25, 2025-06-18 and
+2025-03-26**. `initialize` answers with the version the client asked for when
+it is one of these, and with 2025-11-25 otherwise — the client then accepts it
+or disconnects, as the lifecycle says. The negotiated version belongs to the
+session (`Vigil.MCP.Session`): every later request in it that carries
+`MCP-Protocol-Version` must name that version, and anything else — another
+supported version, one vigil does not speak, the header twice — is a 400. A
+request with no header at all is accepted as the session's version: 2025-03-26
+defined no such header, so its clients send none, and the transport's fallback
+for a missing header only applies to a server with no other way to know.
+
+For a server that offers tools and nothing else the three are the same on the
+wire. What the later two added to that surface is either a field an older
+client ignores — a tool's and the server's `title`, `websiteUrl`, tool
+annotations are 2025-03-26's own — or one vigil does not send: no
+`outputSchema`, no `structuredContent`, no icons. Nothing in a response depends
+on the version, so none is shaped by it.
+
+**One gap is deliberate.** 2025-03-26 says an implementation MUST support
+receiving JSON-RPC batches; 2025-06-18 removed batching. vigil answers a batch
+with `-32600` under every version. No client this server is written for sends
+one, and supporting it for one version would mean a second response path —
+several envelopes decided in one request — for a feature the protocol has
+since dropped.
+
+The rest of the transport's small print, as `/mcp` answers it:
+
+- A message with `result` or `error` and no `method` is a response the client
+  sent back; it is accepted with 202, since vigil sends no requests to match it
+  to. An object with neither a `method` nor a result is `-32600`, as is one
+  whose `method` is not a string.
+- A `tools/call` naming no declared tool, or with a `name` that is not a
+  string, is `-32602` — a protocol error, not a tool result, so it carries no
+  envelope and does not advance the session's state. A tool's own refusal —
+  bad arguments, a missing SkillKey, a read-only token — stays a tool result
+  with `isError`, which is what lets the model correct itself.
+- GET, and any method other than POST and DELETE, is a 405 with
+  `Allow: POST, DELETE`: vigil opens no server-sent stream.
+- A 429 carries `Retry-After`, the rate limit's window, as the authorization
+  server's 429s do.
+
 ---
 
 ## Security model
@@ -1513,7 +1564,8 @@ Five layers, each doing one job:
    calling `skill_read`.
 5. **Rate limiting** — fixed window, in three places that are easy to
    confuse. `/mcp` is limited per access token, so it is unreachable without
-   one. `reload` is counted a second time there, per access token under a key
+   one; past the budget it answers 429 with a `Retry-After` naming the
+   window. `reload` is counted a second time there, per access token under a key
    of its own and against a much smaller budget (`VIGIL_RELOAD_RATE_LIMIT_RPM`,
    default 6), because each call pulls and reparses the whole vault inside the
    single writer. Past it, `reload` answers a tool error saying so rather than

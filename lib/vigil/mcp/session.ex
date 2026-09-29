@@ -5,8 +5,10 @@ defmodule Vigil.MCP.Session do
   (`docs/design.md`, "The time envelope").
 
   A session is one row of the session table `Vigil.MCP.Envelope` owns —
-  `{id, token_digest, last_active, envelope_state}` — and this module is the
-  only one that knows its shape. The envelope asks for its state and records
+  `{id, token_digest, last_active, envelope_state, protocol_version}` — and
+  this module is the only one that knows its shape. The protocol version is
+  the one `initialize` negotiated for it, and every later request in the
+  session is held to it. The envelope asks for its state and records
   it through `envelope_state/2` and `put_envelope_state/3`; everything else
   here decides whether a row is a session at all.
 
@@ -33,28 +35,32 @@ defmodule Vigil.MCP.Session do
   def lifetime_seconds, do: @lifetime_seconds
 
   @doc """
-  A new session for the token under `token_digest`, active at `now`. Returns
-  its id, which the router sends as `Mcp-Session-Id`.
+  A new session for the token under `token_digest`, speaking
+  `protocol_version`, active at `now`. Returns its id, which the router sends
+  as `Mcp-Session-Id`.
   """
-  @spec issue(atom(), binary(), integer()) :: binary()
-  def issue(sessions, token_digest, now) do
+  @spec issue(atom(), binary(), binary(), integer()) :: binary()
+  def issue(sessions, token_digest, protocol_version, now) do
     id = Vigil.Uuid.v4()
-    :ets.insert(sessions, {id, token_digest, now, nil})
+    :ets.insert(sessions, {id, token_digest, now, nil, protocol_version})
     id
   end
 
   @doc """
   Whether `id` is a live session of the token under `token_digest` at `now`.
-  `:ok` starts its lifetime over; `:error` means it is unknown, another
-  token's or expired.
+  `{:ok, protocol_version}` starts its lifetime over and names the version
+  the session negotiated; `:error` means it is unknown, another token's or
+  expired.
   """
-  @spec resume(atom(), binary(), binary(), integer()) :: :ok | :error
+  @spec resume(atom(), binary(), binary(), integer()) :: {:ok, binary()} | :error
   def resume(sessions, id, token_digest, now) do
-    if live?(sessions, id, token_digest, now) do
-      :ets.update_element(sessions, id, {3, now})
-      :ok
-    else
-      :error
+    case live(sessions, id, token_digest, now) do
+      {:ok, protocol_version} ->
+        :ets.update_element(sessions, id, {3, now})
+        {:ok, protocol_version}
+
+      :error ->
+        :error
     end
   end
 
@@ -64,11 +70,13 @@ defmodule Vigil.MCP.Session do
   """
   @spec finish(atom(), binary(), binary(), integer()) :: :ok | :error
   def finish(sessions, id, token_digest, now) do
-    if live?(sessions, id, token_digest, now) do
-      :ets.delete(sessions, id)
-      :ok
-    else
-      :error
+    case live(sessions, id, token_digest, now) do
+      {:ok, _protocol_version} ->
+        :ets.delete(sessions, id)
+        :ok
+
+      :error ->
+        :error
     end
   end
 
@@ -87,14 +95,14 @@ defmodule Vigil.MCP.Session do
 
       table ->
         cutoff = cutoff(now)
-        :ets.select_delete(table, [{{:_, :_, :"$1", :_}, [{:"=<", :"$1", cutoff}], [true]}])
+        :ets.select_delete(table, [{{:_, :_, :"$1", :_, :_}, [{:"=<", :"$1", cutoff}], [true]}])
     end
   end
 
   @doc "The envelope's state for session `id`, `nil` while it has none."
   def envelope_state(sessions, id) do
     case :ets.lookup(sessions, id) do
-      [{^id, _digest, _last_active, state}] -> state
+      [{^id, _digest, _last_active, state, _protocol_version}] -> state
       [] -> nil
     end
   end
@@ -113,18 +121,18 @@ defmodule Vigil.MCP.Session do
   # reached yet is refused exactly as one it has — and is dropped on the spot,
   # since the sweep would drop it next anyway. Only the token the session is
   # bound to gets that far: another token's guess leaves the row alone.
-  defp live?(sessions, id, token_digest, now) do
+  defp live(sessions, id, token_digest, now) do
     case :ets.lookup(sessions, id) do
-      [{^id, ^token_digest, last_active, _state}] ->
+      [{^id, ^token_digest, last_active, _state, protocol_version}] ->
         if last_active > cutoff(now) do
-          true
+          {:ok, protocol_version}
         else
           :ets.delete(sessions, id)
-          false
+          :error
         end
 
       _ ->
-        false
+        :error
     end
   end
 

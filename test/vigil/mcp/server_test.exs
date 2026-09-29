@@ -196,6 +196,62 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 401
   end
 
+  # RFC 6750 §3.1: a request that presented a token is told it was not
+  # accepted; one that presented none gets the bare challenge.
+  test "a presented but invalid token's challenge says invalid_token", %{
+    persistence: persistence,
+    token: token
+  } do
+    presented = auth_post(persistence, "Bearer wrong#{token}")
+    assert presented.status == 401
+    assert [challenge] = get_resp_header(presented, "www-authenticate")
+    assert challenge =~ ~r/^Bearer error="invalid_token", /
+    assert challenge =~ "resource_metadata="
+
+    for header <- [nil, "Basic #{token}", "Bearer "] do
+      conn = auth_post(persistence, header)
+      assert conn.status == 401
+      assert [challenge] = get_resp_header(conn, "www-authenticate")
+      refute challenge =~ "error="
+    end
+  end
+
+  test "the Bearer scheme is matched case-insensitively", %{
+    persistence: persistence,
+    token: token
+  } do
+    for scheme <- ["bearer", "BEARER", "BeArEr"] do
+      conn = auth_post(persistence, "#{scheme} #{token}", @initialize)
+      assert conn.status == 200
+    end
+  end
+
+  defp auth_post(persistence, authorization, body \\ %{jsonrpc: "2.0", id: 1, method: "ping"}) do
+    conn =
+      conn(:post, "/mcp", Jason.encode!(body))
+      |> put_req_header("content-type", "application/json")
+
+    conn =
+      if authorization, do: put_req_header(conn, "authorization", authorization), else: conn
+
+    Server.call(conn, opts(persistence))
+  end
+
+  test "GET and every other unsupported method on /mcp is a 405 naming what is allowed", %{
+    persistence: persistence,
+    token: token
+  } do
+    for method <- [:get, :put, :patch] do
+      conn =
+        conn(method, "/mcp")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> Server.call(opts(persistence))
+
+      assert conn.status == 405
+      assert get_resp_header(conn, "allow") == ["POST, DELETE"]
+    end
+  end
+
   test "initialize returns instructions and a session id header", %{
     persistence: persistence,
     token: token
@@ -243,6 +299,152 @@ defmodule Vigil.MCP.ServerTest do
 
       assert conn.status == 200
       assert Jason.decode!(conn.resp_body)["error"]["code"] == -32600
+    end
+  end
+
+  describe "protocol versions" do
+    defp initialize_with(persistence, token, version) do
+      raw_post(persistence, token, %{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: %{protocolVersion: version}
+      })
+    end
+
+    defp negotiated(conn), do: Jason.decode!(conn.resp_body)["result"]["protocolVersion"]
+
+    defp ping_with(persistence, token, session_id, headers) do
+      raw_post(
+        persistence,
+        token,
+        %{jsonrpc: "2.0", id: 2, method: "ping"},
+        [{"mcp-session-id", session_id} | headers]
+      )
+    end
+
+    test "each supported version is answered with itself", %{
+      persistence: persistence,
+      token: token
+    } do
+      for version <- ["2025-11-25", "2025-06-18", "2025-03-26"] do
+        conn = initialize_with(persistence, token, version)
+        assert conn.status == 200
+        assert negotiated(conn) == version
+      end
+    end
+
+    test "an unsupported or missing version is answered with the latest", %{
+      persistence: persistence,
+      token: token
+    } do
+      for version <- ["2024-11-05", "2099-01-01", 42, nil] do
+        assert negotiated(initialize_with(persistence, token, version)) == "2025-11-25"
+      end
+    end
+
+    test "later requests carry the negotiated version, or none", %{
+      persistence: persistence,
+      token: token
+    } do
+      for version <- ["2025-11-25", "2025-06-18", "2025-03-26"] do
+        [session_id] =
+          get_resp_header(initialize_with(persistence, token, version), "mcp-session-id")
+
+        assert ping_with(persistence, token, session_id, [{"mcp-protocol-version", version}]).status ==
+                 200
+
+        assert ping_with(persistence, token, session_id, []).status == 200
+      end
+    end
+
+    test "a supported version other than the session's is a 400", %{
+      persistence: persistence,
+      token: token
+    } do
+      [session_id] =
+        get_resp_header(initialize_with(persistence, token, "2025-06-18"), "mcp-session-id")
+
+      conn = ping_with(persistence, token, session_id, [{"mcp-protocol-version", "2025-11-25"}])
+      assert conn.status == 400
+    end
+
+    test "a version this server does not speak is a 400", %{
+      persistence: persistence,
+      token: token
+    } do
+      [session_id] =
+        get_resp_header(initialize_with(persistence, token, "2025-11-25"), "mcp-session-id")
+
+      conn = ping_with(persistence, token, session_id, [{"mcp-protocol-version", "2024-11-05"}])
+      assert conn.status == 400
+    end
+  end
+
+  describe "messages without a method" do
+    test "a response the client posts is accepted with 202", %{
+      persistence: persistence,
+      token: token
+    } do
+      for message <- [
+            %{jsonrpc: "2.0", id: 5, result: %{}},
+            %{jsonrpc: "2.0", id: 5, error: %{code: -32601, message: "Method not found"}}
+          ] do
+        conn = post(persistence, token, message, [{"mcp-session-id", "abc"}])
+        assert conn.status == 202
+        assert conn.resp_body == ""
+      end
+    end
+
+    test "an object with neither a method nor a result or error is an Invalid Request", %{
+      persistence: persistence,
+      token: token
+    } do
+      for message <- [%{jsonrpc: "2.0", id: 5}, %{jsonrpc: "2.0", id: 5, method: 7}] do
+        conn = post(persistence, token, message, [{"mcp-session-id", "abc"}])
+        assert conn.status == 200
+        body = Jason.decode!(conn.resp_body)
+        assert body["id"] == 5
+        assert body["error"]["code"] == -32600
+      end
+    end
+  end
+
+  test "tools/call of an unknown tool is Invalid params, with no envelope", %{
+    persistence: persistence,
+    token: token
+  } do
+    conn =
+      post(
+        persistence,
+        token,
+        %{jsonrpc: "2.0", id: 4, method: "tools/call", params: %{name: "does_not_exist"}},
+        [{"mcp-session-id", "abc"}]
+      )
+
+    body = Jason.decode!(conn.resp_body)
+    assert body["id"] == 4
+    assert body["error"]["code"] == -32602
+    refute Map.has_key?(body, "result")
+  end
+
+  test "tools/call with a name that is not a string is Invalid params, not a 500", %{
+    persistence: persistence,
+    token: token
+  } do
+    for name <- [%{"a" => 1}, 42, nil, ["search"]] do
+      conn =
+        post(
+          persistence,
+          token,
+          %{jsonrpc: "2.0", id: 6, method: "tools/call", params: %{name: name}},
+          [{"mcp-session-id", "abc"}]
+        )
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert body["id"] == 6
+      assert body["error"]["code"] == -32602
     end
   end
 
@@ -1113,7 +1315,9 @@ defmodule Vigil.MCP.ServerTest do
       session_id = initialize!(persistence, token)
       digest = OAuth.Token.digest(token)
 
-      assert [{^session_id, ^digest, _last_active, _state}] = :ets.lookup(@sessions, session_id)
+      assert [{^session_id, ^digest, _last_active, _state, _version}] =
+               :ets.lookup(@sessions, session_id)
+
       refute digest == token
     end
   end
@@ -1262,6 +1466,7 @@ defmodule Vigil.MCP.ServerTest do
         )
 
       assert conn.status == 429
+      assert get_resp_header(conn, "retry-after") == ["60"]
     end
 
     # Each reload pulls and reparses inside the writer, so it has a budget of
