@@ -1,0 +1,13 @@
+{
+  "capabilities": {
+    "tools": {}
+  },
+  "instructions": "Voice: use the vault owner's own phrasing verbatim, do not smooth it out. What they\nsaid, in their words — when in doubt quote more rawly rather than summarize\nmore elegantly. Mark your own interpretations and suggestions explicitly as\nsuch (\"Suggestion from Claude: …\"). In five years the vault must still sound\nlike the vault owner, not like Claude.\n\nLanguage: write notes and headings in English. Established technical\nterms stay in the language they are normally used in; do not translate them\nin either direction.\n\nAtomicity: every section must stand on its own — it gets retrieved\nindividually. No \"as mentioned above\", no pronouns pointing outside the\nsection.\n\nFrugality: always search before create. Prefer appending to something that\nexists over adding a new note. Do not write summaries of things the vault\nalready contains.\n\ntype: reference = a fact about the world (does not age). decision = a fact\nabout the vault owner (ages). event = has starts/ends. When in doubt, decision.\n\nSkills: call skill_write only when explicitly told to. Never create or\nchange skills on your own initiative, not even when it seems obvious.\nSkills are instructions to Claude; writing them is the vault owner's decision, not\nClaude's.\n\n\n## Domains (_domains.yml)\n\n```yaml\nbike:      \"Gear: bike, components, equipment, maintenance\"\ntraining:  \"Body: planning, nutrition, recovery, metrics\"\nprojects:  \"Software projects. One subdirectory per project, main note = project name\"\nphantom:   \"Key without a matching directory, to exercise the drift warning\"\njournal:\n  description: \"Chronological, hidden from the default search\"\n  naming:\n    pattern: '^\\d{4}-\\d{2}-\\d{2}\\.md$'\n    scope: filename\n    suggestion: date\n    hint: \"Journal notes are named YYYY-MM-DD.md\"\n\n```",
+  "protocolVersion": "2025-11-25",
+  "serverInfo": {
+    "name": "vigil",
+    "title": "Vigil",
+    "version": "<the release version>",
+    "websiteUrl": "https://github.com/64x-lunicorn/vigil"
+  }
+}

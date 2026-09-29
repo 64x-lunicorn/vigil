@@ -86,6 +86,7 @@ bash scripts/test/grants_test.sh
 bash scripts/test/obsidian_templates_test.sh
 node scripts/test/slug_js_test.mjs
 bash scripts/test/operator_secrets_test.sh
+bash scripts/test/check_changelog_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -102,8 +103,13 @@ real one.
 `update_test.sh` drives `update.sh` against a throwaway prefix: the
 switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
 refusals that must leave the running service alone (among them an env file
-without `VIGIL_SKILLKEY_SECRET`), and the release retention
+without `VIGIL_SKILLKEY_SECRET`), the chunk-id comparison before a switch
+(the question it asks, `--accept-id-changes`), and the release retention
 rule. It needs no root, no systemd and no production paths.
+
+`check_changelog_test.sh` drives `scripts/check_changelog.sh`, the CI check
+that a change to a recorded contract carries a CHANGELOG entry, against
+throwaway branches.
 
 `secrets_test.sh` checks the secrets `init.sh` writes: that what it generates
 passes the boot check's floor for the SkillKey secret, and that the consent
@@ -158,16 +164,23 @@ write-commit-push path and shutdown:
 bash scripts/test/release_smoke.sh
 ```
 
-If your change touches the MCP tool table (`Vigil.MCP.Tools`) or the OAuth
-metadata (`Vigil.OAuth`), the recorded contracts under
-`test/fixtures/contracts/` will no longer match and the suite will say so.
-These files are what already-connected clients see, so a change to one is a
-change to a published interface. Read the diff the failure prints; if it is
-what you meant, record it and commit the updated file with the change:
+If your change touches the MCP tool table (`Vigil.MCP.Tools`), what a tool
+answers, the `initialize` result or the OAuth metadata (`Vigil.OAuth`), the
+recorded contracts under `test/fixtures/contracts/` will no longer match and
+the suite will say so. These files are what already-connected clients see, so
+a change to one is a change to a published interface. Read the diff the failure
+prints; if it is what you meant, record it and commit the updated file with the
+change:
 
 ```bash
 UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs
 ```
+
+Then name the change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) —
+CI fails a pull request that changes a recorded contract without it — and check
+[docs/compatibility.md](docs/compatibility.md) for whether it is a major, minor
+or patch change. Any change an operator or a client would notice belongs in the
+changelog too, contract file or not.
 
 These checks use throwaway fixture vaults and do not require root or a
 production installation. Do not run the root-level deployment workflow just

@@ -153,6 +153,37 @@ defmodule Vigil.Vault.Rules do
   end
 
   @doc """
+  Every chunk id this build derives from the notes in `files`, sorted: the
+  ids a reference into the vault is made of (docs/compatibility.md, "The vault
+  conventions").
+
+  Parsed with `Vigil.Parser`, as the index parses them, so a change to the
+  slug function, to the chunking or to how a colliding heading is numbered
+  shows up here. Two builds asked about the same vault answer the same list
+  exactly when neither moves an id — which is what `mix vigil.slug_diff
+  --against` compares, and why `update.sh` asks the running release for its
+  list before switching to another (`Vigil.Release.chunk_ids/0`). A note that
+  is not UTF-8 has no ids: the server skips it.
+  """
+  @spec chunk_ids(String.t(), [String.t()]) :: [String.t()]
+  def chunk_ids(vault_path, files) do
+    files
+    |> Enum.flat_map(&note_chunk_ids(vault_path, &1))
+    |> Enum.sort()
+  end
+
+  # Sobelow: rel_path is a file vigil enumerated from the vault itself.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp note_chunk_ids(vault_path, rel_path) do
+    with {:ok, content} <- File.read(Path.join(vault_path, rel_path)),
+         {:ok, file} <- Parser.parse(rel_path, content) do
+      Enum.map(file.chunks, & &1.id)
+    else
+      _unreadable -> []
+    end
+  end
+
+  @doc """
   Whether the *filename* half of `path` would move when the slug function
   changes — the other half of `heading_slug_changes/1`.
 

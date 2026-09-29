@@ -386,6 +386,18 @@ else
   fail "bin/vigil rpc reaches the running node" "$(echo "$rpc_out" | tail -3)"
 fi
 
+# update.sh asks the running release for its chunk ids before switching away
+# from it: `bin/vigil eval`, a VM of its own that loads the code and starts
+# nothing, next to the node that is serving. Its output is the list and
+# nothing else — a log line in it would be compared as an id.
+eval_out="$(env VIGIL_VAULT_PATH="$VAULT" "$RELEASE_BIN" eval 'Vigil.Release.chunk_ids()' 2>/dev/null || true)"
+if echo "$eval_out" | grep -qx "home/diacritics-äöü-café.md" &&
+  ! echo "$eval_out" | grep -q "\[warning\]\|\[info\]\|\[error\]"; then
+  pass "bin/vigil eval lists the running release's chunk ids, and only them"
+else
+  fail "bin/vigil eval lists the running release's chunk ids, and only them" "$(echo "$eval_out" | tail -3)"
+fi
+
 ## ── 4. Read path ─────────────────────────────────────────────────────────
 
 section "4/6  Read path"

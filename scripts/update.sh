@@ -4,7 +4,7 @@
 # the systemd unit only with --update-unit.
 #
 # Usage: sudo ./scripts/update.sh [--to <ref> | --rebuild] [--skip-tests --force]
-#            [--update-unit] [--rollback]
+#            [--update-unit] [--accept-id-changes] [--rollback]
 #            [--dry-run] [--non-interactive] [--verbose] [--help]
 
 # shellcheck source=scripts/lib.sh
@@ -17,6 +17,7 @@ UPDATE_UNIT=0
 ROLLBACK=0
 REBUILD=0
 TO_GIVEN=0
+ACCEPT_ID_CHANGES=0
 
 usage() {
   cat <<'EOF'
@@ -28,6 +29,9 @@ scripts/update.sh — switch code revision.
   --skip-tests          only together with --force; is logged
   --force              allows --skip-tests
   --update-unit         adopt a changed systemd unit
+  --accept-id-changes   switch even when the target moves chunk ids (without
+                        it, a change is asked about, or refused under
+                        --non-interactive)
   --rollback            go back to the previous release without building
   --dry-run             log changes with [DRY RUN] instead of applying them
   --non-interactive     run through without any prompts
@@ -64,6 +68,10 @@ while [ $# -gt 0 ]; do
       ;;
     --update-unit)
       UPDATE_UNIT=1
+      shift
+      ;;
+    --accept-id-changes)
+      ACCEPT_ID_CHANGES=1
       shift
       ;;
     --rollback)
@@ -476,6 +484,78 @@ else
 fi
 record_done "built release $(basename "$RELEASE_DIR")"
 
+## ── Chunk ids: a switch that moves a reference is asked about ───────────
+
+# A chunk id is what every stored reference into the vault is made of — a
+# `[[note#heading]]` link, an id an assistant keeps — and the contract says a
+# release only moves one in a major version, with a note in CHANGELOG.md
+# (docs/compatibility.md). Whether this switch moves any is asked of the two
+# builds themselves, on the vault as it is now: the running release lists the
+# ids it derives (`Vigil.Release.chunk_ids/0`, through `bin/vigil eval`, which
+# loads its code and starts nothing), and the target checkout, compiled for
+# the release just built, compares that list with its own
+# (`mix vigil.slug_diff --against`). Checked here, after the build and before
+# anything is switched, because the comparison needs the target compiled; the
+# running service is untouched whatever it answers.
+#
+# A change is asked about, and refused under --non-interactive (exit 2)
+# unless --accept-id-changes says the operator has read the release notes.
+# Declining is exit 4. A running release that cannot list its ids — one built
+# before it could — is compared against nothing, and that is said.
+check_chunk_ids() {
+  local running_ids exclude output
+  exclude="$(env_file_value VIGIL_EXCLUDE)"
+  # Owned by the service account, which reads it below; written by this shell.
+  running_ids="$(as_vigil mktemp)"
+
+  if ! as_vigil env VIGIL_VAULT_PATH="$VAULT" VIGIL_EXCLUDE="$exclude" \
+    "${PREVIOUS_RELEASE}/bin/vigil" eval 'Vigil.Release.chunk_ids()' >"$running_ids" 2>/dev/null; then
+    rm -f "$running_ids"
+    warn "The running release cannot list its chunk ids (a release built before Vigil.Release.chunk_ids/0 cannot), so this switch is not compared. Before a slug change: mix vigil.slug_diff <vault>."
+    return 0
+  fi
+
+  # shellcheck disable=SC2016 # $1-$3 are expanded by the inner bash -c, not here
+  if output="$(as_vigil env VIGIL_EXCLUDE="$exclude" bash -c \
+    'cd "$1" && MIX_ENV=prod mix vigil.slug_diff --against "$2" "$3"' \
+    _ "$REPO" "$running_ids" "$VAULT" 2>&1)"; then
+    rm -f "$running_ids"
+    ok "No chunk id changes: every stored reference keeps resolving."
+    return 0
+  fi
+  rm -f "$running_ids"
+  echo "$output"
+
+  if ! echo "$output" | grep -q "chunk id change(s)"; then
+    err "mix vigil.slug_diff could not compare the chunk ids (output above). The running service is untouched."
+    exit 1
+  fi
+
+  if [ "$ACCEPT_ID_CHANGES" = "1" ]; then
+    warn "Switching although chunk ids change (--accept-id-changes): references to an id marked - stop resolving."
+    return 0
+  fi
+  if [ "$NON_INTERACTIVE" = "1" ]; then
+    err "$(basename "$RELEASE_DIR") changes the chunk ids above, and references to an id marked - stop resolving. Read the release's CHANGELOG entry, then run again with --accept-id-changes to switch anyway."
+    exit 2
+  fi
+  if ! ask_yes_no "Switch anyway? References to an id marked - stop resolving." n; then
+    err "Aborted before the switch: the chunk ids would change. The running service is untouched."
+    exit 4
+  fi
+}
+
+PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
+
+if [ "$REBUILD" = "1" ]; then
+  log "Rebuild of the running commit: its chunk ids are the running release's."
+elif [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] compare the running release's chunk ids with mix vigil.slug_diff --against"
+else
+  check_chunk_ids
+fi
+record_done "compared chunk ids"
+
 ## ── Optional: adopt the systemd unit ─────────────────────────────────────
 
 UNIT_SOURCE="${REPO}/deploy/vigil.service"
@@ -561,8 +641,6 @@ roll_back_automatically() {
 ## ── Step 6 — switch over ─────────────────────────────────────────────────
 
 step "6/8  Switch over"
-
-PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
 
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] systemctl stop ${SERVICE}; symlink to $(basename "$RELEASE_DIR"); systemctl start ${SERVICE}"

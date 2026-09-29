@@ -1,0 +1,510 @@
+{
+  "append": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "create": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "create#event": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "create#linking": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "current": {
+    "content": [
+      {
+        "text": {
+          "_t": "string",
+          "result": {
+            "active": [],
+            "now": "string",
+            "recently_past": [],
+            "upcoming": []
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "current#upcoming": {
+    "content": [
+      {
+        "text": {
+          "_t": "string",
+          "result": {
+            "active": [],
+            "now": "string",
+            "recently_past": [],
+            "upcoming": [
+              {
+                "id": "string",
+                "starts_in": "string",
+                "title": "string"
+              }
+            ]
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "delete_note": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "broken_backlinks": [
+              "string"
+            ],
+            "deleted": "boolean",
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "delete_section": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "history": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "commits": [
+              {
+                "author": "string",
+                "by": "string",
+                "commit": "string",
+                "date": "string",
+                "message": "string",
+                "path": "string"
+              }
+            ],
+            "path": "string"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "links": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "id": "string",
+            "incoming": [
+              {
+                "source": "string",
+                "status": "string"
+              }
+            ],
+            "neighbors": {
+              "bike/via-carolina.md": {
+                "incoming": [
+                  {
+                    "source": "string",
+                    "status": "string"
+                  }
+                ],
+                "outgoing": [
+                  {
+                    "from_chunk": "string",
+                    "status": "string",
+                    "target": "string"
+                  }
+                ]
+              }
+            },
+            "outgoing": [],
+            "truncated": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "lint": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "duplicate_headings": [],
+            "invalid_utf8": [],
+            "orphaned_links": [],
+            "overlong_notes": [],
+            "sentence_headings": [],
+            "stale_decisions": [
+              {
+                "path": "string",
+                "updated_at": "string"
+              }
+            ],
+            "totals": {
+              "duplicate_headings": "integer",
+              "invalid_utf8": "integer",
+              "orphaned_links": "integer",
+              "overlong_notes": "integer",
+              "sentence_headings": "integer",
+              "stale_decisions": "integer"
+            },
+            "truncated": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "list": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "next_cursor": "null",
+            "notes": [
+              {
+                "id": "string",
+                "title": "string",
+                "type": "string",
+                "updated_at": "string"
+              }
+            ]
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "move_note": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "broken_backlinks": [],
+            "from": "string",
+            "pushed": "boolean",
+            "to": "string",
+            "updated_links": [
+              "string"
+            ]
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "read": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "body": "string",
+            "created_at": "string",
+            "ends": "null",
+            "links": {
+              "broken": "integer",
+              "in": "integer",
+              "out": "integer"
+            },
+            "path": "string",
+            "starts": "null",
+            "title": "string",
+            "toc": [
+              {
+                "hash": "string",
+                "heading": "string",
+                "heading_path": [
+                  "string"
+                ],
+                "id": "string"
+              }
+            ],
+            "type": "string",
+            "updated_at": "string"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "read#at": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "at": "string",
+            "body": "string",
+            "created_at": "string",
+            "ends": "null",
+            "links": {
+              "broken": "integer",
+              "in": "integer",
+              "out": "integer"
+            },
+            "path": "string",
+            "starts": "null",
+            "title": "string",
+            "toc": [
+              {
+                "hash": "string",
+                "heading": "string",
+                "heading_path": [
+                  "string"
+                ],
+                "id": "string"
+              }
+            ],
+            "type": "string",
+            "updated_at": "string"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "read#chunk": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "body": "string",
+            "created_at": "string",
+            "ends": "null",
+            "hash": "string",
+            "heading": "string",
+            "heading_path": [
+              "string"
+            ],
+            "id": "string",
+            "starts": "null",
+            "type": "string",
+            "updated_at": "string"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "read#error": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "error": "string"
+        },
+        "type": "string"
+      }
+    ],
+    "isError": "boolean"
+  },
+  "reload": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "reloaded": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "replace_section": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "rewrite_note": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "broken_chunk_links": [],
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "search": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "next_cursor": "null",
+            "results": [
+              {
+                "hub": "string",
+                "id": "string",
+                "preview": "string",
+                "score": "integer",
+                "title": "string",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "skill_list": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": [
+            {
+              "description": "string",
+              "name": "string"
+            }
+          ]
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "skill_read": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "content": "string",
+            "name": "string"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "skill_write": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "name": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "status": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "ahead": "integer",
+            "behind": "integer",
+            "healthy": "boolean",
+            "index_loaded": "boolean",
+            "last_push": "null",
+            "stale": "null",
+            "writer_answers": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  },
+  "update_frontmatter": {
+    "content": [
+      {
+        "text": {
+          "_": "string",
+          "result": {
+            "path": "string",
+            "pushed": "boolean"
+          }
+        },
+        "type": "string"
+      }
+    ]
+  }
+}

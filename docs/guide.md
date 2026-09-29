@@ -532,7 +532,10 @@ flowchart TB
    through, and why OAuth covers them, is in
    [Cloudflare Access](clients.md#cloudflare-access).
 2. **OAuth 2.1** with Authorization Code + PKCE. Dynamic Client Registration
-   and Client-ID Metadata Documents are both supported. No static bearer token.
+   and Client-ID Metadata Documents are both supported. There is no bearer
+   token in the configuration: every token is issued for a grant — by a
+   consent, or seeded by `init.sh` or `mix vigil.seed_token` (90 days by
+   default) — and each one is listed and revoked with `grants.sh`.
 3. **Scopes.** `vault` for full access, `vault:read` for read-only clients.
 4. **SkillKey.** Rotating HMAC derived from `VIGIL_SKILLKEY_SECRET`, required
    by every write tool. The secret is random bytes of its own, never the
@@ -642,12 +645,12 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_RESOURCE` | **required in prod**; `http://localhost:4000/mcp` in dev | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters** |
 | `VIGIL_SKILLKEY_SECRET` | — | SkillKey HMAC secret, **required, at least 32 random bytes**, base64 or hex (`openssl rand -base64 48`); never the consent password |
-| `VIGIL_STATE_DIR` | **required in prod**; `tmp/oauth_state` in dev | directory for the three `:dets` files |
+| `VIGIL_STATE_DIR` | **required in prod**; `tmp/oauth_state` in dev | directory for the OAuth state: three `:dets` files and `oauth_meta.dets`, their schema version (see [compatibility](compatibility.md#the-oauth-state)) |
 | `VIGIL_ALLOWED_ORIGINS` | empty | comma-separated browser origins, besides the issuer's own, that may send a request to `/mcp` and the OAuth endpoints, e.g. `http://localhost:6274`. See [browser origins](#browser-origins) |
 | `VIGIL_TRUSTED_PROXY_HEADER` | unset; `init.sh` writes `CF-Connecting-IP` | header carrying the real client address |
 | `VIGIL_TRUSTED_PROXIES` | empty; `init.sh` writes `127.0.0.1/32,::1/128` | addresses or CIDR blocks whose forwarded header is believed — for the tunnel, the loopback cloudflared connects from |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
-| `VIGIL_RATE_LIMIT_RPM` | `60` | max `tools/call` per minute per access token |
+| `VIGIL_RATE_LIMIT_RPM` | `60` | max `/mcp` requests per minute per access token — every POST (`initialize`, `tools/list`, `tools/call`, notifications, …) and every DELETE, counted once the token validates |
 | `VIGIL_RELOAD_RATE_LIMIT_RPM` | `6` | max `reload` per minute per access token, on top of the budget above |
 | `VIGIL_READ_FETCH_INTERVAL` | `60` | seconds between two fetches a read may trigger: a read adopts what was pushed from another clone at most this long after it was pushed. `0` turns fetching before reads off |
 | `VIGIL_OAUTH_RATE_LIMIT_RPM` | `30` | max `/oauth/authorize` and `/oauth/token` per minute per client address |
@@ -868,6 +871,7 @@ sudo ./scripts/update.sh                 # move to origin/main
 sudo ./scripts/update.sh --to v1.2.3     # to a specific tag or commit
 sudo ./scripts/update.sh --rollback      # back to the previous release
 sudo ./scripts/update.sh --rebuild       # the running commit again, as a new release
+sudo ./scripts/update.sh --non-interactive --accept-id-changes   # unattended, chunk id changes accepted
 ```
 
 `update.sh` builds the new code as its own release and switches by symlink
@@ -883,6 +887,22 @@ back on the running commit whenever the run does not end on the target: a red
 audit or suite, a failed build, an automatic rollback, a dry run, and
 `--rollback`. So after any `update.sh` the checkout shows what is running, and
 an update that failed can simply be run again.
+
+### Chunk ids across an update
+
+Before it switches, `update.sh` compares the chunk ids the two releases derive
+from the vault as it is: the running release lists its own (`bin/vigil eval
+'Vigil.Release.chunk_ids()'`, which starts nothing), and the target checkout
+compares that list with its own (`mix vigil.slug_diff --against`). Chunk ids
+are what stored references and `[[note#heading]]` links are made of, and a
+release moves one only in a major version (see
+[compatibility](compatibility.md#the-vault-conventions)). When one would move,
+`update.sh` prints each id that goes (`-`) and each that comes (`+`) and asks
+before switching; declining exits 4. Under `--non-interactive` it refuses with
+exit 2 unless `--accept-id-changes` is given. Read the release's
+[changelog](../CHANGELOG.md) entry before accepting. A running release built
+before `Vigil.Release.chunk_ids/0` existed cannot list its ids; the switch is
+then not compared, and `update.sh` says so.
 
 - **Logs:** `journalctl -u vigil -f`
 - **Vault state:** `git -C /var/lib/vigil/vault log --oneline -5`
@@ -906,7 +926,7 @@ the host:
 | What | Where | Losing it means |
 |---|---|---|
 | the env file | `/etc/vigil/env` | the settings, the consent password and the SkillKey secret. `init.sh` writes a new one; clients keep their grants, since [rotation revokes no token](#rotating-secrets) |
-| the OAuth state | `oauth_clients.dets`, `oauth_codes.dets` and `oauth_tokens.dets` in `VIGIL_STATE_DIR` (`/var/lib/vigil`) | every registration and every grant: each client connects and consents again, and seeded tokens are seeded again |
+| the OAuth state | `oauth_clients.dets`, `oauth_codes.dets`, `oauth_tokens.dets` and `oauth_meta.dets` (their [schema version](compatibility.md#the-oauth-state)) in `VIGIL_STATE_DIR` (`/var/lib/vigil`) | every registration and every grant: each client connects and consents again, and seeded tokens are seeded again |
 | the deploy key | `/var/lib/vigil/.ssh/id_ed25519` | the host's write access to the vault. `setup.sh` makes a new one when it is missing; register its public key in place of the old one |
 
 The env file and the deploy key are secrets: keep their copies encrypted, or
@@ -918,7 +938,8 @@ nothing has them open:
 sudo systemctl stop vigil
 sudo tar -C / -czf vigil-state-$(date -u +%F).tar.gz \
   etc/vigil/env var/lib/vigil/oauth_clients.dets var/lib/vigil/oauth_codes.dets \
-  var/lib/vigil/oauth_tokens.dets var/lib/vigil/.ssh/id_ed25519
+  var/lib/vigil/oauth_tokens.dets var/lib/vigil/oauth_meta.dets \
+  var/lib/vigil/.ssh/id_ed25519
 sudo systemctl start vigil
 ```
 
@@ -927,7 +948,9 @@ as root, tar keeps the owners and modes — then start it. Moving to a new host
 is not scripted as a restore: `init.sh` refuses an existing env file without
 `--force`, and `--force` generates both secrets anew. There, run `setup.sh`
 and `init.sh --existing-vault --keep-token` as for a new host, then put the
-three `:dets` files back and restart, and every client keeps its grant.
+four `:dets` files back and restart, and every client keeps its grant. A backup
+from an older release is read and migrated; one written by a newer release
+than the one installed is refused at boot, and says so.
 
 ### Erlang/OTP security updates
 
@@ -1321,7 +1344,7 @@ editing the vault in another tool.
 | `Permission denied (publickey)` | deploy key not registered, or registered without write access | add the key from `/var/lib/vigil/.ssh/id_ed25519.pub`, enable "Allow write access" |
 | Writes fail with "Missing or expired SkillKey" | key not passed, or older than two rotation windows | call `skill_read` on `vigil-vault-conventions` and use the key it returns — the error case returns one too |
 | `create` fails with "does not match the schema for domain" | the domain has a `naming.pattern` the path does not satisfy | the error contains a valid suggestion; or adjust `naming` in `_domains.yml` |
-| Chunk ids change unexpectedly after a deploy | the slug logic changed without checking the migration diff | run `mix vigil.slug_diff <vault>` *before* deploying |
+| Chunk ids change unexpectedly after a deploy | the switch was accepted with `--accept-id-changes` or answered yes, or the running release predated the comparison | read the release's CHANGELOG entry; `update.sh --rollback` returns to the ids the previous release derived (see [chunk ids across an update](#chunk-ids-across-an-update)) |
 | Client gets 401 | token wrong, expired or revoked (`sudo ./scripts/grants.sh list`) | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
 | A write tool answers "Read-only token: write access denied." | the token's scope is not `vault` (for example `vault:read`) | connect with a `vault` token |
 | Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client — or the client calls from its vendor's servers (Claude.ai, Claude Desktop, ChatGPT) and cannot send one | fix the Access configuration: a service token for a client on your machine, [the bypass](clients.md#the-bypass-for-cloud-connectors) for a cloud connector — never disable Access for the whole host to "solve" this |
@@ -1377,6 +1400,7 @@ lib/vigil/
 ├── rate_limit.ex        # one fixed-window limit, shared by /mcp and OAuth
 ├── uuid.ex              # UUIDv4 for the OAuth layer
 ├── vault_check.ex       # read-only vault doctor
+├── release.ex           # what update.sh asks a built release with bin/vigil eval
 ├── vault/               # the vault's own rules, all of them pure
 │   ├── policy.ex        # whether a write is allowed — one gate, check/3
 │   ├── decision.ex      # what the gate answers with, one struct per write shape
@@ -1399,7 +1423,7 @@ lib/vigil/
 
 lib/mix/tasks/
 ├── vigil.seed_token.ex  # seed an OAuth access token, 90 days by default
-├── vigil.slug_diff.ex   # migration diff for slug logic changes
+├── vigil.slug_diff.ex   # migration diff for slug logic changes; --against compares two builds' chunk ids
 └── vigil.vault_check.ex # JSON report used by init.sh
 ```
 

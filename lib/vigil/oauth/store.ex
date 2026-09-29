@@ -26,6 +26,12 @@ defmodule Vigil.OAuth.Store do
   their `client_id`, which is public. State written before that change is
   rekeyed when the tables are opened, in `init/1`.
 
+  The state dir carries the version of its format, `schema_version/0`, in
+  `oauth_meta.dets` (docs/compatibility.md, "The OAuth state"). An older
+  version, or none, is migrated when the tables are opened; a newer one is
+  refused before anything is opened or rewritten, since what a later release
+  wrote is not this one's to guess at.
+
   Everything below `over_tables/0` is private, the nineteen answers included.
   They are captured from inside this module, so the value is the only way to
   reach them and the sentence above is a fact rather than a convention.
@@ -41,6 +47,18 @@ defmodule Vigil.OAuth.Store do
   @rate_limits :oauth_rate_limits
   @cimd_cache :oauth_cimd_cache
 
+  # What the files under the state dir are, as a number a later release can
+  # tell apart (docs/compatibility.md, "The OAuth state"):
+  #
+  #   1  codes and tokens keyed by their raw value — 0.2.0 and before, which
+  #      wrote no version at all, so a state dir without one is read as this
+  #   2  codes and tokens keyed by `{:sha256, digest}` (#193)
+  #
+  # A change to a record's shape or a table's key that an older release could
+  # not read is a new number, with its migration in `init/1`.
+  @schema_version 2
+  @meta_file "oauth_meta.dets"
+
   # The cache's hour belongs to the contract, not to this adapter: the
   # in-memory one has to measure it the same way for the claims in
   # `test/vigil/oauth/persistence_test.exs` to mean one thing. How it is
@@ -54,8 +72,11 @@ defmodule Vigil.OAuth.Store do
     state_dir = Keyword.fetch!(opts, :state_dir)
 
     with :ok <- safe_mkdir_p(state_dir),
+         {:ok, found} <- stored_schema_version(state_dir),
+         :ok <- readable(found),
          :ok <- open_dets_files(state_dir),
-         :ok <- rekey_legacy_rows(state_dir) do
+         :ok <- rekey_legacy_rows(state_dir),
+         :ok <- write_schema_version(state_dir) do
       for name <- [@rate_limits, @cimd_cache] do
         if :ets.whereis(name) == :undefined do
           :ets.new(name, [:set, :named_table, :public])
@@ -64,9 +85,85 @@ defmodule Vigil.OAuth.Store do
 
       {:ok, %{}}
     else
+      {:error, {:newer_schema_version, found}} = error ->
+        Logger.error(
+          "Vigil.OAuth.Store refuses #{state_dir}: its OAuth state is schema version #{found}, " <>
+            "written by a newer vigil, and this release reads versions up to #{@schema_version}. " <>
+            "Nothing was changed. Run the newer release again, or restore a backup of the " <>
+            "state dir taken before it was installed (docs/compatibility.md)."
+        )
+
+        {:stop, {:oauth_store_init_failed, elem(error, 1)}}
+
       {:error, reason} ->
         Logger.error("Vigil.OAuth.Store failed to start: #{inspect(reason)}")
         {:stop, {:oauth_store_init_failed, reason}}
+    end
+  end
+
+  @doc """
+  The version of the state dir's format this release writes, and the newest it
+  reads. Every older one is migrated when the tables are opened.
+  """
+  @spec schema_version() :: pos_integer()
+  def schema_version, do: @schema_version
+
+  # The version the state dir says it holds, read before any table is opened:
+  # `nil` for a state dir without one — empty, or written by 0.2.0 or before.
+  # Read-only, so a state dir this release refuses is left byte for byte.
+  #
+  # Sobelow: state_dir from the operator's configuration, the name from
+  # @meta_file.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp stored_schema_version(state_dir) do
+    path = Path.join(state_dir, @meta_file)
+
+    if File.exists?(path) do
+      case :dets.open_file(make_ref(), file: String.to_charlist(path), access: :read) do
+        {:ok, meta} ->
+          found = :dets.lookup(meta, :schema_version)
+          :ok = :dets.close(meta)
+
+          case found do
+            [{:schema_version, version}] -> {:ok, version}
+            [] -> {:ok, nil}
+          end
+
+        {:error, reason} ->
+          {:error, {:dets_open_failed, path, reason}}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp readable(nil), do: :ok
+
+  defp readable(version) when is_integer(version) and version in 1..@schema_version//1,
+    do: :ok
+
+  defp readable(version) when is_integer(version) and version > @schema_version,
+    do: {:error, {:newer_schema_version, version}}
+
+  defp readable(version), do: {:error, {:unknown_schema_version, version}}
+
+  # Written after every migration has run, so a boot interrupted before it
+  # finds the old version, or none, and migrates again.
+  #
+  # Sobelow: state_dir from the operator's configuration, the name from
+  # @meta_file.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp write_schema_version(state_dir) do
+    path = Path.join(state_dir, @meta_file)
+
+    with {:ok, meta} <- :dets.open_file(make_ref(), file: String.to_charlist(path), type: :set) do
+      File.chmod(path, 0o600)
+
+      result =
+        with :ok <- :dets.insert(meta, {:schema_version, @schema_version}), do: :dets.sync(meta)
+
+      :ok = :dets.close(meta)
+      result
     end
   end
 

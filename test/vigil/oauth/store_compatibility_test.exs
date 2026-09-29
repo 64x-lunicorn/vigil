@@ -6,9 +6,10 @@ defmodule Vigil.OAuth.StoreCompatibilityTest do
   release and leaves the state dir alone (`scripts/test/update_test.sh`). So
   the first thing the new code does is open `.dets` files the *old* code wrote,
   and every client that was connected before the deploy authenticates with a
-  token that was minted before it. There is no migration step and no version
-  marker in those files — the only thing standing between a changed record
-  shape and "Claude cannot connect any more" is that somebody thought about it.
+  token that was minted before it. The files carry no version before 1.0 —
+  `oauth_meta.dets` records one since (`Vigil.OAuth.StoreSchemaVersionTest`) —
+  so for this fixture the only thing standing between a changed record shape
+  and "Claude cannot connect any more" is that somebody thought about it.
 
   `test/fixtures/oauth_store_pre_seam/` is a store written at ccc42a6, the
   commit before the OAuth persistence seam was drawn (#135) — the change most

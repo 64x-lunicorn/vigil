@@ -1,9 +1,12 @@
 # OAuth 2.1
 
-vigil is its own authorization server. There is no static bearer token: every
-client authenticates through a standard OAuth 2.1 Authorization Code flow with
-PKCE, registering either via Dynamic Client Registration or via a Client-ID
-Metadata Document.
+vigil is its own authorization server. Every client authenticates through a
+standard OAuth 2.1 Authorization Code flow with PKCE, registering either via
+Dynamic Client Registration or via a Client-ID Metadata Document. There is no
+bearer token in the configuration: the one exception to a consent is a token
+the operator seeds for a grant of its own (`init.sh`, `mix vigil.seed_token`,
+90 days by default), which is stored, listed and revoked like any other (see
+"Revoking a grant" below).
 
 This document describes the implemented surface. The code in
 [`lib/vigil/oauth/`](../lib/vigil/oauth/) and
@@ -745,7 +748,13 @@ client that has it.
 ## Storage and cleanup
 
 Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
-`oauth_clients.dets`, `oauth_codes.dets`, `oauth_tokens.dets`.
+`oauth_clients.dets`, `oauth_codes.dets`, `oauth_tokens.dets` — and a fourth,
+`oauth_meta.dets`, holding the schema version of the other three
+(`Vigil.OAuth.Store.schema_version/0`, currently 2: codes and tokens under
+their digest). The store reads it before it opens anything: a state dir
+without one, or with an older one, is migrated and marked; one marked newer
+than the release knows is refused, and left as it is
+([compatibility](compatibility.md#the-oauth-state)).
 `:dets.sync/1` after every write — the write rate is low enough that it does
 not matter, and a token lost to a crash costs one re-authorization.
 

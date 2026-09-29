@@ -197,6 +197,8 @@ Start with the [deployment guide](docs/guide.md#deploy-on-a-server), then read
 | [Design](docs/design.md) | Explore the architecture, trade-offs and deliberate non-goals. |
 | [CI/CD](docs/ci-cd.md) | Ship a version, see what guards `main` and releases, and run the same gate locally. |
 | [OAuth](docs/oauth.md) | Integrate a client or inspect the authentication flow. |
+| [Compatibility](docs/compatibility.md) | See what vigil 1.0 keeps stable — tools, settings, state, vault conventions, scripts — and how it deprecates. |
+| [Changelog](CHANGELOG.md) | Read what changed in each release, and what to do when upgrading. |
 | [Project history](docs/history.md) | Follow implementation decisions and lessons learned. |
 | [Contributing](CONTRIBUTING.md) | Set up development, run checks and submit a focused change. |
 | [Security policy](SECURITY.md) | Report a vulnerability privately, see supported versions and response targets, or review deployment precautions. |

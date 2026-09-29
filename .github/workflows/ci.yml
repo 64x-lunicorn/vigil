@@ -350,11 +350,38 @@ jobs:
       - name: The operator scripts never expose a secret
         run: bash scripts/test/operator_secrets_test.sh
 
+      # The check the contracts job below runs, against throwaway branches.
+      - name: check_changelog.sh finds a contract change without an entry
+        run: bash scripts/test/check_changelog_test.sh
+
       # The release packaging release.yml runs: the same release gives the
       # same tarball bytes, with the notices inside and nothing of the
       # packaging machine's owner, times or umask.
       - name: package_release.sh packs a release deterministically
         run: bash scripts/test/package_release_test.sh
+
+  # A recorded contract (test/fixtures/contracts/) is what connected clients
+  # are handed, and docs/compatibility.md says every change to one is named in
+  # CHANGELOG.md. A pull request or a merge group that changes one without
+  # touching CHANGELOG.md fails here. A push to main and a release run have no
+  # base to compare against; they passed this as a pull request.
+  contracts:
+    name: Contract changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The base commit has to be here for the three-dot diff.
+          fetch-depth: 0
+
+      - name: A contract change carries a CHANGELOG entry
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: bash scripts/check_changelog.sh "$BASE_SHA" HEAD
 
   release-smoke:
     name: Release smoke test
@@ -489,7 +516,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [test, static, sobelow, scripts, release-smoke, workflows, secrets]
+    needs: [test, static, sobelow, scripts, contracts, release-smoke, workflows, secrets]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

@@ -888,8 +888,9 @@ comes back, what the success report says, and what object a push failure names. 
 links before against the rebuilt index after — is asked before the effect and
 answered against the index it left behind, so that no action has to be a
 special case of the sequence. If the push fails the local commit stays and the
-tool returns an error naming what is committed locally but not pushed — the
-change, the deletion, or the move. Nothing is rolled back. A failed *commit* is
+tool still answers success, with `pushed: false` and a `push_error` naming what
+is committed locally but not pushed — the change, the deletion, or the move —
+so a client does not retry a write that happened. Nothing is rolled back. A failed *commit* is
 the opposite case: everything is (see "A failed commit leaves the vault as it
 was").
 
@@ -967,8 +968,9 @@ that same store rather than from the default one — a skill read answered
 against another writer's vault is a read of the wrong vault. It defaults to
 `Vigil.Store.default_name/0`, so production hands in no name and reaches its
 own registration, and the atom is stated once, where the writer registers it,
-rather than once per caller. What still names no store is `Vigil.MCP.Envelope`
-and `Vigil.MCP.Server`.
+rather than once per caller. `Vigil.MCP.Envelope.for_tool/5` is handed the
+same store the call is, and `Vigil.MCP.Server` resolves it once, at `init/1`,
+for both (see "The router names the writer, and the envelope with it").
 
 **A failed write never takes the server down.** Filesystem errors are converted
 to error tuples and never allowed to propagate into the GenServer. One failed
@@ -2267,6 +2269,72 @@ of starting it, so the new secrets are live.
 
 ---
 
+## What vigil keeps stable
+
+From 1.0 the version number is a promise, and
+[compatibility.md](compatibility.md) is its text: which parts are kept stable
+(the tools, `initialize`, the OAuth metadata and scopes, the settings, the
+OAuth state, the vault conventions, the operator scripts), what a major, minor
+or patch change to each is, and how something is deprecated.
+`CHANGELOG.md` names every change to one of them. What is decided here is how
+the code is held to it.
+
+**What a client is handed is recorded, and recording it needs a changelog
+entry.** The tool list, the `initialize` result and the two OAuth metadata
+documents are recorded as they are served. Tool results are recorded as
+*shapes* — every string `"string"`, a list as the merged shape of its items —
+driven through `/mcp` against the fixture vault: the values belong to the
+fixture, the keys and types are what a client parses. `serverInfo.version` is
+recorded as a placeholder, since it changes with every release by design. CI's
+"Contract changes" job diffs a pull request (or a merge group) against its base
+with three dots and fails when a file under `test/fixtures/contracts/` changed
+and `CHANGELOG.md` did not. It is a script, `scripts/check_changelog.sh`, so
+it runs the same locally; a push to main has no base to compare with and
+passed it as a pull request.
+
+**The OAuth state says which version it is, in a file of its own.**
+`oauth_meta.dets` holds `{:schema_version, 2}`; version 1 — and a state dir
+with no version at all, which is what 0.2.0 and everything before wrote — keys
+codes and tokens by their raw value, version 2 by their digest. A reserved key
+inside one of the three tables was the alternative and was rejected: every walk
+over a table (the janitor's sweep, `grants.sh`'s listings, `revoke_all`) would
+have to know to step around it. The version is read before any table is
+opened, and read-only: a newer one than the release knows refuses the start
+with both numbers and the state dir in the journal, and leaves every file as
+it was, so the newer release still finds its state when it runs again. An older
+one, or none, is migrated and then marked; the marker is written last, so a
+boot interrupted in between migrates again. The digest rekeying still runs on
+every open, whatever the marker says: `init.sh --keep-token` carries an old
+instance's `oauth_tokens.dets` into a state dir, and raw keys can arrive under
+a version-2 marker that way.
+
+**A switch that moves a chunk id is asked about.** Which ids a release derives
+is a property of the release, so the comparison asks the two releases, on the
+vault as it is now: the running one through `bin/vigil eval
+'Vigil.Release.chunk_ids()'` (a VM of its own that loads the code, starts
+nothing and prints only the ids), the target through `mix vigil.slug_diff
+--against` in the checkout. It runs after the build, before anything is
+switched, because the target has to be compiled — for the release, so the
+comparison costs no compile of its own. The vault and `VIGIL_EXCLUDE` are
+handed to both in the environment, so both walk the same notes whether or not
+`eval` read `config/runtime.exs`. A change is shown id by id and asked about;
+under `--non-interactive` it is refused (exit 2) unless `--accept-id-changes`
+is given, and declining is exit 4, the running service untouched either way.
+A running release built before `Vigil.Release` existed cannot answer; the
+switch is then not compared, and `update.sh` says so rather than refusing
+every first update to 1.0. `mix vigil.slug_diff` now evaluates
+`config/runtime.exs` (`app.config`) as well: without it the task never saw
+`VIGIL_EXCLUDE` on a real run and walked excluded directories.
+
+**The notices are held to the lock by the suite.** `THIRD_PARTY_NOTICES.md` is
+written by hand and `mix.lock` by Mix and Dependabot, so the notices lagged a
+`tz` bump. `test/vigil/third_party_notices_test.exs` compares every row's
+package and version with the lock, both ways; it runs in CI's test job with
+the rest of the suite rather than as a script of its own, since reading the
+lock is a `Code.eval_file/1`.
+
+---
+
 ## No audit log — the history is read, not kept
 
 Every write is a commit, authored `vigil <vigil@local>`, and a human's edits
@@ -2340,3 +2408,7 @@ magnitude further out.
 **Slug changes are breaking changes.** Because chunk ids derive from headings,
 editing a heading changes its id and breaks stored references to it.
 `mix vigil.slug_diff` makes the blast radius visible; nothing makes it zero.
+A release that changes how ids are derived is a major version
+(docs/compatibility.md), and `update.sh` compares the running release's ids
+with the target's on the real vault before it switches (see "What vigil keeps
+stable").

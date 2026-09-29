@@ -22,7 +22,9 @@ hopeful ones.
 Shipping is a tag. Nothing else.
 
 ```bash
-# 1. Bump the version in mix.exs, commit, merge to main.
+# 1. Bump the version in mix.exs, rename "## [Unreleased]" in CHANGELOG.md to
+#    the version and today's date, open a new empty "Unreleased" above it,
+#    commit, merge to main.
 # 2. Tag the merged commit with a signed tag and push it.
 git tag -s v0.2.0 -m v0.2.0
 git push origin v0.2.0
@@ -146,6 +148,7 @@ release.
 | **Static analysis** | Credo finds no issues; Dialyzer finds no new type errors. |
 | **Security scan** | Sobelow finds nothing that was not triaged, and its SARIF goes to the repository's Security tab. See below. |
 | **Deployment scripts** | ShellCheck is clean, `init.sh --check-only` is still strictly read-only, `update.sh` switches over, rolls back and prunes releases correctly, and each of `verify()`'s twelve checks decides both outcomes correctly. |
+| **Contract changes** | A pull request or merge group that changes a recorded contract under `test/fixtures/contracts/` also changes `CHANGELOG.md` ([`check_changelog.sh`](../scripts/check_changelog.sh)). See below. |
 | **Release smoke test** | A real production release boots and serves. See below. |
 | **Workflow lint** | actionlint and zizmor, both verified before they run: the pipeline's own configuration is checked like code. |
 | **Secret scan** | gitleaks over the full history, not just the diff. |
@@ -409,8 +412,9 @@ carries its reason:
 
 **Behaviour.** `mix test`, in `MIX_ENV=test` against the fixture vault.
 
-**Published interfaces.** The MCP tool list and the two OAuth metadata
-documents are recorded verbatim under
+**Published interfaces.** The MCP tool list, the `initialize` result, the
+shape of every tool's result and the two OAuth metadata documents are recorded
+under
 [`test/fixtures/contracts/`](../test/fixtures/contracts/) and compared byte for
 byte by
 [`contracts_test.exs`](../test/vigil/contracts_test.exs). These documents are
@@ -419,7 +423,18 @@ reordered enum or a dropped field is a one-line change here and a broken client
 out there. A test that asserts field by field cannot see it: such a test only
 knows about the fields somebody thought to name in it. Recording a change is
 deliberate — `UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs` — and
-the diff in the pull request is the review of the interface change.
+the diff in the pull request is the review of the interface change. The
+"Contract changes" job then holds the pull request to naming it in
+`CHANGELOG.md` ([`scripts/check_changelog.sh`](../scripts/check_changelog.sh),
+diffing against the base with three dots; run it locally as
+`bash scripts/check_changelog.sh origin/main`), and
+[compatibility.md](compatibility.md) says whether it is a major, minor or
+patch change.
+
+**Notices.** `THIRD_PARTY_NOTICES.md` lists every locked Hex package at its
+locked version, and
+[`third_party_notices_test.exs`](../test/vigil/third_party_notices_test.exs)
+fails the Test job when a dependency bump leaves it behind.
 
 **Boot and runtime.**
 [`scripts/test/release_smoke.sh`](../scripts/test/release_smoke.sh) is the

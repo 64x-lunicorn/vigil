@@ -98,6 +98,16 @@ case "${1:-}" in
   deps.audit)
     echo "No vulnerabilities found."
     ;;
+  vigil.slug_diff)
+    # vigil.slug_diff --against <ids-file> <vault>: records the list the
+    # running release gave, and answers a change when the test says so.
+    echo "slug_diff saw: $(cat "${3:-/nonexistent}" 2>/dev/null) exclude=${VIGIL_EXCLUDE:-} env=${MIX_ENV:-}" >>"${FAKE_MIX_LOG}"
+    if [ -f "${FAKE_SLUG_DIFF_CHANGES:-/nonexistent}" ]; then
+      printf '2 chunk id change(s):\n\n  - note.md#oil-1\n  + note.md#oil-2\n'
+      exit 1
+    fi
+    echo "No chunk id changes (1 ids compared)."
+    ;;
   release)
     # A release here is a directory with a bin/vigil in it, which is all the
     # switchover touches.
@@ -115,13 +125,29 @@ case "${1:-}" in
       exit 1
     fi
     mkdir -p "${path}/bin"
-    echo "#!/bin/sh" >"${path}/bin/vigil"
-    chmod +x "${path}/bin/vigil"
+    cp "$(dirname "$0")/release-bin" "${path}/bin/vigil"
     ;;
 esac
 exit 0
 MIX
   chmod +x "${BIN}/mix"
+
+  # A release's bin/vigil, as the fake build above and make_release below
+  # write it: `eval` is the only command update.sh gives it
+  # outside systemd, and it answers with the chunk ids the running release
+  # derives — one id naming the release, so the test can see whose list
+  # reached the comparison. A release holding .no-chunk-ids is one built
+  # before Vigil.Release.chunk_ids/0 existed.
+  cat >"${BIN}/release-bin" <<'REL'
+#!/bin/sh
+release="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${1:-}" = "eval" ]; then
+  [ -f "${release}/.no-chunk-ids" ] && exit 1
+  echo "note.md#seen-by-$(basename "$release") vault=${VIGIL_VAULT_PATH:-}"
+fi
+exit 0
+REL
+  chmod +x "${BIN}/release-bin"
 }
 
 # A `systemd-analyze` that accepts every unit it is asked to verify and scores
@@ -192,7 +218,7 @@ build_vault() {
 make_release() {
   local name="$1" healthy="${2:-healthy}"
   mkdir -p "${PREFIX}/releases/${name}/bin"
-  echo "#!/bin/sh" >"${PREFIX}/releases/${name}/bin/vigil"
+  cp "${BIN}/release-bin" "${PREFIX}/releases/${name}/bin/vigil"
   git -C "${PREFIX}/repo" rev-parse "$OLD_SHA" >"${PREFIX}/releases/${name}/REVISION"
   [ "$healthy" = "broken" ] && touch "${PREFIX}/releases/${name}/.verify-fails"
   echo "${PREFIX}/releases/${name}"
@@ -295,7 +321,8 @@ run_update() {
     FAKE_MIX_RELEASE_FAILS="${FAKE_MIX_RELEASE_FAILS:-/nonexistent}" \
     FAKE_SA_LOG="${WORK}/systemd-analyze.log" \
     FAKE_SA_EXPOSED="${FAKE_SA_EXPOSED:-/nonexistent}" \
-    bash "$UPDATE_SH" "$@" >"${WORK}/out.log" 2>&1
+    FAKE_SLUG_DIFF_CHANGES="${FAKE_SLUG_DIFF_CHANGES:-/nonexistent}" \
+    bash "$UPDATE_SH" "$@" <"${UPDATE_STDIN:-/dev/null}" >"${WORK}/out.log" 2>&1
   local rc=$?
   set -e
   echo "$rc"
@@ -882,6 +909,93 @@ assert_eq "--rebuild --to exits 2" "2" "$RC"
 RC="$(run_update --rebuild --rollback --non-interactive)"
 assert_eq "--rebuild --rollback exits 2" "2" "$RC"
 assert_eq "current is unchanged" "v0" "$(current_release)"
+
+## ── 12. Chunk ids ────────────────────────────────────────────────────────
+
+section "12   The running release's chunk ids are compared with the target's"
+
+build_host
+echo "VIGIL_EXCLUDE=private" >>"$ENV_FILE"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "no change: exits 0" "0" "$RC"
+assert_eq "and switches" "$NEW_SHA" "$(current_release)"
+if grep -q "^slug_diff saw: note.md#seen-by-v0 vault=${VAULT} exclude=private env=prod$" "$FAKE_MIX_LOG"; then
+  pass "the running release's list of the vault, with its exclusions, reached the target's comparison"
+else
+  fail "the running release's list of the vault, with its exclusions, reached the target's comparison" \
+    "mix log: $(grep slug_diff "$FAKE_MIX_LOG" || echo none)"
+fi
+
+section "12b  A change is refused under --non-interactive without --accept-id-changes"
+
+build_host
+touch "${WORK}/slug-diff-changes"
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 2" "2" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+assert_eq "the service was never cycled" "(none)" "$(systemctl_calls)"
+assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+if grep -q -- "- note.md#oil-1" "${WORK}/out.log" && grep -q -- "--accept-id-changes" "${WORK}/out.log"; then
+  pass "names the ids that would move and the flag that accepts it"
+else
+  fail "names the ids that would move and the flag that accepts it" "$(tail -5 "${WORK}/out.log")"
+fi
+
+section "12c  --accept-id-changes switches anyway"
+
+build_host
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" run_update --to "$NEW_SHA" --non-interactive --accept-id-changes)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+
+section "12d  Asked interactively, no aborts and yes switches"
+
+build_host
+echo "n" >"${WORK}/answer"
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" UPDATE_STDIN="${WORK}/answer" run_update --to "$NEW_SHA")"
+assert_eq "declined: exits 4" "4" "$RC"
+assert_eq "declined: current is unchanged" "v0" "$(current_release)"
+assert_eq "declined: the service was never cycled" "(none)" "$(systemctl_calls)"
+
+build_host
+echo "y" >"${WORK}/answer"
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" UPDATE_STDIN="${WORK}/answer" run_update --to "$NEW_SHA")"
+assert_eq "accepted: exits 0" "0" "$RC"
+assert_eq "accepted: current points at the new release" "$NEW_SHA" "$(current_release)"
+rm -f "${WORK}/slug-diff-changes"
+
+section "12e  A running release that cannot list its ids is not compared, and that is said"
+
+build_host
+touch "${PREFIX}/releases/v0/.no-chunk-ids"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+if grep -q "cannot list its chunk ids" "${WORK}/out.log"; then
+  pass "says the switch was not compared"
+else
+  fail "says the switch was not compared" "$(grep -i chunk "${WORK}/out.log" || echo none)"
+fi
+if grep -q "slug_diff" "$FAKE_MIX_LOG"; then
+  fail "the target was not asked to compare against nothing"
+else
+  pass "the target was not asked to compare against nothing"
+fi
+
+section "12f  --rebuild moves no id and compares nothing"
+
+build_host
+RC="$(run_update --rebuild --non-interactive)"
+assert_eq "exits 0" "0" "$RC"
+if grep -q "slug_diff" "$FAKE_MIX_LOG"; then
+  fail "no comparison for the running commit"
+else
+  pass "no comparison for the running commit"
+fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────
 
