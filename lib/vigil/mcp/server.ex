@@ -23,11 +23,12 @@ defmodule Vigil.MCP.Server do
 
   # What this router and the authorization server it forwards to must decide
   # against the same values: where the records are kept, where the windows are
-  # counted, and what this deployment says it is. Named once, so handing one
-  # down and reading it back are the same list rather than two that have to be
-  # kept in step.
-  @shared_with_oauth [:persistence, :limiter, :settings]
+  # counted, what this deployment says it is, and which browser origins may
+  # send a request to either. Named once, so handing one down and reading it
+  # back are the same list rather than two that have to be kept in step.
+  @shared_with_oauth [:persistence, :limiter, :settings, :origins]
 
+  plug(:check_origin)
   plug(:match)
   plug(:dispatch)
 
@@ -90,8 +91,24 @@ defmodule Vigil.MCP.Server do
     |> put_private(:oauth_persistence, opts[:persistence])
     |> put_private(:oauth_opts, opts[:oauth])
     |> put_private(:settings, opts[:settings])
+    |> put_private(:origins, opts[:origins])
     |> super(opts)
   end
+
+  # A browser on another site must not reach `/mcp` (`Vigil.Origin`), and the
+  # transport says so: MUST validate `Origin`, 403 when it is present and
+  # invalid. Checked before the route runs — before the token is looked at and
+  # before the body is read. Every other path is the authorization server's,
+  # which checks its own, against the same origins.
+  defp check_origin(%{path_info: ["mcp"]} = conn, _opts) do
+    if Vigil.Origin.allowed?(conn, conn.private.origins) do
+      conn
+    else
+      conn |> send_resp(403, "") |> halt()
+    end
+  end
+
+  defp check_origin(conn, _opts), do: conn
 
   ## Routes — MCP
 

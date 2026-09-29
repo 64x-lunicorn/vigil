@@ -41,6 +41,15 @@ config :vigil,
     |> String.split(",", trim: true)
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == "")),
+  # Browser origins besides the issuer's own that may send a request to `/mcp`
+  # and the authorization server. Empty by default: a request with no `Origin`
+  # (a program) and one from the issuer's origin (the consent form) are
+  # allowed regardless, and every other browser origin is refused with 403.
+  allowed_origins:
+    System.get_env("VIGIL_ALLOWED_ORIGINS", "")
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == "")),
   issuer: System.get_env("VIGIL_ISSUER", "http://localhost:4000"),
   resource: System.get_env("VIGIL_RESOURCE", "http://localhost:4000/mcp"),
   auth_password: System.get_env("VIGIL_AUTH_PASSWORD"),

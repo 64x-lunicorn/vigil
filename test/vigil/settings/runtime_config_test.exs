@@ -24,7 +24,7 @@ defmodule Vigil.Settings.RuntimeConfigTest do
   @touched Map.keys(@prod_env) ++
              ~w(VIGIL_PORT VIGIL_TZ VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
                 VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
-                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM)
+                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_ALLOWED_ORIGINS)
 
   setup do
     previous = Map.new(@touched, &{&1, System.get_env(&1)})
@@ -81,5 +81,20 @@ defmodule Vigil.Settings.RuntimeConfigTest do
 
     assert {:error, messages} = Check.check(prod_config())
     assert Enum.any?(messages, &(&1 =~ "VIGIL_ISSUER"))
+  end
+
+  test "the allowed origins arrive as a list, and a bad one is refused by name" do
+    assert {:ok, %{allowed_origins: []}} = Check.check(prod_config())
+
+    System.put_env("VIGIL_ALLOWED_ORIGINS", " https://claude.ai, http://localhost:6274 ,")
+
+    assert {:ok, %{allowed_origins: ["https://claude.ai", "http://localhost:6274"]}} =
+             Check.check(prod_config())
+
+    System.put_env("VIGIL_ALLOWED_ORIGINS", "https://claude.ai,claude.ai")
+
+    assert {:error, [message]} = Check.check(prod_config())
+    assert message =~ "VIGIL_ALLOWED_ORIGINS"
+    assert message =~ ~s("claude.ai")
   end
 end

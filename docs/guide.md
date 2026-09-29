@@ -415,6 +415,10 @@ flowchart TB
 5. **Rate limiting**, fixed window — per access token behind `/mcp`, per
    client address in front of the authorization server.
 
+Before layers 2 to 5, every request to `/mcp` and every POST to the
+authorization server has its `Origin` checked, and one sent by a page on
+another site is refused with 403 — see [browser origins](#browser-origins).
+
 Layer 5 is the one to read carefully, because there are three limits and they
 cover different things:
 
@@ -457,6 +461,7 @@ All settings come from environment variables in `/etc/vigil/env`
 | `VIGIL_RESOURCE` | **required in prod**; `http://localhost:4000/mcp` in dev | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |
 | `VIGIL_STATE_DIR` | **required in prod**; `tmp/oauth_state` in dev | directory for the three `:dets` files |
+| `VIGIL_ALLOWED_ORIGINS` | empty | comma-separated browser origins, besides the issuer's own, that may send a request to `/mcp` and the OAuth endpoints, e.g. `http://localhost:6274`. See [browser origins](#browser-origins) |
 | `VIGIL_TRUSTED_PROXY_HEADER` | unset | header carrying the real client address, e.g. `CF-Connecting-IP` |
 | `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
@@ -478,6 +483,9 @@ failed and what it expected, all in one message:
 - `VIGIL_TZ` must be a timezone name the timezone database knows, such as
   `Europe/Berlin`. An unknown one is refused rather than quietly becoming UTC.
 - `VIGIL_BIND` must be an IP address.
+- Every entry in `VIGIL_ALLOWED_ORIGINS` must be an origin — scheme and host,
+  an optional port, no path: `https://claude.ai`, not `claude.ai` or
+  `https://claude.ai/mcp`.
 - `VIGIL_AUTH_PASSWORD` must be at least 12 characters. The message names the
   variable and never shows the value.
 - In prod, `VIGIL_ISSUER` and `VIGIL_RESOURCE` must be `https` URLs, and the
@@ -490,6 +498,29 @@ failed and what it expected, all in one message:
 The last two only affect the instructions handed to the MCP client on connect.
 If your vault is in German, set `VIGIL_VAULT_LANGUAGE=German` and the assistant
 will keep writing German notes.
+
+### Browser origins
+
+A browser that sends a request to another site says which site's page sent it,
+in the `Origin` header, and a page cannot change what that says. vigil uses it
+to refuse a request a page on some other site got a browser to make — through
+DNS rebinding onto a server bound to `127.0.0.1`, most of all, which is the
+local quickstart. `/mcp` and the OAuth endpoints that change something
+(`register`, the consent form's POST, `token`) answer such a request 403,
+before anything else is looked at.
+
+Three kinds of request pass:
+
+- one with no `Origin` at all: Claude, Claude Code and every other MCP client
+  that is a program rather than a web page;
+- one from the issuer's own origin: the consent form posting back to where it
+  was served from;
+- one from an origin listed in `VIGIL_ALLOWED_ORIGINS`.
+
+Leave the list empty unless a browser-based client talks to vigil directly —
+the MCP Inspector's web UI, say, at `http://localhost:6274`. An origin is
+scheme, host and port: `http://localhost:4000` and `http://127.0.0.1:4000` are
+two, so open the consent page on the host `VIGIL_ISSUER` names.
 
 ### The two proxy settings, and why they default to unset
 

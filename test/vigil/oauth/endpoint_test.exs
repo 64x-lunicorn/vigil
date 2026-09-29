@@ -131,6 +131,106 @@ defmodule Vigil.OAuth.EndpointTest do
     assert body["authorization_servers"] == [@settings.issuer]
   end
 
+  ## Origin
+
+  # The three POST endpoints, each with a request it would answer with
+  # something other than 403 — a registration, a consent with no client, an
+  # unknown code — so that a 403 can only be the origin check's.
+  @posts [
+    {"/oauth/register", :json},
+    {"/oauth/authorize", :form},
+    {"/oauth/token", :form}
+  ]
+
+  defp post_from(endpoint, path, kind, origin, via \\ &call/2) do
+    conn =
+      case kind do
+        :json ->
+          conn(
+            :post,
+            path,
+            Jason.encode!(%{client_name: "Test", redirect_uris: ["https://claude.ai/cb"]})
+          )
+          |> put_req_header("content-type", "application/json")
+
+        :form ->
+          conn(:post, path, URI.encode_query(%{"grant_type" => "authorization_code"}))
+          |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      end
+
+    conn = if origin, do: put_req_header(conn, "origin", origin), else: conn
+    via.(conn, endpoint)
+  end
+
+  test "a POST with no Origin, from the issuer's or from a listed origin is answered", %{
+    persistence: persistence
+  } do
+    endpoint =
+      endpoint(
+        persistence: persistence,
+        origins: Vigil.Origin.allowed(@settings.issuer, ["https://claude.ai"])
+      )
+
+    for {path, kind} <- @posts, origin <- [nil, @settings.issuer, "https://claude.ai"] do
+      assert post_from(endpoint, path, kind, origin).status != 403, "#{path} #{origin}"
+    end
+  end
+
+  test "a POST from any other origin is refused with 403", %{endpoint: endpoint} do
+    for {path, kind} <- @posts,
+        origin <- ["https://claude.ai", "https://evil.example", "http://127.0.0.1:4000", "null"] do
+      assert post_from(endpoint, path, kind, origin).status == 403, "#{path} #{origin}"
+    end
+  end
+
+  test "the origins are read from the settings when none are handed in", %{
+    persistence: persistence
+  } do
+    endpoint = OAuth.Endpoint.init(persistence: persistence, settings: @settings)
+
+    assert endpoint[:origins] ==
+             Vigil.Origin.allowed(
+               @settings.issuer,
+               Application.fetch_env!(:vigil, :allowed_origins)
+             )
+  end
+
+  test "a refused POST is not counted against the rate limit", %{persistence: persistence} do
+    endpoint = endpoint(persistence: persistence, limits: budgets(%{register: 1}))
+
+    assert post_from(endpoint, "/oauth/register", :json, "https://evil.example").status == 403
+    assert post_from(endpoint, "/oauth/register", :json, "https://evil.example").status == 403
+    assert post_from(endpoint, "/oauth/register", :json, nil).status == 201
+  end
+
+  test "the consent form's refusal is a page a browser renders", %{endpoint: endpoint} do
+    conn = post_from(endpoint, "/oauth/authorize", :form, "https://evil.example")
+
+    assert conn.status == 403
+    assert get_resp_header(conn, "content-type") == ["text/html; charset=utf-8"]
+    assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+  end
+
+  test "the check holds when Vigil.MCP.Server forwards the request", %{endpoint: endpoint} do
+    for {path, kind} <- @posts do
+      assert post_from(endpoint, path, kind, "https://evil.example", &server_call/2).status ==
+               403
+
+      assert post_from(endpoint, path, kind, @settings.issuer, &server_call/2).status != 403
+    end
+  end
+
+  test "a GET is not checked: discovery and the consent page are read, not changed", %{
+    endpoint: endpoint
+  } do
+    conn =
+      conn(:get, "/.well-known/oauth-authorization-server")
+      |> put_req_header("origin", "https://evil.example")
+      |> call(endpoint)
+
+    assert conn.status == 200
+  end
+
   ## Discovery
 
   test "both protected-resource discovery paths return identical JSON, no auth required", %{

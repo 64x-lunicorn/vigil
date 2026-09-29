@@ -22,6 +22,7 @@ defmodule Vigil.Settings.CheckTest do
     issuer: "https://vault.example.org",
     resource: "https://vault.example.org/mcp",
     auth_password: "correct-horse-battery-staple",
+    allowed_origins: [],
     skillkey_ttl_seconds: 3600,
     rate_limit_rpm: 60,
     reload_rate_limit_rpm: 6,
@@ -126,6 +127,25 @@ defmodule Vigil.Settings.CheckTest do
                  issuer: "http://localhost:4000",
                  resource: "http://localhost:4000/mcp"
                )
+    end
+  end
+
+  describe "the allowed origins" do
+    test "none is fine, and listed ones come back serialized" do
+      assert {:ok, %{allowed_origins: []}} = check_with([])
+
+      assert {:ok, %{allowed_origins: ["https://claude.ai", "http://localhost:6274"]}} =
+               check_with(allowed_origins: ["https://Claude.ai/", "http://localhost:6274"])
+    end
+
+    test "an entry that is not an origin is refused, naming the variable and the entry" do
+      assert [message] =
+               refused(allowed_origins: ["https://claude.ai", "claude.ai", "https://x.org/mcp"])
+
+      assert message =~ "VIGIL_ALLOWED_ORIGINS"
+      assert message =~ ~s("claude.ai")
+      assert message =~ ~s("https://x.org/mcp")
+      refute message =~ ~s("https://claude.ai")
     end
   end
 

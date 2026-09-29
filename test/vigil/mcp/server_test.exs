@@ -940,6 +940,95 @@ defmodule Vigil.MCP.ServerTest do
     end
   end
 
+  describe "Origin" do
+    # The deployment's issuer, which this file's routers resolve because it
+    # hands them no settings: its origin is allowed without being listed. The
+    # listed ones are handed to the authorization server's options, which is
+    # where `/mcp` reads them back from.
+    @issuer_origin "https://vault.factory-lab.org"
+
+    @initialize %{
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: %{protocolVersion: "2025-11-25"}
+    }
+
+    defp initialize_from(persistence, token, origin, listed \\ []) do
+      origins = Vigil.Origin.allowed(Vigil.Settings.from_env().issuer, listed)
+
+      conn(:post, "/mcp", Jason.encode!(@initialize))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> put_req_header("origin", origin)
+      |> Server.call(
+        Server.init(
+          store: @store,
+          sessions: @sessions,
+          oauth:
+            OAuth.Endpoint.init(
+              persistence: persistence,
+              limiter: RateLimit.Counter.new(),
+              origins: origins
+            )
+        )
+      )
+    end
+
+    test "a request with no Origin is answered", %{persistence: persistence, token: token} do
+      conn = post(persistence, token, @initialize)
+      assert conn.status == 200
+    end
+
+    test "a request from the issuer's origin is answered", %{
+      persistence: persistence,
+      token: token
+    } do
+      assert initialize_from(persistence, token, @issuer_origin).status == 200
+    end
+
+    test "a request from a listed origin is answered", %{persistence: persistence, token: token} do
+      assert initialize_from(persistence, token, "https://claude.ai", ["https://claude.ai"]).status ==
+               200
+    end
+
+    test "a request from any other origin is refused with 403", %{
+      persistence: persistence,
+      token: token
+    } do
+      for origin <- ["https://claude.ai", "https://evil.example", "http://127.0.0.1:4000", "null"] do
+        conn = initialize_from(persistence, token, origin)
+        assert conn.status == 403, origin
+        assert conn.resp_body == ""
+      end
+    end
+
+    test "the refusal comes before authentication and before the body is read", %{
+      persistence: persistence
+    } do
+      conn =
+        conn(:post, "/mcp", String.duplicate(" ", 8_000_001))
+        |> put_req_header("origin", "https://evil.example")
+        |> Server.call(opts(persistence))
+
+      # No token and a body longer than one read: 401 or 400 had either been
+      # looked at first.
+      assert conn.status == 403
+      assert get_resp_header(conn, "www-authenticate") == []
+    end
+
+    test "every method on /mcp is checked", %{persistence: persistence} do
+      for method <- [:get, :delete] do
+        conn =
+          conn(method, "/mcp")
+          |> put_req_header("origin", "https://evil.example")
+          |> Server.call(opts(persistence))
+
+        assert conn.status == 403
+      end
+    end
+  end
+
   describe "rate limiting (AP-6.3)" do
     # A small explicit budget (rather than the default 60) keeps this an
     # integration test of the wiring — Server.init/1 resolving the budget

@@ -27,7 +27,12 @@ defmodule Vigil.Application do
           {Vigil.OAuth.Store, state_dir: Application.fetch_env!(:vigil, :state_dir)},
           Vigil.OAuth.Janitor,
           {Bandit,
-           plug: {Vigil.MCP.Server, settings: settings}, ip: checked.bind, port: checked.port}
+           plug:
+             {Vigil.MCP.Server,
+              settings: settings,
+              origins: Vigil.Origin.allowed(settings.issuer, checked.allowed_origins)},
+           ip: checked.bind,
+           port: checked.port}
         ]
       else
         []

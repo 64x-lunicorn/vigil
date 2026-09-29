@@ -10,12 +10,14 @@ defmodule Vigil.OAuth.Endpoint do
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow, Server, Store}
+  alias Vigil.Origin
   alias Vigil.RateLimit
   alias Vigil.Settings
 
   @default_rpm 30
   @default_register_rpm 5
 
+  plug(:check_origin)
   plug(:match)
   plug(:dispatch)
 
@@ -48,7 +50,9 @@ defmodule Vigil.OAuth.Endpoint do
       |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
       |> Keyword.put_new_lazy(:settings, &Settings.from_env/0)
 
-    Keyword.put(opts, :server, Server.new(opts[:persistence], opts[:settings]))
+    opts
+    |> Keyword.put_new_lazy(:origins, fn -> configured_origins(opts[:settings]) end)
+    |> Keyword.put(:server, Server.new(opts[:persistence], opts[:settings]))
   end
 
   @impl true
@@ -58,8 +62,15 @@ defmodule Vigil.OAuth.Endpoint do
     |> put_private(:oauth_limits, opts[:limits])
     |> put_private(:oauth_server, opts[:server])
     |> put_private(:oauth_limiter, opts[:limiter])
+    |> put_private(:oauth_origins, opts[:origins])
     |> super(opts)
   end
+
+  # The issuer's origin and the listed ones, for a caller that hands in none.
+  # Production's are handed down from `Vigil.Application`, built from the list
+  # `Vigil.Settings.Check` has already judged.
+  defp configured_origins(settings),
+    do: Origin.allowed(settings.issuer, Application.fetch_env!(:vigil, :allowed_origins))
 
   defp configured_limits do
     rpm = RateLimit.configured_budget(:oauth_rate_limit_rpm, @default_rpm)
@@ -117,6 +128,29 @@ defmodule Vigil.OAuth.Endpoint do
   match _ do
     send_resp(conn, 404, "")
   end
+
+  ## Origin
+
+  # Every POST here changes something — a client registered, a consent given, a
+  # token handed out — so a browser on another site must not be able to send
+  # one (`Vigil.Origin`). Checked before the route runs: before the rate limit
+  # counts the request, before the body is read and before a password is
+  # compared. The discovery documents and the consent page itself are GETs a
+  # browser navigates to; they change nothing and are not checked.
+  defp check_origin(%{method: "POST"} = conn, _opts) do
+    if Origin.allowed?(conn, conn.private.oauth_origins) do
+      conn
+    else
+      conn
+      |> send_html(
+        403,
+        error_html("This request came from an origin this server does not accept.")
+      )
+      |> halt()
+    end
+  end
+
+  defp check_origin(conn, _opts), do: conn
 
   ## Rate limits
 

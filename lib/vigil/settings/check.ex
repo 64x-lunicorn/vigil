@@ -34,6 +34,7 @@ defmodule Vigil.Settings.Check do
     {:issuer, "VIGIL_ISSUER", :issuer},
     {:resource, "VIGIL_RESOURCE", :resource},
     {:auth_password, "VIGIL_AUTH_PASSWORD", :password},
+    {:allowed_origins, "VIGIL_ALLOWED_ORIGINS", :origins},
     {:skillkey_ttl_seconds, "VIGIL_SKILLKEY_TTL", :positive_integer},
     {:rate_limit_rpm, "VIGIL_RATE_LIMIT_RPM", :positive_integer},
     {:reload_rate_limit_rpm, "VIGIL_RELOAD_RATE_LIMIT_RPM", :positive_integer},
@@ -139,6 +140,24 @@ defmodule Vigil.Settings.Check do
          "at least #{@min_password_length} characters: a publicly reachable " <>
            "authorization server without a strong password is an open door to the vault"}
   end
+
+  # A list, empty by default, so never unset. Every entry must be an origin and
+  # nothing more: a path or a trailing typo would otherwise match no browser's
+  # `Origin` and let nobody in without saying why.
+  defp check_value(:origins, values, _config) when is_list(values) do
+    case Enum.reject(values, &match?({:ok, _}, Vigil.Origin.parse(&1))) do
+      [] ->
+        {:ok, Enum.map(values, fn value -> elem(Vigil.Origin.parse(value), 1) end)}
+
+      bad ->
+        {:error,
+         "a comma-separated list of origins such as http://localhost:6274 " <>
+           "(scheme and host, no path), got #{Enum.map_join(bad, ", ", &inspect/1)}"}
+    end
+  end
+
+  defp check_value(:origins, value, _config),
+    do: {:error, "a comma-separated list of origins, got #{inspect(value)}"}
 
   defp url(value, config) do
     https? = Keyword.get(config, :https_required, false)

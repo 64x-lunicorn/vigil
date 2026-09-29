@@ -299,6 +299,15 @@ and take no `Plug.Conn`.
 No revocation endpoint and no introspection endpoint — neither is needed for a
 single-user deployment.
 
+**Every POST checks `Origin` first**, and so does every request to `/mcp`
+(`Vigil.Origin`). A request with no `Origin` is a program and passes; one from
+the issuer's own origin — the consent form posting back — passes; one from an
+origin listed in `VIGIL_ALLOWED_ORIGINS` passes. Anything else, `null`
+included, is answered 403 before the rate limit counts it, before the body is
+read and before a token or a password is looked at. The consent form's refusal
+is the HTML error page; the other two answer an empty 403. The GETs are not
+checked: a browser navigates to them, and none of them changes anything.
+
 ---
 
 ## Discovery
@@ -731,6 +740,7 @@ VIGIL_ISSUER=https://vault.example.org
 VIGIL_RESOURCE=https://vault.example.org/mcp
 VIGIL_AUTH_PASSWORD=<secret, min. 12 characters>
 VIGIL_STATE_DIR=/var/lib/vigil
+# VIGIL_ALLOWED_ORIGINS=https://claude.ai
 ```
 
 **Startup check:** if `VIGIL_AUTH_PASSWORD` is missing or shorter than 12

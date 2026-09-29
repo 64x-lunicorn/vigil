@@ -1416,6 +1416,27 @@ did not add itself. Both settings are empty by default: unconfigured, the limit
 stays global, which is stricter than intended rather than weaker. Getting them
 wrong is the only way to make this worse than not having it.
 
+**A browser on another site is refused before anything else.** The Streamable
+HTTP transport says a server MUST validate `Origin` and answer 403 when it is
+present and invalid; that is the defence against DNS rebinding, and a server
+bound to loopback — the local quickstart — is exactly what rebinding reaches.
+`Vigil.Origin` lets three kinds of request through: one with no `Origin` (a
+program, not a browser), one from the issuer's origin (the consent form posting
+back), and one from an origin listed in `VIGIL_ALLOWED_ORIGINS`, empty by
+default. Everything else, `null` included, is refused. Origins are compared
+serialized — lowercase scheme and host, the default port dropped — and a listed
+entry that is not an origin, such as a bare host or one with a path, refuses
+boot rather than silently matching nobody. The check is a plug ahead of the
+route in both routers, so it runs before the token is looked at, before the
+body is read and before the rate limit counts the request: a refused request
+costs nothing and spends no one's budget. `/mcp` is checked on every method;
+the authorization server only on its POSTs, because its GETs are discovery
+documents and the consent page, which a browser navigates to and which change
+nothing. Two routers, one set of origins: it is built once, from the issuer
+and the checked list, and `Vigil.MCP.Server` hands it to `Vigil.OAuth.Endpoint`
+and reads it back the way it does persistence and the limiter. No wildcard,
+and no port range: a list an operator can read is a list an operator can check.
+
 **A grant** is one authorization, and it is the unit of revocation. A `grant_id`
 is minted with the authorization code and carried onto every token redeemed or
 refreshed from it, so a replayed refresh token can take down the whole family.
