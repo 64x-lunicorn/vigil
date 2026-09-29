@@ -209,6 +209,13 @@ defmodule Vigil.MCP.Tools do
           type: :boolean,
           default: false,
           description: "Append the chunk ids that link here."
+        },
+        %{
+          name: "at",
+          type: :string,
+          max_length: @short_max,
+          description:
+            "Optional: a commit (from history) to read the note as it was then, under the path it had then. An unknown revision is an error."
         }
       ]
     },
@@ -239,6 +246,30 @@ defmodule Vigil.MCP.Tools do
           type: {:integer, 1..2},
           default: 1,
           description: "Defaults to 1; 2 adds each directly connected note's own depth-1 view."
+        }
+      ]
+    },
+    %{
+      name: "history",
+      title: "Show a note's history",
+      description:
+        "Lists the commits that touched a note, newest first, following renames: commit, date, author, by (vigil or human), message, and the path the note had in that commit.",
+      write: false,
+      call: :history,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
+      params: [
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
+        %{
+          name: "limit",
+          type: {:integer, 1..100},
+          default: 20,
+          description: "Maximum number of commits (default 20)."
         }
       ]
     },

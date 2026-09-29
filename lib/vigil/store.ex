@@ -7,6 +7,7 @@ defmodule Vigil.Store do
     Clock,
     Commit,
     Events,
+    History,
     Index,
     Parser,
     Git,
@@ -63,7 +64,8 @@ defmodule Vigil.Store do
   # `current` and `reload` declare no parameter, and the six
   # writes state their contracts in Vigil.Vault.Policy, the one gate every
   # write goes through. Vigil.MCP.Tools declares every bound and default (`limit` 1..25
-  # default 10, `depth` 1..2 default 1, `backlinks` default false) and
+  # default 10 for search and 1..100 default 20 for history, `depth` 1..2
+  # default 1, `backlinks` default false, `at` default nil) and
   # supplies a value on every call, so nothing here restates one.
   def call(store \\ @default_name, op, params)
 
@@ -72,6 +74,8 @@ defmodule Vigil.Store do
 
   def call(store, :links, %{id: _, direction: _, depth: _} = params),
     do: request(store, :links, params)
+
+  def call(store, :history, %{path: _, limit: _} = params), do: request(store, :history, params)
 
   def call(store, :create, %{} = params), do: request(store, :create, params)
   def call(store, :append, %{} = params), do: request(store, :append, params)
@@ -118,11 +122,13 @@ defmodule Vigil.Store do
   defp with_now(store, params),
     do: Map.put_new_lazy(params, :now, fn -> Clock.now(published_tz(store)) end)
 
-  # The five the index answers. Each names the Vigil.Index function that
-  # answers it, which is what lets one `handle_call` clause cover all of them —
-  # and that clause is where a read brings the vault up to date first
-  # (freshen/1), so a read added here is freshened without a word more.
-  @read_ops [:search, :read, :links, :lint, :current]
+  # The six reads. Five are answered by the index and name the Vigil.Index
+  # function that answers them; `history`, and `read` at a revision, are
+  # answered out of the Git history by Vigil.History (read_answer/3). One
+  # `handle_call` clause covers all of them — and that clause is where a read
+  # brings the vault up to date first (freshen/1), so a read added here is
+  # freshened without a word more.
+  @read_ops [:search, :read, :links, :lint, :current, :history]
 
   # The eight that go through the write path (docs/design.md, "The write
   # path"): Vigil.Vault.Policy and Vigil.Vault.Plan already take the operation
@@ -270,8 +276,9 @@ defmodule Vigil.Store do
   # A read makes no decision here: the params map is handed on exactly as the
   # tool table describes it, so a parameter added to a read tool is a change
   # to the table and to the index function that reads it, and to nothing in
-  # between. The operation *is* the name of that function, which is what
-  # collapses the five clauses into one — and what the compiler cannot check.
+  # between. The operation *is* the name of that function (or, for the two
+  # that read the Git history, of Vigil.History's — read_answer/3), which is
+  # what collapses the clauses into one — and what the compiler cannot check.
   # The dispatch coverage in Vigil.MCP.ServerTest drives every declared tool
   # end to end, which is where a row whose `call:` no longer names an index
   # function fails (docs/design.md, "MCP tool schemas are authoritative").
@@ -283,7 +290,7 @@ defmodule Vigil.Store do
   @impl true
   def handle_call({op, params}, _from, state) when op in @read_ops do
     state = freshen(state)
-    {:reply, flagged(apply(Index, op, [state.index, params]), state), state}
+    {:reply, flagged(read_answer(op, params, state), state), state}
   end
 
   def handle_call({op, params}, _from, state) when op in @write_ops do
@@ -450,6 +457,17 @@ defmodule Vigil.Store do
 
   defp due?(%{fetched_at: nil}), do: true
   defp due?(state), do: state.clock_ms.() - state.fetched_at >= state.read_fetch_interval
+
+  # What a read is answered with. Everything the index holds is the index's
+  # to answer; what a note went through is Git's (docs/design.md, "No audit
+  # log"), asked through the same value a write commits through.
+  defp read_answer(:history, params, state),
+    do: History.history(state.git, state.vault_path, params)
+
+  defp read_answer(:read, %{at: rev} = params, state) when is_binary(rev),
+    do: History.read_at(state.git, state.vault_path, state.index, params)
+
+  defp read_answer(op, params, state), do: apply(Index, op, [state.index, params])
 
   # Flagged while the last update failed, whichever call made it. Not with
   # the behaviour turned off: a read then answers exactly as it always did,

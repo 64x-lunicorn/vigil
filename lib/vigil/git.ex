@@ -3,10 +3,11 @@ defmodule Vigil.Git do
   Git, as a value its callers hold rather than a module they name
   (`docs/design.md`, "Git is reached through a value").
 
-  Two things live here. The **contract** is a struct of fourteen functions —
+  Two things live here. The **contract** is a struct of sixteen functions —
   the whole of what vigil asks git: `add`, `remove`, `move`, `commit`,
   `snapshot_index`, `restore_index` and `push`, which a write uses,
-  `log_metadata`, which the load uses and no write ever asks, `tracking`,
+  `log_metadata`, which the load uses and no write ever asks, `history` and
+  `show`, which the `history` tool and `read` at a revision ask, `tracking`,
   which boot asks once to check the remote and branch settings against the
   clone, and `divergence`, `fetch`, `fast_forward`, `rebase` and
   `abort_rebase`, which bring the vault up to date — at boot, on `reload`,
@@ -21,7 +22,7 @@ defmodule Vigil.Git do
   answer.
 
   The **production adapter** is the rest of this module: `over_repository/0`
-  wires the fourteen questions to the `git` commands underneath it. It is a function
+  wires the sixteen questions to the `git` commands underneath it. It is a function
   here, beside the contract it implements, rather than closures assembled by a
   caller — there are two callers, `Vigil.Store` and `Vigil.Skills`, and an
   adapter assembled at the call site would exist twice. `Store` builds it when
@@ -44,6 +45,16 @@ defmodule Vigil.Git do
     # last_author:}. What "creation date = first commit" is read out of
     # (docs/design.md, principle 3).
     :log_metadata,
+    # The commits that touched one path, newest first, at most `limit`,
+    # following renames: [%{commit:, at:, author:, email:, message:, path:}],
+    # `path` being what the note was called in that commit.
+    # {:ok, commits} | {:error, reason}.
+    :history,
+    # One path's content as it was at a revision, and the date of the last
+    # commit up to that revision that touched it.
+    # {:ok, %{commit:, content:, updated_at:}} | {:error, :unknown_revision}
+    # | {:error, :not_found}.
+    :show,
     # git add -- paths. :ok | {:error, reason}.
     :add,
     # git rm -- paths, from the index and the working tree. :ok | {:error, reason}.
@@ -88,7 +99,7 @@ defmodule Vigil.Git do
   @type t :: %__MODULE__{}
 
   @doc """
-  Builds a git adapter from an answer to every one of the fourteen questions.
+  Builds a git adapter from an answer to every one of the sixteen questions.
 
   Raises `ArgumentError` when a field is missing or unknown, which is the
   point: an unwired question must fail where the adapter is built, not answer
@@ -105,6 +116,8 @@ defmodule Vigil.Git do
   def over_repository do
     new(
       log_metadata: &log_metadata/1,
+      history: &history/3,
+      show: &show/3,
       add: &add/2,
       remove: &remove/2,
       move: &move/3,
@@ -208,6 +221,114 @@ defmodule Vigil.Git do
 
   defp touch(nil, at, author), do: %{created_at: at, updated_at: at, last_author: author}
   defp touch(entry, at, author), do: %{entry | updated_at: at, last_author: author}
+
+  @doc """
+  The commits that touched `path`, newest first and at most `limit` of them,
+  followed across renames (`git log --follow`): `{:ok, [%{commit:, at:,
+  author:, email:, message:, path:}]}`, where `path` is what the note was
+  called in that commit and `message` is the commit's subject. A path git
+  has never seen answers `{:ok, []}`.
+
+  Read NUL-separated like `log_metadata/1`, so a path git would quote arrives
+  as the filesystem spells it.
+  """
+  def history(vault_path, path, limit) do
+    with {:ok, out} <-
+           run(vault_path, [
+             "log",
+             "--follow",
+             "-M",
+             "-z",
+             "--name-status",
+             "--format=%x01%H%x00%aI%x00%an%x00%ae%x00%s",
+             "-n",
+             Integer.to_string(limit),
+             "--",
+             path
+           ]) do
+      {:ok, out |> String.split("\x01", trim: true) |> Enum.map(&history_entry(&1, path))}
+    end
+  end
+
+  # `<hash>\0<iso>\0<name>\0<email>\0<subject>\0\n` and then the commit's
+  # changes to the followed path — `<status>\0<path>\0`, or
+  # `R<score>\0<old>\0<new>\0` — whose last path is the name it had then. A
+  # merge lists none, and is reported under the name it was followed to.
+  defp history_entry(record, followed) do
+    [hash, iso, name, email, subject | changes] = String.split(record, "\0")
+    {:ok, at, _} = DateTime.from_iso8601(iso)
+
+    paths =
+      changes
+      |> Enum.map(&String.trim_leading(&1, "\n"))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.drop(1)
+
+    %{
+      commit: hash,
+      at: at,
+      author: name,
+      email: email,
+      message: subject,
+      path: List.last(paths, followed)
+    }
+  end
+
+  @doc """
+  `path` as it was at `rev`: `{:ok, %{commit:, content:, updated_at:}}`, the
+  commit `rev` names in full, the file's bytes there, and the date of the
+  last commit up to it that touched the path.
+
+  The revision is verified before anything is read: whatever `rev` is, it is
+  handed to `git rev-parse --verify --end-of-options` and peeled to a commit,
+  so it cannot be an option and cannot name a tree or a blob. A revision
+  starting with `-` is not tried at all. `{:error, :unknown_revision}` for
+  anything that does not name a commit, `{:error, :not_found}` for a path the
+  commit does not hold.
+  """
+  def show(vault_path, rev, path) do
+    with {:ok, sha} <- verify_revision(vault_path, rev),
+         {:ok, updated_at} <- last_touched(vault_path, sha, path),
+         {:ok, content} <- blob(vault_path, sha, path) do
+      {:ok, %{commit: sha, content: content, updated_at: updated_at}}
+    end
+  end
+
+  defp verify_revision(_vault_path, "-" <> _), do: {:error, :unknown_revision}
+  defp verify_revision(_vault_path, ""), do: {:error, :unknown_revision}
+
+  defp verify_revision(vault_path, rev) do
+    case run(vault_path, [
+           "rev-parse",
+           "--verify",
+           "--quiet",
+           "--end-of-options",
+           rev <> "^{commit}"
+         ]) do
+      {:ok, out} -> {:ok, String.trim(out)}
+      {:error, _} -> {:error, :unknown_revision}
+    end
+  end
+
+  defp last_touched(vault_path, sha, path) do
+    case run(vault_path, ["log", "-1", "--format=%aI", sha, "--", path]) do
+      {:ok, out} ->
+        case DateTime.from_iso8601(String.trim(out)) do
+          {:ok, at, _} -> {:ok, at}
+          {:error, _} -> {:error, :not_found}
+        end
+
+      {:error, _} ->
+        {:error, :not_found}
+    end
+  end
+
+  defp blob(vault_path, sha, path) do
+    case run(vault_path, ["cat-file", "blob", "#{sha}:#{path}"]) do
+      {:ok, content} -> {:ok, content}
+      {:error, _} -> {:error, :not_found}
+    end
+  end
 
   @doc """
   `git add` for the given paths — the working tree's content of each, staged.

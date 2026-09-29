@@ -549,14 +549,14 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 400
   end
 
-  test "tools/list contains exactly eighteen tools", %{persistence: persistence, token: token} do
+  test "tools/list contains exactly nineteen tools", %{persistence: persistence, token: token} do
     conn =
       post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
         {"mcp-session-id", "abc"}
       ])
 
     body = Jason.decode!(conn.resp_body)
-    assert length(body["result"]["tools"]) == 18
+    assert length(body["result"]["tools"]) == 19
   end
 
   # A reader is shown what it may call. Offering it the writes only to refuse
@@ -1902,6 +1902,11 @@ defmodule Vigil.MCP.ServerTest do
        fn %{payload: payload} -> assert payload["result"]["title"] == "vigil" end},
       {"links", %{id: "bike/via-carolina.md", direction: "out"},
        fn %{payload: payload} -> assert is_list(payload["result"]["outgoing"]) end},
+      {"history", %{path: "bike/via-carolina.md", limit: 5},
+       fn %{payload: payload} ->
+         assert [%{"by" => "human", "path" => "bike/via-carolina.md"}] =
+                  payload["result"]["commits"]
+       end},
       {"lint", %{},
        fn %{payload: payload} -> assert is_list(payload["result"]["orphaned_links"]) end},
       {"current", %{}, fn %{payload: payload} -> assert is_list(payload["result"]["active"]) end},

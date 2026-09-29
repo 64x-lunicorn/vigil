@@ -15,9 +15,9 @@ defmodule Vigil.MCP.ToolsTest do
   @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete_note move_note skill_write)
 
   describe "definitions/0 is derived from the declaration table" do
-    test "eighteen tools, matching write_tool?/1 to the write: flag" do
+    test "nineteen tools, matching write_tool?/1 to the write: flag" do
       definitions = Tools.definitions()
-      assert length(definitions) == 18
+      assert length(definitions) == 19
 
       for %{name: name} <- definitions do
         assert Tools.write_tool?(name) == name in @write_tools
@@ -211,6 +211,23 @@ defmodule Vigil.MCP.ToolsTest do
     # reload stays callable with vault:read (#177), yet it moves the vault to
     # whatever the remote holds: not read-only, and the one tool that reaches
     # outside the vault's own state.
+    # docs/design.md, "No audit log": history reads what git already holds.
+    test "history is read-only, idempotent and closed-world, with a bounded limit" do
+      [history] = Enum.filter(Tools.definitions(), &(&1.name == "history"))
+
+      assert history.annotations == %{
+               readOnlyHint: true,
+               destructiveHint: false,
+               idempotentHint: true,
+               openWorldHint: false
+             }
+
+      refute Tools.write_tool?("history")
+      assert history.inputSchema.required == ["path"]
+      assert %{minimum: 1, maximum: 100} = history.inputSchema.properties.limit
+      assert history.inputSchema.properties.path.maxLength == 1_024
+    end
+
     test "reload is neither read-only nor closed-world" do
       [reload] = Enum.filter(Tools.definitions(), &(&1.name == "reload"))
 

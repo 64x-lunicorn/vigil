@@ -954,10 +954,11 @@ deletion, a move, a skill.
 the filesystem and it commits. The filesystem half stays where it is. The git
 half is a value its callers hold rather than a module they name.
 
-**The value is the whole of `Vigil.Git`, not the write half.** Fourteen
+**The value is the whole of `Vigil.Git`, not the write half.** Sixteen
 questions: `add`, `remove`, `move`, `commit`, `snapshot_index`,
 `restore_index`, `push` — `log_metadata`, which no write ever asks,
-`tracking`, which only the boot check asks (see "The vault's remote and branch
+`history` and `show`, which only the reads of the history ask (see "No audit
+log — the history is read, not kept"), `tracking`, which only the boot check asks (see "The vault's remote and branch
 are checked against the clone"), and `divergence`, `fetch`, `fast_forward`,
 `rebase` and `abort_rebase`, which bring the vault up to date at boot, on
 `reload`, before a write, before a read once per interval and after a refused
@@ -2175,6 +2176,39 @@ update has just moved, and removes the cron file on a host that still has it.
 
 ---
 
+## No audit log — the history is read, not kept
+
+Every write is a commit, authored `vigil <vigil@local>`, and a human's edits
+arrive as commits of their own. What a note went through is therefore already
+recorded, in the one place principle 3 puts metadata; a log vigil kept beside
+it would be a second statement of the same facts, free to disagree. So there
+is none, and the history is read instead.
+
+**`history(path, limit)` lists the commits that touched a note**, newest
+first, following renames (`git log --follow`): each with its `commit`, its
+`date` (the author date), its `author`, its `message` (the subject line — a
+human's body is not vigil's to reproduce), `by` and the `path` the note had
+in that commit. `by` is `vigil` or `human`, and it is decided by the author's
+address, not the name: every commit vigil makes is authored from
+`vigil@local`, while a human may call themselves anything, `vigil` included.
+`limit` is 1–100, default 20. A path with no history at all is "Not found".
+
+**`read(id, at: <rev>)` reads a note or chunk as it was at a revision.** The
+file at that commit is read through the Git value (`show`), parsed with the
+normal parser and rendered as `read` renders the current one, plus `at`, the
+full commit id. The id's path is the one the note had then — `history` names
+it per commit — and the old text is read against today's vault, so its
+`links` counters and backlinks are today's. The revision is verified before
+anything is read: it is handed to `git rev-parse --verify --end-of-options`
+peeled to a commit, so it can be neither an option nor a tree or a blob, and
+a revision starting with `-` is not tried at all. A revision that names no
+commit is a tool error, "Unknown revision".
+
+Both are reads like the others: answered inside the writer's read clause, and
+so fetched first once per interval (see "Reads see what another clone
+pushed"). `Vigil.Git.CommitLog` answers both out of what it recorded, and the
+contract suite holds it and the repository to the same answers.
+
 ## Deliberate non-goals
 
 Not built, and not "prepared for" either:
@@ -2192,7 +2226,9 @@ Not built, and not "prepared for" either:
 - No `create_domain` tool — the server creates no structure, because it would
   then be deciding its own filing system
 - No write access to `_domains.yml`
-- No audit log — writes are in the Git history, reads are uninteresting
+- No audit log — writes are in the Git history, reads are uninteresting;
+  the history is exposed by a read tool rather than kept a second time (see
+  "No audit log — the history is read, not kept")
 
 ---
 

@@ -186,6 +186,79 @@ defmodule Vigil.GitTest do
       # docs/design.md, "A human edit arrives as a commit, never as a file":
       # what another clone pushed is seen after a fetch and adopted by a
       # fast-forward, and nothing before the fast-forward touches the vault.
+      # docs/design.md, "No audit log": the history a write leaves is read back
+      # rather than kept a second time, and a rename does not cut it off.
+      test "history follows a note across a rename, newest first", %{git: git, vault: vault} do
+        path = note(vault, "bike/hist.md", "One")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        note(vault, path, "Two")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        {:ok, _} = move_commit(git, vault, path, "bike/hist-moved.md", "move: #{path}")
+
+        assert {:ok, commits} = git.history.(vault, "bike/hist-moved.md", 10)
+
+        assert Enum.map(commits, &{&1.message, &1.path}) == [
+                 {"move: bike/hist.md", "bike/hist-moved.md"},
+                 {"update: bike/hist.md", "bike/hist.md"},
+                 {"create: bike/hist.md", "bike/hist.md"}
+               ]
+
+        assert Enum.all?(commits, &match?(%{author: "vigil", email: "vigil@local"}, &1))
+        assert Enum.all?(commits, &(&1.commit =~ ~r/\A[0-9a-f]{40}\z/))
+        assert Enum.all?(commits, &match?(%DateTime{}, &1.at))
+      end
+
+      test "history reports who committed a note the vault already had", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:ok, [initial]} = git.history.(vault, "bike/terra-speed.md", 10)
+        assert %{author: "Daniel", email: "daniel@local", path: "bike/terra-speed.md"} = initial
+        assert {:ok, []} = git.history.(vault, "bike/never-there.md", 10)
+      end
+
+      test "history answers at most limit commits, the newest", %{git: git, vault: vault} do
+        path = note(vault, "bike/limited.md", "One")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        note(vault, path, "Two")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+
+        assert {:ok, [%{message: "update: bike/limited.md"}]} = git.history.(vault, path, 1)
+      end
+
+      test "show answers a note as it was at a revision", %{git: git, vault: vault} do
+        path = note(vault, "bike/shown.md", "Before")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        note(vault, path, "After")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        {:ok, [newest, oldest]} = git.history.(vault, path, 10)
+
+        assert {:ok, %{commit: commit, content: content, updated_at: %DateTime{}}} =
+                 git.show.(vault, oldest.commit, path)
+
+        assert commit == oldest.commit
+        assert content =~ "# Before"
+        assert {:ok, %{content: after_content}} = git.show.(vault, newest.commit, path)
+        assert after_content =~ "# After"
+      end
+
+      test "show refuses a revision that names no commit, and a path the commit lacks", %{
+        git: git,
+        vault: vault
+      } do
+        {:ok, [initial]} = git.history.(vault, "bike/terra-speed.md", 10)
+
+        assert {:error, :unknown_revision} =
+                 git.show.(vault, "no-such-revision", "bike/terra-speed.md")
+
+        assert {:error, :unknown_revision} = git.show.(vault, "--output=x", "bike/terra-speed.md")
+
+        assert {:error, :unknown_revision} =
+                 git.show.(vault, String.duplicate("0", 40), "bike/terra-speed.md")
+
+        assert {:error, :not_found} = git.show.(vault, initial.commit, "bike/never-there.md")
+      end
+
       test "a commit pushed elsewhere is behind after a fetch, and a fast-forward adopts it",
            %{git: git, vault: vault} = ctx do
         push_from_elsewhere(ctx, "bike/from-elsewhere.md")
@@ -560,6 +633,21 @@ defmodule Vigil.GitTest do
       {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
       assert %{created_at: %DateTime{}, last_author: "vigil"} = git.log_metadata.(vault)[path]
+    end
+
+    test "history and show take non-ASCII paths as the filesystem spells them", %{
+      git: git,
+      vault: vault
+    } do
+      path = note(vault, "home/Übersicht Heizöl.md", "Übersicht")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      {:ok, _} = move_commit(git, vault, path, "home/Heizöl *.md", "move: #{path}")
+
+      assert {:ok, [moved, created]} = git.history.(vault, "home/Heizöl *.md", 10)
+      assert moved.path == "home/Heizöl *.md"
+      assert created.path == path
+      assert {:ok, %{content: content}} = git.show.(vault, created.commit, path)
+      assert content =~ "# Übersicht"
     end
 
     test "committing unchanged content succeeds without a new commit", %{

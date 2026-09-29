@@ -63,6 +63,11 @@
     "description": "Reads a chunk, or a note: its body (the text before its first ## heading) and its table of contents. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
     "inputSchema": {
       "properties": {
+        "at": {
+          "description": "Optional: a commit (from history) to read the note as it was then, under the path it had then. An unknown revision is an error.",
+          "maxLength": 1024,
+          "type": "string"
+        },
         "backlinks": {
           "description": "Append the chunk ids that link here.",
           "type": "boolean"
@@ -121,6 +126,37 @@
     },
     "name": "links",
     "title": "Show links"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Lists the commits that touched a note, newest first, following renames: commit, date, author, by (vigil or human), message, and the path the note had in that commit.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Maximum number of commits (default 20).",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "history",
+    "title": "Show a note's history"
   },
   {
     "annotations": {

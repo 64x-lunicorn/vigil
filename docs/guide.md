@@ -279,7 +279,7 @@ starts — `skill_write` refuses that skill (see [Tools](#tools)).
 
 ## Tools
 
-Eighteen tools. "RW" means the token needs the `vault` scope; a token with
+Nineteen tools. "RW" means the token needs the `vault` scope; a token with
 any other scope, `vault:read` included, is not shown them on `tools/list` and
 gets an explicit error if it calls one anyway. "Key" means the call must carry
 a current `skill_key`. Every write also takes an optional `request_id` (see
@@ -288,8 +288,9 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | Tool | Parameters | Returns | Role | Key |
 |---|---|---|---|:--:|
 | `search` | query, domain?, type?, prefer?, limit? | ranked hits with previews, plus `hub` when unambiguous | RO/RW | – |
-| `read` | id, backlinks? | one chunk with its `hash`, or a note's `body` (the text before its first `##`) and table of contents (each entry with its `hash`) plus `links` counters | RO/RW | – |
+| `read` | id, backlinks?, at? | one chunk with its `hash`, or a note's `body` (the text before its first `##`) and table of contents (each entry with its `hash`) plus `links` counters; with `at`, as it was at that commit | RO/RW | – |
 | `links` | id, direction?, depth? | resolved outgoing/incoming references | RO/RW | – |
+| `history` | path, limit? | `{path, commits}`: each commit's `commit`, `date`, `author`, `by` (`vigil`/`human`), `message` and the `path` the note had then, newest first, across renames | RO/RW | – |
 | `create` | path, type, content, starts?, ends?, force?, create_dirs? | `{path, pushed, path_normalized_from?}` | RW | ✓ |
 | `append` | path, heading?, content | `{path, pushed}` | RW | ✓ |
 | `replace_section` | id, content, if_match? | `{path, pushed}` | RW | ✓ |
@@ -316,7 +317,7 @@ remote holds, and has its own, smaller rate limit
 (`VIGIL_RELOAD_RATE_LIMIT_RPM`), since each call pulls and reparses the vault.
 
 **Reads fetch first, at most once a minute.** Before `search`, `read`,
-`links`, `lint` or `current` answers, the server fetches from the remote and
+`links`, `history`, `lint` or `current` answers, the server fetches from the remote and
 adopts what a human pushed, the way it does before a write — but only when
 it last asked the remote at least `VIGIL_READ_FETCH_INTERVAL` seconds ago (60
 by default; `0` turns it off). The fetch gives up after five seconds. If it
@@ -324,7 +325,15 @@ fails or gives up, the read is still answered, from the vault as the server
 last saw it, and the response says so with `"stale": true` beside the
 result; `status` says since when and why.
 
-`limit` is 1–25 (default 10) and `depth` is 1 or 2. A value outside the range
+**A note's history is its Git history.** There is no audit log: `history`
+lists the commits that touched a note, following it across renames, and says
+for each whether vigil or a human made it (by the author address,
+`vigil@local` being vigil's). `read` with `at` set to one of those commits
+returns the note or section as it was then, under the path it had then; a
+revision that names no commit is a tool error.
+
+`search`'s `limit` is 1–25 (default 10), `history`'s 1–100 (default 20), and
+`depth` is 1 or 2. A value outside the range
 is a tool error naming the range, not a silently clamped result: a caller told
 it got 25 hits of the 100 it asked for could not tell that from having asked
 for 25.
@@ -332,7 +341,8 @@ for 25.
 Every string argument has a maximum length, published as `maxLength` on
 `tools/list` and counted in characters: `content` takes up to 1,000,000,
 every other string (`path`, `id`, `from`, `to`, `query`, `domain`, `heading`,
-`name`, `starts`, `ends`, `if_match`, `request_id`, `skill_key`) up to 1,024.
+`name`, `starts`, `ends`, `if_match`, `at`, `request_id`, `skill_key`) up to
+1,024.
 A longer value is a tool error naming the parameter, e.g. `Invalid parameter
 content: expected at most 1000000 characters`. The `/mcp` request body is read
 up to 8,000,000 bytes, which fits the longest `content` sent as UTF-8; a

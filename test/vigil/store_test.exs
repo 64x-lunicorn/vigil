@@ -856,6 +856,111 @@ defmodule Vigil.StoreTest do
     end
   end
 
+  # docs/design.md, "No audit log": what a note went through is read back out
+  # of the Git history, never kept a second time.
+  describe "history" do
+    defp history(path, limit \\ 20), do: Store.call(@store, :history, %{path: path, limit: limit})
+
+    defp read_at(id, at), do: Store.call(@store, :read, %{id: id, at: at, backlinks: false})
+
+    defp rename_terra_speed do
+      {:ok, _} =
+        Store.call(@store, :append, %{
+          path: "bike/terra-speed.md",
+          content: "Tubeless since June."
+        })
+
+      {:ok, _} =
+        Store.call(@store, :move_note, %{
+          from: "bike/terra-speed.md",
+          to: "bike/terra-40c.md",
+          confirm: true
+        })
+    end
+
+    test "of a renamed note includes the commits from before the rename, newest first" do
+      rename_terra_speed()
+
+      assert {:ok, %{path: "bike/terra-40c.md", commits: commits}} = history("bike/terra-40c.md")
+
+      assert [
+               %{by: "vigil", author: "vigil", path: "bike/terra-40c.md", message: "move: " <> _},
+               %{
+                 by: "vigil",
+                 author: "vigil",
+                 path: "bike/terra-speed.md",
+                 message: "append: " <> _
+               },
+               %{by: "human", author: "Daniel", path: "bike/terra-speed.md"}
+             ] = commits
+
+      assert Enum.all?(commits, &match?({:ok, _, _}, DateTime.from_iso8601(&1.date)))
+    end
+
+    test "answers at most limit commits, the newest" do
+      rename_terra_speed()
+
+      assert {:ok, %{commits: [%{message: "move: " <> _}]}} = history("bike/terra-40c.md", 1)
+      assert {:ok, %{commits: [_, _]}} = history("bike/terra-40c.md", 2)
+    end
+
+    test "of a path with no history is not found, and an unsafe path is refused" do
+      assert {:error, "Not found: bike/never-there.md"} = history("bike/never-there.md")
+      assert {:error, "Invalid path"} = history("../outside.md")
+    end
+
+    test "read at a revision returns the text the note had then, under the name it had" do
+      rename_terra_speed()
+      {:ok, %{commits: [_move, append, initial]}} = history("bike/terra-40c.md")
+      section = "bike/terra-speed.md#gravel-experience"
+
+      assert {:ok, %{body: before, at: at}} = read_at(section, initial.commit)
+      assert at == initial.commit
+      assert before =~ "annoying"
+      refute before =~ "Tubeless"
+
+      assert {:ok, %{body: appended}} = read_at(section, append.commit)
+      assert appended =~ "Tubeless since June."
+
+      assert {:ok, %{path: "bike/terra-speed.md", title: "WTB Terra Speed 40C", toc: [_, _]}} =
+               read_at("bike/terra-speed.md", initial.commit)
+    end
+
+    test "read at a revision returns a chunk as it was" do
+      {:ok, %{commits: [initial]}} = history("bike/via-carolina.md")
+
+      {:ok, _} =
+        Store.call(@store, :replace_section, %{
+          id: "bike/via-carolina.md#gear",
+          content: "Only a frame bag now."
+        })
+
+      assert {:ok, %{heading: "Gear", body: body}} =
+               read_at("bike/via-carolina.md#gear", initial.commit)
+
+      assert body =~ "Frame bag, no saddle bag."
+
+      assert {:ok, %{body: current}} =
+               Store.call(@store, :read, %{id: "bike/via-carolina.md#gear", backlinks: false})
+
+      assert current =~ "Only a frame bag now."
+    end
+
+    test "read at an unknown revision is an error" do
+      assert {:error, "Unknown revision: no-such-revision"} =
+               read_at("bike/via-carolina.md", "no-such-revision")
+
+      assert {:error, "Unknown revision: --all"} = read_at("bike/via-carolina.md", "--all")
+    end
+
+    test "read at a revision the note did not exist in is not found" do
+      {:ok, %{commits: [initial]}} = history("bike/via-carolina.md")
+
+      assert {:error, "Not found: bike/never-there.md at " <> _} =
+               read_at("bike/never-there.md", initial.commit)
+    end
+  end
+
   # Each finding's rule (duplicate headings, sentence-like headings, orphaned
   # links, overlong notes, stale decisions) is Vigil.Index's job now and is
   # covered there (index_test.exs) without git. This is the wiring smoke
@@ -1458,6 +1563,20 @@ defmodule Vigil.StoreTest do
       advance(clock, 60)
 
       assert [%{id: "bike/elsewhere.md" <> _} | _] = quokkas()
+    end
+
+    test "a commit pushed from another clone shows up in history within one interval",
+         %{vault: vault} do
+      {log, clock} = freshening_store(vault)
+      CommitLog.push_from_elsewhere(log, "bike/elsewhere.md", @elsewhere)
+
+      assert {:error, "Not found: " <> _} =
+               Store.call(@store, :history, %{path: "bike/elsewhere.md", limit: 20})
+
+      advance(clock, 60)
+
+      assert {:ok, %{commits: [%{by: "human", author: "Daniel"}]}} =
+               Store.call(@store, :history, %{path: "bike/elsewhere.md", limit: 20})
     end
 
     test "within one interval no second fetch happens, whichever read asks", %{vault: vault} do
