@@ -272,6 +272,15 @@ in again. `init.sh` provisions the vault, generates secrets,
 audits dependencies, runs the test suite, builds a release, starts the service,
 seeds two OAuth tokens, and finishes with an acceptance check.
 
+Before it creates anything, `init.sh` asks for the public hostname, which
+becomes `VIGIL_ISSUER` (`https://<hostname>`) and `VIGIL_RESOURCE`. It
+suggests the tunnel's hostname from `/etc/cloudflared/config.yml`, or under
+`--force` the env file's own; without either there is no default, and an empty
+answer or an `http://` one is refused (exit 2) with the boot check's words: a
+production release does not start on an issuer that is not `https`. Under
+`--non-interactive` on a host without cloudflared configured, set the tunnel
+up first.
+
 `init.sh` prints both tokens **once** at the end. After that they exist
 nowhere: `/var/lib/vigil/oauth_tokens.dets` keeps only their SHA-256 digests,
 so a lost token is seeded again, not recovered. Each lives 90 days, and either

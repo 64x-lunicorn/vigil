@@ -582,6 +582,24 @@ if [ -f "$ENV_FILE" ]; then
   fi
 fi
 
+# The public hostname, which the OAuth issuer and resource are made of. Asked
+# here, before anything is created: in prod the boot check refuses an issuer
+# that is not https, so there is no default a service could start on without
+# one — the tunnel's hostname when setup.sh configured cloudflared, the env
+# file's own under --force (Enter keeps it), and otherwise none.
+HOSTNAME_DEFAULT=""
+if [ -f /etc/cloudflared/config.yml ]; then
+  FOUND="$(grep -oP 'hostname:\s*\K\S+' /etc/cloudflared/config.yml 2>/dev/null | head -1 || true)"
+  [ -n "$FOUND" ] && HOSTNAME_DEFAULT="$FOUND"
+fi
+EXISTING_ISSUER="$(env_file_value VIGIL_ISSUER)"
+if [ -n "$EXISTING_ISSUER" ]; then
+  HOSTNAME_DEFAULT="${EXISTING_ISSUER#https://}"
+fi
+PUBLIC_HOST="$(ask_value "Public hostname (OAuth issuer/resource, e.g. vault.example.org)" "$HOSTNAME_DEFAULT")"
+ISSUER="$(issuer_for_host "$PUBLIC_HOST")" || exit 2
+RESOURCE="${ISSUER}/mcp"
+
 if [ -L /opt/vigil/current ]; then
   log "Release already built (/opt/vigil/current present) — will be rebuilt in step 6."
 else
@@ -709,24 +727,7 @@ record_done "generated VIGIL_SKILLKEY_SECRET (the SkillKey HMAC secret)"
 
 step "4/9  Runtime config"
 
-# Under --force the file's own values are the defaults, so Enter keeps them.
-HOSTNAME_DEFAULT="localhost:4000"
-if [ -f /etc/cloudflared/config.yml ]; then
-  FOUND="$(grep -oP 'hostname:\s*\K\S+' /etc/cloudflared/config.yml 2>/dev/null | head -1 || true)"
-  [ -n "$FOUND" ] && HOSTNAME_DEFAULT="$FOUND"
-fi
-EXISTING_ISSUER="$(env_file_value VIGIL_ISSUER)"
-if [ -n "$EXISTING_ISSUER" ]; then
-  HOSTNAME_DEFAULT="${EXISTING_ISSUER#*://}"
-fi
-PUBLIC_HOST="$(ask_value "Public hostname (OAuth issuer/resource)" "$HOSTNAME_DEFAULT")"
-
-if [ "$PUBLIC_HOST" = "localhost:4000" ]; then
-  ISSUER="http://localhost:4000"
-else
-  ISSUER="https://${PUBLIC_HOST}"
-fi
-RESOURCE="${ISSUER}/mcp"
+# ISSUER and RESOURCE were decided in the preflight.
 
 # existing_or <NAME> <default> — the env file's value for NAME, or the default.
 existing_or() {

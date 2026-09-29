@@ -49,7 +49,7 @@ assert_line() {
 
 ## ── 1. The env file init.sh writes ───────────────────────────────────────
 
-section "1/3  init.sh writes the tunnel's proxy settings"
+section "1/4  init.sh writes the tunnel's proxy settings"
 
 # The heredoc between `ENV_DEFAULTS="$(` and the `EOF` that closes it.
 env_content="$(awk '/^ENV_DEFAULTS="\$\($/ { on = 1; next } on && /^EOF$/ { exit } on' "$INIT_SH")"
@@ -66,7 +66,7 @@ assert_line "the env file trusts loopback, where cloudflared connects from" \
 
 ## ── 2. The example env file ──────────────────────────────────────────────
 
-section "2/3  deploy/vigil.env.example shows the same two lines"
+section "2/4  deploy/vigil.env.example shows the same two lines"
 
 example="$(cat "${REPO_ROOT}/deploy/vigil.env.example")"
 assert_line "the example names CF-Connecting-IP as the header" "$example" "$HEADER_LINE"
@@ -80,10 +80,52 @@ fi
 
 ## ── 3. The guide ─────────────────────────────────────────────────────────
 
-section "3/3  docs/guide.md shows the same two lines"
+section "3/4  docs/guide.md shows the same two lines"
 
 guide="$(cat "${REPO_ROOT}/docs/guide.md")"
 assert_line "the guide names CF-Connecting-IP as the header" "$guide" "$HEADER_LINE"
 assert_line "the guide trusts loopback" "$guide" "$PROXIES_LINE"
+
+## ── 4. The issuer the tunnel serves ─────────────────────────────────────
+
+section "4/4  init.sh offers no issuer a prod boot refuses"
+
+# The tunnel's hostname is the issuer, always over https: the boot check
+# refuses anything else in prod, and init.sh used to offer
+# http://localhost:4000 whenever cloudflared was not configured.
+issuer_of() {
+  # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c
+  bash -c 'source "$1/scripts/lib.sh"; trap - EXIT; issuer_for_host "$2"' _ "$REPO_ROOT" "$1" 2>&1
+}
+assert_eq "a hostname becomes an https issuer" "https://vault.example.org" "$(issuer_of vault.example.org)"
+assert_eq "one typed with https:// and a slash, the same" "https://vault.example.org" "$(issuer_of https://vault.example.org/)"
+for refused in "" "http://localhost:4000" "vault.example.org/mcp"; do
+  if out="$(issuer_of "$refused")"; then
+    fail "'${refused}' is refused" "got: ${out}"
+  else
+    pass "'${refused}' is refused"
+  fi
+done
+case "$(issuer_of "")" in
+  *"VIGIL_ISSUER must be an https URL"*) pass "in the boot check's words" ;;
+  *) fail "in the boot check's words" "$(issuer_of "")" ;;
+esac
+
+init_text="$(cat "$INIT_SH")"
+if grep -q 'localhost:4000"$' <<<"$(grep -E '^ *(HOSTNAME_DEFAULT|ISSUER)=' <<<"$init_text")"; then
+  fail "init.sh has no localhost default for the hostname"
+else
+  pass "init.sh has no localhost default for the hostname"
+fi
+# Asked, and refused, in the preflight: before the vault is created.
+# shellcheck disable=SC2016 # init.sh's own text
+issuer_at="$(grep -n -m1 -F 'ISSUER="$(issuer_for_host "$PUBLIC_HOST")" || exit 2' "$INIT_SH" | cut -d: -f1)"
+step2_at="$(grep -n -m1 -F 'step "2/9' "$INIT_SH" | cut -d: -f1)"
+if [ -n "$issuer_at" ] && [ -n "$step2_at" ] && [ "$issuer_at" -lt "$step2_at" ]; then
+  pass "the hostname is settled in the preflight, before anything is created"
+else
+  fail "the hostname is settled in the preflight, before anything is created" \
+    "issuer ${issuer_at:-?}, step 2 ${step2_at:-?}"
+fi
 
 report

@@ -344,6 +344,31 @@ ignore_obsidian_dirs() {
   done
 }
 
+# issuer_for_host <hostname> — the OAuth issuer for the public hostname an
+# operator gave: https://<hostname>. In prod the boot check refuses an issuer
+# that is not https (Vigil.Settings.Check), so a hostname that is missing, or
+# given as http://, is refused here with the boot check's words rather than
+# written into an env file the service then will not start on.
+issuer_for_host() {
+  local host="${1#https://}"
+  host="${host%/}"
+  case "$host" in
+    "")
+      err "VIGIL_ISSUER must be an https URL, and no public hostname was given (none is configured for cloudflared in /etc/cloudflared/config.yml either). Give the hostname the tunnel serves, e.g. vault.example.org."
+      return 1
+      ;;
+    http://*)
+      err "VIGIL_ISSUER must be an https URL, got \"${host}\". Give the hostname alone; it is served over https."
+      return 1
+      ;;
+    */* | *[[:space:]]*)
+      err "\"${host}\" is not a hostname: give it alone, e.g. vault.example.org."
+      return 1
+      ;;
+  esac
+  printf 'https://%s\n' "$host"
+}
+
 ## ── Logging ──────────────────────────────────────────────────────────────
 
 _timestamp() { date +%H:%M:%S; }
