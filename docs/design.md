@@ -1347,7 +1347,13 @@ loopback, the host it names is `localhost`, `127.0.0.1` or `::1`, and it
 carries none of the headers a proxy adds (`Forwarded`, `X-Forwarded-For`,
 `X-Real-IP`, `CF-Connecting-IP`, or the one `VIGIL_TRUSTED_PROXY_HEADER`
 names). Every other request gets a 404, as if the route were not there. The
-host check also refuses a page that rebinds its own name onto 127.0.0.1. The
+host check also refuses a page that rebinds its own name onto 127.0.0.1. It
+rests on the proxy saying it is one: a proxy that forwards with its upstream's
+own address as `Host` and adds no forwarding header — nginx's `proxy_pass`
+with nothing set — is indistinguishable from a `curl` on the host, so the
+guide's proxy notes make passing the `Host` on and adding `X-Forwarded-For`
+part of every proxy's configuration, rather than vigil opening a second
+listener for `/healthz` alone. The
 error text of the last push and of `stale` is left out of `/healthz` — git's
 words can name the remote — and shown by `status`, behind a token.
 

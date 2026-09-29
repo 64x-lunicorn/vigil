@@ -823,7 +823,7 @@ Such a host is updated by hand for now.
 
 ### Bring your own proxy
 
-Whatever sits in front, three things stay the same:
+Whatever sits in front, four things stay the same:
 
 - **The issuer is the public name.** `VIGIL_ISSUER` is `https://` plus the
   name clients use, and `VIGIL_RESOURCE` is that plus `/mcp`. The consent page
@@ -837,6 +837,18 @@ Whatever sits in front, three things stay the same:
   already says on later runs. For another proxy, name the header it sets and
   the address it connects from — or neither
   ([why](#the-two-proxy-settings-and-why-they-default-to-unset)).
+- **The proxy has to say it is one, or [`/healthz`](#healthz-and-status) is
+  public.** vigil cannot tell a proxy on the same host from a `curl` there by
+  the peer, which is loopback for both. It answers `/healthz` only to a
+  request that names `localhost`, `127.0.0.1` or `::1` as its host and carries
+  no forwarding header, so the proxy must pass the client's `Host` on or add
+  `X-Forwarded-For` (or `Forwarded`, `X-Real-IP`, `CF-Connecting-IP`) — best
+  both. cloudflared and Caddy do both by default. nginx does neither: its
+  `proxy_pass` sends the upstream's own address as `Host` and adds no
+  forwarding header, so the two `proxy_set_header` lines below are required,
+  not a refinement. Check from outside:
+  `curl -s -o /dev/null -w '%{http_code}\n' https://vault.example.org/healthz`
+  answers `404`.
 
 **Caddy**, on the same host:
 
@@ -866,7 +878,8 @@ location / {
 }
 ```
 
-with the same two settings as for Caddy. `client_max_body_size` matters:
+with the same two settings as for Caddy. Both `proxy_set_header` lines are
+what keeps `/healthz` off the internet (see above). `client_max_body_size` matters:
 nginx's default of 1 MB answers a large `create` or `rewrite_note` with its
 own 413 long before vigil's limit of 8,000,000 bytes.
 
