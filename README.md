@@ -114,9 +114,9 @@ export VIGIL_AUTH_PASSWORD='replace-with-your-own-local-password'
 mix run --no-halt
 ```
 
-The MCP endpoint is **`http://localhost:4000/mcp`**. This command does not
-restrict the listener to loopback: use a trusted development machine with a
-firewall, and do not expose port 4000 to the internet.
+The MCP endpoint is **`http://localhost:4000/mcp`**. The listener binds to
+loopback (`127.0.0.1`) unless `VIGIL_BIND` says otherwise, so it is not
+reachable from other machines.
 
 In another terminal, verify OAuth discovery:
 

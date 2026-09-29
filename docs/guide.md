@@ -97,9 +97,13 @@ flowchart TB
 
 ### What happens on a write
 
-Every write is validated, committed and pushed before the client is told it
-succeeded. If the push fails, the client is told — the change is not silently
-stranded on the server.
+Every write is validated, committed and pushed before the client gets an
+answer. If only the push fails, the write still succeeded: the answer says
+`pushed: false` and carries the reason in `push_error`, so the client knows
+without being invited to retry — a retried `append` would append twice. The
+commit goes out with the next successful push, or within 15 minutes through the
+safety-net cron job. A write whose *commit* fails is an error, and the file is
+restored as it was.
 
 ```mermaid
 sequenceDiagram
@@ -120,7 +124,7 @@ sequenceDiagram
     alt push succeeded
         St-->>Cl: {path, pushed: true}
     else push failed
-        St-->>Cl: error — committed locally, not pushed
+        St-->>Cl: {path, pushed: false, push_error}
     end
 ```
 
@@ -200,13 +204,23 @@ vigil commits and pushes every edit, even in development.
 
 ### Deploy on a server
 
-Run these from the repository root on a Debian 13 server. Configure HTTPS,
-Cloudflare Access and a private vault remote with write access first.
+On a fresh Debian 13 server or container, as root. A Proxmox LXC needs the
+`nesting=1` feature — the unit's sandboxing (`ProtectSystem`, `PrivateTmp`)
+fails with `226/NAMESPACE` without it — and 2 GB of RAM for the build.
 `setup.sh` is idempotent; `init.sh` protects existing secrets and refuses to
 overwrite them unless explicitly forced.
 
 ```bash
-sudo ./scripts/setup.sh --repo-url https://github.com/64x-lunicorn/vigil.git
+apt-get update && apt-get install -y git
+git clone https://github.com/64x-lunicorn/vigil.git /root/vigil && cd /root/vigil
+sudo ./scripts/setup.sh --hostname vault.example.org   # packages, user, deploy key, tunnel
+```
+
+`setup.sh` prints the service user's public key. Add it to the vault
+repository as a deploy key **with write access**, and set up a Cloudflare
+Access application for the hostname. Then:
+
+```bash
 sudo ./scripts/init.sh --new-vault          # vault, secrets, build, start, verify
 ```
 
@@ -216,14 +230,22 @@ or, to adopt a vault you already have:
 sudo ./scripts/init.sh --existing-vault git@github.com:you/vault.git
 ```
 
+Later updates run from the checkout `setup.sh` made, so there is one copy of
+the code on the host: `cd /opt/vigil/repo && sudo ./scripts/update.sh`.
+
 `setup.sh` installs packages, creates the `vigil` system user, sets up its SSH
-identity (verifying GitHub's host key fingerprint), clones the code and
-installs the systemd unit. `init.sh` provisions the vault, generates secrets,
+identity (verifying GitHub's host key fingerprint), clones the code, installs
+Hex and rebar3 for the service user and the systemd unit, and creates the
+Cloudflare tunnel with its DNS record (`--tunnel-name` if a tunnel called
+`vigil` already belongs to another host). `init.sh` provisions the vault, generates secrets,
 audits dependencies, runs the test suite, builds a release, starts the service,
 seeds two OAuth tokens, and finishes with an acceptance check.
 
 `init.sh` prints both tokens **once** at the end. After that they exist only in
-`/var/lib/vigil/oauth_tokens.dets`, readable by root.
+`/var/lib/vigil/oauth_tokens.dets`, readable by root. It also installs the push
+safety net as `/etc/cron.d/vigil-push-safety-net`. An adopted vault keeps its
+own `vigil-vault-conventions` skill; the template is only written when the
+vault has none.
 
 ---
 
@@ -409,15 +431,16 @@ All settings come from environment variables in `/etc/vigil/env`
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VIGIL_VAULT_PATH` | `test/fixtures/vault` | path to the vault's Git clone |
+| `VIGIL_VAULT_PATH` | **required in prod**; `test/fixtures/vault` in dev | path to the vault's Git clone |
 | `VIGIL_PORT` | `4000` | HTTP port |
+| `VIGIL_BIND` | `127.0.0.1` | listen address; loopback keeps the LAN from bypassing Cloudflare Access. Widen it only for a proxy on another host |
 | `VIGIL_GIT_REMOTE` | `origin` | remote used for pull **and** push; must match `git branch -vv` |
 | `VIGIL_TZ` | `Europe/Berlin` | timezone for `current`, envelopes, relative times |
 | `VIGIL_EXCLUDE` | empty | comma-separated directory names that are never parsed, at any depth — `secret` hides `projects/secret/` as well as `secret/` |
-| `VIGIL_ISSUER` | `http://localhost:4000` | OAuth issuer |
-| `VIGIL_RESOURCE` | `http://localhost:4000/mcp` | canonical MCP endpoint URI (audience) |
+| `VIGIL_ISSUER` | **required in prod**; `http://localhost:4000` in dev | OAuth issuer |
+| `VIGIL_RESOURCE` | **required in prod**; `http://localhost:4000/mcp` in dev | canonical MCP endpoint URI (audience) |
 | `VIGIL_AUTH_PASSWORD` | — | consent password, **required, min. 12 characters**; also the SkillKey HMAC secret |
-| `VIGIL_STATE_DIR` | `tmp/oauth_state` | directory for the three `:dets` files |
+| `VIGIL_STATE_DIR` | **required in prod**; `tmp/oauth_state` in dev | directory for the three `:dets` files |
 | `VIGIL_TRUSTED_PROXY_HEADER` | unset | header carrying the real client address, e.g. `CF-Connecting-IP` |
 | `VIGIL_TRUSTED_PROXIES` | empty | addresses or CIDR blocks whose forwarded header is believed |
 | `VIGIL_SKILLKEY_TTL` | `3600` | SkillKey rotation window in seconds |
@@ -536,16 +559,19 @@ editing the vault in another tool.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Every tool answers `EXIT time out`, even `read` | `Vigil.Store` died, usually after a write error | `systemctl restart vigil`, then check `journalctl -u vigil`; for permission errors `chown -R vigil:vigil /var/lib/vigil` |
+| Requests hang, then fail with HTTP 500; the journal shows `GenServer.call ... timeout` | the single writer is blocked for over two minutes, almost always on a git pull or push that cannot reach the remote | check `journalctl -u vigil` and the network path to the remote; git's own connect and stall timeouts should normally end the call well before this |
+| Service refuses to start: "VIGIL_… not set" | a required setting is missing from `/etc/vigil/env` | add it (see `deploy/vigil.env.example`) |
+| Service fails with `226/NAMESPACE` | an LXC container without `nesting=1` cannot give the unit its sandbox | enable the container's nesting feature in Proxmox and restart it |
 | Service will not start, journal shows an OAuth store error | `Vigil.OAuth.Store` could not open the `dets` files | check ownership and permissions of `VIGIL_STATE_DIR`. A broken OAuth store deliberately takes the whole service down — a service that cannot authenticate anyone is worse than no service |
 | `git pull failed: Host key verification failed` | the service user's `known_hosts` is empty | re-run `setup.sh` (idempotent) |
 | `Permission denied (publickey)` | deploy key not registered, or registered without write access | add the key from `/var/lib/vigil/.ssh/id_ed25519.pub`, enable "Allow write access" |
 | Writes fail with "Missing or expired SkillKey" | key not passed, or older than two rotation windows | call `skill_read` on `vigil-vault-conventions` and use the key it returns — the error case returns one too |
 | `create` fails with "does not match the schema for domain" | the domain has a `naming.pattern` the path does not satisfy | the error contains a valid suggestion; or adjust `naming` in `_domains.yml` |
 | Chunk ids change unexpectedly after a deploy | the slug logic changed without checking the migration diff | run `mix vigil.slug_diff <vault>` *before* deploying |
-| Client gets 401 | token wrong, expired, or wrong scope for the tool | seed a new token (`mix vigil.seed_token`) or redo the OAuth flow |
+| Client gets 401 | token wrong or expired | redo the OAuth flow. Never run `mix vigil.seed_token` against a running service — it opens the dets files a second time and the token it writes is never seen |
+| A write tool answers "Read-only token: write access denied." | the token has scope `vault:read` | connect with a `vault` token |
 | Client gets 403 from the endpoint, not from Elixir | Cloudflare Access service token missing in the client | fix the Access configuration — never disable Access to "solve" this |
-| Changes do not appear on other devices | push failed, commit is local | `git -C /var/lib/vigil/vault rev-list --count github/main..main`, then push |
+| Changes do not appear on other devices; writes answer `pushed: false` | push failed, commit is local | the safety-net cron retries every 15 minutes; check `journalctl -t vigil-push` and `git -C /var/lib/vigil/vault rev-list --count github/main..main` |
 
 ---
 
