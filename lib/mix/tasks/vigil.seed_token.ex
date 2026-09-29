@@ -12,6 +12,7 @@ defmodule Mix.Tasks.Vigil.SeedToken do
 
       mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault
       mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault:read --ttl-days 3650
+      mix vigil.seed_token --state-dir /var/lib/vigil --resource https://vault.example.org/mcp --scope vault --ttl-seconds 900
   """
   use Mix.Task
 
@@ -21,7 +22,13 @@ defmodule Mix.Tasks.Vigil.SeedToken do
 
     {opts, _rest, invalid} =
       OptionParser.parse(args,
-        strict: [state_dir: :string, resource: :string, scope: :string, ttl_days: :integer]
+        strict: [
+          state_dir: :string,
+          resource: :string,
+          scope: :string,
+          ttl_days: :integer,
+          ttl_seconds: :integer
+        ]
       )
 
     if invalid != [] do
@@ -31,7 +38,9 @@ defmodule Mix.Tasks.Vigil.SeedToken do
     state_dir = Keyword.fetch!(opts, :state_dir)
     resource = Keyword.fetch!(opts, :resource)
     scope = Keyword.get(opts, :scope, "vault")
-    ttl_days = Keyword.get(opts, :ttl_days, 3650)
+    # --ttl-seconds wins over --ttl-days: short-lived tokens for verify() are
+    # counted in minutes, not days.
+    ttl_seconds = Keyword.get(opts, :ttl_seconds, Keyword.get(opts, :ttl_days, 3650) * 86_400)
 
     # The scopes are `Vigil.OAuth`'s, the same list its metadata publishes: a
     # scope the flow issues is one this task can seed, and no other.
@@ -53,7 +62,7 @@ defmodule Mix.Tasks.Vigil.SeedToken do
         Vigil.OAuth.Store.over_tables(),
         resource,
         scope,
-        ttl_days * 86_400,
+        ttl_seconds,
         now
       )
 

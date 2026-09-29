@@ -4,14 +4,19 @@
 # Does not touch secrets, vault content, or starting the service.
 #
 # Usage: sudo ./scripts/setup.sh [--repo-url <url>] [--skip-cloudflared]
+#            [--tunnel-name <name>] [--hostname <host>]
 #            [--otp-version <x> --force] [--dry-run] [--non-interactive]
 #            [--verbose] [--help]
 
 # shellcheck source=scripts/lib.sh
 source "$(dirname "$0")/lib.sh"
 
-REPO_URL="git@github.com:Lunicorn-lab/vigil.git"
+# The code repo is public: https needs no deploy key. The deploy key this
+# script generates is for the vault, which is private.
+REPO_URL="https://github.com/64x-lunicorn/vigil.git"
 SKIP_CLOUDFLARED=0
+TUNNEL_NAME="vigil"
+TUNNEL_HOSTNAME=""
 OTP_VERSION_OVERRIDE=""
 FORCE=0
 
@@ -27,8 +32,10 @@ scripts/setup.sh — Debian 13 → an installed but not started vigil service.
 
 Order: setup.sh → init.sh → update.sh (as needed, repeatable)
 
-  --repo-url <url>       code repo (default: git@github.com:Lunicorn-lab/vigil.git)
+  --repo-url <url>        code repo (default: https://github.com/64x-lunicorn/vigil.git)
   --skip-cloudflared      set the tunnel up manually; this script skips cloudflared
+  --tunnel-name <name>    Cloudflare tunnel to create or reuse (default: vigil)
+  --hostname <host>       public hostname routed to vigil (asked for if omitted)
   --otp-version <x>       override .tool-versions (only together with --force)
   --force                 allows --otp-version, otherwise has no effect
   --dry-run               log changes with [DRY RUN] instead of applying them
@@ -54,6 +61,14 @@ while [ $# -gt 0 ]; do
     --skip-cloudflared)
       SKIP_CLOUDFLARED=1
       shift
+      ;;
+    --tunnel-name)
+      TUNNEL_NAME="$2"
+      shift 2
+      ;;
+    --hostname)
+      TUNNEL_HOSTNAME="$2"
+      shift 2
       ;;
     --otp-version)
       OTP_VERSION_OVERRIDE="$2"
@@ -169,7 +184,7 @@ record_done "preflight passed"
 step "2/9  Install packages"
 
 PACKAGES=(
-  git curl ca-certificates jq openssl util-linux openssh-client
+  git curl ca-certificates jq openssl util-linux openssh-client cron gnupg
   build-essential libssl-dev
   erlang-base erlang-dev erlang-crypto erlang-ssl erlang-public-key
   erlang-inets erlang-xmerl erlang-tools elixir
@@ -222,7 +237,7 @@ else
 fi
 
 if [ "$DRY_RUN" != "1" ]; then
-  install -d -m 0755 -o root -o root /opt/vigil
+  install -d -m 0755 -o root -g root /opt/vigil
   install -d -m 0755 -o vigil -g vigil /opt/vigil/repo
   install -d -m 0755 -o vigil -g vigil /opt/vigil/releases
   install -d -m 0750 -o vigil -g vigil /var/lib/vigil
@@ -302,7 +317,10 @@ if [ "$DRY_RUN" != "1" ] && [ -f "${DEPLOY_KEY}.pub" ]; then
   echo "  Repository → Settings → Deploy keys → Add deploy key, enable 'Allow write access'."
   echo
 
-  if as_vigil ssh -o BatchMode=yes -o ConnectTimeout=5 -T git@github.com 2>&1 | grep -qi "successfully authenticated"; then
+  # ssh -T always exits 1 (GitHub offers no shell), so its status says nothing
+  # and, under pipefail, would sink the whole pipeline. Read what it printed.
+  SSH_GREETING="$(as_vigil ssh -o BatchMode=yes -o ConnectTimeout=5 -T git@github.com 2>&1 || true)"
+  if grep -qi "successfully authenticated" <<<"$SSH_GREETING"; then
     ok "Deploy key already works (ssh -T git@github.com succeeded)."
   else
     warn "Deploy key is not registered with GitHub yet (ssh -T git@github.com fails — expected until the key is added)."
@@ -326,6 +344,17 @@ fi
 
 check_tool_versions
 record_done "code repo at /opt/vigil/repo"
+
+# Hex and rebar3 are per user, and Debian's elixir package brings neither.
+# Without them the first `mix deps.get` in init.sh stops at an interactive
+# "Shall I install Hex?" whose prompt goes to /dev/null — it looks hung.
+if [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] mix local.hex --force && mix local.rebar --force (as vigil)"
+else
+  as_vigil bash -c 'cd /opt/vigil/repo && mix local.hex --force --if-missing >/dev/null && mix local.rebar --force --if-missing >/dev/null'
+  ok "Hex and rebar3 installed for the vigil user."
+fi
+record_done "Hex and rebar3 for the vigil user"
 
 ## ── Step 6 — systemd unit ────────────────────────────────────────────────
 
@@ -375,17 +404,19 @@ else
   if command -v cloudflared >/dev/null 2>&1; then
     log "cloudflared already installed ($(cloudflared --version 2>&1 | head -1))."
   else
-    DEB_ARCH="$ARCH"
-    TMP_DEB="$(mktemp --suffix=.deb)"
-    curl -fsSL -o "$TMP_DEB" \
-      "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${DEB_ARCH}.deb"
-    dpkg -i "$TMP_DEB"
-    rm -f "$TMP_DEB"
+    # Cloudflare's signed apt repository rather than an unverified .deb: apt
+    # checks the signature, and cloudflared then updates with the system.
+    install -d -m 0755 /usr/share/keyrings
+    curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg
+    echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" \
+      >/etc/apt/sources.list.d/cloudflared.list
+    apt-get update
+    apt-get install -y --no-install-recommends cloudflared
   fi
 
   if [ "$NON_INTERACTIVE" = "1" ]; then
     warn "Setting up the cloudflared tunnel needs an interactive 'cloudflared tunnel login' (browser) — skipped under --non-interactive."
-    record_next_step "cloudflared tunnel login && cloudflared tunnel create vigil, then create /etc/cloudflared/config.yml by hand"
+    record_next_step "cloudflared tunnel login && cloudflared tunnel create ${TUNNEL_NAME}, then create /etc/cloudflared/config.yml by hand"
   else
     if [ ! -f /root/.cloudflared/cert.pem ]; then
       log "cloudflared tunnel login — open the printed link in a browser."
@@ -396,27 +427,49 @@ else
     fi
 
     if [ -f /root/.cloudflared/cert.pem ]; then
-      if ! cloudflared tunnel list 2>/dev/null | grep -q '\bvigil\b'; then
-        cloudflared tunnel create vigil
+      TUNNEL_ID="$(cloudflared tunnel list -o json 2>/dev/null | jq -r --arg n "$TUNNEL_NAME" '.[] | select(.name==$n) | .id' || true)"
+
+      # A tunnel of this name that exists in the account but whose credentials
+      # are not on this host belongs to another machine — typically the
+      # container this one replaces. Reusing its ID would write a config
+      # cloudflared cannot start with. Say so instead.
+      if [ -n "$TUNNEL_ID" ] && [ ! -f "/root/.cloudflared/${TUNNEL_ID}.json" ]; then
+        err "Tunnel '${TUNNEL_NAME}' (${TUNNEL_ID}) exists in the account, but its credentials are not on this host."
+        err "Fix: stop it on the old host and 'cloudflared tunnel delete ${TUNNEL_NAME}', or re-run with --tunnel-name <new-name>."
+        exit 2
       fi
-      TUNNEL_ID="$(cloudflared tunnel list -o json 2>/dev/null | jq -r '.[] | select(.name=="vigil") | .id' || true)"
+
+      if [ -z "$TUNNEL_ID" ]; then
+        cloudflared tunnel create "$TUNNEL_NAME"
+        TUNNEL_ID="$(cloudflared tunnel list -o json 2>/dev/null | jq -r --arg n "$TUNNEL_NAME" '.[] | select(.name==$n) | .id' || true)"
+      fi
 
       if [ -n "$TUNNEL_ID" ]; then
-        HOSTNAME_VALUE="$(ask_value "Hostname for the tunnel (e.g. vault.example.org)" "vault.example.org")"
+        HOSTNAME_VALUE="${TUNNEL_HOSTNAME:-$(ask_value "Hostname for the tunnel (e.g. vault.example.org)" "vault.example.org")}"
         install -d -m 0755 /etc/cloudflared
+        # 127.0.0.1, not localhost: vigil binds IPv4 loopback, and localhost
+        # may resolve to ::1 first.
         write_file_atomically /etc/cloudflared/config.yml 0644 root:root "$(
           cat <<EOF
 tunnel: ${TUNNEL_ID}
 credentials-file: /root/.cloudflared/${TUNNEL_ID}.json
 ingress:
   - hostname: ${HOSTNAME_VALUE}
-    service: http://localhost:4000
+    service: http://127.0.0.1:4000
   - service: http_status:404
 EOF
         )"
+        # The DNS record is what makes the hostname reach this tunnel. An
+        # existing record for the hostname (the old tunnel's) is replaced.
+        if cloudflared tunnel route dns --overwrite-dns "$TUNNEL_NAME" "$HOSTNAME_VALUE"; then
+          ok "DNS: ${HOSTNAME_VALUE} → tunnel '${TUNNEL_NAME}'."
+        else
+          warn "Could not route ${HOSTNAME_VALUE} to tunnel '${TUNNEL_NAME}'."
+          record_next_step "cloudflared tunnel route dns --overwrite-dns ${TUNNEL_NAME} ${HOSTNAME_VALUE}"
+        fi
         cloudflared service install >/dev/null 2>&1 || true
-        systemctl enable cloudflared >/dev/null 2>&1 || true
-        ok "Configured cloudflared tunnel 'vigil' (hostname ${HOSTNAME_VALUE}, no catch-all)."
+        systemctl enable --now cloudflared >/dev/null 2>&1 || true
+        ok "Configured cloudflared tunnel '${TUNNEL_NAME}' (hostname ${HOSTNAME_VALUE}, no catch-all)."
       else
         warn "Could not determine the tunnel ID — tunnel config not written."
         record_next_step "check cloudflared tunnel list, create /etc/cloudflared/config.yml by hand"

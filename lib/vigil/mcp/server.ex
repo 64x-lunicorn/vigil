@@ -158,7 +158,7 @@ defmodule Vigil.MCP.Server do
          true <- protocol_version_ok?,
          {:ok, body, conn} <- Plug.Conn.read_body(conn),
          {:ok, msg} <- Jason.decode(body) do
-      handle_message(conn, msg, scope)
+      if is_map(msg), do: handle_message(conn, msg, scope), else: invalid_request(conn)
     else
       false ->
         send_resp(conn, 400, "")
@@ -184,8 +184,19 @@ defmodule Vigil.MCP.Server do
     case get_req_header(conn, "mcp-protocol-version") do
       [] -> {:ok, true, conn}
       [@protocol_version] -> {:ok, true, conn}
-      [_other] -> {:ok, false, conn}
+      _other_or_several -> {:ok, false, conn}
     end
+  end
+
+  # A body that parses but is not one JSON-RPC object — a batch, a scalar.
+  # Batches were removed from MCP in 2025-06-18; either way there is no `id`
+  # to answer to.
+  defp invalid_request(conn) do
+    send_json(conn, 200, %{
+      jsonrpc: "2.0",
+      id: nil,
+      error: %{code: -32600, message: "Invalid Request"}
+    })
   end
 
   defp handle_message(conn, %{"method" => "initialize"} = msg, _scope) do
@@ -217,6 +228,15 @@ defmodule Vigil.MCP.Server do
     with_session(conn, fn _session_id ->
       send_json(conn, 200, %{jsonrpc: "2.0", id: msg["id"], result: %{tools: Tools.definitions()}})
     end)
+  end
+
+  defp handle_message(conn, %{"method" => "tools/call", "params" => params} = msg, _scope)
+       when not is_map(params) and not is_nil(params) do
+    send_json(conn, 200, %{
+      jsonrpc: "2.0",
+      id: msg["id"],
+      error: %{code: -32602, message: "Invalid params: params must be an object"}
+    })
   end
 
   defp handle_message(conn, %{"method" => "tools/call"} = msg, scope) do

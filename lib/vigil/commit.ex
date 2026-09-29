@@ -42,14 +42,26 @@ defmodule Vigil.Commit do
   def write(%Git{} = git, vault_path, rel_path, content, message) do
     abs_path = Path.join(vault_path, rel_path)
 
+    previous = File.read(abs_path)
+
     with :ok <- mkdir_p(Path.dirname(abs_path)),
          :ok <- write_file(abs_path, content) do
       case git.add_commit.(vault_path, rel_path, message) do
-        {:ok, commit_meta} -> {:ok, commit_meta}
-        {:error, out} -> {:error, "git commit failed: #{out}"}
+        {:ok, commit_meta} ->
+          {:ok, commit_meta}
+
+        {:error, out} ->
+          restore(abs_path, previous)
+          {:error, "git commit failed: #{out}"}
       end
     end
   end
+
+  # A write that did not commit must not stay on disk: the index still holds
+  # the old note, and the next write's commit would sweep the stray content in
+  # under its own message.
+  defp restore(abs_path, {:ok, previous}), do: File.write(abs_path, previous)
+  defp restore(abs_path, {:error, _}), do: File.rm(abs_path)
 
   @doc """
   Removes `rel_path` from the vault and commits the removal under `message`.

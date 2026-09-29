@@ -5,7 +5,7 @@
 # it aborts unless --force is given.
 #
 # Usage: sudo ./scripts/init.sh (--new-vault | --existing-vault <git-url>)
-#          [--allow-unprotected] [--force] [--keep-token]
+#          [--allow-unprotected] [--force] [--ignore-audit] [--keep-token]
 #          [--dry-run] [--non-interactive] [--verbose] [--help]
 #        sudo ./scripts/init.sh --check-only [--vault <path>]
 
@@ -20,6 +20,7 @@ VAULT_REMOTE_URL=""
 ALLOW_UNPROTECTED=0
 FORCE=0
 KEEP_TOKEN=0
+IGNORE_AUDIT=0
 CHECK_ONLY=0
 CHECK_ONLY_VAULT=""
 
@@ -35,8 +36,10 @@ Prerequisite: setup.sh has already run.
                               --non-interactive, otherwise asked interactively)
   --allow-unprotected         skip the Cloudflare Access check in verify()
   --force                     regenerate existing secrets (requires typing "yes")
-  --keep-token                do not seed a new token — prints instructions for
-                              transferring the dets files from the old container
+  --ignore-audit              continue despite a failed dependency audit
+  --keep-token                also print how to carry over OAuth clients and
+                              tokens (the dets files) from the old container;
+                              verify() still seeds its own tokens
   --dry-run                   log changes with [DRY RUN] instead of applying
   --non-interactive           run through without any prompts
   --verbose                   extra debug output (set -x)
@@ -78,6 +81,10 @@ while [ $# -gt 0 ]; do
       ;;
     --force)
       FORCE=1
+      shift
+      ;;
+    --ignore-audit)
+      IGNORE_AUDIT=1
       shift
       ;;
     --keep-token)
@@ -303,7 +310,9 @@ run_vault_adoption() {
   # call `mix deps.get`. Without MIX_ENV=prod, for the same reason as
   # `mix test`: in :prod config/runtime.exs reaches for /var/lib/vigil, which
   # is not ready at this point in the sequence.
-  if ! as_vigil bash -c 'cd /opt/vigil/repo && mix deps.get' >/dev/null; then
+  # Compiled here too, so the first run's compiler output does not land in
+  # the JSON the check below prints on stdout.
+  if ! as_vigil bash -c 'cd /opt/vigil/repo && mix deps.get && mix compile' >/dev/null; then
     err "mix deps.get failed for the vault adoption check."
     return 1
   fi
@@ -652,6 +661,16 @@ else
 fi
 RESOURCE="${ISSUER}/mcp"
 
+# What the writing instructions tell the assistant about the vault: whose
+# notes these are and which language they are written in.
+VAULT_OWNER="$(ask_value "Vault owner (named in the writing instructions)" "the vault owner")"
+VAULT_LANGUAGE="$(ask_value "Language the notes are written in" "English")"
+VAULT_TZ="$(ask_value "Time zone of the vault" "Europe/Berlin")"
+# Written double-quoted below: the file is read by systemd and by `source`
+# in these scripts, and an unquoted value with a space breaks the latter.
+VAULT_OWNER="${VAULT_OWNER//\"/}"
+VAULT_LANGUAGE="${VAULT_LANGUAGE//\"/}"
+
 # The domain list is deliberately NOT written here: it is read at runtime
 # from _domains.yml, never maintained as a regex or list in code. A list kept
 # in two places always drifts.
@@ -659,8 +678,9 @@ ENV_CONTENT="$(
   cat <<EOF
 VIGIL_VAULT_PATH=${VAULT}
 VIGIL_PORT=4000
+VIGIL_BIND=127.0.0.1
 VIGIL_GIT_REMOTE=github
-VIGIL_TZ=Europe/Berlin
+VIGIL_TZ=${VAULT_TZ}
 VIGIL_EXCLUDE=
 VIGIL_ISSUER=${ISSUER}
 VIGIL_RESOURCE=${RESOURCE}
@@ -668,6 +688,8 @@ VIGIL_AUTH_PASSWORD=${AUTH_PASSWORD}
 VIGIL_STATE_DIR=/var/lib/vigil
 VIGIL_SKILLKEY_TTL=3600
 VIGIL_RATE_LIMIT_RPM=60
+VIGIL_VAULT_OWNER="${VAULT_OWNER}"
+VIGIL_VAULT_LANGUAGE="${VAULT_LANGUAGE}"
 EOF
 )"
 write_file_atomically "$ENV_FILE" 0600 root:root "$ENV_CONTENT"
@@ -678,18 +700,21 @@ record_done "wrote runtime config to ${ENV_FILE}"
 step "5/9  Dependency audit"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] mix deps.get --only prod && mix hex.audit"
+  log "[DRY RUN] mix deps.get && mix hex.audit && mix deps.audit"
 else
-  AUDIT_OUTPUT="$(as_vigil bash -c 'cd /opt/vigil/repo && mix deps.get --only prod && mix hex.audit' 2>&1)" || true
-  echo "$AUDIT_OUTPUT"
-  if echo "$AUDIT_OUTPUT" | grep -qiE '\b(high|critical)\b'; then
-    if [ "$FORCE" != "1" ]; then
-      err "mix hex.audit reports HIGH/CRITICAL advisories. Override only with --force."
+  # All environments' deps: `mix test` in the build step needs the test deps.
+  # The verdict is the exit status — hex.audit fails on a retired package,
+  # deps.audit on a known vulnerability.
+  if AUDIT_OUTPUT="$(as_vigil bash -c 'cd /opt/vigil/repo && mix deps.get && mix hex.audit && mix deps.audit' 2>&1)"; then
+    echo "$AUDIT_OUTPUT"
+    ok "Dependency audit clean."
+  else
+    echo "$AUDIT_OUTPUT"
+    if [ "$IGNORE_AUDIT" != "1" ]; then
+      err "Dependency audit failed (retired package or known vulnerability). Override only with --ignore-audit."
       exit 2
     fi
-    warn "mix hex.audit reports HIGH/CRITICAL advisories, overridden with --force."
-  else
-    ok "No HIGH/CRITICAL advisory."
+    warn "Dependency audit failed, overridden with --ignore-audit."
   fi
 fi
 record_done "ran the dependency audit"
@@ -741,32 +766,49 @@ else
     record_next_step "carry over oauth_tokens.dets/oauth_clients.dets from the old container, if wanted"
   fi
 
-  SKILL_CONTENT="$(cat "${SCRIPT_DIR}/templates/vigil-vault-conventions.md")"
-  SKILL_JSON_CONTENT="$(printf '%s' "$SKILL_CONTENT" | jq -Rs .)"
-  # skill_write requires a SkillKey like every other write tool. That creates
-  # a chicken-and-egg problem on a fresh vault: the vigil-vault-conventions
-  # skill does not exist yet, so there is no skill_read response to take the
-  # key from. Vigil.Skills.read/3 therefore returns the current SkillKey in the
-  # error case as well (it is a pure HMAC over secret + time, independent of
-  # any skill existing) — parsed here out of the failing skill_read
-  # response.
-  SKILL_READ_RESPONSE="$(mcp_call "http://localhost:4000" "$RW_TOKEN" "skill_read" \
-    '{"name":"vigil-vault-conventions"}')"
-  BOOTSTRAP_SKILL_KEY="$(echo "$SKILL_READ_RESPONSE" | mcp_error_text 2>/dev/null | grep -oP 'SkillKey: \K[0-9a-f]+' || true)"
-  if [ -z "$BOOTSTRAP_SKILL_KEY" ]; then
-    err "Could not extract a SkillKey from the skill_read response for bootstrapping: ${SKILL_READ_RESPONSE}"
-    exit 1
-  fi
+  # An adopted vault may already carry its own conventions skill, tuned by
+  # its owner — never overwrite it with the template. (The bootstrap below
+  # also depends on skill_read failing, which it does not for a skill that
+  # exists.)
+  if [ -f "${VAULT}/skills/vigil-vault-conventions.md" ]; then
+    ok "Skill 'vigil-vault-conventions' already in the vault — kept as it is."
+  else
+    SKILL_CONTENT="$(cat "${SCRIPT_DIR}/templates/vigil-vault-conventions.md")"
+    SKILL_JSON_CONTENT="$(printf '%s' "$SKILL_CONTENT" | jq -Rs .)"
+    # skill_write requires a SkillKey like every other write tool. That creates
+    # a chicken-and-egg problem on a fresh vault: the vigil-vault-conventions
+    # skill does not exist yet, so there is no skill_read response to take the
+    # key from. Vigil.Skills.read/3 therefore returns the current SkillKey in the
+    # error case as well (it is a pure HMAC over secret + time, independent of
+    # any skill existing) — parsed here out of the failing skill_read
+    # response.
+    SKILL_READ_RESPONSE="$(mcp_call "http://localhost:4000" "$RW_TOKEN" "skill_read" \
+      '{"name":"vigil-vault-conventions"}')"
+    BOOTSTRAP_SKILL_KEY="$(echo "$SKILL_READ_RESPONSE" | mcp_error_text 2>/dev/null | grep -oP 'SkillKey: \K[0-9a-f]+' || true)"
+    if [ -z "$BOOTSTRAP_SKILL_KEY" ]; then
+      err "Could not extract a SkillKey from the skill_read response for bootstrapping: ${SKILL_READ_RESPONSE}"
+      exit 1
+    fi
 
-  SKILL_WRITE_RESPONSE="$(mcp_call "http://localhost:4000" "$RW_TOKEN" "skill_write" \
-    "{\"name\":\"vigil-vault-conventions\",\"content\":${SKILL_JSON_CONTENT},\"skill_key\":\"${BOOTSTRAP_SKILL_KEY}\"}")"
-  if echo "$SKILL_WRITE_RESPONSE" | mcp_is_error; then
-    err "skill_write for vigil-vault-conventions failed: $(echo "$SKILL_WRITE_RESPONSE" | mcp_error_text 2>/dev/null || echo "$SKILL_WRITE_RESPONSE")"
-    exit 1
+    SKILL_WRITE_RESPONSE="$(mcp_call "http://localhost:4000" "$RW_TOKEN" "skill_write" \
+      "{\"name\":\"vigil-vault-conventions\",\"content\":${SKILL_JSON_CONTENT},\"skill_key\":\"${BOOTSTRAP_SKILL_KEY}\"}")"
+    if echo "$SKILL_WRITE_RESPONSE" | mcp_is_error; then
+      err "skill_write for vigil-vault-conventions failed: $(echo "$SKILL_WRITE_RESPONSE" | mcp_error_text 2>/dev/null || echo "$SKILL_WRITE_RESPONSE")"
+      exit 1
+    fi
+    ok "Created skill 'vigil-vault-conventions'."
   fi
-  ok "Created skill 'vigil-vault-conventions'."
 fi
 record_done "service started, tokens seeded, conventions skill created"
+
+# The push safety net: a write whose push failed is committed and answered
+# `pushed: false`; this pushes it within 15 minutes if no later write does.
+if [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] install /etc/cron.d/vigil-push-safety-net"
+else
+  install -m 0644 -o root -g root "${SCRIPT_DIR}/../deploy/vigil-push-safety-net.cron" /etc/cron.d/vigil-push-safety-net
+  ok "Installed the push safety net (/etc/cron.d/vigil-push-safety-net)."
+fi
 
 ## ── Step 8 — verify() ────────────────────────────────────────────────────
 

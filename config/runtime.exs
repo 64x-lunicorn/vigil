@@ -2,6 +2,10 @@ import Config
 
 config :vigil,
   port: String.to_integer(System.get_env("VIGIL_PORT", "4000")),
+  # Loopback by default: cloudflared runs on the same host, and a port open on
+  # the LAN is a way around Cloudflare Access. Set 0.0.0.0 (or an interface
+  # address) only when a proxy on another host forwards to vigil.
+  bind: System.get_env("VIGIL_BIND", "127.0.0.1"),
   git_remote: System.get_env("VIGIL_GIT_REMOTE", "origin"),
   tz: System.get_env("VIGIL_TZ", "Europe/Berlin"),
   exclude:
@@ -73,8 +77,22 @@ if config_env() == :test do
     resource: "https://vault.factory-lab.org/mcp",
     auth_password: "correct-horse-battery-staple"
 else
+  # In :prod the four facts that decide which vault, which OAuth state and
+  # which identity have no fallback. A missing line in /etc/vigil/env used to
+  # boot against the demo vault, keep OAuth state inside the release directory
+  # (replaced on every update) or announce `localhost` as the issuer, which
+  # fails every real token's audience check. Unset, they stay nil here and
+  # Vigil.Application refuses to start, naming the variable.
+  #
+  # Only the server refuses: mix tasks run under MIX_ENV=prod (seed_token,
+  # vault_check) evaluate this file too and take what they need as arguments.
+  fallback = fn var, default ->
+    if config_env() == :prod, do: System.get_env(var), else: System.get_env(var, default)
+  end
+
   config :vigil,
-    vault_path:
-      System.get_env("VIGIL_VAULT_PATH", Path.expand("test/fixtures/vault", File.cwd!())),
-    state_dir: System.get_env("VIGIL_STATE_DIR", Path.expand("tmp/oauth_state", File.cwd!()))
+    vault_path: fallback.("VIGIL_VAULT_PATH", Path.expand("test/fixtures/vault", File.cwd!())),
+    state_dir: fallback.("VIGIL_STATE_DIR", Path.expand("tmp/oauth_state", File.cwd!())),
+    issuer: fallback.("VIGIL_ISSUER", "http://localhost:4000"),
+    resource: fallback.("VIGIL_RESOURCE", "http://localhost:4000/mcp")
 end

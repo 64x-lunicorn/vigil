@@ -192,7 +192,7 @@ defmodule Vigil.SkillsTest do
       # No "origin" remote configured — push fails, but that failure itself
       # proves valid_skill_name?/1 and validate_skill_frontmatter/1 both let
       # this write through to the git-write path.
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Skills.write(
                  "valid-name_1",
                  "---\nname: x\ndescription: x\n---\n# X",

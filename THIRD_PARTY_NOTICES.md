@@ -8,22 +8,17 @@ with its existing copyright notice:
 Third-party software and documentation retain their original copyrights and
 license terms. The project license does not relicense those components.
 
-## Bundled development skills
+## Adapted agent guidance
 
-The development skills in [`.agents/skills/`](.agents/skills/) originate from
+The agent guidance in [`docs/agents/`](docs/agents/) is adapted from
 [mattpocock/skills](https://github.com/mattpocock/skills), by Matt Pocock, under
-the MIT License. The repository also contains agent guidance adapted from that
-collection in [`docs/agents/`](docs/agents/).
+the MIT License.
 
 - **Copyright:** Copyright (c) 2026 Matt Pocock
-- **License text:** [`.agents/skills/LICENSE`](.agents/skills/LICENSE)
 - **Upstream license:** <https://github.com/mattpocock/skills/blob/main/LICENSE>
-- **Installed-source manifest:** [`skills-lock.json`](skills-lock.json)
 
-These skills are development aids, not runtime dependencies of the vigil
-server. Keep their license notice with any copies or substantial portions.
-The manifest records source paths and content hashes, not upstream Git commit
-identifiers.
+This guidance is a development aid, not a runtime dependency of the vigil
+server.
 
 ## Locked Elixir/Erlang dependencies
 

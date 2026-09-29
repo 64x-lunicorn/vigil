@@ -992,7 +992,7 @@ defmodule Vigil.StoreTest do
 
       start_store(vault, git: git, git_remote: "nonexistent-remote")
 
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Store.call(@store, :create, %{
                  path: "bike/ordered.md",
                  type: "reference",
@@ -1044,7 +1044,7 @@ defmodule Vigil.StoreTest do
       :ok = stop_supervised(Store)
       log = start_push_probing_store(vault, self())
 
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Store.call(@store, :delete_note, %{path: "bike/via-carolina.md", confirm: true})
 
       assert msg =~ "Deletion committed locally, but push failed"
@@ -1062,7 +1062,7 @@ defmodule Vigil.StoreTest do
       :ok = stop_supervised(Store)
       log = start_push_probing_store(vault, self())
 
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Store.call(@store, :move_note, %{
                  from: "bike/via-carolina.md",
                  to: "bike/via-carolina-2026.md",
@@ -1083,11 +1083,36 @@ defmodule Vigil.StoreTest do
   end
 
   describe "write-path robustness" do
-    test "push failure is returned as an error; read and search keep working", %{vault: vault} do
+    test "a write whose commit fails leaves the file as it was", %{vault: vault} do
+      :ok = stop_supervised(Store)
+      git = %{CommitLog.new(vault) | add_commit: fn _, _, _ -> {:error, "boom"} end}
+      start_store(vault, git: git)
+
+      path = Path.join(vault, "bike/terra-speed.md")
+      before = File.read!(path)
+
+      assert {:error, "git commit failed: boom"} =
+               Store.call(@store, :append, %{path: "bike/terra-speed.md", content: "More"})
+
+      assert File.read!(path) == before
+
+      assert {:error, "git commit failed: boom"} =
+               Store.call(@store, :create, %{
+                 path: "bike/brand-new.md",
+                 type: "reference",
+                 content: "# Brand new\ntext"
+               })
+
+      refute File.exists?(Path.join(vault, "bike/brand-new.md"))
+    end
+
+    test "push failure is a success that says it was not pushed; read and search keep working", %{
+      vault: vault
+    } do
       :ok = stop_supervised(Store)
       start_store(vault, git_remote: "nonexistent-remote")
 
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Store.call(@store, :create, %{
                  path: "bike/new.md",
                  type: "reference",
@@ -1109,7 +1134,7 @@ defmodule Vigil.StoreTest do
       :ok = stop_supervised(Store)
       start_store(vault, git_remote: "nonexistent-remote")
 
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Store.call(@store, :delete_note, %{path: "bike/terra-speed.md", confirm: true})
 
       assert msg =~ "Deletion committed locally, but push failed"
@@ -1125,7 +1150,7 @@ defmodule Vigil.StoreTest do
       :ok = stop_supervised(Store)
       start_store(vault, git_remote: "nonexistent-remote")
 
-      assert {:error, msg} =
+      assert {:ok, %{pushed: false, push_error: msg}} =
                Store.call(@store, :move_note, %{
                  from: "bike/terra-speed.md",
                  to: "bike/terra-40c.md",

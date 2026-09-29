@@ -100,7 +100,13 @@ defmodule Vigil.Store do
   def call(store, :skill_write, %{name: _, content: _} = params),
     do: request(store, :skill_write, params)
 
-  defp request(store, op, params), do: GenServer.call(store, {op, params})
+  # Longer than anything the writer can be busy with: a write is bounded by
+  # its push, and Vigil.Git bounds the network calls well inside this. The
+  # default 5 s let a caller give up on a write that then completed anyway —
+  # the client saw an error, retried, and the content landed twice.
+  @call_timeout 120_000
+
+  defp request(store, op, params), do: GenServer.call(store, {op, params}, @call_timeout)
 
   defp with_now(store, params),
     do: Map.put_new_lazy(params, :now, fn -> Clock.now(published_tz(store)) end)
@@ -143,7 +149,7 @@ defmodule Vigil.Store do
   def vault_path(store \\ @default_name), do: :ets.lookup_element(store, :vault_path, 2)
 
   def instructions_domains_text(store \\ @default_name),
-    do: GenServer.call(store, :instructions_domains_text)
+    do: GenServer.call(store, :instructions_domains_text, @call_timeout)
 
   # No fallback for a missing table. It lives with this process, so its absence
   # means the writer is down — and the response is going to fail at the tool
@@ -521,17 +527,29 @@ defmodule Vigil.Store do
   defp observe(_action, _state), do: fn _after_effect -> %{} end
 
   # What a push failure names as committed locally but not pushed: a change, a
-  # deletion, a move. The sentence git wrote comes after it (Vigil.Commit).
+  # deletion, a move. The sentence git wrote comes after it (Vigil.Commit), and
+  # the whole of it travels as `push_error` on a success.
   defp push_failure({:write, _path, _content}),
     do: "Change saved and committed locally, but push failed"
 
   defp push_failure({:delete, _path}), do: "Deletion committed locally, but push failed"
   defp push_failure({:move, _from, _to}), do: "Move committed locally, but push failed"
 
+  # A failed push is not a failed write. The change is on disk, committed and
+  # in the index, so the answer is a success that says it was not pushed —
+  # reported as an error, it invited the client to retry, and an `append`
+  # retried is an `append` twice. The commit goes out with the next push that
+  # succeeds, or with the safety-net cron.
   defp push(state, success, failure_prefix) do
     case Commit.push(state.git, state.vault_path, state.git_remote) do
-      :ok -> {{:ok, success}, state}
-      {:error, out} -> {{:error, "#{failure_prefix}: #{out}"}, state}
+      :ok ->
+        {{:ok, success}, state}
+
+      {:error, out} ->
+        Logger.warning("vigil: #{failure_prefix}: #{out}")
+
+        {{:ok, %{success | pushed: false} |> Map.put(:push_error, "#{failure_prefix}: #{out}")},
+         state}
     end
   end
 
