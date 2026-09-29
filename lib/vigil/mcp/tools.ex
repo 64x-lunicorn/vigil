@@ -158,7 +158,7 @@ defmodule Vigil.MCP.Tools do
       name: "read",
       title: "Read a note or section",
       description:
-        "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
+        "Reads a chunk, or a note: its body (the text before its first ## heading) and its table of contents. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
       write: false,
       call: :read,
       hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},

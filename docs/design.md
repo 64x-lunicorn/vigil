@@ -346,7 +346,21 @@ extraction and the write gate alike.
 
 **The H1 creates no chunk** — it is the title of the file. Text between the H1
 and the first `##` (or text in a file with no headings at all) becomes a chunk
-whose id is the path with no fragment.
+whose id is the path with no fragment: the note's **preamble**. The blank lines
+between the title (or frontmatter) and its first content line are no part of
+it, for the same reason the separators between sections are not.
+
+**The preamble is read as the note's `body`.** `read` of a path returns the
+preamble as `body` next to the table of contents, which lists the chunks that
+have a heading; the two together cover every chunk of the note, so whatever
+`search` finds, `read` of the hit's id hands back. A note with no preamble
+answers `body: ""`, so a note read has one shape. A short memory — a title and a
+paragraph, no `##` — is read in full this way. The alternative, an id of the
+preamble's own that the table of contents lists, was rejected: it is a second
+id scheme for a chunk that already has one, the path, and every chunk id and
+slug stays what it was. The preamble carries no `hash`: no section edit can
+name it — `replace_section` and `delete_section` take a `path#heading-slug`
+only — so a hash for it would be a promise nothing takes back.
 
 Chunk id: `path#heading-slug`, for example `bike/via-carolina.md#fueling`.
 
@@ -977,7 +991,7 @@ vault, was rejected: it is a second store to keep consistent with the
 repository for a window measured in minutes.
 
 **A section edit can name the content it read.** `read` hands out a `hash` for
-every chunk — SHA-256 over its heading and body, never over its id or a line
+every chunk a section edit can name — SHA-256 over its heading and body, never over its id or a line
 number, which are positions — on a chunk read and on every entry of a note's
 table of contents. `replace_section` and `delete_section` take it back as an
 optional `if_match`, and `Vigil.Vault.Policy` refuses the edit when the chunk

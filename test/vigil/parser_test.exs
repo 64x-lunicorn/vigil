@@ -315,11 +315,13 @@ defmodule Vigil.ParserTest do
     end
 
     # The fragmentless chunk is built on its own code path, with its own
-    # body-end computation — the rule has to be stated there too.
+    # body-end computation — the rule has to be stated there too. With no
+    # heading line to sit under, the blank line between the title and its
+    # first content line separates the two and is no part of the body either.
     test "the fragmentless pre-H2 chunk follows the same rule" do
       chunk = boundary_chunk("x/boundaries.md")
 
-      assert chunk.body == "\nText before the first heading."
+      assert chunk.body == "Text before the first heading."
       assert chunk.body_end_line == 6
     end
 

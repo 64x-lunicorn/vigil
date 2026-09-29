@@ -58,7 +58,7 @@
       "openWorldHint": false,
       "readOnlyHint": true
     },
-    "description": "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
+    "description": "Reads a chunk, or a note: its body (the text before its first ## heading) and its table of contents. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
     "inputSchema": {
       "properties": {
         "backlinks": {

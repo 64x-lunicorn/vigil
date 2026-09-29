@@ -286,7 +286,7 @@ a current `skill_key`. Every write also takes an optional `request_id` (see
 | Tool | Parameters | Returns | Role | Key |
 |---|---|---|---|:--:|
 | `search` | query, domain?, type?, prefer?, limit? | ranked hits with previews, plus `hub` when unambiguous | RO/RW | – |
-| `read` | id, backlinks? | one chunk with its `hash`, or a note's table of contents (each entry with its `hash`) plus `links` counters | RO/RW | – |
+| `read` | id, backlinks? | one chunk with its `hash`, or a note's `body` (the text before its first `##`) and table of contents (each entry with its `hash`) plus `links` counters | RO/RW | – |
 | `links` | id, direction?, depth? | resolved outgoing/incoming references | RO/RW | – |
 | `create` | path, type, content, starts?, ends?, force?, create_dirs? | `{path, pushed, path_normalized_from?}` | RW | ✓ |
 | `append` | path, heading?, content | `{path, pushed}` | RW | ✓ |

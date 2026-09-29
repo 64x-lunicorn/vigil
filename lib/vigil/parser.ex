@@ -372,8 +372,16 @@ defmodule Vigil.Parser do
        ) do
     # The same boundary as a heading chunk, through the same function — this
     # chunk just has no heading to fall back on, so a body with no content
-    # line at all makes no chunk.
-    {body, body_end} = close_body(rev_lines)
+    # line at all makes no chunk. It has no heading line to sit under either,
+    # so the blank lines between the title (or frontmatter) and its first
+    # content line separate it from what is above and are no part of it: this
+    # body is what `read` of the note hands back (docs/design.md, "Chunking").
+    {body, body_end} =
+      rev_lines
+      |> Enum.reverse()
+      |> Enum.drop_while(fn {line, _no} -> String.trim(line) == "" end)
+      |> Enum.reverse()
+      |> close_body()
 
     if body_end == nil do
       nil

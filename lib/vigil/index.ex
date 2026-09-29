@@ -504,7 +504,8 @@ defmodule Vigil.Index do
 
   @doc """
   A fragment id returns the chunk (with backlinks when asked). A bare path
-  returns the note's table of contents, its `links` out/in/broken counters
+  returns the note's `body` (the text before its first `##`, its preamble),
+  its table of contents, its `links` out/in/broken counters
   and, when asked, its backlinks. Which of the two an id names, and whether it
   names anything at all, is `resolve/2`'s answer; what is left here is the
   rendering of it — a path that fails the safety check answers "Invalid path",
@@ -610,11 +611,24 @@ defmodule Vigil.Index do
     end
   end
 
+  # The note's preamble — the chunk whose id is the path itself, holding the
+  # text between the H1 (or frontmatter) and the first `##` — comes back as its
+  # `body`; every chunk with a heading comes back as an entry of its `toc`.
+  # Between them they cover every chunk the note has, so nothing `search` can
+  # hit is out of `read`'s reach. A note with no preamble answers `""`, not a
+  # missing key: the shape of a note read does not depend on the note.
   defp note_result(index, note, backlinks?) do
+    chunks = note.chunk_ids |> Enum.map(&Map.get(index.chunks, &1)) |> Enum.reject(&is_nil/1)
+
+    body =
+      case Enum.find(chunks, &is_nil(&1.heading)) do
+        nil -> ""
+        preamble -> preamble.body
+      end
+
     toc =
-      note.chunk_ids
-      |> Enum.map(&Map.get(index.chunks, &1))
-      |> Enum.filter(&(&1 && &1.heading))
+      chunks
+      |> Enum.filter(& &1.heading)
       |> Enum.map(fn chunk ->
         %{
           id: chunk.id,
@@ -632,6 +646,7 @@ defmodule Vigil.Index do
       ends: iso(note.ends),
       created_at: iso(note.created_at),
       updated_at: iso(note.updated_at),
+      body: body,
       toc: toc,
       links: note_link_counts(index, note)
     }

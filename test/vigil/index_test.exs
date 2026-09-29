@@ -93,11 +93,12 @@ defmodule Vigil.IndexTest do
   end
 
   describe "read/2 — note by path" do
-    test "returns a table of contents and links out/in/broken counters", %{index: index} do
+    test "returns the preamble as its body, a table of contents and links out/in/broken counters",
+         %{index: index} do
       {:ok, result} = Index.read(index, %{id: "bike/via-carolina.md", backlinks: false})
 
       assert result.title == "Via Carolina"
-      refute Map.has_key?(result, :body)
+      assert result.body == "328 km Prague to Nuremberg. Tires: [[terra-speed|Terra Speed]]."
       assert Enum.map(result.toc, & &1.heading) == ["Fueling", "Second Half", "Gear"]
 
       {:ok, fueling} = Index.read(index, %{id: "bike/via-carolina.md#fueling", backlinks: false})
@@ -106,6 +107,41 @@ defmodule Vigil.IndexTest do
       # via-carolina.md links out to terra-speed.md, and is itself linked to
       # from training/note-without-anything.md — see fixture vault.
       assert result.links == %{out: 1, in: 1, broken: 0}
+    end
+
+    # docs/design.md, "Chunking": the text before the first `##` is the
+    # note's own chunk, and reading the note is how it is read back.
+    test "a note with no ## heading returns its text and an empty table of contents",
+         %{index: index} do
+      {:ok, result} = Index.read(index, %{id: "garden/raised-bed.md", backlinks: false})
+
+      assert result.body == "A raised bed built from larch wood, three levels, south-facing."
+      assert result.toc == []
+    end
+
+    test "a note with no heading at all returns every paragraph of it", %{index: index} do
+      {:ok, result} =
+        Index.read(index, %{id: "training/note-without-anything.md", backlinks: false})
+
+      assert result.body =~ ~r/\AShort paragraph with no frontmatter/
+      assert result.body =~ ~r/still unstructured\. The transfer stage was long but doable\.\z/
+    end
+
+    test "a note whose first line after the H1 is a ## heading has an empty body",
+         %{index: index} do
+      {:ok, result} = Index.read(index, %{id: "bike/terra-speed.md", backlinks: false})
+
+      assert result.body == ""
+      assert Enum.map(result.toc, & &1.heading) == ["Dimensions", "Gravel Experience"]
+    end
+
+    test "a search hit on a preamble names an id that reads back as the preamble text",
+         %{index: index} do
+      [hit] = search(index, %{query: "larch wood"})
+
+      {:ok, result} = Index.read(index, %{id: hit.id, backlinks: false})
+
+      assert result.body =~ "larch wood"
     end
 
     test "backlinks is opt-in", %{index: index} do
