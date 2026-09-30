@@ -8,7 +8,7 @@ defmodule Vigil.OAuth.FlowTest do
   """
   use ExUnit.Case, async: true
 
-  alias Vigil.OAuth.{Code, Flow, Server}
+  alias Vigil.OAuth.{Client, Code, Flow, Server}
 
   # The authorization server these decisions are made for, stated rather than
   # read back out of the deployment. Two of its seven fields are what the
@@ -118,6 +118,74 @@ defmodule Vigil.OAuth.FlowTest do
     test "no redirect_uri at all is refused", %{persistence: persistence} do
       assert {:error, "invalid_redirect_uri"} = Flow.register(persistence, %{})
     end
+
+    # Every registered field is stored and shown, so each has a cap, and a
+    # refusal says which one was over it.
+    test "a client_name over its cap is refused, naming the field", %{persistence: persistence} do
+      metadata = %{"redirect_uris" => ["https://app.example/cb"]}
+
+      assert {:ok, _} =
+               Flow.register(
+                 persistence,
+                 Map.put(metadata, "client_name", String.duplicate("é", 200))
+               )
+
+      assert {:error, "invalid_client_metadata", description} =
+               Flow.register(
+                 persistence,
+                 Map.put(metadata, "client_name", String.duplicate("a", 201))
+               )
+
+      assert description =~ "client_name"
+      assert persistence.count_clients.() == 1
+    end
+
+    test "more redirect_uris than the cap are refused, naming the field", %{
+      persistence: persistence
+    } do
+      uris = for i <- 1..11, do: "https://app.example/cb/#{i}"
+
+      assert {:ok, _} = Flow.register(persistence, %{"redirect_uris" => Enum.take(uris, 10)})
+
+      assert {:error, "invalid_redirect_uri", description} =
+               Flow.register(persistence, %{"redirect_uris" => uris})
+
+      assert description =~ "redirect_uris"
+    end
+
+    test "a redirect URI over its length cap is refused, naming the field", %{
+      persistence: persistence
+    } do
+      base = "https://app.example/"
+      at_cap = base <> String.duplicate("a", 2_000 - byte_size(base))
+
+      assert {:ok, _} = Flow.register(persistence, %{"redirect_uris" => [at_cap]})
+
+      assert {:error, "invalid_redirect_uri", description} =
+               Flow.register(persistence, %{"redirect_uris" => [at_cap <> "a"]})
+
+      assert description =~ "redirect_uris"
+    end
+
+    test "a full client table answers unavailable", %{persistence: persistence} do
+      for i <- 1..Client.max_clients() do
+        :ok = persistence.put_client.("filler-#{i}", %{name: "F", redirect_uris: []})
+      end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :unavailable =
+                 Flow.register(persistence, %{"redirect_uris" => ["https://app.example/cb"]})
+      end)
+    end
+
+    # The follow-up #193 left open: a client_id that was never written is
+    # not handed out, exactly like a code or a token.
+    test "a client that could not be stored answers unavailable", %{persistence: persistence} do
+      failing = %{persistence | put_client: fn _id, _attrs -> {:error, :enospc} end}
+
+      assert :unavailable =
+               Flow.register(failing, %{"redirect_uris" => ["https://app.example/cb"]})
+    end
   end
 
   describe "authorize_request/4" do
@@ -174,6 +242,43 @@ defmodule Vigil.OAuth.FlowTest do
       assert ctx.scope == "vault"
     end
 
+    # `Plug.Conn.Query` decodes `state[a]=x` to a map and `scope[]=x` to a
+    # list. The client is trusted by the time the rest is read, so it is told;
+    # a `state` that is not a string is not echoed back.
+    test "a parameter that decoded to a list or a map is an invalid request", %{
+      persistence: persistence
+    } do
+      client_id = client!(persistence)
+
+      for {name, value} <- [
+            {"scope", ["vault"]},
+            {"code_challenge", %{"a" => "b"}},
+            {"extra", ["x"]}
+          ] do
+        params = authorize_params(client_id, %{name => value, "state" => "xyz"})
+
+        assert {:error, {:redirect, "https://app.example/cb", "invalid_request", "xyz"}} =
+                 Flow.authorize_request(server(persistence), params)
+      end
+
+      params = authorize_params(client_id, %{"state" => %{"a" => "b"}})
+
+      assert {:error, {:redirect, "https://app.example/cb", "invalid_request", nil}} =
+               Flow.authorize_request(server(persistence), params)
+    end
+
+    test "a client_id or redirect_uri that is not a string is untrusted", %{
+      persistence: persistence
+    } do
+      client_id = client!(persistence)
+
+      assert {:error, :untrusted} =
+               Flow.authorize_request(server(persistence), authorize_params([client_id]))
+
+      params = authorize_params(client_id, %{"redirect_uri" => ["https://app.example/cb"]})
+      assert {:error, :untrusted} = Flow.authorize_request(server(persistence), params)
+    end
+
     test "the read-only scope is carried through", %{persistence: persistence} do
       params = authorize_params(client!(persistence), %{"scope" => "vault:read"})
 
@@ -200,6 +305,33 @@ defmodule Vigil.OAuth.FlowTest do
         },
         overrides
       )
+    end
+
+    # `scope=""` is an accepted request, and "no scope asked for" means the
+    # default one. The token endpoint issues `vault` rather than the empty
+    # string, which no allow-list would ever let write.
+    test "a code consented with an empty scope issues vault", %{persistence: persistence} do
+      client_id = client!(persistence)
+
+      {:ok, ctx} =
+        Flow.authorize_request(
+          server(persistence),
+          authorize_params(client_id, %{"scope" => ""})
+        )
+
+      code = Code.issue(persistence, ctx)
+
+      assert {:ok, tokens} =
+               Flow.grant(persistence, code_grant(%{"code" => code, "client_id" => client_id}))
+
+      assert tokens.scope == "vault"
+
+      assert {:ok, "vault"} =
+               Vigil.OAuth.Token.validate_access(
+                 persistence,
+                 tokens.access_token,
+                 @settings.resource
+               )
     end
 
     test "a correct verifier yields an access and a refresh token", %{
@@ -499,6 +631,41 @@ defmodule Vigil.OAuth.FlowTest do
 
       assert fresh.scope == tokens.scope
     end
+
+    # A refresh family whose code was redeemed with `scope=""` before the token
+    # endpoint said otherwise. Only `vault` writes, so carrying the empty
+    # string forward would quietly turn a full-access client into a reader.
+    test "a refresh token carrying an empty scope rotates into vault", %{
+      persistence: persistence
+    } do
+      client_id = client!(persistence)
+      legacy = Vigil.OAuth.Token.random()
+
+      persistence.put_token.(legacy, %{
+        type: :refresh,
+        grant_id: Vigil.Uuid.v4(),
+        client_id: client_id,
+        aud: @settings.resource,
+        scope: "",
+        expires_at: System.system_time(:second) + 3600
+      })
+
+      assert {:ok, fresh} =
+               Flow.grant(persistence, %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => legacy,
+                 "client_id" => client_id
+               })
+
+      assert fresh.scope == "vault"
+
+      assert {:ok, "vault"} =
+               Vigil.OAuth.Token.validate_access(
+                 persistence,
+                 fresh.access_token,
+                 @settings.resource
+               )
+    end
   end
 
   describe "grant/3 — anything else" do
@@ -507,6 +674,18 @@ defmodule Vigil.OAuth.FlowTest do
                Flow.grant(persistence, %{"grant_type" => "password"})
 
       assert {:error, 400, "unsupported_grant_type"} = Flow.grant(persistence, %{})
+    end
+
+    test "a parameter that decoded to a list or a map is an invalid request", %{
+      persistence: persistence
+    } do
+      for params <- [
+            %{"grant_type" => ["authorization_code"]},
+            %{"grant_type" => "authorization_code", "code" => %{"a" => "b"}},
+            %{"grant_type" => "refresh_token", "refresh_token" => ["x"]}
+          ] do
+        assert {:error, 400, "invalid_request"} = Flow.grant(persistence, params)
+      end
     end
   end
 
@@ -528,6 +707,36 @@ defmodule Vigil.OAuth.FlowTest do
                )
 
       assert {:ok, _} = persistence.take_code.(code)
+    end
+
+    # The first code is what keeps a registered client from the unused-client
+    # sweep, so it is written on the client before the code leaves.
+    test "the first code is recorded on the client", %{persistence: persistence, ctx: ctx} do
+      now = 1_700_000_000
+      id = ctx.client.client_id
+
+      assert {:ok, _} =
+               Flow.consent(server(persistence), "10.0.0.6", @settings.auth_password, ctx, now)
+
+      assert {:ok, %{first_code_at: ^now}} = persistence.get_client.(id)
+
+      :ok = persistence.sweep_expired.(now + Client.unused_ttl() * 10)
+      assert {:ok, _} = persistence.get_client.(id)
+    end
+
+    test "a first code that could not be recorded is not handed out", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      failing = %{persistence | put_client: fn _id, _attrs -> {:error, :enospc} end}
+
+      assert :unavailable =
+               Flow.consent(
+                 Server.new(failing, @settings),
+                 "10.0.0.7",
+                 @settings.auth_password,
+                 ctx
+               )
     end
 
     test "a wrong password yields no code", %{persistence: persistence, ctx: ctx} do
@@ -564,6 +773,167 @@ defmodule Vigil.OAuth.FlowTest do
           do:
             assert(:wrong_password = Flow.consent(server(persistence), "10.0.0.5", "wrong", ctx))
     end
+  end
+
+  describe "consent/5 — the budget every address shares" do
+    import ExUnit.CaptureLog
+
+    setup %{persistence: persistence} do
+      {:ok, ctx} =
+        Flow.authorize_request(server(persistence), authorize_params(client!(persistence)))
+
+      # A budget of three, so that four addresses — each well inside its own
+      # lockout — are enough to spend it.
+      %{ctx: ctx, shared: Server.new(persistence, %{@settings | consent_failures_per_hour: 3})}
+    end
+
+    test "past the hourly budget every address is refused, and a warning is logged", %{
+      shared: shared,
+      ctx: ctx
+    } do
+      for n <- 1..3, do: assert(:wrong_password = Flow.consent(shared, "10.1.0.#{n}", "x", ctx))
+
+      log =
+        capture_log(fn ->
+          assert :rate_limited = Flow.consent(shared, "10.1.0.4", "x", ctx)
+        end)
+
+      assert log =~ "[warning]"
+      assert log =~ "3 wrong passwords within the hour"
+      assert log =~ "VIGIL_CONSENT_FAILURES_PER_HOUR"
+
+      # Refused before the password is compared: the right one fares no
+      # better, and an address that has guessed nothing yet neither.
+      assert :rate_limited = Flow.consent(shared, "10.1.0.5", @settings.auth_password, ctx)
+
+      # Said once, not once per refusal. Matched on its own words: the suite
+      # runs async, so the capture can hold other tests' warnings too.
+      refute capture_log(fn -> Flow.consent(shared, "10.1.0.6", "x", ctx) end) =~
+               "wrong passwords within the hour"
+    end
+
+    test "the budget is an hour long", %{shared: shared, ctx: ctx} do
+      now = 1_700_000_000
+      for n <- 1..3, do: Flow.consent(shared, "10.2.0.#{n}", "x", ctx, now)
+
+      capture_log(fn ->
+        assert :rate_limited = Flow.consent(shared, "10.2.0.4", "x", ctx, now + 3600)
+      end)
+
+      assert {:ok, _} =
+               Flow.consent(shared, "10.2.0.4", @settings.auth_password, ctx, now + 3601)
+    end
+
+    test "a right password spends nothing of it", %{shared: shared, ctx: ctx} do
+      for _ <- 1..5,
+          do: assert({:ok, _} = Flow.consent(shared, "10.3.0.1", @settings.auth_password, ctx))
+
+      for n <- 1..3, do: assert(:wrong_password = Flow.consent(shared, "10.3.0.#{n}", "x", ctx))
+    end
+
+    # A locked-out address is refused on its own window and spends nothing of
+    # the shared one, so one noisy address cannot use it up alone.
+    test "an address already locked out spends nothing of it", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      shared = Server.new(persistence, %{@settings | consent_failures_per_hour: 6})
+
+      for _ <- 1..5, do: Flow.consent(shared, "10.4.0.1", "x", ctx)
+      for _ <- 1..10, do: assert(:rate_limited = Flow.consent(shared, "10.4.0.1", "x", ctx))
+
+      assert :wrong_password = Flow.consent(shared, "10.4.0.2", "x", ctx)
+    end
+  end
+
+  describe "consent/5 — at once" do
+    setup %{persistence: persistence} do
+      {:ok, ctx} =
+        Flow.authorize_request(server(persistence), authorize_params(client!(persistence)))
+
+      %{ctx: ctx}
+    end
+
+    # The attempt is counted before the password is compared. Counted after,
+    # every guess in flight at once was compared against a count none of them
+    # had added to yet.
+    test "parallel guesses from one address get five comparisons, no more", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      results =
+        Vigil.AtOnce.run(100, fn -> Flow.consent(server(persistence), "10.5.0.1", "x", ctx) end)
+
+      assert Enum.count(results, &(&1 == :wrong_password)) == 5
+      assert Enum.count(results, &(&1 == :rate_limited)) == 95
+    end
+
+    test "parallel guesses from many addresses get the shared budget, no more", %{
+      persistence: persistence,
+      ctx: ctx
+    } do
+      shared = Server.new(persistence, %{@settings | consent_failures_per_hour: 10})
+
+      results =
+        ExUnit.CaptureLog.with_log(fn ->
+          Vigil.AtOnce.run(100, fn ->
+            Flow.consent(shared, "10.6.0.#{:erlang.unique_integer([:positive])}", "x", ctx)
+          end)
+        end)
+        |> elem(0)
+
+      assert Enum.count(results, &(&1 == :wrong_password)) == 10
+    end
+  end
+
+  describe "password_matches?/2" do
+    @password "correct-horse-battery-staple"
+
+    test "only the password itself matches" do
+      assert Flow.password_matches?(@password, @password)
+
+      for guess <- [
+            nil,
+            "",
+            "correct-horse-battery-stapl",
+            "correct-horse-battery-staplf",
+            @password <> "x",
+            String.upcase(@password)
+          ],
+          do: refute(Flow.password_matches?(guess, @password))
+    end
+
+    # `Plug.Crypto.secure_compare/2` on the raw values answers `false` at once
+    # for a guess of another length, and only walks the bytes of a guess of
+    # the password's own length — so how fast a guess was refused told the
+    # guesser the password's length. Timed here: a guess of the right length
+    # and one far shorter, both short enough that hashing them costs the same,
+    # must be refused in about the same time. The raw comparison is several
+    # times apart on these inputs; the margin is wide so a busy machine does
+    # not fail it.
+    test "a guess is refused in the same time whatever its length" do
+      password = String.duplicate("p", 48)
+      same_length = String.duplicate("q", 48)
+      short = "q"
+
+      # Interleaved, so a burst of load elsewhere lands on both alike.
+      {short_runs, same_runs} =
+        Enum.unzip(for _ <- 1..31, do: {time(short, password), time(same_length, password)})
+
+      ratio = median(short_runs) / median(same_runs)
+
+      assert ratio > 0.5 and ratio < 2.0,
+             "a one-byte guess took #{Float.round(ratio, 2)}x the time of a full-length one"
+    end
+
+    defp time(guess, password) do
+      {micros, _} =
+        :timer.tc(fn -> for _ <- 1..2_000, do: Flow.password_matches?(guess, password) end)
+
+      micros
+    end
+
+    defp median(runs), do: runs |> Enum.sort() |> Enum.at(div(length(runs), 2))
   end
 
   describe "authorize_request/4 — CIMD" do

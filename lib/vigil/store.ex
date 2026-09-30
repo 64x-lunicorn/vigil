@@ -7,9 +7,11 @@ defmodule Vigil.Store do
     Clock,
     Commit,
     Events,
+    History,
     Index,
     Parser,
     Git,
+    RequestLog,
     Skills
   }
 
@@ -62,15 +64,19 @@ defmodule Vigil.Store do
   # `current` and `reload` declare no parameter, and the six
   # writes state their contracts in Vigil.Vault.Policy, the one gate every
   # write goes through. Vigil.MCP.Tools declares every bound and default (`limit` 1..25
-  # default 10, `depth` 1..2 default 1, `backlinks` default false) and
+  # default 10 for search and 1..100 default 20 for history, `depth` 1..2
+  # default 1, `backlinks` default false, `at` default nil) and
   # supplies a value on every call, so nothing here restates one.
   def call(store \\ @default_name, op, params)
 
   def call(store, :search, %{limit: _} = params), do: request(store, :search, params)
+  def call(store, :list, %{sort: _, limit: _} = params), do: request(store, :list, params)
   def call(store, :read, %{id: _, backlinks: _} = params), do: request(store, :read, params)
 
   def call(store, :links, %{id: _, direction: _, depth: _} = params),
     do: request(store, :links, params)
+
+  def call(store, :history, %{path: _, limit: _} = params), do: request(store, :history, params)
 
   def call(store, :create, %{} = params), do: request(store, :create, params)
   def call(store, :append, %{} = params), do: request(store, :append, params)
@@ -86,10 +92,11 @@ defmodule Vigil.Store do
 
   def call(store, :delete_note, %{} = params), do: request(store, :delete_note, params)
   def call(store, :move_note, %{} = params), do: request(store, :move_note, params)
-  # The two rows that resolve an instant. Vigil.MCP.Tools puts the response's
-  # envelope instant into the params of every row declaring `now:`, so in
-  # production nothing is resolved here; the fallback covers a caller with no
-  # envelope to share one, which is a test pinning a moment. It is resolved in
+  # The two reads among the ten rows that resolve an instant (the other eight
+  # are writes, and fall back in write/3). Vigil.MCP.Tools puts the
+  # response's envelope instant into the params of every row declaring
+  # `now:`, so in production nothing is resolved here; the fallback covers a
+  # caller with no envelope to share one, which is a test pinning a moment. It is resolved in
   # the caller's process rather than behind the writer's mailbox for the
   # reason bd7e842 removed the other one: a clock read on the far side of the
   # writer can land in a different minute than the response it belongs to.
@@ -106,14 +113,24 @@ defmodule Vigil.Store do
   # the client saw an error, retried, and the content landed twice.
   @call_timeout 120_000
 
+  # How long a read waits for the fetch it may trigger before it is answered
+  # from the index as it stands (freshen/1). Far inside the above, and short:
+  # a fetch that finds nothing new is one round trip, and one that finds a
+  # human's commit is a handful of small objects.
+  @read_fetch_timeout 5_000
+
   defp request(store, op, params), do: GenServer.call(store, {op, params}, @call_timeout)
 
   defp with_now(store, params),
     do: Map.put_new_lazy(params, :now, fn -> Clock.now(published_tz(store)) end)
 
-  # The five the index answers. Each names the Vigil.Index function that
-  # answers it, which is what lets one `handle_call` clause cover all of them.
-  @read_ops [:search, :read, :links, :lint, :current]
+  # The seven reads. Six are answered by the index and name the Vigil.Index
+  # function that answers them; `history`, and `read` at a revision, are
+  # answered out of the Git history by Vigil.History (read_answer/3). One
+  # `handle_call` clause covers all of them — and that clause is where a read
+  # brings the vault up to date first (freshen/1), so a read added here is
+  # freshened without a word more.
+  @read_ops [:search, :list, :read, :links, :lint, :current, :history]
 
   # The eight that go through the write path (docs/design.md, "The write
   # path"): Vigil.Vault.Policy and Vigil.Vault.Plan already take the operation
@@ -179,6 +196,7 @@ defmodule Vigil.Store do
     vault_path = Keyword.fetch!(opts, :vault_path) |> Path.expand()
     exclude = Keyword.get(opts, :exclude, [])
     git_remote = Keyword.get(opts, :git_remote, "origin")
+    git_branch = Keyword.get(opts, :git_branch, "main")
 
     # The one default, in the one place that has configuration to build it
     # from (docs/design.md, "Git is reached through a value"). Vigil.Skills
@@ -193,6 +211,14 @@ defmodule Vigil.Store do
     # only for a write that arrived without an instant of its own.
     settings = Keyword.get_lazy(opts, :settings, &Settings.from_env/0)
 
+    # docs/design.md, "Reads see what another clone pushed". The interval is
+    # the deployment's (VIGIL_READ_FETCH_INTERVAL, checked at boot and handed
+    # in by Vigil.Application); a writer handed none does not fetch before
+    # reads. The timeout and the clock are only ever handed in by a test.
+    read_fetch_interval = Keyword.get(opts, :read_fetch_interval, 0) * 1_000
+    read_fetch_timeout = Keyword.get(opts, :read_fetch_timeout, @read_fetch_timeout)
+    clock_ms = Keyword.get(opts, :clock_ms, fn -> System.monotonic_time(:millisecond) end)
+
     if :ets.whereis(name) == :undefined do
       :ets.new(name, [:set, :named_table, :public, read_concurrency: true])
     end
@@ -205,50 +231,99 @@ defmodule Vigil.Store do
       vault_path: vault_path,
       exclude: exclude,
       git_remote: git_remote,
+      git_branch: git_branch,
       git: git,
       domains: %{},
-      index: %Index{}
+      index: %Index{},
+      requests: RequestLog.new(),
+      # The last push this writer made: nil until the first one.
+      last_push: nil,
+      read_fetch_interval: read_fetch_interval,
+      read_fetch_timeout: read_fetch_timeout,
+      clock_ms: clock_ms,
+      # When the vault last asked the remote, on clock_ms: set by every
+      # update, whatever asked for it and however it ended.
+      fetched_at: nil,
+      # nil while the last update succeeded; otherwise when it failed and why.
+      stale: nil,
+      # The chunk ids each of the last reloads of the index took away, newest
+      # first: handed to Vigil.Vault.Facts, so a refusal can say that the
+      # remote changed a section under the caller (vanished/2).
+      vanished: []
     }
 
+    abort_left_rebase(git, vault_path)
     {state, pull_result} = do_full_load(state)
 
     case pull_result do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("vigil: initial git pull failed: #{reason}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("vigil: initial update from the remote failed: #{reason}")
     end
 
     {:ok, state}
   end
 
+  # A rebase a writer started and never finished — it stopped in the middle
+  # of one — leaves HEAD detached, and whatever is committed after it on no
+  # branch. It is aborted before anything else, which puts the branch back
+  # where it stood, vigil's commits on it; the update that follows starts
+  # the rebase again if it is still due.
+  defp abort_left_rebase(git, vault_path) do
+    with {:ok, %{rebasing: true}} <- git.tracking.(vault_path) do
+      case git.abort_rebase.(vault_path) do
+        :ok ->
+          Logger.warning(
+            "vigil: aborted a rebase left in progress; the branch is back where it stood before it"
+          )
+
+        {:error, reason} ->
+          Logger.error("vigil: a rebase is in progress and could not be aborted: #{reason}")
+      end
+    end
+  end
+
   defp over_repository!(vault_path) do
-    unless File.dir?(Path.join(vault_path, ".git")) do
+    unless Git.clone?(vault_path) do
       raise "VIGIL_VAULT_PATH #{vault_path} is not a git repository or does not exist"
     end
 
     Git.over_repository()
   end
 
-  # One message shape for all of them: {operation, params}. The five reads and
-  # the eight writes share one clause each, because in both groups the
-  # operation is the only difference: Vigil.Index names each read's answer,
-  # and Vigil.Vault.Policy and Vigil.Vault.Plan already take the write as an
-  # argument.
+  # One message shape for all of them: {operation, params}. The seven reads
+  # and the eight writes share one clause each, because in both groups the
+  # operation is the only difference: it names each read's answer (a
+  # Vigil.Index function, or for the two that read the Git history one of
+  # Vigil.History's), and Vigil.Vault.Policy and Vigil.Vault.Plan already
+  # take the write as an argument.
   #
   # A read makes no decision here: the params map is handed on exactly as the
   # tool table describes it, so a parameter added to a read tool is a change
   # to the table and to the index function that reads it, and to nothing in
-  # between. The operation *is* the name of that function, which is what
-  # collapses the five clauses into one — and what the compiler cannot check.
+  # between. The operation *is* the name of that function (or, for the two
+  # that read the Git history, of Vigil.History's — read_answer/3), which is
+  # what collapses the clauses into one — and what the compiler cannot check.
   # The dispatch coverage in Vigil.MCP.ServerTest drives every declared tool
   # end to end, which is where a row whose `call:` no longer names an index
   # function fails (docs/design.md, "MCP tool schemas are authoritative").
+  #
+  # A read is answered from the vault brought up to date first (freshen/1),
+  # and as `{:stale, answer}` while the last attempt to do that failed
+  # (flagged/2) — Vigil.MCP.Tools turns the tag into the response's `stale`
+  # field.
   @impl true
   def handle_call({op, params}, _from, state) when op in @read_ops do
-    {:reply, apply(Index, op, [state.index, params]), state}
+    state = freshen(state)
+    {:reply, flagged(read_answer(op, params, state), state), state}
   end
 
   def handle_call({op, params}, _from, state) when op in @write_ops do
-    {result, new_state} = write(op, params, state)
+    {result, new_state} =
+      once(op, params, state, &in_step(&1, &2, fn params, state -> write(op, params, state) end))
+
     {:reply, result, new_state}
   end
 
@@ -258,57 +333,577 @@ defmodule Vigil.Store do
   end
 
   def handle_call({:skill_write, params}, _from, state) do
-    {:reply, do_skill_write(params.name, params.content, state), state}
+    {result, new_state} =
+      once(:skill_write, params, state, fn params, state ->
+        in_step(params, state, fn params, state ->
+          {do_skill_write(params, state), state}
+        end)
+      end)
+
+    {:reply, result, new_state}
+  end
+
+  def handle_call({:status, _params}, _from, state) do
+    counts =
+      case divergence(state) do
+        {:ok, divergence} -> Map.take(divergence, [:ahead, :behind, :rewritten])
+        {:error, _reason} -> %{ahead: nil, behind: nil, rewritten: nil}
+      end
+
+    report = %{on_branch: on_branch?(state), last_push: state.last_push, stale: state.stale}
+    {:reply, Map.merge(counts, report), state}
   end
 
   def handle_call(:instructions_domains_text, _from, state) do
     {:reply, domains_yaml_raw(state.vault_path), state}
   end
 
+  # Whether HEAD is the branch every push names, with no rebase in progress:
+  # a commit anywhere else never leaves the host.
+  defp on_branch?(state) do
+    case state.git.tracking.(state.vault_path) do
+      {:ok, %{head: head} = tracking} ->
+        head == state.git_branch and not Map.get(tracking, :rebasing, false)
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
   defp reload_result(:ok), do: %{reloaded: true}
   defp reload_result({:error, reason}), do: %{reloaded: true, pull_failed: reason}
 
+  ## A retried write is applied once
+  #
+  # A write can outlive the client's call timeout and still complete here; the
+  # client sees an error and retries (docs/design.md, "A retried write is
+  # applied once"). A write that names itself with a `request_id` is performed
+  # once: a repeat answers the first write's result with `already_applied:
+  # true` and writes nothing. The same id for a different write is refused
+  # rather than answered with a result that is not its own.
+  #
+  # `request_id` is popped here, like `now`, so what the write path is handed
+  # is the request the operation declares. The fingerprint leaves `now` out
+  # too: a retry's envelope is decided at its own instant, and that does not
+  # make it another write. Only a success is remembered — a refused or failed
+  # write changed nothing, and its corrected retry must be free to run.
+  #
+  # Checking and performing happen in one `handle_call`, inside the single
+  # writer, so a retry that arrives while the first call is still running
+  # queues behind it and finds its id.
+  defp once(op, params, state, perform) do
+    case Map.pop(params, :request_id) do
+      {nil, params} ->
+        perform.(params, state)
+
+      {id, params} ->
+        fingerprint = {op, Map.delete(params, :now)}
+        now = System.monotonic_time(:millisecond)
+
+        case RequestLog.lookup(state.requests, id, fingerprint, now) do
+          {:applied, {:ok, result}} ->
+            {{:ok, Map.put(result, :already_applied, true)}, state}
+
+          :conflict ->
+            {{:error,
+              "request_id #{id} was already used for a different write. " <>
+                "Use a new request_id for every distinct write."}, state}
+
+          :unknown ->
+            {result, state} = perform.(params, state)
+            {result, remember(state, id, fingerprint, result, now)}
+        end
+    end
+  end
+
+  defp remember(state, id, fingerprint, {:ok, _} = result, now),
+    do: %{state | requests: RequestLog.remember(state.requests, id, fingerprint, result, now)}
+
+  defp remember(state, _id, _fingerprint, _result, _now), do: state
+
+  ## Staying in step with the remote
+  #
+  # How many times a push the remote refused is rebased and tried again before
+  # the write gives up and says so. Each round is a fetch, a rebase and a push;
+  # a remote that moves this often between two of them is being written to by
+  # something that should be looked at.
+  @push_retries 3
+
+  # docs/design.md, "The server stays in step with the remote". A human who
+  # pushes and never calls `reload` used to make the next push fail: vigil
+  # committed on top of a history the remote had already moved past. So every
+  # write — the eight note writes and `skill_write` — is performed on a vault
+  # brought up to date first, a push the remote refuses because it moved in
+  # the meantime is rebased and tried again, and the push it ends with is
+  # noted for `status`.
+  defp in_step(params, state, perform) do
+    state = bring_up_to_date(state)
+    {result, state} = perform.(params, state)
+    {result, state} = push_again(result, state, @push_retries)
+    {result, note_push(state, result)}
+  end
+
+  # The one place that decides whether the vault adopts what the remote holds,
+  # and how: asked before every write, and — through update/1 — by the load at
+  # boot and on `reload`.
+  #
+  # If the remote moved, the vault is brought on top of it and the index
+  # rebuilt, so the write is decided against the vault as it now stands and
+  # lands on top of what the human pushed. Anything else — a fetch that fails,
+  # a rebase that conflicts — is logged and changes nothing: the write goes
+  # ahead on the vault as it was, and its push says what is in the way.
+  #
+  # A read asks it too (freshen/1), with a fetch bounded by `fetch_timeout`.
+  defp bring_up_to_date(state, fetch_timeout \\ :infinity) do
+    case update(state, fetch_timeout) do
+      {:moved, state} ->
+        reload_index(state)
+
+      {:in_step, state} ->
+        state
+
+      {{_error_or_conflict, reason}, state} ->
+        Logger.warning("vigil: could not bring the vault up to date: #{reason}")
+        state
+    end
+  end
+
+  ## Reads see what another clone pushed
+  #
+  # docs/design.md, "Reads see what another clone pushed". A read brings the
+  # vault up to date the way a write does, through the same function, but at
+  # most once per interval — counted from the last time the vault asked the
+  # remote, by a read, a write, `reload` or the load at boot. An interval of 0
+  # never does. Nothing runs unless a tool is called.
+  #
+  # It happens here, inside the single writer, so the fetch cannot race a
+  # write; and because every read waits behind it, the fetch has a timeout of
+  # its own, shorter than anything a write waits for: a remote that stalls
+  # delays one read by at most that, once per interval. A fetch that fails or
+  # does not answer in time never fails the read — it is answered from the
+  # index as it stands, flagged.
+  #
+  # How long that is by default is stated beside the write's own timeout, at
+  # the top of this module (@read_fetch_timeout).
+
+  defp freshen(%{read_fetch_interval: 0} = state), do: state
+
+  defp freshen(state) do
+    if due?(state), do: bring_up_to_date(state, state.read_fetch_timeout), else: state
+  end
+
+  defp due?(%{fetched_at: nil}), do: true
+  defp due?(state), do: state.clock_ms.() - state.fetched_at >= state.read_fetch_interval
+
+  # What a read is answered with. Everything the index holds is the index's
+  # to answer; what a note went through is Git's (docs/design.md, "No audit
+  # log"), asked through the same value a write commits through.
+  defp read_answer(:history, params, state),
+    do: History.history(state.git, layout(state), params)
+
+  # An empty `at` is no revision, and is read as `read` without one.
+  defp read_answer(:read, %{at: rev} = params, state) when is_binary(rev) and rev != "",
+    do: History.read_at(state.git, layout(state), state.index, params)
+
+  defp read_answer(op, params, state), do: apply(Index, op, [state.index, params])
+
+  # Flagged while the last update failed, whichever call made it. Not with
+  # the behaviour turned off: a read then answers exactly as it always did,
+  # and `status` is where a failed update shows.
+  defp flagged(answer, %{read_fetch_interval: 0}), do: answer
+  defp flagged(answer, %{stale: nil}), do: answer
+  defp flagged(answer, _stale), do: {:stale, answer}
+
+  # The fetch, bounded when a timeout is given. It runs in a process of its
+  # own so that the writer can stop waiting for it; that process is killed
+  # when the time is up. A `git fetch` it started is not: it goes on within
+  # Vigil.Git's own network bounds, and what it brings is adopted by the next
+  # update. Monitored rather than linked, so a fetch that crashes is a failed
+  # fetch, not a crashed writer.
+  defp fetch(state, :infinity),
+    do: state.git.fetch.(state.vault_path, state.git_remote, state.git_branch)
+
+  defp fetch(state, timeout) do
+    %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
+    writer = self()
+    tag = make_ref()
+
+    # The closure binds only what the fetch needs: the process it runs in
+    # gets a copy of everything it captures, and the state holds the index.
+    {pid, ref} =
+      spawn_monitor(fn -> send(writer, {tag, git.fetch.(vault_path, remote, branch)}) end)
+
+    receive do
+      {^tag, result} ->
+        Process.demonitor(ref, [:flush])
+        result
+
+      {:DOWN, ^ref, :process, ^pid, reason} ->
+        {:error, "fetch from #{remote}/#{branch} failed: #{inspect(reason)}"}
+    after
+      timeout ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(pid, :kill)
+        # An answer sent just before the kill must not linger in the writer's
+        # mailbox.
+        receive do
+          {^tag, _late} -> :ok
+        after
+          0 -> :ok
+        end
+
+        {:error, "fetch from #{remote}/#{branch} did not answer within #{timeout} ms"}
+    end
+  end
+
+  # What the remote holds, adopted — with no index rebuilt, which is the
+  # caller's: the load builds one regardless, a write or a read only when
+  # something moved. `{:moved | :in_step | {:conflict, reason} | {:error,
+  # reason}, state}` — the state noting when the remote was asked, and whether
+  # the vault is now as far as it knows in step with it (`stale`, for `status`
+  # and for the reads answered until the next update succeeds).
+  #
+  # With no unpushed commits of its own the vault fast-forwards. With some, it
+  # rebases them onto the remote — vigil's own single-file commits replayed on
+  # top of whatever was pushed, merge commits included (principle 2). A rebase
+  # that conflicts is aborted at once: vigil's commits stay local, nothing on
+  # the remote is overwritten, and which paths are in the way is the answer.
+  #
+  # A remote a force-push rewrote holds less than the vault: commits it once
+  # had are gone (`rewritten`), whether or not anything new came with them.
+  # That is adopted too, by the same rebase — which replays only vigil's own
+  # commits, so what the human took away leaves the vault as well and no push
+  # puts it back — and said in the log, since it is a human's history that
+  # moved backwards.
+  defp update(state, fetch_timeout \\ :infinity) do
+    outcome = adopt_remote(state, fetch_timeout)
+    {outcome, noted(state, outcome)}
+  end
+
+  defp adopt_remote(state, fetch_timeout) do
+    %{git: git, vault_path: vault_path, git_remote: remote, git_branch: branch} = state
+
+    with :ok <- fetch(state, fetch_timeout),
+         {:ok, divergence} <- divergence(state),
+         :moved <- moved(divergence),
+         :ok <- adopt(git, vault_path, remote, branch, divergence) do
+      log_adopted(divergence, remote, branch)
+      :moved
+    end
+  end
+
+  defp moved(%{behind: 0, rewritten: 0}), do: :in_step
+  defp moved(_divergence), do: :moved
+
+  defp log_adopted(%{behind: behind, rewritten: 0}, remote, branch),
+    do: Logger.info("vigil: adopted #{behind} commit(s) from #{remote}/#{branch}")
+
+  defp log_adopted(%{behind: behind, rewritten: rewritten}, remote, branch) do
+    Logger.warning(
+      "vigil: #{remote}/#{branch} was force-pushed: dropped #{rewritten} commit(s) it no " <>
+        "longer holds, adopted #{behind} new one(s), and replayed vigil's own on top"
+    )
+  end
+
+  defp noted(state, {_error_or_conflict, reason}) do
+    at = DateTime.utc_now() |> DateTime.truncate(:second)
+    %{state | fetched_at: state.clock_ms.(), stale: %{at: at, error: reason}}
+  end
+
+  defp noted(state, _moved_or_in_step), do: %{state | fetched_at: state.clock_ms.(), stale: nil}
+
+  defp adopt(git, vault_path, remote, branch, %{ahead: 0, rewritten: 0}),
+    do: git.fast_forward.(vault_path, remote, branch)
+
+  defp adopt(git, vault_path, remote, branch, _unpushed) do
+    case git.rebase.(vault_path, remote, branch) do
+      {:conflict, paths} ->
+        git.abort_rebase.(vault_path)
+        {:conflict, conflict(paths, remote, branch)}
+
+      {:error, reason} ->
+        # A rebase that failed for any other reason may still have begun;
+        # aborting one that did not is refused, and harmless.
+        git.abort_rebase.(vault_path)
+        {:error, reason}
+
+      :ok ->
+        :ok
+    end
+  end
+
+  defp conflict(paths, remote, branch) do
+    "Rebasing vigil's unpushed commits onto #{remote}/#{branch} conflicts in " <>
+      "#{Enum.join(paths, ", ")}. The rebase was aborted: vigil's commits stay local, " <>
+      "nothing on the remote was overwritten, and a human has to resolve the conflict"
+  end
+
+  defp divergence(state),
+    do: state.git.divergence.(state.vault_path, state.git_remote, state.git_branch)
+
+  # A push that failed because the remote moved between the update and the
+  # push is rebased onto it and tried again, a bounded number of times. Which
+  # failure it was is not read out of git's words: the vault fetches, and a
+  # remote that holds nothing new means the push failed for some other reason
+  # — an unreachable remote, a refusal — which a rebase cannot help.
+  #
+  # A conflict or the limit, whichever stops the retries, is added to the push
+  # error the write already carries, after git's own reason.
+  defp push_again({:ok, %{pushed: false} = report}, state, 0) do
+    {{:ok,
+      more_push_error(
+        report,
+        "Rebased onto #{state.git_remote}/#{state.git_branch} and pushed again " <>
+          "#{@push_retries} times, and the remote had moved on every time. " <>
+          "The commit stays local and goes out with the next push that succeeds"
+      )}, state}
+  end
+
+  defp push_again({:ok, %{pushed: false} = report} = result, state, retries) do
+    case update(state) do
+      {:moved, state} ->
+        state = reload_index(state)
+
+        case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
+          :ok -> {{:ok, report |> Map.put(:pushed, true) |> Map.delete(:push_error)}, state}
+          {:error, _reason} -> push_again(result, state, retries - 1)
+        end
+
+      {{:conflict, reason}, state} ->
+        {{:ok, more_push_error(report, reason)}, state}
+
+      {_in_step_or_error, state} ->
+        {result, state}
+    end
+  end
+
+  defp push_again(result, state, _retries), do: {result, state}
+
+  defp more_push_error(report, sentence),
+    do: %{report | push_error: "#{String.trim_trailing(report.push_error)}. #{sentence}."}
+
+  # A section id that the index does not resolve and one of the last
+  # reloads took away is refused as changed on the remote rather than as not
+  # found — `Vigil.Vault.Policy` words it, from the ids handed in with the
+  # facts. Which call adopted the change does not matter — the write's own
+  # update, or a read in between that already took the section away — so the
+  # ids each reload took away are remembered (vanished/2), rather than the
+  # index before this write compared with the one after.
+
+  # How many reloads of the index the ids they took away are remembered for:
+  # enough to span the reads and writes between a client's read and its edit,
+  # bounded so a vault that churns does not grow the writer without end.
+  @remembered_reloads 16
+
+  # The index read again from disk — after an update moved the vault, and at
+  # boot and on `reload` — and which chunk ids that took away remembered for
+  # the facts a write is decided on.
+  defp reload_index(state) do
+    before = state.index
+    state = load(state)
+    vanished(state, before)
+  end
+
+  defp vanished(state, before) do
+    gone =
+      before.chunks
+      |> Map.keys()
+      |> Enum.reject(&Map.has_key?(state.index.chunks, &1))
+      |> MapSet.new()
+
+    if MapSet.size(gone) == 0,
+      do: state,
+      else: %{state | vanished: Enum.take([gone | state.vanished], @remembered_reloads)}
+  end
+
+  # A write that got as far as its push says so in its result, as `pushed:`
+  # and `push_error:` — a note write and a skill write alike. A write refused
+  # or failed before it leaves the last push as it was.
+  defp note_push(state, {:ok, %{pushed: pushed} = result}) do
+    at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    last_push =
+      if pushed,
+        do: %{pushed: true, at: at},
+        else: %{pushed: false, at: at, error: result.push_error}
+
+    %{state | last_push: last_push}
+  end
+
+  defp note_push(state, _result), do: state
+
+  ## Status
+
+  # How long `status/2` waits for the writer before it says the writer does not
+  # answer. A write in progress holds the writer until its push is done, so a
+  # healthy writer can take a while; one that takes longer than this is what
+  # the answer is for.
+  @status_timeout 5_000
+
+  @doc """
+  Whether this writer is serving, and how it stands with the remote — what
+  the `status` tool and `/healthz` report (docs/design.md, "The server stays
+  in step with the remote").
+
+  Healthy means the index is loaded, the writer answers, and HEAD is the
+  branch the writer pushes (`on_branch`). Asked in the caller's process:
+  whether the index is loaded is read from the writer's table, and the writer is asked the rest with a timeout of its own,
+  so a writer that does not answer is reported rather than waited on.
+  `ahead`, `behind` and `rewritten` are `nil` when the writer does not answer
+  or the clone cannot count them; `behind` and `rewritten` are as fresh as
+  the last fetch.
+  """
+  @spec status(atom(), timeout()) :: map()
+  def status(store \\ @default_name, timeout \\ @status_timeout) do
+    index_loaded = index_loaded?(store)
+
+    sync =
+      try do
+        {:ok, GenServer.call(store, {:status, %{}}, timeout)}
+      catch
+        :exit, _reason -> :no_answer
+      end
+
+    case sync do
+      {:ok, sync} ->
+        Map.merge(sync, %{
+          index_loaded: index_loaded,
+          writer_answers: true,
+          healthy: index_loaded and sync.on_branch
+        })
+
+      :no_answer ->
+        %{
+          index_loaded: index_loaded,
+          writer_answers: false,
+          healthy: false,
+          on_branch: nil,
+          ahead: nil,
+          behind: nil,
+          rewritten: nil,
+          last_push: nil,
+          stale: nil
+        }
+    end
+  end
+
+  # The event notes are published by put_index/2, which every load goes
+  # through, into a table that lives and dies with the writer: present means
+  # an index was built, absent means the writer is down or still loading.
+  defp index_loaded?(store) do
+    :ets.whereis(store) != :undefined and :ets.member(store, :events)
+  rescue
+    ArgumentError -> false
+  end
+
   ## Loading
 
+  # At boot and on `reload`: the vault brought up to date the way a write
+  # brings it (update/1), unpushed commits of vigil's own rebased rather than
+  # refused, and then read. What stopped the update — an unreachable remote, a
+  # conflict — is what `reload` reports as `pull_failed`; the vault is read
+  # regardless, as it stands.
   defp do_full_load(state) do
-    pull_result = state.git.pull.(state.vault_path, state.git_remote)
+    {outcome, state} = update(state)
 
+    pull_result =
+      case outcome do
+        {_error_or_conflict, reason} -> {:error, reason}
+        _moved_or_in_step -> :ok
+      end
+
+    {reload_index(state), pull_result}
+  end
+
+  # The vault as it now stands on disk, read into a new index: at boot and on
+  # `reload`, and whenever an update before or after a write moved it.
+  defp load(state) do
     git_meta = state.git.log_metadata.(state.vault_path)
     domains = load_domains(state.vault_path)
 
     layout = layout(state)
 
     log_warnings(Domains.mismatches(domains, layout.domains))
+    sweep_temp_files(layout)
 
-    parsed_files =
+    loaded =
       layout
       |> Layout.note_paths()
       |> Enum.map(&load_file(state.vault_path, &1, git_meta))
-      |> Enum.reject(&is_nil/1)
 
-    index = Index.build(parsed_files)
+    parsed_files = for {:ok, file} <- loaded, do: file
+
+    invalid_utf8 =
+      Enum.map(Layout.non_utf8_paths(layout), &skip_non_utf8_name/1) ++
+        for {:invalid_utf8, path} <- loaded, do: path
+
+    index = Index.build(parsed_files, invalid_utf8)
     sizes = Index.size(index)
 
     Logger.info(
       "vigil: #{length(layout.domains)} domains (#{Enum.join(layout.domains, ", ")}), #{sizes.notes} notes, #{sizes.chunks} chunks"
     )
 
-    {put_index(%{state | domains: domains}, index), pull_result}
+    put_index(%{state | domains: domains}, index)
   end
 
+  # One file that cannot be read or is not UTF-8 costs that file, never the
+  # load: a raise here is a restart loop at boot (docs/design.md, "A note that
+  # is not UTF-8 is skipped"). The skipped path is kept for `lint`.
+  # Sobelow: rel_path is a file vigil enumerated from the vault itself.
+  # sobelow_skip ["Traversal.FileModule"]
   defp load_file(vault_path, rel_path, git_meta) do
     abs_path = Path.join(vault_path, rel_path)
 
-    case File.read(abs_path) do
-      {:ok, content} ->
-        meta = Map.get(git_meta, rel_path, %{created_at: nil, updated_at: nil, last_author: nil})
-        {:ok, file} = Parser.parse(rel_path, content, meta)
-        file
+    with {:ok, content} <- File.read(abs_path),
+         meta =
+           Map.get(git_meta, rel_path, %{created_at: nil, updated_at: nil, last_author: nil}),
+         {:ok, file} <- Parser.parse(rel_path, content, meta) do
+      {:ok, file}
+    else
+      {:error, :invalid_utf8} ->
+        Logger.warning("skipping #{rel_path}: not valid UTF-8")
+        {:invalid_utf8, rel_path}
 
       {:error, reason} ->
         Logger.warning("cannot read #{rel_path}: #{inspect(reason)}")
-        nil
+        :unreadable
     end
+  end
+
+  # What a write that crashed between writing its temporary file and renaming
+  # it left behind (Vigil.Commit.temp_file?/1): in the domains and `skills/`,
+  # the only directories vigil writes to, and only under exactly the name
+  # Vigil.Commit gives one. The load runs inside the writer, so no write of
+  # this server's own is between the two steps while it sweeps.
+  # Sobelow: the paths are ones the layout's own directories hold.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp sweep_temp_files(layout) do
+    (layout.domains ++ ["skills"])
+    |> Enum.flat_map(
+      &Path.wildcard(Path.join([layout.vault_path, &1, "**", ".*.tmp"]), match_dot: true)
+    )
+    |> Enum.filter(&Commit.temp_file?(Path.basename(&1)))
+    |> Enum.each(fn path ->
+      case File.rm(path) do
+        :ok ->
+          Logger.info(
+            "removed #{Layout.printable_path(Path.relative_to(path, layout.vault_path))}, left by an interrupted write"
+          )
+
+        {:error, _reason} ->
+          :ok
+      end
+    end)
+  end
+
+  # A note whose file name is not UTF-8 is skipped like one whose content is
+  # not, and named the way a log line and `lint`'s JSON can carry it
+  # (Vigil.Vault.Layout.non_utf8_paths/1 says why it is never loaded).
+  defp skip_non_utf8_name(rel_path) do
+    printable = Layout.printable_path(rel_path)
+    Logger.warning("skipping #{printable}: file name is not valid UTF-8")
+    printable
   end
 
   # Reading the file is this module's job; understanding it is
@@ -317,11 +912,14 @@ defmodule Vigil.Store do
   # description, not configuration").
   #
   # First of two readers of _domains.yml, and deliberately the slower one: what
-  # this parses feeds the write policy, so it is refreshed at startup and on
-  # `reload` only and never shifts underneath a write. domains_yaml_raw/1 reads
+  # this parses feeds the write policy, so it is refreshed only when the vault
+  # is loaded — at startup, on `reload`, and when an update adopts what
+  # another clone pushed (load/1) — and never shifts underneath a write. domains_yaml_raw/1 reads
   # the same file per MCP `initialize`; that divergence is the decision recorded
   # in docs/design.md, "_domains.yml is a description, not configuration", not
   # an oversight.
+  # Sobelow: a fixed file name under the configured vault root.
+  # sobelow_skip ["Traversal.FileModule"]
   defp load_domains(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
@@ -351,6 +949,8 @@ defmodule Vigil.Store do
   # (docs/design.md, "_domains.yml is a description, not configuration"). An
   # absent file is already warned about at load, so only a file that exists and
   # still cannot be read is worth a warning here.
+  # Sobelow: a fixed file name under the configured vault root.
+  # sobelow_skip ["Traversal.FileModule"]
   defp domains_yaml_raw(vault_path) do
     path = Path.join(vault_path, "_domains.yml")
 
@@ -385,7 +985,7 @@ defmodule Vigil.Store do
   defp facts(state, now) do
     Facts.over_vault(
       state.index,
-      %{layout: layout(state), naming: naming_rules(state)},
+      %{layout: layout(state), naming: naming_rules(state), vanished: state.vanished},
       now
     )
   end
@@ -414,7 +1014,6 @@ defmodule Vigil.Store do
     {now, request} = Map.pop(request, :now, Clock.now(published_tz(state.table)))
 
     with {:ok, resolved} <- Policy.check(op, request, facts(state, now)),
-         :ok <- ensure_directories(op, resolved, state),
          {:ok, current} <- current_content(op, resolved, state),
          {:ok, plan} <- Plan.build(op, resolved, request, current) do
       execute(plan, state)
@@ -423,29 +1022,33 @@ defmodule Vigil.Store do
     end
   end
 
-  # The policy decides that a project directory may be created; creating it is
-  # this module's job, and only `:create` can ask for one. Vigil.Commit would
-  # mkdir_p the parent anyway, but doing it here keeps a filesystem failure
-  # attributable to the directory.
-  defp ensure_directories(:create, %Decision.Create{} = decision, state),
-    do: create_project_dir(state, decision.create_project_dir)
-
-  defp ensure_directories(_op, _decision, _state), do: :ok
+  # The policy decides that a project directory may be created
+  # (Decision.Create's create_project_dir); creating it is Vigil.Commit's
+  # write, which makes a missing parent directory inside the change it
+  # rolls back — so a create that fails leaves no empty `projects/<name>/`
+  # behind, where creating it here, before the change began, did.
 
   # A create has no current content by definition, and the two git-level
-  # operations never look at it; every other operation is a transformation of
-  # what the note already says.
+  # operations never look at their own note; every other operation is a
+  # transformation of what the note already says. A move that updates links
+  # reads the notes that link to it instead, each with what the index says
+  # its links have to become.
+  defp current_content(:move_note, %Decision.MoveNote{update_links: true} = move, state) do
+    state.index
+    |> Index.relinks(move.from, move.to)
+    |> Enum.reduce_while({:ok, []}, fn {path, relinks}, {:ok, acc} ->
+      case read_existing_file(abs(state, path)) do
+        {:ok, content} -> {:cont, {:ok, [{path, content, relinks} | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
   defp current_content(op, _resolved, _state) when op in [:create, :delete_note, :move_note],
     do: {:ok, nil}
 
   defp current_content(_op, resolved, state),
     do: read_existing_file(abs(state, resolved.path))
-
-  defp create_project_dir(_state, nil), do: :ok
-
-  defp create_project_dir(state, project) do
-    Commit.mkdir_p(Path.join(state.vault_path, Layout.project_dir(project)))
-  end
 
   # Where a plan becomes an effect. Every effect is Vigil.Commit's — the write,
   # the delete, the move and the push — and the order they run in is this
@@ -461,7 +1064,7 @@ defmodule Vigil.Store do
   # against the index it left behind, so that no action has to be a special
   # case of the sequence.
   defp execute(%Plan{action: action} = plan, state) do
-    report_after = observe(action, state)
+    report_after = observe(plan, state)
 
     case perform(action, plan.message, state) do
       {:ok, commit_meta} ->
@@ -481,31 +1084,40 @@ defmodule Vigil.Store do
   # the commit's metadata, which the reparse needs; a delete has no note left
   # to put metadata on.
   defp perform({:write, path, content}, message, state),
-    do: Commit.write(state.git, state.vault_path, path, content, message)
+    do: Commit.write(state.git, state.vault_path, state.git_branch, path, content, message)
 
   defp perform({:delete, path}, message, state) do
-    with :ok <- Commit.delete(state.git, state.vault_path, path, message), do: {:ok, nil}
+    with :ok <- Commit.delete(state.git, state.vault_path, state.git_branch, path, message),
+         do: {:ok, nil}
   end
 
-  defp perform({:move, from, to}, message, state),
-    do: Commit.move(state.git, state.vault_path, from, to, message)
+  defp perform({:move, from, to, rewrites}, message, state),
+    do: Commit.move(state.git, state.vault_path, state.git_branch, from, to, message, rewrites)
 
   # The index after the effect: the note as it now stands on disk, at the path
-  # it now has — or gone.
+  # it now has — or gone. A move reparses every note whose links it rewrote as
+  # well; the moved note's own rewrite is already what stands at `to`.
   defp reindex(state, {:write, path, _content}, commit_meta),
     do: put_reparsed(state, path, commit_meta, "write")
 
   defp reindex(state, {:delete, path}, _commit_meta),
     do: put_index(state, Index.remove(state.index, path))
 
-  defp reindex(state, {:move, from, to}, commit_meta),
-    do: move_reparsed(state, from, to, commit_meta)
+  defp reindex(state, {:move, from, to, rewrites}, commit_meta) do
+    rewrites
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.reject(&(&1 == to))
+    |> Enum.reduce(
+      move_reparsed(state, from, to, commit_meta),
+      &put_reparsed(&2, &1, commit_meta, "move")
+    )
+  end
 
   # What the action itself puts in the success map. The plan's own report — what
   # only the *operation* knows about its result — is merged on top of it.
   defp reported({:write, path, _content}), do: %{path: path, pushed: true}
   defp reported({:delete, path}), do: %{path: path, deleted: true, pushed: true}
-  defp reported({:move, from, to}), do: %{from: from, to: to, pushed: true}
+  defp reported({:move, from, to, _rewrites}), do: %{from: from, to: to, pushed: true}
 
   # The part of a report that is a diff across the effect rather than a fact
   # either side of it could answer alone. The reading is taken here, before,
@@ -515,16 +1127,40 @@ defmodule Vigil.Store do
   # A move is the one action with such a report — which references it broke. A
   # source chunk that resolved to the note before and does not show up in the
   # (rebuilt) incoming references of the target afterwards now points nowhere,
-  # for example because it named an explicit path instead of a basename.
-  defp observe({:move, from, to}, state) do
+  # for example because it named an explicit path instead of a basename. A
+  # source inside the moved note has moved with it, and is looked for under
+  # its new id.
+  defp observe(%Plan{action: {:move, from, to, _rewrites}}, state) do
     resolved_before = Index.backlinks(state.index, from)
 
     fn after_effect ->
-      %{broken_backlinks: resolved_before -- Index.backlinks(after_effect.index, to)}
+      resolved_after = Index.backlinks(after_effect.index, to)
+
+      %{
+        broken_backlinks:
+          Enum.reject(resolved_before, &(moved_id(&1, from, to) in resolved_after))
+      }
     end
   end
 
-  defp observe(_action, _state), do: fn _after_effect -> %{} end
+  # A rewrite can drop or rename a section another note links into, and says
+  # which links it broke (docs/design.md, "The write path"): an inbound link
+  # into one of the note's sections before that no longer resolves after.
+  defp observe(%Plan{action: {:write, path, _content}, observe: :broken_chunk_links}, state) do
+    before = Index.inbound_chunk_links(state.index, path)
+
+    fn after_effect ->
+      %{
+        broken_chunk_links:
+          Enum.reject(before, &(&1.from in Index.backlinks(after_effect.index, &1.to)))
+      }
+    end
+  end
+
+  defp observe(_plan, _state), do: fn _after_effect -> %{} end
+
+  defp moved_id(from, from, to), do: to
+  defp moved_id(id, from, to), do: String.replace_prefix(id, from <> "#", to <> "#")
 
   # What a push failure names as committed locally but not pushed: a change, a
   # deletion, a move. The sentence git wrote comes after it (Vigil.Commit), and
@@ -533,15 +1169,15 @@ defmodule Vigil.Store do
     do: "Change saved and committed locally, but push failed"
 
   defp push_failure({:delete, _path}), do: "Deletion committed locally, but push failed"
-  defp push_failure({:move, _from, _to}), do: "Move committed locally, but push failed"
+  defp push_failure({:move, _from, _to, _rewrites}), do: "Move committed locally, but push failed"
 
   # A failed push is not a failed write. The change is on disk, committed and
   # in the index, so the answer is a success that says it was not pushed —
   # reported as an error, it invited the client to retry, and an `append`
   # retried is an `append` twice. The commit goes out with the next push that
-  # succeeds, or with the safety-net cron.
+  # succeeds, or with the push safety net.
   defp push(state, success, failure_prefix) do
-    case Commit.push(state.git, state.vault_path, state.git_remote) do
+    case Commit.push(state.git, state.vault_path, state.git_remote, state.git_branch) do
       :ok ->
         {{:ok, success}, state}
 
@@ -581,6 +1217,8 @@ defmodule Vigil.Store do
   # A read failure here happens before anything is written, so it is
   # reported back to the caller as an ordinary error tuple rather than
   # crashing the GenServer.
+  # Sobelow: callers resolve a path that passed Vigil.Slug.safe_path/1.
+  # sobelow_skip ["Traversal.FileModule"]
   defp read_existing_file(path) do
     case File.read(path) do
       {:ok, content} -> {:ok, content}
@@ -593,6 +1231,8 @@ defmodule Vigil.Store do
   # the GenServer and take down unrelated calls — it only means the index
   # stays stale for `rel_path` until the next reload, so the failure is logged
   # rather than propagated.
+  # Sobelow: rel_path was just written or moved, after Vigil.Slug.safe_path/1.
+  # sobelow_skip ["Traversal.FileModule"]
   defp read_for_reparse(vault_path, rel_path, verb) do
     case File.read(Path.join(vault_path, rel_path)) do
       {:ok, content} ->
@@ -621,7 +1261,20 @@ defmodule Vigil.Store do
           last_author: commit_meta.last_author
         }
 
-        Parser.parse(rel_path, content, meta)
+        case Parser.parse(rel_path, content, meta) do
+          {:ok, file} ->
+            {:ok, file}
+
+          # Content vigil wrote is UTF-8 — it arrived as JSON, and a note that
+          # is not is refused an edit or a move (Vigil.Vault.Plan,
+          # Vigil.Vault.Policy) — so this is a file changed underneath the
+          # write. It is handled as a failed read is: the index stays as it
+          # was for the path until the next load, which skips the file and
+          # names it.
+          {:error, :invalid_utf8} ->
+            Logger.warning("vigil: could not reparse #{rel_path} after #{verb}: not valid UTF-8")
+            :error
+        end
 
       :error ->
         :error
@@ -639,11 +1292,17 @@ defmodule Vigil.Store do
   # vault_path/0), so the bootstrap read every write begins with does not
   # queue behind the push of the write before it.
 
-  defp do_skill_write(name, content, state) do
-    Skills.write(name, content, %{
-      vault_path: state.vault_path,
-      git_remote: state.git_remote,
-      git: state.git
-    })
+  defp do_skill_write(params, state) do
+    Skills.write(
+      params.name,
+      params.content,
+      %{
+        vault_path: state.vault_path,
+        git_remote: state.git_remote,
+        git_branch: state.git_branch,
+        git: state.git
+      },
+      confirm: Map.get(params, :confirm, false)
+    )
   end
 end

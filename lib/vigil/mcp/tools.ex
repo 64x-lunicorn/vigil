@@ -2,14 +2,24 @@ defmodule Vigil.MCP.Tools do
   @moduledoc """
   Every MCP tool's contract, declared once.
 
-  `@tools` is the single source of truth: name, description, the `write`
-  flag, the `call` the tool makes, whether that call resolves an instant
-  (`now:`), and each parameter's name, type, and whether it is required. Three things are generated from it — `definitions/0`
-  (the JSON schema handed to the client on `tools/list`), the argument
-  validation `dispatch/5` runs on `tools/call`, and the `Store.call/3` that
-  follows it. A schema, its validation and the call they describe cannot drift
+  `@tools` is the single source of truth: name, title, description, the
+  `write` flag, the `call` the tool makes, whether that call resolves an
+  instant (`now:`), the four MCP hints (`hints:`), and each parameter's name,
+  type, and whether it is required. Three things are generated from it —
+  `definitions/1` (the JSON schema and annotations handed to the client on
+  `tools/list`), the argument validation `dispatch/5` runs on `tools/call`,
+  and the `Store.call/3` that follows it. A schema, its validation and the call they describe cannot drift
   out of agreement when they are the same table. Adding a tool is adding a
   row.
+
+  `hints:` is what `tools/list` publishes as the tool's annotations —
+  `readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint` — and
+  every row states all four. They are not derived from `write:`, because the
+  two say different things: `write:` is what a token needs the `vault` scope
+  for, the hints are what the tool does to the vault. `reload` is the case
+  that keeps them apart — callable with `vault:read`, and still neither
+  read-only nor closed-world, because it moves the vault to what the remote
+  holds.
 
   The call is a row's `call:` and its parameters: every declared parameter
   travels under the name the table gives it, except `skill_key`, which
@@ -17,17 +27,21 @@ defmodule Vigil.MCP.Tools do
   defaulted at that point — by the time the call is built, validation has run
   and every declared parameter has a value.
 
-  `skill_key` is also the one parameter no row declares. A write takes it
+  `skill_key` is also one of two parameters no row declares. A write takes it
   because it is a write, and the row already says `write: true` — the gate
   below reads the requirement off that flag, so the parameter is derived from
   it as well rather than written out identically in every write row. The
+  other is `request_id`, optional on every write for the same reason, which
+  unlike `skill_key` travels with the call: the writer is what remembers it
+  (`docs/design.md`, "A retried write is applied once"). The
   `confirm` parameter is not derivable the same way and stays declared per
-  row: only three of the nine writes take one, and `write: true` does not
+  row: only four of the nine writes take one, and `write: true` does not
   say which.
 
-  `Vigil.Store` answers all but two of the operations. `skill_list` and
+  `Vigil.Store` answers all but three of the operations. `skill_list` and
   `skill_read` are answered against `Vigil.Skills` in the caller's own
-  process — see `answer/4`.
+  process, and `status` by `Vigil.Store.status/2`, which asks the writer with
+  a timeout of its own — see `answer/4`.
 
   Which writer that is, is the caller's to say. `dispatch/5` takes it and
   defaults to `Vigil.Store.default_name/0`, the registration production runs
@@ -38,7 +52,11 @@ defmodule Vigil.MCP.Tools do
 
   Four types cover every tool: `:string`, `:boolean`, `{:integer, min..max}`,
   `{:enum, values}`. A `:string` marked `required: true` must also be
-  non-empty; the generated schema says so with `minLength: 1`. An integer is
+  non-empty; the generated schema says so with `minLength: 1`. A `:string` is
+  always bounded too: every one declares a `max_length`, published as
+  `maxLength` and counted in characters (Unicode code points, as JSON Schema
+  counts them), and a longer value is refused naming the parameter. A row
+  that declares a string without one is a compile error. An integer is
   always bounded — there is no unbounded integer type, because a bound stated
   anywhere but here is a bound the published schema does not carry and the
   validator does not enforce. The range is published as `minimum`/`maximum`
@@ -53,6 +71,20 @@ defmodule Vigil.MCP.Tools do
 
   alias Vigil.{Skills, SkillKey, Store}
 
+  # How long a string argument may be, in characters (docs/design.md, "Input
+  # sizes are bounded"). Two sizes cover every parameter: a note's or a
+  # skill's text, and everything else — a path, an id, a query, a heading, a
+  # name, a timestamp, a key. A note is parsed several times per write inside
+  # the single writer, so how long one write may keep every other caller
+  # waiting is a question of how much text it can carry. A million characters
+  # is a book, not a note; a thousand is a heading nobody writes.
+  #
+  # `Vigil.MCP.Server` reads a `/mcp` body up to a byte limit of its own,
+  # which is kept large enough for the longest `content` below plus the rest
+  # of the message.
+  @content_max 1_000_000
+  @short_max 1_024
+
   # The one parameter that is not a parameter of any Store operation: it
   # authorizes a write and is consumed by the gate below.
   @skill_key :skill_key
@@ -65,7 +97,39 @@ defmodule Vigil.MCP.Tools do
     name: @skill_key_name,
     type: :string,
     required: true,
+    max_length: @short_max,
     description: "Current key from skill_read."
+  }
+
+  # Derived from `write:` the same way, for the same reason: every write takes
+  # it and no read does (docs/design.md, "A retried write is applied once").
+  # Unlike `skill_key` it is a parameter of the operation and travels with the
+  # call — the writer is what remembers it.
+  @request_id_param %{
+    name: "request_id",
+    type: :string,
+    max_length: @short_max,
+    description:
+      "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again."
+  }
+
+  # Declared on the two rows that edit a section by id.
+  @if_match_param %{
+    name: "if_match",
+    type: :string,
+    max_length: @short_max,
+    description:
+      "Optional: the section's hash from read. The edit is refused if the id no longer holds that content."
+  }
+
+  # Declared on the two rows that answer page by page (docs/design.md, "Reads
+  # that enumerate are paged").
+  @cursor_param %{
+    name: "cursor",
+    type: :string,
+    max_length: @short_max,
+    description:
+      "Optional: next_cursor from the previous page, with the same other parameters. Refused once a write changed the answer."
   }
 
   @type_enum ["reference", "decision", "event"]
@@ -77,7 +141,8 @@ defmodule Vigil.MCP.Tools do
           required(:type) => param_type,
           required(:description) => String.t(),
           optional(:required) => boolean(),
-          optional(:default) => term()
+          optional(:default) => term(),
+          optional(:max_length) => pos_integer()
         }
 
   @type tool_spec :: %{
@@ -85,6 +150,13 @@ defmodule Vigil.MCP.Tools do
           required(:description) => String.t(),
           required(:write) => boolean(),
           required(:call) => atom(),
+          required(:title) => String.t(),
+          required(:hints) => %{
+            read_only: boolean(),
+            destructive: boolean(),
+            idempotent: boolean(),
+            open_world: boolean()
+          },
           required(:params) => [param_spec],
           optional(:now) => boolean()
         }
@@ -92,12 +164,26 @@ defmodule Vigil.MCP.Tools do
   @tools [
     %{
       name: "search",
-      description: "Searches chunk bodies and headings for a phrase.",
+      title: "Search the vault",
+      description:
+        "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl). Results come a page at a time, with next_cursor for the next one.",
       write: false,
       call: :search,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
-        %{name: "query", type: :string, required: true, description: "Exact search phrase."},
-        %{name: "domain", type: :string, description: "Restrict results to this domain."},
+        %{
+          name: "query",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "Words or a phrase to search for."
+        },
+        %{
+          name: "domain",
+          type: :string,
+          max_length: @short_max,
+          description: "Restrict results to this domain."
+        },
         %{name: "type", type: {:enum, @type_enum}, description: "Filter by chunk type."},
         %{
           name: "prefer",
@@ -109,19 +195,54 @@ defmodule Vigil.MCP.Tools do
           type: {:integer, 1..25},
           default: 10,
           description: "Maximum number of hits (default 10)."
-        }
+        },
+        @cursor_param
+      ]
+    },
+    %{
+      name: "list",
+      title: "List notes",
+      description:
+        "Lists notes as cards (id, title, type, updated_at), never bodies, page by page: the whole vault or one domain, most recently updated first or by title. journal is listed only when named as the domain.",
+      write: false,
+      call: :list,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
+      params: [
+        %{
+          name: "domain",
+          type: :string,
+          max_length: @short_max,
+          description: "Only notes in this domain."
+        },
+        %{name: "type", type: {:enum, @type_enum}, description: "Only notes of this type."},
+        %{
+          name: "sort",
+          type: {:enum, ["updated", "title"]},
+          default: "updated",
+          description: "updated (most recent first, the default) or title."
+        },
+        %{
+          name: "limit",
+          type: {:integer, 1..100},
+          default: 25,
+          description: "Maximum number of notes per page (default 25)."
+        },
+        @cursor_param
       ]
     },
     %{
       name: "read",
+      title: "Read a note or section",
       description:
-        "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
+        "Reads a chunk, or a note: its body (the text before its first ## heading) and its table of contents. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
       write: false,
       call: :read,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
         %{
           name: "id",
           type: :string,
+          max_length: @short_max,
           required: true,
           description: "path#heading-slug, or just path."
         },
@@ -130,17 +251,32 @@ defmodule Vigil.MCP.Tools do
           type: :boolean,
           default: false,
           description: "Append the chunk ids that link here."
+        },
+        %{
+          name: "at",
+          type: :string,
+          max_length: @short_max,
+          description:
+            "Optional: a commit (from history) to read the note as it was then, under the path it had then. An unknown revision is an error."
         }
       ]
     },
     %{
       name: "links",
+      title: "Show links",
       description:
         "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
       write: false,
       call: :links,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
-        %{name: "id", type: :string, required: true, description: "path, or path#heading-slug."},
+        %{
+          name: "id",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "path, or path#heading-slug."
+        },
         %{
           name: "direction",
           type: {:enum, ["out", "in", "both"]},
@@ -151,19 +287,52 @@ defmodule Vigil.MCP.Tools do
           name: "depth",
           type: {:integer, 1..2},
           default: 1,
-          description: "Defaults to 1; 2 adds each directly connected note's own depth-1 view."
+          description:
+            "Defaults to 1; 2 adds each directly connected note's own depth-1 view, for at most 25 notes (truncated: true when there were more)."
+        }
+      ]
+    },
+    %{
+      name: "history",
+      title: "Show a note's history",
+      description:
+        "Lists the commits that touched a note, newest first, following renames: commit, date, author, by (vigil or human), message, and the path the note had in that commit.",
+      write: false,
+      call: :history,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
+      params: [
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
+        %{
+          name: "limit",
+          type: {:integer, 1..100},
+          default: 20,
+          description: "Maximum number of commits (default 20)."
         }
       ]
     },
     %{
       name: "create",
+      title: "Create a note",
       description:
         "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
       write: true,
       call: :create,
+      hints: %{read_only: false, destructive: false, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "type",
           type: {:enum, @type_enum},
@@ -173,15 +342,22 @@ defmodule Vigil.MCP.Tools do
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "Markdown body, starting with an H1."
         },
         %{
           name: "starts",
           type: :string,
+          max_length: @short_max,
           description: "ISO timestamp, only for type: event."
         },
-        %{name: "ends", type: :string, description: "ISO timestamp, only for type: event."},
+        %{
+          name: "ends",
+          type: :string,
+          max_length: @short_max,
+          description: "ISO timestamp, only for type: event."
+        },
         %{
           name: "force",
           type: :boolean,
@@ -198,20 +374,30 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "append",
+      title: "Append to a note",
       description: "Appends content to an existing note.",
       write: true,
       call: :append,
+      hints: %{read_only: false, destructive: false, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "heading",
           type: :string,
-          description: "Section name; without it, appends at end of file."
+          max_length: @short_max,
+          description: "Section name, one non-empty line; without it, appends at end of file."
         },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "Markdown text to append."
         }
@@ -219,32 +405,51 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "replace_section",
+      title: "Replace a section",
       description: "Replaces the body of exactly one chunk.",
       write: true,
       call: :replace_section,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "id", type: :string, required: true, description: "path#heading-slug."},
+        %{
+          name: "id",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "path#heading-slug."
+        },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "New body, without headings of its own."
-        }
+        },
+        @if_match_param
       ]
     },
     %{
       name: "rewrite_note",
+      title: "Rewrite a note",
       description:
-        "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
+        "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold. The result lists the links from other notes into its sections that the rewrite broke.",
       write: true,
       call: :rewrite_note,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "New body, starting with an H1."
         },
@@ -259,41 +464,76 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "delete_section",
+      title: "Delete a section",
       description: "Removes a chunk including its heading.",
       write: true,
       call: :delete_section,
+      hints: %{read_only: false, destructive: true, idempotent: false, open_world: false},
       now: true,
       params: [
-        %{name: "id", type: :string, required: true, description: "path#heading-slug."}
+        %{
+          name: "id",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "path#heading-slug."
+        },
+        @if_match_param
       ]
     },
     %{
       name: "update_frontmatter",
+      title: "Update frontmatter",
       description:
-        "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
+        "Sets type/starts/ends in the frontmatter of an existing note, keeping every other key, and writes the block if the note has none; the body is untouched.",
       write: true,
       call: :update_frontmatter,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "type",
           type: {:enum, @type_enum},
           required: true,
           description: "New frontmatter type."
         },
-        %{name: "starts", type: :string, description: "ISO timestamp, only for type: event."},
-        %{name: "ends", type: :string, description: "ISO timestamp, only for type: event."}
+        %{
+          name: "starts",
+          type: :string,
+          max_length: @short_max,
+          description: "ISO timestamp, only for type: event."
+        },
+        %{
+          name: "ends",
+          type: :string,
+          max_length: @short_max,
+          description: "ISO timestamp, only for type: event."
+        }
       ]
     },
     %{
       name: "delete_note",
+      title: "Delete a note",
       description: "Permanently deletes a note. Destructive — requires confirm: true.",
       write: true,
       call: :delete_note,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "path", type: :string, required: true, description: "domain/filename.md."},
+        %{
+          name: "path",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "domain/filename.md."
+        },
         %{
           name: "confirm",
           type: :boolean,
@@ -304,62 +544,105 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "move_note",
+      title: "Move a note",
       description:
-        "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
+        "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true. With update_links: true, the links that point at the note are rewritten in the same commit.",
       write: true,
       call: :move_note,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       now: true,
       params: [
-        %{name: "from", type: :string, required: true, description: "Existing path."},
-        %{name: "to", type: :string, required: true, description: "New path."},
+        %{
+          name: "from",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "Existing path."
+        },
+        %{
+          name: "to",
+          type: :string,
+          max_length: @short_max,
+          required: true,
+          description: "New path."
+        },
         %{
           name: "confirm",
           type: :boolean,
           default: false,
           description: "Must be true, otherwise the call is rejected."
+        },
+        %{
+          name: "update_links",
+          type: :boolean,
+          default: false,
+          description:
+            "Rewrites the wiki links and Markdown links in every note that links to the moved one, keeping each link's text and #fragment."
         }
       ]
     },
     %{
       name: "lint",
+      title: "Check the vault",
       description:
-        "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+        "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes. Each category lists at most 50; totals counts them all and truncated says whether any were cut.",
       write: false,
       call: :lint,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       now: true,
       params: []
     },
     %{
       name: "current",
+      title: "Current time and events",
       description: "Returns the current time plus active and nearby events.",
       write: false,
       call: :current,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       now: true,
       params: []
     },
     %{
       name: "reload",
-      description: "Runs git pull and reparses the vault.",
+      title: "Reload from the remote",
+      description:
+        "Fetches from the remote, puts vigil's unpushed commits on top of what it holds, and reparses the vault.",
       write: false,
       call: :reload,
+      hints: %{read_only: false, destructive: false, idempotent: true, open_world: true},
+      params: []
+    },
+    %{
+      name: "status",
+      title: "Server status",
+      description:
+        "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), the last push's result and time, and, as stale, when and why the vault last failed to update from the remote.",
+      write: false,
+      call: :status,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: []
     },
     %{
       name: "skill_list",
+      title: "List skills",
       description: "Lists available skills with their description, without bodies.",
       write: false,
       call: :skill_list,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: []
     },
     %{
       name: "skill_read",
+      title: "Read a skill",
       description: "Reads the full content of a skill.",
       write: false,
       call: :skill_read,
+      hints: %{read_only: true, destructive: false, idempotent: true, open_world: false},
       params: [
         %{
           name: "name",
           type: :string,
+          max_length: @short_max,
           required: true,
           description: "Skill name, with or without .md."
         }
@@ -367,21 +650,33 @@ defmodule Vigil.MCP.Tools do
     },
     %{
       name: "skill_write",
-      description: "Creates or replaces a skill; only on explicit instruction.",
+      title: "Write a skill",
+      description:
+        "Creates or replaces a skill; only on explicit instruction. Replacing an existing skill is destructive — requires confirm: true. vigil-vault-conventions is protected and cannot be written.",
       write: true,
       call: :skill_write,
+      hints: %{read_only: false, destructive: true, idempotent: true, open_world: false},
       params: [
         %{
           name: "name",
           type: :string,
+          max_length: @short_max,
           required: true,
           description: "Skill name, with or without .md."
         },
         %{
           name: "content",
           type: :string,
+          max_length: @content_max,
           required: true,
           description: "Full file content including frontmatter."
+        },
+        %{
+          name: "confirm",
+          type: :boolean,
+          default: false,
+          description:
+            "Must be true to replace a skill that exists, otherwise the call is rejected; a new skill needs none."
         }
       ]
     }
@@ -396,25 +691,69 @@ defmodule Vigil.MCP.Tools do
                   into: %{},
                   do: {value, String.to_atom(value)}
 
-  @doc "Tool definitions for `tools/list`, generated from `@tools`."
-  @spec definitions() :: [map()]
-  def definitions do
-    Enum.map(@tools, fn tool ->
-      %{
-        name: tool.name,
-        description: tool.description,
-        inputSchema: input_schema(param_specs(tool))
-      }
-    end)
+  # Every row states all four hints. The spec's default for a hint left out is
+  # the cautious one — destructive, open-world — which is also what a row that
+  # forgot one would publish, so a missing hint is a compile error rather than
+  # a tool quietly described as the opposite of what it is.
+  @hint_keys [:destructive, :idempotent, :open_world, :read_only]
+
+  for tool <- @tools, %{type: :string} = param <- tool.params do
+    unless is_integer(param[:max_length]) and param.max_length > 0 do
+      raise ArgumentError, "tool #{tool.name} declares string #{param.name} without a max_length"
+    end
   end
 
-  # A row's parameters, plus the one its `write:` flag implies. Last, where it
-  # was written by hand in every write row — the published schema lists its
-  # required parameters in declaration order, and this is a change to how the
-  # table is written, not to what `tools/list` serves.
-  defp param_specs(%{write: true} = tool), do: tool.params ++ [@skill_key_param]
+  for tool <- @tools do
+    unless is_binary(tool[:title]) and tool.title != "" do
+      raise ArgumentError, "tool #{tool.name} declares no title"
+    end
+
+    unless is_map(tool[:hints]) and Enum.sort(Map.keys(tool.hints)) == @hint_keys and
+             Enum.all?(Map.values(tool.hints), &is_boolean/1) do
+      raise ArgumentError,
+            "tool #{tool.name} must declare each of #{inspect(@hint_keys)} as a boolean"
+    end
+  end
+
+  @doc """
+  Tool definitions for `tools/list`, generated from `@tools`.
+
+  `writes: false` leaves out every tool whose row says `write: true` — the
+  list a token that may not write is shown, so it is offered only what it can
+  call. The default is the whole table.
+  """
+  @spec definitions(keyword()) :: [map()]
+  def definitions(opts \\ []) do
+    writes? = Keyword.get(opts, :writes, true)
+    for tool <- @tools, writes? or not tool.write, do: definition(tool)
+  end
+
+  defp definition(tool) do
+    %{
+      name: tool.name,
+      title: tool.title,
+      description: tool.description,
+      inputSchema: input_schema(param_specs(tool)),
+      annotations: %{
+        readOnlyHint: tool.hints.read_only,
+        destructiveHint: tool.hints.destructive,
+        idempotentHint: tool.hints.idempotent,
+        openWorldHint: tool.hints.open_world
+      }
+    }
+  end
+
+  # A row's parameters, plus the two its `write:` flag implies. `skill_key`
+  # last, where it was written by hand in every write row — the published
+  # schema lists its required parameters in declaration order.
+  defp param_specs(%{write: true} = tool),
+    do: tool.params ++ [@request_id_param, @skill_key_param]
+
   defp param_specs(%{write: false} = tool), do: tool.params
 
+  # Sobelow: parameter names come from this module's own tool table, never from
+  # a client.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp input_schema(params) do
     properties = Map.new(params, &{String.to_atom(&1.name), property_schema(&1)})
     required = for %{name: name} = spec <- params, required?(spec), do: name
@@ -426,7 +765,7 @@ defmodule Vigil.MCP.Tools do
   end
 
   defp property_schema(%{type: :string, description: description} = spec) do
-    base = %{type: "string", description: description}
+    base = %{type: "string", maxLength: spec.max_length, description: description}
     if required?(spec), do: Map.put(base, :minLength, 1), else: base
   end
 
@@ -443,7 +782,7 @@ defmodule Vigil.MCP.Tools do
 
   @doc """
   True for tools that write to the vault — gated by both AP-4's SkillKey and
-  AP-6's read-only (`vault:read`) scope. `skill_write` requires a SkillKey
+  AP-6's scope, which lets only a `vault` token write. `skill_write` requires a SkillKey
   same as any other write tool; the bootstrap deadlock this could cause on a
   brand-new vault (no `vigil-vault-conventions` skill yet to read a key from)
   is resolved in `Vigil.Skills.read/3`, which reveals the current key even
@@ -457,6 +796,10 @@ defmodule Vigil.MCP.Tools do
     end
   end
 
+  @doc "Whether `name` names a tool this server declares."
+  @spec known?(String.t()) :: boolean()
+  def known?(name), do: find_tool(name) != nil
+
   defp find_tool(name), do: Enum.find(@tools, &(&1.name == name))
 
   @doc """
@@ -464,11 +807,14 @@ defmodule Vigil.MCP.Tools do
   envelope was decided at.
 
   Validates `args` against the declared tool's parameters first — a
-  violation (wrong type, off-enum value, missing or empty required
-  parameter) is reported as a tool error before the Store's mailbox is
-  reached, naming every violation rather than only the first. Undeclared
+  violation (wrong type, off-enum value, out-of-range integer, string over
+  its `max_length`, missing or empty required parameter) is reported as a
+  tool error before the Store's mailbox is reached, naming every violation
+  rather than only the first. Undeclared
   parameters are ignored. What is left is the call the row declares.
-  Returns `{:ok, result}` or `{:error, message}`.
+  Returns `{:ok, result}` or `{:error, message}` — with a third element,
+  `%{stale: true}`, for a read answered while the vault could not be brought
+  up to date with its remote.
 
   `args` is whatever the client sent as `arguments`, and a JSON object is the
   only container a parameter can be looked up in. Anything else is refused
@@ -492,7 +838,7 @@ defmodule Vigil.MCP.Tools do
   secret is a gate a test cannot hand another deployment.
   """
   @spec dispatch(GenServer.server(), String.t(), term(), DateTime.t(), SkillKey.t()) ::
-          {:ok, term()} | {:error, String.t()}
+          {:ok, term()} | {:error, String.t()} | {:ok | :error, term(), %{stale: true}}
   def dispatch(store \\ Store.default_name(), name, args, now, key) do
     case find_tool(name) do
       nil ->
@@ -524,6 +870,10 @@ defmodule Vigil.MCP.Tools do
 
   defp answer(:skill_read, %{name: name}, store, key),
     do: Skills.read(name, Store.vault_path(store), key)
+
+  # `status` reports whether the writer answers, so it cannot be a plain call
+  # into it: a writer that does not answer would take the report down with it.
+  defp answer(:status, %{}, store, _key), do: Store.status(store)
 
   defp answer(op, params, store, _key), do: Store.call(store, op, params)
 
@@ -561,6 +911,9 @@ defmodule Vigil.MCP.Tools do
   defp require_object(args) when is_map(args), do: :ok
   defp require_object(_args), do: {:error, "Invalid arguments: expected an object"}
 
+  # Sobelow: parameter names come from this module's own tool table, never from
+  # a client.
+  # sobelow_skip ["DOS.StringToAtom"]
   defp validate_params(param_specs, args) do
     {values, errors} =
       Enum.reduce(param_specs, {[], []}, fn spec, {values, errors} ->
@@ -609,9 +962,17 @@ defmodule Vigil.MCP.Tools do
 
   defp check_type(%{type: :string} = spec, value) do
     cond do
-      not is_binary(value) -> type_error(spec, "a string")
-      required?(spec) and value == "" -> missing_error(spec)
-      true -> {:ok, value}
+      not is_binary(value) ->
+        type_error(spec, "a string")
+
+      required?(spec) and value == "" ->
+        missing_error(spec)
+
+      too_long?(value, spec.max_length) ->
+        type_error(spec, "at most #{spec.max_length} characters")
+
+      true ->
+        {:ok, value}
     end
   end
 
@@ -635,6 +996,16 @@ defmodule Vigil.MCP.Tools do
     end
   end
 
+  # Characters as JSON Schema counts them, code points. No character is
+  # shorter than a byte, so a value no longer in bytes than the bound is
+  # within it without being counted.
+  defp too_long?(value, max) when byte_size(value) <= max, do: false
+  defp too_long?(value, max), do: codepoints(value, 0) > max
+
+  defp codepoints(<<_::utf8, rest::binary>>, count), do: codepoints(rest, count + 1)
+  defp codepoints(<<_, rest::binary>>, count), do: codepoints(rest, count + 1)
+  defp codepoints(<<>>, count), do: count
+
   defp missing_error(spec), do: {:error, "Missing or invalid parameter: #{spec.name}"}
 
   defp type_error(spec, expected),
@@ -647,6 +1018,17 @@ defmodule Vigil.MCP.Tools do
   # off the shape it returns — a `raw: true` in the table would be a second
   # statement of it, free to disagree with the Store, and removing that class
   # of twin is what the table is for.
+  #
+  # A read answered from a vault that could not be brought up to date comes
+  # back tagged (`Vigil.Store`, docs/design.md, "Reads see what another clone
+  # pushed"), and the tag becomes a third element the router puts beside the
+  # result as `stale: true` — on every read tool, from the one clause that
+  # answers them all, rather than as a field in each result's own shape.
+  defp to_result({:stale, answer}) do
+    {tag, value} = to_result(answer)
+    {tag, value, %{stale: true}}
+  end
+
   defp to_result({:ok, _} = result), do: result
   defp to_result({:error, _} = result), do: result
   defp to_result(value), do: {:ok, value}

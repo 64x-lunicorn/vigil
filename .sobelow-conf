@@ -1,0 +1,12 @@
+[
+  verbose: false,
+  private: true,
+  skip: true,
+  router: :none,
+  exit: "low",
+  format: "txt",
+  out: nil,
+  threshold: "low",
+  ignore: [],
+  ignore_files: ["config/test.exs"]
+]

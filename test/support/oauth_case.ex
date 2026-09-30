@@ -79,6 +79,8 @@ defmodule Vigil.OAuthCase do
       issuer: "https://vault.factory-lab.org",
       resource: "https://vault.factory-lab.org/mcp",
       auth_password: "correct-horse-battery-staple",
+      consent_failures_per_hour: 50,
+      skillkey_secret: "y7CI4lMs8Utr4o5rIo2N2TqzaVmvCH4X6yjvDaLpVnzq4k5LCvhFQIPj3KnhnyKq",
       skillkey_ttl_seconds: 3600,
       vault_owner: "the vault owner",
       vault_language: "English"

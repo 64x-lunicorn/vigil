@@ -47,6 +47,18 @@ defmodule Vigil.SlugTest do
     end
   end
 
+  describe "fold/1" do
+    test "folds letters the way a slug does, and keeps spaces and punctuation" do
+      assert Slug.fold("Heizöl-Tank, Café") == "heizoel-tank, cafe"
+      assert Slug.fold("Straße") == "strasse"
+    end
+
+    test "an NFD string folds to what its NFC form folds to" do
+      assert Slug.fold(String.normalize("Heizöl", :nfd)) == "heizoel"
+      assert Slug.fold(String.normalize("Heizöl", :nfc)) == "heizoel"
+    end
+  end
+
   describe "normalize_path/1" do
     test "slugifies every directory segment and the file basename, lowercases the extension" do
       assert Slug.normalize_path("Bike/Terra Speed.MD") == {:ok, "bike/terra-speed.md", true}

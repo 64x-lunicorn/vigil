@@ -1,0 +1,186 @@
+defmodule Vigil.Settings.RuntimeConfigTest do
+  @moduledoc """
+  `config/runtime.exs` hands a malformed setting on instead of raising on it,
+  so that `Vigil.Settings.Check` is the one place that refuses it — by name.
+
+  async: false because what is under test is a read of the process
+  environment: each test sets the variables it is about and restores them.
+  """
+  use ExUnit.Case, async: false
+
+  alias Vigil.Git.CommitLog
+  alias Vigil.Settings.Check
+
+  @runtime Path.expand("../../../config/runtime.exs", __DIR__)
+
+  # A prod deployment that passes, as /etc/vigil/env would state it.
+  @prod_env %{
+    "VIGIL_VAULT_PATH" => "/var/lib/vigil/vault",
+    "VIGIL_STATE_DIR" => "/var/lib/vigil",
+    "VIGIL_ISSUER" => "https://vault.example.org",
+    "VIGIL_RESOURCE" => "https://vault.example.org/mcp",
+    "VIGIL_AUTH_PASSWORD" => "correct-horse-battery-staple",
+    "VIGIL_SKILLKEY_SECRET" => "itTnVnZk/sC37IrApqZhoUWOfli819Xl7zZx6DSYKPrXRrOsez+p930plUaYNzV6"
+  }
+
+  @touched Map.keys(@prod_env) ++
+             ~w(VIGIL_PORT VIGIL_TZ VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM
+                VIGIL_RELOAD_RATE_LIMIT_RPM VIGIL_OAUTH_RATE_LIMIT_RPM
+                VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM VIGIL_CONSENT_FAILURES_PER_HOUR
+                VIGIL_ALLOWED_ORIGINS VIGIL_READ_FETCH_INTERVAL
+                VIGIL_GIT_REMOTE VIGIL_GIT_BRANCH VIGIL_TRUSTED_PROXY_HEADER
+                VIGIL_TRUSTED_PROXIES VIGIL_EXCLUDE VIGIL_VAULT_OWNER VIGIL_VAULT_LANGUAGE)
+
+  setup do
+    previous = Map.new(@touched, &{&1, System.get_env(&1)})
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {var, nil} -> System.delete_env(var)
+        {var, value} -> System.put_env(var, value)
+      end)
+    end)
+
+    Enum.each(@touched, &System.delete_env/1)
+    System.put_env(@prod_env)
+  end
+
+  defp prod_config, do: @runtime |> Config.Reader.read!(env: :prod) |> Keyword.fetch!(:vigil)
+
+  # A clone laid out the way scripts/init.sh leaves one: `main`, tracking
+  # `github/main`.
+  defp check(config),
+    do: Check.check(config, CommitLog.new("/var/lib/vigil/vault", remote: "github"))
+
+  # config/runtime.exs and the release's `eval` read a comma list through
+  # the same function.
+  test "a comma list is comma-separated, trimmed, blanks dropped" do
+    assert Vigil.Settings.comma_list(" work, geheim ,,  ,private") == [
+             "work",
+             "geheim",
+             "private"
+           ]
+
+    assert Vigil.Settings.comma_list("") == []
+  end
+
+  test "the prod defaults pass the check, with integers parsed" do
+    assert {:ok, checked} = check(prod_config())
+    assert checked.port == 4000
+    assert checked.rate_limit_rpm == 60
+    assert checked.consent_failures_per_hour == 50
+    assert checked.read_fetch_interval == 60
+  end
+
+  test "an unset timezone is UTC, and a named one is read as written" do
+    assert {:ok, %{tz: "UTC"}} = check(prod_config())
+
+    System.put_env("VIGIL_TZ", "Europe/Berlin")
+
+    assert {:ok, %{tz: "Europe/Berlin"}} = check(prod_config())
+  end
+
+  test "a non-integer reaches the check as written and is refused by name" do
+    for var <-
+          ~w(VIGIL_PORT VIGIL_SKILLKEY_TTL VIGIL_RATE_LIMIT_RPM VIGIL_RELOAD_RATE_LIMIT_RPM
+             VIGIL_OAUTH_RATE_LIMIT_RPM VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM
+             VIGIL_CONSENT_FAILURES_PER_HOUR VIGIL_READ_FETCH_INTERVAL) do
+      System.put_env(var, "12abc")
+
+      assert {:error, [message]} = check(prod_config())
+      assert message =~ var
+      assert message =~ ~s("12abc")
+
+      System.delete_env(var)
+    end
+  end
+
+  test "a SkillKey TTL of zero is refused" do
+    System.put_env("VIGIL_SKILLKEY_TTL", "0")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_SKILLKEY_TTL"
+  end
+
+  test "a read fetch interval of zero is accepted" do
+    System.put_env("VIGIL_READ_FETCH_INTERVAL", "0")
+
+    assert {:ok, %{read_fetch_interval: 0}} = check(prod_config())
+  end
+
+  test "the remote defaults to github, and an unset branch to the clone's" do
+    assert {:ok, %{git_remote: "github", git_branch: "main"}} = check(prod_config())
+  end
+
+  test "the remote and the branch are read from the environment" do
+    System.put_env("VIGIL_GIT_REMOTE", "origin")
+    System.put_env("VIGIL_GIT_BRANCH", "master")
+
+    assert %{git_remote: "origin", git_branch: "master"} = prod_config() |> Map.new()
+  end
+
+  test "an unset required setting in prod is refused by name" do
+    System.delete_env("VIGIL_STATE_DIR")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_STATE_DIR is not set"
+  end
+
+  # The upgrade path: a host set up before the SkillKey had a secret of its own
+  # has an env file without one. It refuses to boot rather than fall back to
+  # the consent password, and says which line to add and how to make it.
+  test "an env file from before the SkillKey secret existed is refused, naming it" do
+    System.delete_env("VIGIL_SKILLKEY_SECRET")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_SKILLKEY_SECRET is not set"
+    assert message =~ "openssl rand -base64 48"
+  end
+
+  test "an http issuer is refused in prod" do
+    System.put_env("VIGIL_ISSUER", "http://vault.example.org")
+
+    assert {:error, messages} = check(prod_config())
+    assert Enum.any?(messages, &(&1 =~ "VIGIL_ISSUER"))
+  end
+
+  test "the allowed origins arrive as a list, and a bad one is refused by name" do
+    assert {:ok, %{allowed_origins: []}} = check(prod_config())
+
+    System.put_env("VIGIL_ALLOWED_ORIGINS", " https://claude.ai, http://localhost:6274 ,")
+
+    assert {:ok, %{allowed_origins: ["https://claude.ai", "http://localhost:6274"]}} =
+             check(prod_config())
+
+    System.put_env("VIGIL_ALLOWED_ORIGINS", "https://claude.ai,claude.ai")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_ALLOWED_ORIGINS"
+    assert message =~ ~s("claude.ai")
+  end
+
+  test "the tunnel's proxy settings pass, and a block that is none is refused by name" do
+    System.put_env("VIGIL_TRUSTED_PROXY_HEADER", "CF-Connecting-IP")
+    System.put_env("VIGIL_TRUSTED_PROXIES", "127.0.0.1/32,::1/128")
+
+    assert {:ok, %{trusted_proxy_header: "cf-connecting-ip", trusted_proxies: [_, _]}} =
+             check(prod_config())
+
+    System.put_env("VIGIL_TRUSTED_PROXIES", "127.0.0.1/33,::1/128")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_TRUSTED_PROXIES"
+    assert message =~ ~s("127.0.0.1/33")
+  end
+
+  test "the excluded directories arrive as a list, and a path among them is refused" do
+    System.put_env("VIGIL_EXCLUDE", "secret, private")
+
+    assert {:ok, %{exclude: ["secret", "private"]}} = check(prod_config())
+
+    System.put_env("VIGIL_EXCLUDE", "secret,projects/secret")
+
+    assert {:error, [message]} = check(prod_config())
+    assert message =~ "VIGIL_EXCLUDE"
+  end
+end

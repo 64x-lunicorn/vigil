@@ -7,8 +7,6 @@ defmodule Vigil.MCP.Envelope.Decision do
   snapshot once per response and passes it in here.
   """
 
-  @stale_after 24 * 3600
-
   @weekdays {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"}
 
   @doc """
@@ -22,7 +20,7 @@ defmodule Vigil.MCP.Envelope.Decision do
   not about routing.
   """
   def for_tool("current", _prev_state, now, snapshot) do
-    {%{"_t" => format_time(now)}, session_state(now, snapshot)}
+    {%{"_t" => format_time(now)}, session_state(snapshot)}
   end
 
   def for_tool(_tool, prev_state, now, snapshot) do
@@ -31,23 +29,22 @@ defmodule Vigil.MCP.Envelope.Decision do
         nil ->
           first_line(now, snapshot)
 
-        %{last_active: last_active, active_ids: prev_ids} ->
-          cond do
-            DateTime.diff(now, last_active) > @stale_after ->
-              first_line(now, snapshot)
-
-            MapSet.equal?(prev_ids, snapshot.active_ids) ->
-              %{"_t" => format_time(now)}
-
-            true ->
-              %{"_!" => phase_change_text(prev_ids, snapshot.active_ids, snapshot.titles)}
+        %{active_ids: prev_ids} ->
+          if MapSet.equal?(prev_ids, snapshot.active_ids) do
+            %{"_t" => format_time(now)}
+          else
+            %{"_!" => phase_change_text(prev_ids, snapshot.active_ids, snapshot.titles)}
           end
       end
 
-    {result, session_state(now, snapshot)}
+    {result, session_state(snapshot)}
   end
 
-  defp session_state(now, snapshot), do: %{active_ids: snapshot.active_ids, last_active: now}
+  # What the next response is compared against: which events were active.
+  # Nothing about when — a session lives at most as long as the access token
+  # it is bound to (`Vigil.MCP.Session`), so there is no gap long enough for a
+  # session to need its first line again.
+  defp session_state(snapshot), do: %{active_ids: snapshot.active_ids}
 
   defp format_time(now), do: Calendar.strftime(now, "%H:%M")
 

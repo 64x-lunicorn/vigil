@@ -129,10 +129,15 @@ defmodule Vigil.Vault.Rules do
     end
   end
 
+  # Sobelow: rel_path is a file vigil enumerated from the vault itself.
+  # sobelow_skip ["Traversal.FileModule"]
   defp heading_changes(vault_path, rel_path) do
+    # A note that is not UTF-8 has no chunk ids to change: the server skips it
+    # (docs/design.md, "A note that is not UTF-8 is skipped").
     case File.read(Path.join(vault_path, rel_path)) do
       {:ok, content} ->
         content
+        |> utf8_text()
         |> heading_slug_changes()
         |> Enum.map(fn %{text: text, old: old, new: new} ->
           %{kind: :heading, path: rel_path, heading: text, old: old, new: new}
@@ -140,6 +145,41 @@ defmodule Vigil.Vault.Rules do
 
       {:error, _reason} ->
         []
+    end
+  end
+
+  defp utf8_text(content) do
+    if String.valid?(content), do: Markdown.normalize(content), else: ""
+  end
+
+  @doc """
+  Every chunk id this build derives from the notes in `files`, sorted: the
+  ids a reference into the vault is made of (docs/compatibility.md, "The vault
+  conventions").
+
+  Parsed with `Vigil.Parser`, as the index parses them, so a change to the
+  slug function, to the chunking or to how a colliding heading is numbered
+  shows up here. Two builds asked about the same vault answer the same list
+  exactly when neither moves an id — which is what `mix vigil.slug_diff
+  --against` compares, and why `update.sh` asks the running release for its
+  list before switching to another (`Vigil.Release.chunk_ids/0`). A note that
+  is not UTF-8 has no ids: the server skips it.
+  """
+  @spec chunk_ids(String.t(), [String.t()]) :: [String.t()]
+  def chunk_ids(vault_path, files) do
+    files
+    |> Enum.flat_map(&note_chunk_ids(vault_path, &1))
+    |> Enum.sort()
+  end
+
+  # Sobelow: rel_path is a file vigil enumerated from the vault itself.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp note_chunk_ids(vault_path, rel_path) do
+    with {:ok, content} <- File.read(Path.join(vault_path, rel_path)),
+         {:ok, file} <- Parser.parse(rel_path, content) do
+      Enum.map(file.chunks, & &1.id)
+    else
+      _unreadable -> []
     end
   end
 

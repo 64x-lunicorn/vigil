@@ -1,0 +1,6 @@
+## Flags for the short-lived node behind `bin/vigil rpc`, `stop` and `remote`.
+
+## No epmd, and no listener: this node only dials the release's node, on the
+## port rel/env.sh.eex passes as -erl_epmd_port, and is never dialled back.
+-start_epmd false
+-dist_listen false

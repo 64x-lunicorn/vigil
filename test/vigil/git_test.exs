@@ -1,7 +1,7 @@
 defmodule Vigil.GitTest do
   use ExUnit.Case, async: true
 
-  alias Vigil.Git
+  alias Vigil.{Commit, Git}
   alias Vigil.Git.CommitLog
 
   @moduledoc """
@@ -38,6 +38,23 @@ defmodule Vigil.GitTest do
     path
   end
 
+  # What a write asks for, as one step: stage the path, commit it.
+  defp add_commit(git, vault, path, message, branch \\ "main") do
+    :ok = git.add.(vault, [path])
+    git.commit.(vault, branch, [path], message)
+  end
+
+  defp remove_commit(git, vault, path, message) do
+    with :ok <- git.remove.(vault, [path]),
+         {:ok, _} <- git.commit.(vault, "main", [path], message),
+         do: :ok
+  end
+
+  defp move_commit(git, vault, from, to, message) do
+    :ok = git.move.(vault, from, to)
+    git.commit.(vault, "main", [from, to], message)
+  end
+
   # One body per claim, run against the repository and against the commit log.
   # The two agreeing is what lets every other test in the suite stay off git;
   # the two drifting apart is the one thing that could go wrong with a second
@@ -56,13 +73,13 @@ defmodule Vigil.GitTest do
                  meta["bike/terra-speed.md"]
       end
 
-      test "add_commit authors as vigil and push succeeds", %{git: git, vault: vault} do
+      test "add and commit author as vigil and push succeeds", %{git: git, vault: vault} do
         path = note(vault, "bike/new.md", "New")
 
         assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
-                 git.add_commit.(vault, path, "create: #{path}")
+                 add_commit(git, vault, path, "create: #{path}")
 
-        assert :ok = git.push.(vault, "origin")
+        assert :ok = git.push.(vault, "origin", "main")
       end
 
       # Creation date = first commit (docs/design.md, principle 3), read back
@@ -73,7 +90,7 @@ defmodule Vigil.GitTest do
       } do
         path = note(vault, "bike/fresh.md", "Fresh")
 
-        {:ok, commit_meta} = git.add_commit.(vault, path, "create: #{path}")
+        {:ok, commit_meta} = add_commit(git, vault, path, "create: #{path}")
 
         assert %{created_at: created_at, updated_at: updated_at, last_author: "vigil"} =
                  git.log_metadata.(vault)[path]
@@ -84,37 +101,66 @@ defmodule Vigil.GitTest do
 
       test "push failure is reported without losing the local commit", %{git: git, vault: vault} do
         path = note(vault, "bike/new2.md", "New2")
-        {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
-        assert {:error, _reason} = git.push.(vault, "nonexistent-remote")
+        assert {:error, _reason} = git.push.(vault, "nonexistent-remote", "main")
 
         assert %{last_author: "vigil"} = git.log_metadata.(vault)[path]
         assert File.exists?(Path.join(vault, path))
       end
 
-      test "pull fast-forwards from the vault's remote", %{git: git, vault: vault} do
-        assert :ok = git.pull.(vault, "origin")
+      # A path is a path, never a pattern: a note a human named `*.md` is one
+      # note, and removing it removes nothing else.
+      test "a note named like a glob is removed alone", %{git: git, vault: vault} do
+        glob = note(vault, "bike/*.md", "Glob")
+        {:ok, _} = add_commit(git, vault, glob, "create: #{glob}")
+
+        assert :ok = Commit.delete(git, vault, "main", glob, "delete: #{glob}")
+
+        refute File.exists?(Path.join(vault, glob))
+        assert File.exists?(Path.join(vault, "bike/terra-speed.md"))
+        assert File.exists?(Path.join(vault, "bike/via-carolina.md"))
+        assert %{last_author: "Daniel"} = git.log_metadata.(vault)["bike/terra-speed.md"]
       end
 
-      test "pull against a nonexistent remote returns an error", %{git: git, vault: vault} do
-        assert {:error, _reason} = git.pull.(vault, "nonexistent-remote")
+      test "fetch from the vault's remote succeeds", %{git: git, vault: vault} do
+        assert :ok = git.fetch.(vault, "origin", "main")
       end
 
-      test "remove_commit removes the file", %{git: git, vault: vault} do
+      @tag :capture_log
+      test "push and fetch against a branch the vault does not have return an error", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:error, _reason} = git.push.(vault, "origin", "no-such-branch")
+        assert {:error, _reason} = git.fetch.(vault, "origin", "no-such-branch")
+      end
+
+      test "tracking reports the checked-out branch, the remotes and each upstream", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:ok,
+                %{head: "main", remotes: ["origin"], branches: %{"main" => {"origin", "main"}}}} =
+                 git.tracking.(vault)
+      end
+
+      test "remove and commit remove the file", %{git: git, vault: vault} do
         assert :ok =
-                 git.remove_commit.(vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
+                 remove_commit(git, vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
 
         refute File.exists?(Path.join(vault, "bike/terra-speed.md"))
       end
 
-      test "move_commit renames the file and commits it at its new path", %{
+      test "move and commit rename the file and commits it at its new path", %{
         git: git,
         vault: vault
       } do
         before = git.log_metadata.(vault)
 
         assert {:ok, %{updated_at: %DateTime{}, last_author: "vigil"}} =
-                 git.move_commit.(
+                 move_commit(
+                   git,
                    vault,
                    "bike/terra-speed.md",
                    "bike/terra-speed-new.md",
@@ -136,18 +182,621 @@ defmodule Vigil.GitTest do
         assert DateTime.compare(created_at, updated_at) in [:lt, :eq]
         assert created_at == before["bike/terra-speed.md"].created_at
       end
+
+      # docs/design.md, "A human edit arrives as a commit, never as a file":
+      # what another clone pushed is seen after a fetch and adopted by a
+      # fast-forward, and nothing before the fast-forward touches the vault.
+      # docs/design.md, "No audit log": the history a write leaves is read back
+      # rather than kept a second time, and a rename does not cut it off.
+      test "history follows a note across a rename, newest first", %{git: git, vault: vault} do
+        path = note(vault, "bike/hist.md", "One")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        note(vault, path, "Two")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        {:ok, _} = move_commit(git, vault, path, "bike/hist-moved.md", "move: #{path}")
+
+        assert {:ok, commits} = git.history.(vault, "bike/hist-moved.md", 10)
+
+        assert Enum.map(commits, &{&1.message, &1.path}) == [
+                 {"move: bike/hist.md", "bike/hist-moved.md"},
+                 {"update: bike/hist.md", "bike/hist.md"},
+                 {"create: bike/hist.md", "bike/hist.md"}
+               ]
+
+        assert Enum.all?(commits, &match?(%{author: "vigil", email: "vigil@local"}, &1))
+        assert Enum.all?(commits, &(&1.commit =~ ~r/\A[0-9a-f]{40}\z/))
+        assert Enum.all?(commits, &match?(%DateTime{}, &1.at))
+      end
+
+      test "history reports who committed a note the vault already had", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:ok, [initial]} = git.history.(vault, "bike/terra-speed.md", 10)
+        assert %{author: "Daniel", email: "daniel@local", path: "bike/terra-speed.md"} = initial
+        assert {:ok, []} = git.history.(vault, "bike/never-there.md", 10)
+      end
+
+      test "history answers at most limit commits, the newest", %{git: git, vault: vault} do
+        path = note(vault, "bike/limited.md", "One")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        note(vault, path, "Two")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+
+        assert {:ok, [%{message: "update: bike/limited.md"}]} = git.history.(vault, path, 1)
+      end
+
+      test "show answers a note as it was at a revision", %{git: git, vault: vault} do
+        path = note(vault, "bike/shown.md", "Before")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        note(vault, path, "After")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        {:ok, [newest, oldest]} = git.history.(vault, path, 10)
+
+        assert {:ok, %{commit: commit, content: content, updated_at: %DateTime{}}} =
+                 git.show.(vault, oldest.commit, path)
+
+        assert commit == oldest.commit
+        assert content =~ "# Before"
+        assert {:ok, %{content: after_content}} = git.show.(vault, newest.commit, path)
+        assert after_content =~ "# After"
+      end
+
+      test "show refuses a revision that names no commit, and a path the commit lacks", %{
+        git: git,
+        vault: vault
+      } do
+        {:ok, [initial]} = git.history.(vault, "bike/terra-speed.md", 10)
+
+        assert {:error, :unknown_revision} =
+                 git.show.(vault, "no-such-revision", "bike/terra-speed.md")
+
+        assert {:error, :unknown_revision} = git.show.(vault, "--output=x", "bike/terra-speed.md")
+
+        assert {:error, :unknown_revision} =
+                 git.show.(vault, String.duplicate("0", 40), "bike/terra-speed.md")
+
+        assert {:error, :not_found} = git.show.(vault, initial.commit, "bike/never-there.md")
+      end
+
+      test "a commit pushed elsewhere is behind after a fetch, and a fast-forward adopts it",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert :ok = git.fetch.(vault, "origin", "main")
+        assert {:ok, %{ahead: 0, behind: 1}} = git.divergence.(vault, "origin", "main")
+        refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+
+        assert :ok = git.fast_forward.(vault, "origin", "main")
+
+        assert File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert %{last_author: "x"} = git.log_metadata.(vault)["bike/from-elsewhere.md"]
+      end
+
+      test "a commit not yet pushed counts as ahead, and a push brings it to zero", %{
+        git: git,
+        vault: vault
+      } do
+        path = note(vault, "bike/ahead.md", "Ahead")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+        assert {:ok, %{ahead: 1, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert :ok = git.push.(vault, "origin", "main")
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      test "a push is refused while the remote holds a commit the vault lacks",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+        assert {:error, _reason} = git.push.(vault, "origin", "main")
+      end
+
+      # Principle 2: no merge. With a commit of its own the vault cannot be
+      # fast-forwarded, and it is left exactly as it was.
+      test "a fast-forward is refused while the vault holds a commit of its own",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 1, behind: 1}} = git.divergence.(vault, "origin", "main")
+        assert {:error, _reason} = git.fast_forward.(vault, "origin", "main")
+        refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+      end
+
+      # docs/design.md, principle 2: vigil's own unpushed commits are
+      # rebased onto what another clone pushed — never merged — and the push
+      # that follows is a fast-forward.
+      test "a rebase puts the vault's commit on top of one pushed elsewhere, and the push succeeds",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+
+        assert File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        assert File.exists?(Path.join(vault, path))
+        assert {:ok, %{ahead: 1, behind: 0}} = git.divergence.(vault, "origin", "main")
+        assert :ok = git.push.(vault, "origin", "main")
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+
+        meta = git.log_metadata.(vault)
+        assert %{last_author: "vigil"} = meta[path]
+        assert %{last_author: "x"} = meta["bike/from-elsewhere.md"]
+      end
+
+      test "a rebase with nothing fetched leaves the vault's commit as it was", %{
+        git: git,
+        vault: vault
+      } do
+        path = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+        assert {:ok, %{ahead: 1, behind: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      # A real conflict is not vigil's to resolve: the rebase stops, names the
+      # path, and aborting it puts the vault back exactly as it was — its
+      # commit local, the other side's still only on the remote.
+      test "a rebase over the same note stops at a conflict, and aborting it keeps the vault's commit",
+           %{git: git, vault: vault} = ctx do
+        path = "bike/terra-speed.md"
+        push_from_elsewhere(ctx, path, "---\ntype: reference\n---\n# Theirs\nfrom elsewhere\n")
+        File.write!(Path.join(vault, path), "---\ntype: reference\n---\n# Ours\nfrom vigil\n")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:conflict, [^path]} = git.rebase.(vault, "origin", "main")
+        assert :ok = git.abort_rebase.(vault)
+
+        assert File.read!(Path.join(vault, path)) =~ "from vigil"
+        assert {:ok, %{ahead: 1, behind: 1}} = git.divergence.(vault, "origin", "main")
+        assert %{last_author: "vigil"} = git.log_metadata.(vault)[path]
+        assert {:error, _reason} = git.push.(vault, "origin", "main")
+      end
+
+      # docs/design.md, "The server stays in step with the remote": what a
+      # force-push elsewhere took off the remote is followed, never put back.
+      # Only the vault's own commits — the ones the remote never held — are
+      # replayed.
+      test "a force-push that took a pushed commit away counts it as rewritten, and a rebase drops it and keeps the vault's own on top",
+           %{git: git, vault: vault} = ctx do
+        pushed = note(vault, "bike/pushed.md", "Pushed")
+        {:ok, _} = add_commit(git, vault, pushed, "create: #{pushed}")
+        :ok = git.push.(vault, "origin", "main")
+        mine = note(vault, "bike/mine.md", "Mine")
+        {:ok, _} = add_commit(git, vault, mine, "create: #{mine}")
+        drop_from_elsewhere(ctx, 1)
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 2, behind: 1, rewritten: 1}} =
+                 git.divergence.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+
+        refute File.exists?(Path.join(vault, pushed))
+        assert File.exists?(Path.join(vault, mine))
+        assert File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        refute Map.has_key?(git.log_metadata.(vault), pushed)
+
+        assert {:ok, %{ahead: 1, behind: 0, rewritten: 0}} =
+                 git.divergence.(vault, "origin", "main")
+
+        assert :ok = git.push.(vault, "origin", "main")
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 0, behind: 0, rewritten: 0}} =
+                 git.divergence.(vault, "origin", "main")
+      end
+
+      # The same force-push with nothing pushed after it: the remote is not
+      # ahead of the vault — it is an ancestor of it — and a push would be a
+      # fast-forward that restores what was taken away.
+      test "a force-push that only took a commit away is rewritten, not behind, and a rebase takes it away here too",
+           %{git: git, vault: vault} = ctx do
+        pushed = note(vault, "bike/pushed.md", "Pushed")
+        {:ok, _} = add_commit(git, vault, pushed, "create: #{pushed}")
+        :ok = git.push.(vault, "origin", "main")
+        drop_from_elsewhere(ctx, 1)
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 1, behind: 0, rewritten: 1}} =
+                 git.divergence.(vault, "origin", "main")
+
+        assert :ok = git.rebase.(vault, "origin", "main")
+
+        refute File.exists?(Path.join(vault, pushed))
+
+        assert {:ok, %{ahead: 0, behind: 0, rewritten: 0}} =
+                 git.divergence.(vault, "origin", "main")
+      end
+
+      test "a push is refused while the vault holds a commit a force-push took off the remote",
+           %{git: git, vault: vault} = ctx do
+        pushed = note(vault, "bike/pushed.md", "Pushed")
+        {:ok, _} = add_commit(git, vault, pushed, "create: #{pushed}")
+        :ok = git.push.(vault, "origin", "main")
+        drop_from_elsewhere(ctx, 1)
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:error, reason} = git.push.(vault, "origin", "main")
+        assert reason =~ "rewritten"
+
+        :ok = git.fetch.(vault, "origin", "main")
+
+        assert {:ok, %{ahead: 1, behind: 0, rewritten: 1}} =
+                 git.divergence.(vault, "origin", "main")
+      end
+
+      # What `git commit` does with nothing to commit is make no commit, and
+      # a write of what the file already holds leaves nothing to push.
+      test "committing unchanged content answers the last commit and leaves nothing to push", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:ok, %{updated_at: %DateTime{}, last_author: "Daniel"}} =
+                 add_commit(git, vault, "bike/terra-speed.md", "update: unchanged")
+
+        assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      # A rebase stopped at a conflict leaves HEAD detached under git; what
+      # `tracking` reports is the branch it is rebasing, which is where
+      # aborting it puts HEAD back — and that a rebase is in progress.
+      test "a rebase stopped at a conflict is reported by tracking until it is aborted",
+           %{git: git, vault: vault} = ctx do
+        path = "bike/terra-speed.md"
+        push_from_elsewhere(ctx, path, "---\ntype: reference\n---\n# Theirs\nfrom elsewhere\n")
+        File.write!(Path.join(vault, path), "---\ntype: reference\n---\n# Ours\nfrom vigil\n")
+        {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+        :ok = git.fetch.(vault, "origin", "main")
+        assert {:ok, %{rebasing: false}} = git.tracking.(vault)
+
+        {:conflict, _paths} = git.rebase.(vault, "origin", "main")
+        assert {:ok, %{head: "main", rebasing: true}} = git.tracking.(vault)
+
+        :ok = git.abort_rebase.(vault)
+        assert {:ok, %{head: "main", rebasing: false}} = git.tracking.(vault)
+      end
+
+      # docs/design.md, "Git is reached through a value": vigil commits onto
+      # the branch it pushes, and on nothing else.
+      test "a commit on a detached HEAD is refused, and tracking reports no branch checked out",
+           %{git: git, vault: vault} = ctx do
+        detach(ctx)
+        path = note(vault, "bike/detached.md", "Detached")
+        :ok = git.add.(vault, [path])
+
+        assert {:error, reason} = git.commit.(vault, "main", [path], "create: #{path}")
+        assert reason =~ "detached"
+        assert {:ok, %{head: nil, rebasing: false}} = git.tracking.(vault)
+        assert {:ok, %{ahead: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      # docs/design.md, "The vault's remote and branch are checked against
+      # the clone": what boot checked holds for every write after it. A `git
+      # switch` in the clone after boot puts HEAD on a branch no push names;
+      # a commit there would never leave the host while the push that
+      # follows found the configured branch up to date.
+      test "a commit while another branch is checked out is refused, naming both branches",
+           %{git: git, vault: vault} = ctx do
+        switch(ctx, "elsewhere")
+        path = note(vault, "bike/switched.md", "Switched")
+        :ok = git.add.(vault, [path])
+
+        assert {:error, reason} = git.commit.(vault, "main", [path], "create: #{path}")
+        assert reason =~ "VIGIL_GIT_BRANCH"
+        assert reason =~ "main"
+        assert reason =~ "elsewhere"
+        assert {:ok, %{head: "elsewhere"}} = git.tracking.(vault)
+        assert {:ok, %{ahead: 0}} = git.divergence.(vault, "origin", "main")
+      end
+
+      test "a fast-forward and a rebase are refused while another branch is checked out",
+           %{git: git, vault: vault} = ctx do
+        push_from_elsewhere(ctx, "bike/from-elsewhere.md")
+        :ok = git.fetch.(vault, "origin", "main")
+        switch(ctx, "elsewhere")
+
+        assert {:error, reason} = git.fast_forward.(vault, "origin", "main")
+        assert reason =~ "VIGIL_GIT_BRANCH" and reason =~ "elsewhere"
+        assert {:error, reason} = git.rebase.(vault, "origin", "main")
+        assert reason =~ "VIGIL_GIT_BRANCH" and reason =~ "elsewhere"
+
+        refute File.exists?(Path.join(vault, "bike/from-elsewhere.md"))
+        assert {:ok, %{ahead: 0, behind: 1}} = git.divergence.(vault, "origin", "main")
+      end
+
+      test "aborting when no rebase is in progress is an error", %{git: git, vault: vault} do
+        assert {:error, _reason} = git.abort_rebase.(vault)
+      end
+
+      @tag :capture_log
+      test "fetch and divergence against a remote the vault does not have are errors", %{
+        git: git,
+        vault: vault
+      } do
+        assert {:error, _reason} = git.fetch.(vault, "nonexistent-remote", "main")
+        assert {:error, _reason} = git.divergence.(vault, "nonexistent-remote", "main")
+      end
+    end
+  end
+
+  describe "the repository, a move with rewrites" do
+    setup :real_git
+
+    test "is one commit holding the rename and every rewritten note", %{git: git, vault: vault} do
+      assert {:ok, _} =
+               Commit.move(
+                 git,
+                 vault,
+                 "main",
+                 "bike/terra-speed.md",
+                 "bike/terra-40c.md",
+                 "move",
+                 [
+                   {"bike/via-carolina.md", "# Via\n[[terra-40c]]\n"}
+                 ]
+               )
+
+      {out, 0} =
+        System.cmd("git", ["show", "--name-status", "--format=%s", "HEAD"], cd: vault)
+
+      assert out =~ "move"
+      assert out =~ ~r/R\d+\tbike\/terra-speed.md\tbike\/terra-40c.md/
+      assert out =~ "M\tbike/via-carolina.md"
+      {status, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
+      assert status == ""
+    end
+  end
+
+  # A commit another clone pushed, authored `x`: through a real second clone
+  # for the repository, recorded as such for the commit log.
+  @elsewhere "---\ntype: reference\n---\n# Elsewhere\n"
+
+  defp push_from_elsewhere(ctx, path, content \\ @elsewhere)
+
+  defp push_from_elsewhere(%{log: log}, path, content) do
+    CommitLog.push_from_elsewhere(log, path, content, "x")
+  end
+
+  defp push_from_elsewhere(%{remote: remote, vault: vault}, path, content) do
+    other = vault <> "_elsewhere"
+    {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
+    File.mkdir_p!(Path.dirname(Path.join(other, path)))
+    File.write!(Path.join(other, path), content)
+    {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+
+    {_out, 0} =
+      System.cmd(
+        "git",
+        ~w(-c user.name=x -c user.email=x@x -c commit.gpgsign=false commit -q -m elsewhere),
+        cd: other
+      )
+
+    {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
+    File.rm_rf!(other)
+    :ok
+  end
+
+  # A force-push from another clone that took the last `count` commits off
+  # the remote: through a real second clone for the repository, recorded as
+  # such for the commit log.
+  defp drop_from_elsewhere(%{log: log}, count), do: CommitLog.drop_from_elsewhere(log, count)
+
+  defp drop_from_elsewhere(%{remote: remote, vault: vault}, count) do
+    other = vault <> "_rewriting"
+    {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
+    {_out, 0} = System.cmd("git", ["reset", "-q", "--hard", "HEAD~#{count}"], cd: other)
+    {_out, 0} = System.cmd("git", ["push", "-q", "--force", "origin", "main"], cd: other)
+    File.rm_rf!(other)
+    :ok
+  end
+
+  defp switch(%{log: log}, branch), do: CommitLog.switch(log, branch)
+
+  defp switch(%{vault: vault}, branch) do
+    {_out, 0} = System.cmd("git", ["switch", "-q", "-c", branch], cd: vault)
+    :ok
+  end
+
+  defp detach(%{log: log}), do: CommitLog.detach(log)
+
+  defp detach(%{vault: vault}) do
+    {_out, 0} = System.cmd("git", ["checkout", "-q", "--detach"], cd: vault)
+    :ok
+  end
+
+  # Everything on disk under the vault but git's own directory, with its
+  # content: a rollback that leaves a file, a directory or a temporary file
+  # behind differs here from the vault it started with.
+  defp tree(vault) do
+    Path.join(vault, "**")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.reject(&String.contains?(Path.relative_to(&1, vault), ".git"))
+    |> Map.new(fn abs ->
+      {Path.relative_to(abs, vault), if(File.dir?(abs), do: :dir, else: File.read!(abs))}
+    end)
+  end
+
+  defp failing_commit(git), do: %{git | commit: fn _, _, _, _ -> {:error, "boom"} end}
+
+  # docs/design.md, "A failed commit leaves the vault as it was". The commit is
+  # made to fail through the value, after the staging it follows has happened,
+  # and what the working tree and the staging area hold afterwards is compared
+  # with what they held before.
+  for {adapter, setup_fun} <- [
+        {"the repository", :real_git},
+        {"the commit log", :commit_log}
+      ] do
+    describe "#{adapter}, when the commit fails" do
+      setup(setup_fun)
+
+      setup %{git: git, vault: vault} do
+        {:ok, failing: failing_commit(git), before: tree(vault)}
+      end
+
+      test "a write to an existing note leaves it as it was", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        path = "bike/terra-speed.md"
+        {:ok, index} = git.snapshot_index.(vault, [path])
+
+        assert {:error, "git commit failed: boom"} =
+                 Commit.write(failing, vault, "main", path, "# Replaced\n", "update: #{path}")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, [path]) == {:ok, index}
+      end
+
+      test "a new note in a new directory leaves neither behind", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        path = "bike/archive/2026/new.md"
+        {:ok, index} = git.snapshot_index.(vault, [path])
+
+        assert {:error, "git commit failed: boom"} =
+                 Commit.write(failing, vault, "main", path, "# New\n", "create: #{path}")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, [path]) == {:ok, index}
+      end
+
+      test "a removal leaves the note where it was", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        path = "bike/via-carolina.md"
+        {:ok, index} = git.snapshot_index.(vault, [path])
+
+        assert {:error, "git rm/commit failed: boom"} =
+                 Commit.delete(failing, vault, "main", path, "delete: #{path}")
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, [path]) == {:ok, index}
+      end
+
+      # `git rm` takes a directory it empties with it.
+      test "a removal that empties its directory leaves both where they were", %{
+        git: git,
+        failing: failing,
+        vault: vault
+      } do
+        path = note(vault, "garden/beds/only.md", "Only")
+        {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+        before = tree(vault)
+
+        assert {:error, "git rm/commit failed: boom"} =
+                 Commit.delete(failing, vault, "main", path, "delete: #{path}")
+
+        assert tree(vault) == before
+      end
+
+      test "a move leaves the note at its old path and nothing at the new one", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        paths = ["bike/via-carolina.md", "bike/archive/via-carolina.md"]
+        {:ok, index} = git.snapshot_index.(vault, paths)
+
+        assert {:error, "git mv/commit failed: boom"} =
+                 Commit.move(
+                   failing,
+                   vault,
+                   "main",
+                   hd(paths),
+                   List.last(paths),
+                   "move: via-carolina"
+                 )
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, paths) == {:ok, index}
+      end
+
+      test "a move with rewrites leaves the note and every linking note as they were", %{
+        git: git,
+        failing: failing,
+        vault: vault,
+        before: before
+      } do
+        paths = ["bike/via-carolina.md", "bike/terra-speed.md", "bike/archive/via-carolina.md"]
+        {:ok, index} = git.snapshot_index.(vault, paths)
+
+        rewrites = [
+          {"bike/terra-speed.md", "# Rewritten\n"},
+          {"bike/archive/via-carolina.md", "# Rewritten too\n"}
+        ]
+
+        assert {:error, "git mv/commit failed: boom"} =
+                 Commit.move(
+                   failing,
+                   vault,
+                   "main",
+                   "bike/via-carolina.md",
+                   "bike/archive/via-carolina.md",
+                   "move: via-carolina",
+                   rewrites
+                 )
+
+        assert tree(vault) == before
+        assert git.snapshot_index.(vault, paths) == {:ok, index}
+      end
+
+      # What the failure would otherwise have left staged is swept into the
+      # next commit under that commit's message.
+      test "the next commit carries only its own change", %{
+        git: git,
+        failing: failing,
+        vault: vault
+      } do
+        {:error, _} = Commit.delete(failing, vault, "main", "bike/via-carolina.md", "delete")
+
+        assert {:ok, _} =
+                 Commit.write(
+                   git,
+                   vault,
+                   "main",
+                   "bike/next.md",
+                   "# Next\n",
+                   "create: bike/next.md"
+                 )
+
+        assert File.exists?(Path.join(vault, "bike/via-carolina.md"))
+        assert git.log_metadata.(vault)["bike/via-carolina.md"].last_author == "Daniel"
+      end
     end
   end
 
   # What only a repository can be asked. The identity a commit carries down to
-  # its email address, the ambient configuration it has to survive, and a pull
-  # that actually brings something back.
+  # its email address, the ambient configuration it has to survive, and a rebase
+  # onto the kind of history only a real clone makes.
   describe "the repository alone" do
     setup :real_git
 
     test "a commit carries vigil's full identity", %{git: git, vault: vault} do
       path = note(vault, "bike/new.md", "New")
-      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
       {out, 0} = System.cmd("git", ["log", "-1", "--format=%an <%ae>"], cd: vault)
       assert String.trim(out) == "vigil <vigil@local>"
@@ -167,15 +816,15 @@ defmodule Vigil.GitTest do
       note(vault, "bike/signed.md", "S")
 
       assert {:ok, %{last_author: "vigil"}} =
-               git.add_commit.(vault, "bike/signed.md", "create: bike/signed.md")
+               add_commit(git, vault, "bike/signed.md", "create: bike/signed.md")
 
       note(vault, "bike/signed2.md", "S2")
-      {:ok, _} = git.add_commit.(vault, "bike/signed2.md", "create: bike/signed2.md")
+      {:ok, _} = add_commit(git, vault, "bike/signed2.md", "create: bike/signed2.md")
 
       assert {:ok, _} =
-               git.move_commit.(vault, "bike/signed2.md", "bike/signed3.md", "move: s2 -> s3")
+               move_commit(git, vault, "bike/signed2.md", "bike/signed3.md", "move: s2 -> s3")
 
-      assert :ok = git.remove_commit.(vault, "bike/signed3.md", "delete: bike/signed3.md")
+      assert :ok = remove_commit(git, vault, "bike/signed3.md", "delete: bike/signed3.md")
     end
 
     # git quotes every non-ASCII path under the default core.quotePath=true;
@@ -185,25 +834,141 @@ defmodule Vigil.GitTest do
       vault: vault
     } do
       path = note(vault, "home/Übersicht Heizöl.md", "Übersicht")
-      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
 
       assert %{created_at: %DateTime{}, last_author: "vigil"} = git.log_metadata.(vault)[path]
     end
 
-    test "add_commit of unchanged content succeeds without a new commit", %{
+    test "history and show take non-ASCII paths as the filesystem spells them", %{
+      git: git,
+      vault: vault
+    } do
+      path = note(vault, "home/Übersicht Heizöl.md", "Übersicht")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      {:ok, _} = move_commit(git, vault, path, "home/Heizöl *.md", "move: #{path}")
+
+      assert {:ok, [moved, created]} = git.history.(vault, "home/Heizöl *.md", 10)
+      assert moved.path == "home/Heizöl *.md"
+      assert created.path == path
+      assert {:ok, %{content: content}} = git.show.(vault, created.commit, path)
+      assert content =~ "# Übersicht"
+    end
+
+    test "committing unchanged content succeeds without a new commit", %{
       git: git,
       vault: vault
     } do
       {head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
 
       assert {:ok, %{updated_at: %DateTime{}, last_author: "Daniel"}} =
-               git.add_commit.(vault, "bike/terra-speed.md", "update: unchanged")
+               add_commit(git, vault, "bike/terra-speed.md", "update: unchanged")
 
       assert {^head, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
     end
 
+    # What git's own staging area says, beyond what the value hands back: the
+    # whole of `git status`, and the index entries of every path, unchanged.
+    test "a failed commit leaves git status and the index as they were", %{
+      git: git,
+      vault: vault
+    } do
+      failing = failing_commit(git)
+      status = fn -> System.cmd("git", ["status", "--porcelain"], cd: vault) end
+      stage = fn -> System.cmd("git", ["ls-files", "--stage"], cd: vault) end
+      {status_before, stage_before} = {status.(), stage.()}
+
+      {:error, _} = Commit.write(failing, vault, "main", "bike/terra-speed.md", "# X\n", "update")
+      {:error, _} = Commit.write(failing, vault, "main", "bike/new/x.md", "# X\n", "create")
+      {:error, _} = Commit.delete(failing, vault, "main", "bike/via-carolina.md", "delete")
+
+      {:error, _} =
+        Commit.move(failing, vault, "main", "bike/via-carolina.md", "bike/b/v.md", "move")
+
+      {:error, _} =
+        Commit.move(failing, vault, "main", "bike/via-carolina.md", "bike/b/v.md", "move", [
+          {"bike/terra-speed.md", "# X\n"}
+        ])
+
+      assert status.() == status_before
+      assert stage.() == stage_before
+    end
+
+    # The failure the value simulates, as a repository produces it.
+    test "a commit refused on a detached HEAD leaves the vault as it was", %{
+      git: git,
+      vault: vault
+    } do
+      {_out, 0} = System.cmd("git", ["checkout", "-q", "--detach"], cd: vault)
+      before = tree(vault)
+
+      assert {:error, "git rm/commit failed: HEAD is detached" <> _} =
+               Commit.delete(git, vault, "main", "bike/via-carolina.md", "delete")
+
+      assert tree(vault) == before
+      {out, 0} = System.cmd("git", ["status", "--porcelain"], cd: vault)
+      assert out == ""
+    end
+
+    # docs/design.md, "Git is reached through a value": a hook in the vault's
+    # clone is not vigil's to satisfy. Every one here fails, and
+    # `reference-transaction` runs for every ref any of these calls moves.
+    test "no hook in the clone runs for a commit, a push, a fetch, a fast-forward or a rebase",
+         %{git: git, vault: vault, remote: remote} do
+      for hook <- ~w(pre-commit commit-msg post-commit pre-push post-merge post-checkout
+                     post-rewrite pre-rebase reference-transaction) do
+        path = Path.join(vault, ".git/hooks/#{hook}")
+        File.write!(path, "#!/bin/sh\necho refused by #{hook}\nexit 1\n")
+        File.chmod!(path, 0o755)
+      end
+
+      path = note(vault, "bike/hooked.md", "Hooked")
+      assert {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      assert :ok = git.push.(vault, "origin", "main")
+
+      push_from_elsewhere(%{remote: remote, vault: vault}, "bike/first-elsewhere.md")
+      assert :ok = git.fetch.(vault, "origin", "main")
+      assert :ok = git.fast_forward.(vault, "origin", "main")
+
+      push_from_elsewhere(%{remote: remote, vault: vault}, "bike/second-elsewhere.md")
+      mine = note(vault, "bike/mine.md", "Mine")
+      {:ok, _} = add_commit(git, vault, mine, "create: #{mine}")
+      assert :ok = git.fetch.(vault, "origin", "main")
+      assert :ok = git.rebase.(vault, "origin", "main")
+      assert :ok = git.push.(vault, "origin", "main")
+    end
+
+    test "a push succeeds when the clone's configuration asks for signed pushes", %{
+      git: git,
+      vault: vault
+    } do
+      {_, 0} = System.cmd("git", ["config", "push.gpgSign", "true"], cd: vault)
+      {_, 0} = System.cmd("git", ["config", "gpg.program", "/bin/false"], cd: vault)
+      path = note(vault, "bike/signed.md", "Signed")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+
+      assert :ok = git.push.(vault, "origin", "main")
+    end
+
+    # One test of "is this a clone", asked by the boot check (tracking) and by
+    # the writer that builds this adapter alike: a worktree's `.git` is a
+    # file, not a directory, and it is a clone all the same.
+    test "a worktree of a clone is a clone, and a directory inside one is not", %{
+      git: git,
+      vault: vault
+    } do
+      worktree = vault <> "_worktree"
+      {_out, 0} = System.cmd("git", ["worktree", "add", "-q", "-b", "side", worktree], cd: vault)
+      on_exit(fn -> File.rm_rf(worktree) end)
+
+      assert Git.clone?(vault)
+      assert Git.clone?(worktree)
+      assert {:ok, %{head: "side"}} = git.tracking.(worktree)
+      refute Git.clone?(Path.join(vault, "bike"))
+      assert {:error, _reason} = git.tracking.(Path.join(vault, "bike"))
+    end
+
     test "delete and move are git operations, not filesystem calls", %{git: git, vault: vault} do
-      assert :ok = git.remove_commit.(vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
+      assert :ok = remove_commit(git, vault, "bike/terra-speed.md", "delete: bike/terra-speed.md")
 
       {out, 0} = System.cmd("git", ["log", "-1", "--format=%s"], cd: vault)
       assert String.trim(out) == "delete: bike/terra-speed.md"
@@ -212,39 +977,146 @@ defmodule Vigil.GitTest do
       assert String.trim(out) == ""
     end
 
-    test "pull/2 brings a commit made elsewhere into the vault", %{
+    # What Obsidian Git's "merge" sync puts on the remote: a merge commit.
+    # vigil does not make one, and rebases onto one like onto any other.
+    test "a rebase onto a merge commit pushed elsewhere", %{
       git: git,
       vault: vault,
       remote: remote
     } do
-      other = vault <> "_other_clone"
+      other = vault <> "_merging_clone"
       {_out, 0} = System.cmd("git", ["clone", "-q", remote, other])
-      File.write!(Path.join(other, "note.md"), "---\ntype: reference\n---\n# Note\ntext\n")
+      as_x = ~w(-c user.name=x -c user.email=x@x -c commit.gpgsign=false)
+      {_out, 0} = System.cmd("git", ["checkout", "-q", "-b", "side"], cd: other)
+      File.write!(Path.join(other, "side.md"), "# Side\n")
       {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+      {_out, 0} = System.cmd("git", as_x ++ ~w(commit -q -m side), cd: other)
+      {_out, 0} = System.cmd("git", ["checkout", "-q", "main"], cd: other)
+      File.write!(Path.join(other, "main.md"), "# Main\n")
+      {_out, 0} = System.cmd("git", ["add", "-A"], cd: other)
+      {_out, 0} = System.cmd("git", as_x ++ ~w(commit -q -m main), cd: other)
+      {_out, 0} = System.cmd("git", as_x ++ ~w(merge -q --no-ff --no-edit side), cd: other)
+      {_out, 0} = System.cmd("git", ["push", "-q", "origin", "main"], cd: other)
+      File.rm_rf!(other)
 
-      {_out, 0} =
-        System.cmd(
-          "git",
-          [
-            "-c",
-            "user.name=x",
-            "-c",
-            "user.email=x@x",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "-q",
-            "-m",
-            "external"
-          ],
-          cd: other
-        )
+      path = note(vault, "bike/mine.md", "Mine")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
 
-      {_out, 0} = System.cmd("git", ["push", "-q"], cd: other)
-      File.rm_rf(other)
+      assert :ok = git.rebase.(vault, "origin", "main")
+      assert :ok = git.push.(vault, "origin", "main")
 
-      assert :ok = git.pull.(vault, "origin")
-      assert File.exists?(Path.join(vault, "note.md"))
+      for file <- ["side.md", "main.md", path], do: assert(File.exists?(Path.join(vault, file)))
+      {parents, 0} = System.cmd("git", ["log", "-1", "--format=%p", "HEAD~1"], cd: vault)
+      assert parents |> String.split() |> length() == 2
+    end
+
+    # docs/design.md, "The server stays in step with the remote": a writer
+    # that stopped in the middle of a rebase left the clone with HEAD
+    # detached; the next one aborts it before it loads, so its commits land
+    # on the branch and leave the host — even when the remote does not
+    # answer, and no update gets as far as a rebase of its own.
+    @tag :capture_log
+    test "a writer started on a clone left in the middle of a rebase aborts it", %{
+      git: git,
+      vault: vault,
+      remote: remote
+    } do
+      path = "bike/terra-speed.md"
+      push_from_elsewhere(%{remote: remote, vault: vault}, path, "# Theirs\n")
+      File.write!(Path.join(vault, path), "# Ours\n")
+      {:ok, _} = add_commit(git, vault, path, "update: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
+      {:conflict, [^path]} = git.rebase.(vault, "origin", "main")
+      assert {_out, 1} = System.cmd("git", ["symbolic-ref", "-q", "HEAD"], cd: vault)
+
+      start_supervised!(
+        {Vigil.Store,
+         vault_path: vault,
+         git: %{git | fetch: fn _, _, _ -> {:error, "offline"} end},
+         git_remote: "origin",
+         git_branch: "main",
+         name: :"#{__MODULE__}.MidRebase"}
+      )
+
+      assert {"refs/heads/main\n", 0} = System.cmd("git", ["symbolic-ref", "HEAD"], cd: vault)
+      assert {:ok, %{rebasing: false}} = git.tracking.(vault)
+      assert File.read!(Path.join(vault, path)) == "# Ours\n"
+      assert %{on_branch: true} = Vigil.Store.status(:"#{__MODULE__}.MidRebase")
+    end
+
+    # A hook in the vault's clone is not vigil's to satisfy, and a rebase
+    # rewrites vigil's commits as vigil, unsigned, whatever the ambient
+    # configuration says.
+    test "a rebase runs no hook and rewrites the vault's commit as vigil, unsigned", %{
+      git: git,
+      vault: vault,
+      remote: remote
+    } do
+      hook = Path.join(vault, ".git/hooks/pre-rebase")
+      File.write!(hook, "#!/bin/sh\necho refused by hook\nexit 1\n")
+      File.chmod!(hook, 0o755)
+      {_, 0} = System.cmd("git", ["config", "commit.gpgsign", "true"], cd: vault)
+      {_, 0} = System.cmd("git", ["config", "gpg.program", "/bin/false"], cd: vault)
+      push_from_elsewhere(%{remote: remote, vault: vault}, "bike/from-elsewhere.md")
+      path = note(vault, "bike/mine.md", "Mine")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      :ok = git.fetch.(vault, "origin", "main")
+
+      assert :ok = git.rebase.(vault, "origin", "main")
+
+      {out, 0} = System.cmd("git", ["log", "-1", "--format=%an <%ae>|%cn <%ce>"], cd: vault)
+      assert String.trim(out) == "vigil <vigil@local>|vigil <vigil@local>"
+    end
+  end
+
+  # A vault on another branch than `main`: every call that names a branch
+  # names the one it is handed, and nothing falls back to `main`.
+  describe "a repository on master" do
+    setup %{vault: vault} do
+      {:ok,
+       git: Git.over_repository(),
+       remote: Vigil.GitRepo.init(vault, remote: true, branch: "master")}
+    end
+
+    test "tracking reports master and its upstream", %{git: git, vault: vault} do
+      assert {:ok, %{head: "master", branches: branches}} = git.tracking.(vault)
+      assert branches == %{"master" => {"origin", "master"}}
+    end
+
+    test "a write pushes master to the remote", %{git: git, vault: vault, remote: remote} do
+      path = note(vault, "bike/master.md", "Master")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}", "master")
+
+      assert :ok = git.push.(vault, "origin", "master")
+      assert :ok = git.fetch.(vault, "origin", "master")
+      assert {:ok, %{ahead: 0, behind: 0}} = git.divergence.(vault, "origin", "master")
+
+      {local, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: vault)
+      {pushed, 0} = System.cmd("git", ["--git-dir", remote, "rev-parse", "master"])
+      assert pushed == local
+    end
+
+    test "a branch without an upstream is reported as having none", %{git: git, vault: vault} do
+      {_, 0} = System.cmd("git", ["branch", "draft"], cd: vault)
+
+      assert {:ok, %{branches: %{"draft" => nil}}} = git.tracking.(vault)
+    end
+
+    test "a detached HEAD has no checked-out branch", %{git: git, vault: vault} do
+      {_, 0} = System.cmd("git", ["checkout", "-q", "--detach"], cd: vault)
+
+      assert {:ok, %{head: nil}} = git.tracking.(vault)
+    end
+
+    test "a directory that is not a git clone is an error", %{git: git} do
+      dir =
+        Path.join(System.tmp_dir!(), "vigil_not_a_clone_#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(dir)
+      on_exit(fn -> File.rm_rf(dir) end)
+
+      assert {:error, _reason} = git.tracking.(dir)
     end
   end
 
@@ -260,12 +1132,13 @@ defmodule Vigil.GitTest do
       log: log
     } do
       path = note(vault, "bike/new.md", "New")
-      {:ok, _} = git.add_commit.(vault, path, "create: #{path}")
-      :ok = git.push.(vault, "origin")
+      {:ok, _} = add_commit(git, vault, path, "create: #{path}")
+      :ok = git.push.(vault, "origin", "main")
 
       assert CommitLog.calls(log) == [
-               {:add_commit, path, "create: #{path}"},
-               {:push, "origin"}
+               {:add, [path]},
+               {:commit, [path], "create: #{path}"},
+               {:push, "origin", "main"}
              ]
     end
   end

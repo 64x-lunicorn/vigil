@@ -1,8 +1,10 @@
 <!--
-CI runs formatting, warnings-as-errors, tests, Credo, Dialyzer, ShellCheck,
-the dependency audits, a secret scan and a full production-release smoke test.
-Run `mix ci` before pushing to get the same answer in a couple of minutes
-instead of after a round trip.
+CI runs formatting, warnings-as-errors, tests, Credo, Sobelow, Dialyzer, the
+dependency audits, ShellCheck and every shell suite, the contract check, a
+workflow lint, a secret scan and a full production-release smoke test.
+Run `mix ci` before pushing to get the Elixir part of that answer in a couple
+of minutes instead of after a round trip; CONTRIBUTING.md lists the shell
+suites.
 -->
 
 ## What and why
@@ -14,8 +16,10 @@ instead of after a round trip.
 <!-- Delete what does not apply; say so if something could not be run. -->
 
 - [ ] `mix ci` passes locally
-- [ ] `bash scripts/test/check_only_test.sh` (deployment script changes)
+- [ ] ShellCheck and every shell suite CI's Deployment scripts job runs, as
+      [CONTRIBUTING.md](../CONTRIBUTING.md) lists them (deployment script changes)
 - [ ] `bash scripts/test/release_smoke.sh` (release, config or boot-path changes)
+- [ ] `bash scripts/test/reproducible_release.sh` (release configuration or packaging changes)
 - [ ] Regression test added for the changed behaviour
 - [ ] Affected documentation updated
 - [ ] [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) updated (dependency changes)

@@ -17,6 +17,7 @@ defmodule Vigil.MCP.ServerTest do
   alias Vigil.RateLimit
   alias Vigil.Store
   alias Vigil.MCP.Server
+  alias Vigil.MCP.Session
   alias Vigil.MCP.Tools
   alias Vigil.OAuth
 
@@ -24,6 +25,13 @@ defmodule Vigil.MCP.ServerTest do
   # rather than the registrations production uses.
   @store __MODULE__.Writer
   @sessions __MODULE__.Sessions
+
+  @initialize %{
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: %{protocolVersion: "2025-11-25"}
+  }
 
   setup do
     vault = Vigil.FixtureVault.build()
@@ -70,11 +78,14 @@ defmodule Vigil.MCP.ServerTest do
     {limiter, extra} = Keyword.pop_lazy(extra, :limiter, &RateLimit.Counter.new/0)
 
     Server.init(
-      [
-        store: @store,
-        sessions: @sessions,
-        oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter)
-      ] ++ extra
+      Keyword.merge(
+        [
+          store: @store,
+          sessions: @sessions,
+          oauth: OAuth.Endpoint.init(persistence: persistence, limiter: limiter)
+        ],
+        extra
+      )
     )
   end
 
@@ -83,7 +94,40 @@ defmodule Vigil.MCP.ServerTest do
   # other key would be refused by the gate rather than by the assertion.
   defp deployment_key, do: Vigil.SkillKey.key(Vigil.Settings.from_env())
 
+  # A session is issued at `initialize` and bound to the token that asked for
+  # it, so an `mcp-session-id` a test names is a name, not an id: the first
+  # request under it initializes a session for that token, and every later one
+  # carries the id that came back. `raw_post/4` sends headers as they are, for
+  # the tests about ids nobody issued.
   defp post(persistence, token, body, headers \\ []) do
+    raw_post(persistence, token, body, Enum.map(headers, &issued(persistence, token, &1)))
+  end
+
+  defp issued(persistence, token, {"mcp-session-id", name}),
+    do: {"mcp-session-id", session(persistence, token, name)}
+
+  defp issued(_persistence, _token, header), do: header
+
+  defp session(persistence, token, name) do
+    case Process.get({:session, token, name}) do
+      nil ->
+        id = initialize!(persistence, token)
+        Process.put({:session, token, name}, id)
+        id
+
+      id ->
+        id
+    end
+  end
+
+  defp initialize!(persistence, token) do
+    conn = raw_post(persistence, token, @initialize)
+    assert conn.status == 200
+    [id] = get_resp_header(conn, "mcp-session-id")
+    id
+  end
+
+  defp raw_post(persistence, token, body, headers \\ []) do
     conn =
       conn(:post, "/mcp", Jason.encode!(body))
       |> put_req_header("content-type", "application/json")
@@ -155,6 +199,62 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 401
   end
 
+  # RFC 6750 §3.1: a request that presented a token is told it was not
+  # accepted; one that presented none gets the bare challenge.
+  test "a presented but invalid token's challenge says invalid_token", %{
+    persistence: persistence,
+    token: token
+  } do
+    presented = auth_post(persistence, "Bearer wrong#{token}")
+    assert presented.status == 401
+    assert [challenge] = get_resp_header(presented, "www-authenticate")
+    assert challenge =~ ~r/^Bearer error="invalid_token", /
+    assert challenge =~ "resource_metadata="
+
+    for header <- [nil, "Basic #{token}", "Bearer "] do
+      conn = auth_post(persistence, header)
+      assert conn.status == 401
+      assert [challenge] = get_resp_header(conn, "www-authenticate")
+      refute challenge =~ "error="
+    end
+  end
+
+  test "the Bearer scheme is matched case-insensitively", %{
+    persistence: persistence,
+    token: token
+  } do
+    for scheme <- ["bearer", "BEARER", "BeArEr"] do
+      conn = auth_post(persistence, "#{scheme} #{token}", @initialize)
+      assert conn.status == 200
+    end
+  end
+
+  defp auth_post(persistence, authorization, body \\ %{jsonrpc: "2.0", id: 1, method: "ping"}) do
+    conn =
+      conn(:post, "/mcp", Jason.encode!(body))
+      |> put_req_header("content-type", "application/json")
+
+    conn =
+      if authorization, do: put_req_header(conn, "authorization", authorization), else: conn
+
+    Server.call(conn, opts(persistence))
+  end
+
+  test "GET and every other unsupported method on /mcp is a 405 naming what is allowed", %{
+    persistence: persistence,
+    token: token
+  } do
+    for method <- [:get, :put, :patch] do
+      conn =
+        conn(method, "/mcp")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> Server.call(opts(persistence))
+
+      assert conn.status == 405
+      assert get_resp_header(conn, "allow") == ["POST, DELETE"]
+    end
+  end
+
   test "initialize returns instructions and a session id header", %{
     persistence: persistence,
     token: token
@@ -174,6 +274,11 @@ defmodule Vigil.MCP.ServerTest do
     body = Jason.decode!(conn.resp_body)
     assert body["result"]["instructions"] =~ "Voice:"
     assert body["result"]["protocolVersion"] == "2025-11-25"
+
+    server_info = body["result"]["serverInfo"]
+    assert server_info["name"] == "vigil"
+    assert server_info["title"] == "Vigil"
+    assert server_info["websiteUrl"] == "https://github.com/64x-lunicorn/vigil"
   end
 
   test "unknown method returns JSON-RPC -32601", %{persistence: persistence, token: token} do
@@ -197,6 +302,219 @@ defmodule Vigil.MCP.ServerTest do
 
       assert conn.status == 200
       assert Jason.decode!(conn.resp_body)["error"]["code"] == -32600
+    end
+  end
+
+  # docs/design.md, "Input sizes are bounded". The body is read up to a limit
+  # of its own rather than Plug's default, and a longer one is answered in
+  # the protocol's words, not with an empty 400 a client cannot read.
+  describe "the /mcp body limit" do
+    test "a body over the limit is refused with 413 and a JSON-RPC error", %{
+      persistence: persistence,
+      token: token
+    } do
+      padding = String.duplicate("a", Server.max_body_bytes())
+
+      body =
+        ~s({"jsonrpc":"2.0","id":7,"method":"ping","params":{"padding":"#{padding}"}})
+
+      conn =
+        conn(:post, "/mcp", body)
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer #{token}")
+        |> Server.call(opts(persistence))
+
+      assert conn.status == 413
+      reply = Jason.decode!(conn.resp_body)
+      assert reply["jsonrpc"] == "2.0"
+      assert reply["id"] == nil
+      assert reply["error"]["code"] == -32600
+      assert reply["error"]["message"] =~ "#{Server.max_body_bytes()} bytes"
+    end
+
+    # The longest argument, in the longest characters there are, still gets
+    # as far as the validation that measures it: the body limit is not the
+    # smaller of the two bounds.
+    test "a content one character over its limit, in 4-byte characters, reaches validation", %{
+      persistence: persistence,
+      token: token
+    } do
+      content = "# X\n" <> String.duplicate("😀", 1_000_000)
+      assert byte_size(content) < Server.max_body_bytes()
+
+      conn =
+        post(
+          persistence,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 8,
+            method: "tools/call",
+            params: %{
+              name: "create",
+              arguments: %{
+                path: "bike/huge.md",
+                type: "reference",
+                content: content,
+                skill_key: Vigil.SkillKey.current(deployment_key())
+              }
+            }
+          },
+          [{"mcp-session-id", "huge"}]
+        )
+
+      assert conn.status == 200
+      result = Jason.decode!(conn.resp_body)["result"]
+      assert result["isError"] == true
+
+      assert hd(result["content"])["text"] =~
+               "Invalid parameter content: expected at most 1000000 characters"
+    end
+  end
+
+  describe "protocol versions" do
+    defp initialize_with(persistence, token, version) do
+      raw_post(persistence, token, %{
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: %{protocolVersion: version}
+      })
+    end
+
+    defp negotiated(conn), do: Jason.decode!(conn.resp_body)["result"]["protocolVersion"]
+
+    defp ping_with(persistence, token, session_id, headers) do
+      raw_post(
+        persistence,
+        token,
+        %{jsonrpc: "2.0", id: 2, method: "ping"},
+        [{"mcp-session-id", session_id} | headers]
+      )
+    end
+
+    test "each supported version is answered with itself", %{
+      persistence: persistence,
+      token: token
+    } do
+      for version <- ["2025-11-25", "2025-06-18", "2025-03-26"] do
+        conn = initialize_with(persistence, token, version)
+        assert conn.status == 200
+        assert negotiated(conn) == version
+      end
+    end
+
+    test "an unsupported or missing version is answered with the latest", %{
+      persistence: persistence,
+      token: token
+    } do
+      for version <- ["2024-11-05", "2099-01-01", 42, nil] do
+        assert negotiated(initialize_with(persistence, token, version)) == "2025-11-25"
+      end
+    end
+
+    test "later requests carry the negotiated version, or none", %{
+      persistence: persistence,
+      token: token
+    } do
+      for version <- ["2025-11-25", "2025-06-18", "2025-03-26"] do
+        [session_id] =
+          get_resp_header(initialize_with(persistence, token, version), "mcp-session-id")
+
+        assert ping_with(persistence, token, session_id, [{"mcp-protocol-version", version}]).status ==
+                 200
+
+        assert ping_with(persistence, token, session_id, []).status == 200
+      end
+    end
+
+    test "a supported version other than the session's is a 400", %{
+      persistence: persistence,
+      token: token
+    } do
+      [session_id] =
+        get_resp_header(initialize_with(persistence, token, "2025-06-18"), "mcp-session-id")
+
+      conn = ping_with(persistence, token, session_id, [{"mcp-protocol-version", "2025-11-25"}])
+      assert conn.status == 400
+    end
+
+    test "a version this server does not speak is a 400", %{
+      persistence: persistence,
+      token: token
+    } do
+      [session_id] =
+        get_resp_header(initialize_with(persistence, token, "2025-11-25"), "mcp-session-id")
+
+      conn = ping_with(persistence, token, session_id, [{"mcp-protocol-version", "2024-11-05"}])
+      assert conn.status == 400
+    end
+  end
+
+  describe "messages without a method" do
+    test "a response the client posts is accepted with 202", %{
+      persistence: persistence,
+      token: token
+    } do
+      for message <- [
+            %{jsonrpc: "2.0", id: 5, result: %{}},
+            %{jsonrpc: "2.0", id: 5, error: %{code: -32601, message: "Method not found"}}
+          ] do
+        conn = post(persistence, token, message, [{"mcp-session-id", "abc"}])
+        assert conn.status == 202
+        assert conn.resp_body == ""
+      end
+    end
+
+    test "an object with neither a method nor a result or error is an Invalid Request", %{
+      persistence: persistence,
+      token: token
+    } do
+      for message <- [%{jsonrpc: "2.0", id: 5}, %{jsonrpc: "2.0", id: 5, method: 7}] do
+        conn = post(persistence, token, message, [{"mcp-session-id", "abc"}])
+        assert conn.status == 200
+        body = Jason.decode!(conn.resp_body)
+        assert body["id"] == 5
+        assert body["error"]["code"] == -32600
+      end
+    end
+  end
+
+  test "tools/call of an unknown tool is Invalid params, with no envelope", %{
+    persistence: persistence,
+    token: token
+  } do
+    conn =
+      post(
+        persistence,
+        token,
+        %{jsonrpc: "2.0", id: 4, method: "tools/call", params: %{name: "does_not_exist"}},
+        [{"mcp-session-id", "abc"}]
+      )
+
+    body = Jason.decode!(conn.resp_body)
+    assert body["id"] == 4
+    assert body["error"]["code"] == -32602
+    refute Map.has_key?(body, "result")
+  end
+
+  test "tools/call with a name that is not a string is Invalid params, not a 500", %{
+    persistence: persistence,
+    token: token
+  } do
+    for name <- [%{"a" => 1}, 42, nil, ["search"]] do
+      conn =
+        post(
+          persistence,
+          token,
+          %{jsonrpc: "2.0", id: 6, method: "tools/call", params: %{name: name}},
+          [{"mcp-session-id", "abc"}]
+        )
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert body["id"] == 6
+      assert body["error"]["code"] == -32602
     end
   end
 
@@ -231,14 +549,35 @@ defmodule Vigil.MCP.ServerTest do
     assert conn.status == 400
   end
 
-  test "tools/list contains exactly seventeen tools", %{persistence: persistence, token: token} do
+  test "tools/list contains exactly twenty tools", %{persistence: persistence, token: token} do
     conn =
       post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
         {"mcp-session-id", "abc"}
       ])
 
     body = Jason.decode!(conn.resp_body)
-    assert length(body["result"]["tools"]) == 17
+    assert length(body["result"]["tools"]) == 20
+  end
+
+  # A reader is shown what it may call. Offering it the writes only to refuse
+  # every one of them is how users learn to approve without reading.
+  test "tools/list for a vault:read token lists no write tool", %{
+    persistence: persistence,
+    oauth: oauth
+  } do
+    read_token = seed_token(oauth, OAuth.read_scope())
+
+    conn =
+      post(persistence, read_token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
+        {"mcp-session-id", "abc"}
+      ])
+
+    names = for tool <- Jason.decode!(conn.resp_body)["result"]["tools"], do: tool["name"]
+
+    assert names != []
+    assert Enum.filter(names, &Tools.write_tool?/1) == []
+    assert "reload" in names
+    assert length(names) == length(Tools.definitions(writes: false))
   end
 
   test "tools/call search returns an envelope alongside the result", %{
@@ -261,8 +600,91 @@ defmodule Vigil.MCP.ServerTest do
     body = Jason.decode!(conn.resp_body)
     text = hd(body["result"]["content"])["text"]
     payload = Jason.decode!(text)
-    assert is_list(payload["result"])
+    assert %{"results" => [_ | _], "next_cursor" => nil} = payload["result"]
     assert Map.has_key?(payload, "_")
+  end
+
+  # docs/design.md, "Reads see what another clone pushed": a read answered
+  # while the vault could not be brought up to date says so beside its
+  # result, and `status` says since when and why.
+  describe "a remote that cannot be reached" do
+    setup %{vault: vault} do
+      :ok = stop_supervised(Store)
+      git = %{Vigil.Git.CommitLog.new(vault) | fetch: fn _, _, _ -> {:error, "unreachable"} end}
+
+      start_supervised!(
+        {Store, vault_path: vault, git: git, name: @store, read_fetch_interval: 60}
+      )
+
+      :ok
+    end
+
+    defp tool_payload(persistence, token, name, arguments) do
+      conn =
+        post(
+          persistence,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 3,
+            method: "tools/call",
+            params: %{name: name, arguments: arguments}
+          },
+          [{"mcp-session-id", "session-stale"}]
+        )
+
+      conn.resp_body
+      |> Jason.decode!()
+      |> get_in(["result", "content"])
+      |> hd()
+      |> Map.fetch!("text")
+      |> Jason.decode!()
+    end
+
+    @tag :capture_log
+    test "a read succeeds from the current index, with stale: true beside its result", %{
+      persistence: persistence,
+      token: token
+    } do
+      payload = tool_payload(persistence, token, "search", %{query: "tires", domain: "bike"})
+
+      assert %{"results" => [_ | _]} = payload["result"]
+      assert payload["stale"] == true
+    end
+
+    @tag :capture_log
+    test "status says since when and why; /healthz leaves out why", %{
+      persistence: persistence,
+      token: token
+    } do
+      assert %{"stale" => %{"at" => _, "error" => "unreachable"}} =
+               tool_payload(persistence, token, "status", %{})["result"]
+
+      conn =
+        conn(:get, "/healthz") |> Map.put(:host, "localhost") |> Server.call(opts(persistence))
+
+      assert conn.status == 200
+      assert %{"healthy" => true, "stale" => stale} = Jason.decode!(conn.resp_body)
+      assert Map.keys(stale) == ["at"]
+    end
+  end
+
+  test "a fresh vault's read carries no stale field", %{persistence: persistence, token: token} do
+    conn =
+      post(
+        persistence,
+        token,
+        %{
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: %{name: "search", arguments: %{query: "tires"}}
+        },
+        [{"mcp-session-id", "session-fresh"}]
+      )
+
+    text = conn.resp_body |> Jason.decode!() |> get_in(["result", "content"]) |> hd()
+    refute Map.has_key?(Jason.decode!(text["text"]), "stale")
   end
 
   test "second call in the same session gets the time-only envelope", %{
@@ -438,23 +860,6 @@ defmodule Vigil.MCP.ServerTest do
       assert payload["error"] == "Invalid arguments: expected an object"
       assert Map.has_key?(payload, "_")
     end
-  end
-
-  # One byte past what `Plug.Conn.read_body/1` reads in one go, so the body
-  # arrives as `{:more, partial, conn}`. It is refused the way a body that
-  # could not be read is, rather than raising out of the router.
-  test "a body longer than one read is a 400, not a crash", %{
-    persistence: persistence,
-    token: token
-  } do
-    conn =
-      conn(:post, "/mcp", String.duplicate(" ", 8_000_001))
-      |> put_req_header("content-type", "application/json")
-      |> put_req_header("authorization", "Bearer #{token}")
-      |> Server.call(opts(persistence))
-
-    assert conn.status == 400
-    assert conn.resp_body == ""
   end
 
   defp failing_create(persistence, token, session_id, id) do
@@ -847,6 +1252,46 @@ defmodule Vigil.MCP.ServerTest do
       assert hd(body["result"]["content"])["text"] =~ "Read-only token"
     end
 
+    # The scope is an allow-list: `vault` writes, and nothing else does. The
+    # empty string is what a code consented with `scope=""` used to carry; an
+    # unknown scope cannot be minted by the flow, but a record is a record.
+    test "a token with any scope other than vault cannot write", %{
+      persistence: persistence,
+      oauth: oauth
+    } do
+      for scope <- [OAuth.read_scope(), "", "vault:admin", "VAULT"] do
+        token = seed_token(oauth, scope)
+
+        conn =
+          post(
+            persistence,
+            token,
+            %{
+              jsonrpc: "2.0",
+              id: 1,
+              method: "tools/call",
+              params: %{
+                name: "create",
+                arguments: %{path: "bike/new.md", type: "reference", content: "# New\ntext"}
+              }
+            },
+            [{"mcp-session-id", "session-scope"}]
+          )
+
+        body = Jason.decode!(conn.resp_body)
+        assert body["result"]["isError"] == true, "scope #{inspect(scope)} was let write"
+        assert hd(body["result"]["content"])["text"] =~ "write access denied"
+
+        listed =
+          post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"}, [
+            {"mcp-session-id", "session-scope"}
+          ])
+
+        names = for t <- Jason.decode!(listed.resp_body)["result"]["tools"], do: t["name"]
+        assert Enum.filter(names, &Tools.write_tool?/1) == []
+      end
+    end
+
     test "a vault:read token can call reload without a skill_key", %{
       persistence: persistence,
       oauth: oauth
@@ -874,6 +1319,257 @@ defmodule Vigil.MCP.ServerTest do
     end
   end
 
+  describe "sessions" do
+    defp ping(persistence, token, session_id) do
+      raw_post(persistence, token, %{jsonrpc: "2.0", id: 9, method: "ping"}, [
+        {"mcp-session-id", session_id}
+      ])
+    end
+
+    defp delete(persistence, token, headers) do
+      conn(:delete, "/mcp")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> then(&Enum.reduce(headers, &1, fn {k, v}, c -> put_req_header(c, k, v) end))
+      |> Server.call(opts(persistence))
+    end
+
+    test "initialize issues a session the token then works in", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+
+      conn = ping(persistence, token, session_id)
+      assert conn.status == 200
+      assert Jason.decode!(conn.resp_body)["result"] == %{}
+    end
+
+    test "a request with no session id is a 400", %{persistence: persistence, token: token} do
+      conn = raw_post(persistence, token, %{jsonrpc: "2.0", id: 2, method: "tools/list"})
+      assert conn.status == 400
+    end
+
+    # 404 is what the transport tells a client to re-initialize on — after a
+    # server restart as much as after an id it made up.
+    test "an unknown session id gets 404", %{persistence: persistence, token: token} do
+      for method <- ["ping", "tools/list", "tools/call", "notifications/initialized"] do
+        conn =
+          raw_post(
+            persistence,
+            token,
+            %{
+              jsonrpc: "2.0",
+              id: 1,
+              method: method,
+              params: %{name: "current", arguments: %{}}
+            },
+            [{"mcp-session-id", "never-issued"}]
+          )
+
+        assert conn.status == 404, method
+        assert conn.resp_body == ""
+      end
+    end
+
+    test "a session id used with a different token gets 404", %{
+      persistence: persistence,
+      token: token,
+      oauth: oauth
+    } do
+      session_id = initialize!(persistence, token)
+      other = seed_token(oauth)
+
+      assert ping(persistence, other, session_id).status == 404
+      assert delete(persistence, other, [{"mcp-session-id", session_id}]).status == 404
+
+      # The other token's attempt neither took the session over nor ended it.
+      assert ping(persistence, token, session_id).status == 200
+    end
+
+    test "an expired session is swept and then gets 404", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+      later = System.system_time(:second) + Session.lifetime_seconds()
+
+      assert Session.sweep_expired(@sessions, later) == 1
+      assert :ets.lookup(@sessions, session_id) == []
+      assert ping(persistence, token, session_id).status == 404
+    end
+
+    test "DELETE /mcp ends the session with 204, and it then gets 404", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+
+      conn = delete(persistence, token, [{"mcp-session-id", session_id}])
+      assert conn.status == 204
+      assert conn.resp_body == ""
+
+      assert ping(persistence, token, session_id).status == 404
+      assert delete(persistence, token, [{"mcp-session-id", session_id}]).status == 404
+    end
+
+    # The transport's rule for every request after initialization, DELETE
+    # included: a version header this server does not speak, or one other
+    # than the session negotiated, is a 400 — and the session stays.
+    test "DELETE /mcp checks MCP-Protocol-Version like every other request", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+
+      for version <- ["1999-01-01", "2025-03-26"] do
+        conn =
+          delete(persistence, token, [
+            {"mcp-session-id", session_id},
+            {"mcp-protocol-version", version}
+          ])
+
+        assert conn.status == 400, version
+      end
+
+      assert ping(persistence, token, session_id).status == 200
+
+      conn =
+        delete(persistence, token, [
+          {"mcp-session-id", session_id},
+          {"mcp-protocol-version", "2025-11-25"}
+        ])
+
+      assert conn.status == 204
+    end
+
+    test "DELETE /mcp needs a token and a session id", %{persistence: persistence, token: token} do
+      no_token = conn(:delete, "/mcp") |> Server.call(opts(persistence))
+      assert no_token.status == 401
+      assert [_challenge] = get_resp_header(no_token, "www-authenticate")
+
+      assert delete(persistence, token, []).status == 400
+    end
+
+    # Only `initialize` adds a row. Before this, every distinct id a client
+    # sent was a row of its own, never removed.
+    test "the session table stays bounded under rotating ids", %{
+      persistence: persistence,
+      token: token
+    } do
+      initialize!(persistence, token)
+      size = :ets.info(@sessions, :size)
+
+      for n <- 1..200 do
+        call = %{
+          jsonrpc: "2.0",
+          id: n,
+          method: "tools/call",
+          params: %{name: "current", arguments: %{}}
+        }
+
+        conn = raw_post(persistence, token, call, [{"mcp-session-id", "rotating-#{n}"}])
+        assert conn.status == 404
+      end
+
+      assert :ets.info(@sessions, :size) == size
+    end
+
+    test "the session table keeps the token's digest, never the token", %{
+      persistence: persistence,
+      token: token
+    } do
+      session_id = initialize!(persistence, token)
+      digest = OAuth.Token.digest(token)
+
+      assert [{^session_id, ^digest, _last_active, _state, _version}] =
+               :ets.lookup(@sessions, session_id)
+
+      refute digest == token
+    end
+  end
+
+  describe "Origin" do
+    # The deployment's issuer, which this file's routers resolve because it
+    # hands them no settings: its origin is allowed without being listed. The
+    # listed ones are handed to the authorization server's options, which is
+    # where `/mcp` reads them back from.
+    @issuer_origin "https://vault.factory-lab.org"
+
+    defp initialize_from(persistence, token, origin, listed \\ []) do
+      origins = Vigil.Origin.allowed(Vigil.Settings.from_env().issuer, listed)
+
+      conn(:post, "/mcp", Jason.encode!(@initialize))
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> put_req_header("origin", origin)
+      |> Server.call(
+        Server.init(
+          store: @store,
+          sessions: @sessions,
+          oauth:
+            OAuth.Endpoint.init(
+              persistence: persistence,
+              limiter: RateLimit.Counter.new(),
+              origins: origins
+            )
+        )
+      )
+    end
+
+    test "a request with no Origin is answered", %{persistence: persistence, token: token} do
+      conn = post(persistence, token, @initialize)
+      assert conn.status == 200
+    end
+
+    test "a request from the issuer's origin is answered", %{
+      persistence: persistence,
+      token: token
+    } do
+      assert initialize_from(persistence, token, @issuer_origin).status == 200
+    end
+
+    test "a request from a listed origin is answered", %{persistence: persistence, token: token} do
+      assert initialize_from(persistence, token, "https://claude.ai", ["https://claude.ai"]).status ==
+               200
+    end
+
+    test "a request from any other origin is refused with 403", %{
+      persistence: persistence,
+      token: token
+    } do
+      for origin <- ["https://claude.ai", "https://evil.example", "http://127.0.0.1:4000", "null"] do
+        conn = initialize_from(persistence, token, origin)
+        assert conn.status == 403, origin
+        assert conn.resp_body == ""
+      end
+    end
+
+    test "the refusal comes before authentication and before the body is read", %{
+      persistence: persistence
+    } do
+      conn =
+        conn(:post, "/mcp", String.duplicate(" ", 8_000_001))
+        |> put_req_header("origin", "https://evil.example")
+        |> Server.call(opts(persistence))
+
+      # No token and a body longer than one read: 401 or 400 had either been
+      # looked at first.
+      assert conn.status == 403
+      assert get_resp_header(conn, "www-authenticate") == []
+    end
+
+    test "every method on /mcp is checked", %{persistence: persistence} do
+      for method <- [:get, :delete] do
+        conn =
+          conn(method, "/mcp")
+          |> put_req_header("origin", "https://evil.example")
+          |> Server.call(opts(persistence))
+
+        assert conn.status == 403
+      end
+    end
+  end
+
   describe "rate limiting (AP-6.3)" do
     # A small explicit budget (rather than the default 60) keeps this an
     # integration test of the wiring — Server.init/1 resolving the budget
@@ -885,7 +1581,11 @@ defmodule Vigil.MCP.ServerTest do
         |> put_req_header("content-type", "application/json")
         |> put_req_header("authorization", "Bearer #{token}")
 
-      conn = Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+      conn =
+        headers
+        |> Enum.map(&issued(persistence, token, &1))
+        |> Enum.reduce(conn, fn {k, v}, c -> put_req_header(c, k, v) end)
+
       Server.call(conn, opts(persistence, rate_limit_budget: budget, limiter: limiter))
     end
 
@@ -932,6 +1632,97 @@ defmodule Vigil.MCP.ServerTest do
         )
 
       assert conn.status == 429
+      assert get_resp_header(conn, "retry-after") == ["60"]
+    end
+
+    # Each reload pulls and reparses inside the writer, so it has a budget of
+    # its own, well below the one every request is counted against. Past it,
+    # reload answers a rate-limit error; the session and every other tool go
+    # on as before.
+    test "reload past its own budget answers a rate-limit error", %{
+      persistence: persistence,
+      token: token
+    } do
+      limiter = RateLimit.Counter.new()
+
+      call = fn id, name ->
+        conn =
+          conn(
+            :post,
+            "/mcp",
+            Jason.encode!(%{
+              jsonrpc: "2.0",
+              id: id,
+              method: "tools/call",
+              params: %{name: name, arguments: %{}}
+            })
+          )
+          |> put_req_header("content-type", "application/json")
+          |> put_req_header("authorization", "Bearer #{token}")
+          |> put_req_header("mcp-session-id", session(persistence, token, "session-reload-rl"))
+          |> Server.call(
+            opts(persistence,
+              rate_limit_budget: 100,
+              reload_rate_limit_budget: 2,
+              limiter: limiter
+            )
+          )
+
+        assert conn.status == 200
+        Jason.decode!(conn.resp_body)["result"]
+      end
+
+      for id <- 1..2 do
+        refute Map.get(call.(id, "reload"), "isError")
+      end
+
+      limited = call.(3, "reload")
+      assert limited["isError"] == true
+      assert Jason.decode!(hd(limited["content"])["text"])["error"] =~ "Rate limit"
+
+      refute Map.get(call.(4, "current"), "isError")
+    end
+
+    # The limiter's table is a copy of what the server holds like any other,
+    # so it counts a token under its digest and never holds the token — in
+    # both windows a `reload` is counted in.
+    test "a token's requests are counted under its digest", %{
+      persistence: persistence,
+      token: token
+    } do
+      test = self()
+
+      limiter =
+        RateLimit.new(
+          limited?: fn key, _budget, _now ->
+            send(test, {:counted, key})
+            false
+          end,
+          sweep_expired: fn _now -> :ok end
+        )
+
+      conn =
+        post_with_budget(
+          persistence,
+          limiter,
+          token,
+          %{
+            jsonrpc: "2.0",
+            id: 1,
+            method: "tools/call",
+            params: %{name: "reload", arguments: %{}}
+          },
+          3,
+          [{"mcp-session-id", "session-digest"}]
+        )
+
+      assert conn.status == 200
+      digest = OAuth.Token.digest(token)
+      # Once for the request, once more for `reload`'s own window.
+      assert_received {:counted, ^digest}
+      assert_received {:counted, {:reload, ^digest}}
+      refute_received {:counted, _}
+      refute digest == token
     end
   end
 
@@ -990,6 +1781,96 @@ defmodule Vigil.MCP.ServerTest do
   # The list is checked against `Tools.definitions/0` first, so a tool added to
   # `@tools` without an entry here fails the suite instead of quietly going
   # unexercised.
+  # docs/design.md, "The server stays in step with the remote": answered on
+  # this host without a token, and to nobody else.
+  describe "/healthz" do
+    defp healthz(persistence, fun \\ & &1, extra \\ []) do
+      conn(:get, "/healthz")
+      |> Map.put(:host, "localhost")
+      |> fun.()
+      |> Server.call(opts(persistence, extra))
+    end
+
+    test "answers 200 on loopback without a token, with where the vault stands", %{
+      persistence: persistence
+    } do
+      conn = healthz(persistence)
+
+      assert conn.status == 200
+
+      assert %{
+               "healthy" => true,
+               "index_loaded" => true,
+               "writer_answers" => true,
+               "ahead" => 0,
+               "behind" => 0,
+               "last_push" => nil
+             } = Jason.decode!(conn.resp_body)
+    end
+
+    test "answers over IPv6 loopback and to 127.0.0.1 by address", %{persistence: persistence} do
+      assert healthz(persistence, &%{&1 | remote_ip: {0, 0, 0, 0, 0, 0, 0, 1}, host: "::1"}).status ==
+               200
+
+      assert healthz(persistence, &%{&1 | host: "127.0.0.1"}).status == 200
+    end
+
+    test "answers 503 when there is no writer to answer", %{persistence: persistence} do
+      conn = healthz(persistence, & &1, store: __MODULE__.NoSuchWriter)
+
+      assert conn.status == 503
+
+      assert %{"healthy" => false, "index_loaded" => false, "writer_answers" => false} =
+               Jason.decode!(conn.resp_body)
+    end
+
+    test "is not there for a peer that is not loopback", %{persistence: persistence} do
+      assert healthz(persistence, &%{&1 | remote_ip: {192, 168, 1, 20}}).status == 404
+    end
+
+    # The proxy in front is on this host too, so what it forwards arrives from
+    # loopback — and says so in a header.
+    test "is not there for a request a proxy forwarded", %{persistence: persistence} do
+      for header <- ~w(x-forwarded-for cf-connecting-ip forwarded x-real-ip) do
+        assert healthz(persistence, &put_req_header(&1, header, "203.0.113.9")).status == 404
+      end
+    end
+
+    test "is not there for a request that names another host", %{persistence: persistence} do
+      assert healthz(persistence, &%{&1 | host: "vault.example.org"}).status == 404
+    end
+
+    @tag :capture_log
+    test "reports a failed push without git's words", %{persistence: persistence, vault: vault} do
+      writer = __MODULE__.FailingPushWriter
+
+      start_supervised!(
+        {Store,
+         vault_path: vault,
+         exclude: [],
+         git_remote: "nonexistent-remote",
+         git: Vigil.Git.CommitLog.new(vault),
+         name: writer},
+        id: writer
+      )
+
+      {:ok, %{pushed: false}} =
+        Store.call(writer, :create, %{
+          path: "bike/healthz.md",
+          type: "reference",
+          content: "# Healthz\ntext",
+          force: true
+        })
+
+      conn = healthz(persistence, & &1, store: writer)
+
+      assert conn.status == 200
+      assert %{"last_push" => last_push} = Jason.decode!(conn.resp_body)
+      assert %{"pushed" => false, "at" => _} = last_push
+      refute Map.has_key?(last_push, "error")
+    end
+  end
+
   describe "dispatch coverage" do
     test "every declared tool is dispatched end to end", %{
       persistence: persistence,
@@ -1043,18 +1924,34 @@ defmodule Vigil.MCP.ServerTest do
       {"search", %{query: "tires", domain: "bike"},
        fn %{payload: payload} ->
          assert Enum.any?(
-                  payload["result"],
+                  payload["result"]["results"],
                   &String.starts_with?(&1["id"], "bike/via-carolina.md")
                 )
+       end},
+      {"list", %{domain: "bike", sort: "title"},
+       fn %{payload: payload} ->
+         # By title: "Via Carolina" before "WTB Terra Speed 40C".
+         assert Enum.map(payload["result"]["notes"], & &1["id"]) ==
+                  ["bike/via-carolina.md", "bike/terra-speed.md"]
        end},
       {"read", %{id: "projects/vigil/vigil.md"},
        fn %{payload: payload} -> assert payload["result"]["title"] == "vigil" end},
       {"links", %{id: "bike/via-carolina.md", direction: "out"},
        fn %{payload: payload} -> assert is_list(payload["result"]["outgoing"]) end},
+      {"history", %{path: "bike/via-carolina.md", limit: 5},
+       fn %{payload: payload} ->
+         assert [%{"by" => "human", "path" => "bike/via-carolina.md"}] =
+                  payload["result"]["commits"]
+       end},
       {"lint", %{},
        fn %{payload: payload} -> assert is_list(payload["result"]["orphaned_links"]) end},
       {"current", %{}, fn %{payload: payload} -> assert is_list(payload["result"]["active"]) end},
       {"reload", %{}, fn %{payload: payload} -> assert payload["result"]["reloaded"] == true end},
+      {"status", %{},
+       fn %{payload: payload} ->
+         assert %{"index_loaded" => true, "writer_answers" => true, "healthy" => true} =
+                  payload["result"]
+       end},
       {"skill_list", %{},
        fn %{payload: payload} -> assert Enum.any?(payload["result"], &(&1["name"] == "tdd")) end},
       {"skill_read", %{name: "tdd"},

@@ -9,8 +9,9 @@
 # could modify/commit the vault it was supposed to only inspect.
 #
 # Builds a throwaway git-backed fixture vault with one instance of each of
-# the four automatically-fixable finding classes (missing .gitignore entry,
-# wrong local git identity, a missing _domains.yml entry, wrong permissions),
+# the four automatically-fixable finding classes (missing .gitignore entries,
+# one of them for a .trash/ already committed, wrong local git identity, a
+# missing _domains.yml entry, wrong permissions),
 # runs `init.sh --check-only --vault <fixture>` against it, and asserts the
 # fixture is byte-for-byte, commit-for-commit, and permissions-for-permissions
 # unchanged afterwards.
@@ -97,9 +98,27 @@ type: reference
 Text.
 EOF
 
+# A note saved as Windows-1252 (0xE9 is "é" there, and no UTF-8 on its
+# own): the server skips it, and the report names it with the fix.
+printf -- '---\ntype: reference\n---\n# Caf\351\n\nText.\n' >"${VAULT}/bike/windows-note.md"
+
+# Markdown files the layout ignores: one a level too deep (a warning, with
+# its fix), a root page (information only), and one under a dot directory
+# (outside the vault model, never listed). That one is committed below, the
+# way Obsidian Git commits a deleted note, so .trash/ is tracked.
+mkdir -p "${VAULT}/bike/deep" "${VAULT}/.trash"
+printf -- '# Too Deep\n' >"${VAULT}/bike/deep/too-deep.md"
+printf -- '# Dashboard\n' >"${VAULT}/Dashboard.md"
+printf -- '# Old\n' >"${VAULT}/.trash/old.md"
+
 # Missing .gitignore entry: no .gitignore at all yet.
 
-git -C "$VAULT" init -q -b main
+# On `master`, with no upstream yet, and the env file naming a remote that is
+# not a default either: the upstream fix has to say both, read from there.
+git -C "$VAULT" init -q -b master
+ENV_FILE_UNDER_TEST="$(mktemp)"
+trap 'rm -rf "$VAULT" "$ENV_FILE_UNDER_TEST"' EXIT
+echo "VIGIL_GIT_REMOTE=upstream" >"$ENV_FILE_UNDER_TEST"
 # Wrong local git identity on purpose — init.sh's fix wants
 # "vigil"/"vigil@$(hostname)".
 git -C "$VAULT" config user.name "Not Vigil"
@@ -116,6 +135,7 @@ BEFORE_DOMAINS_YML="$(cat "${VAULT}/_domains.yml")"
 BEFORE_USER_NAME="$(git -C "$VAULT" config user.name)"
 BEFORE_USER_EMAIL="$(git -C "$VAULT" config user.email)"
 BEFORE_VAULT_LS="$(ls -ld "$VAULT")"
+BEFORE_TRACKED_TRASH="$(git -C "$VAULT" ls-files -- .trash)"
 
 ## ── Run init.sh --check-only against it, with test stubs in place ─────────
 
@@ -123,6 +143,7 @@ set +e
 OUTPUT="$(
   VIGIL_INIT_TEST_STUBS=1 \
     VIGIL_TEST_REPO_ROOT="$REPO_ROOT" \
+    VIGIL_ENV_FILE="$ENV_FILE_UNDER_TEST" \
     bash "$INIT_SH" --check-only --vault "$VAULT" 2>&1
 )"
 EXIT_CODE=$?
@@ -143,6 +164,7 @@ AFTER_DOMAINS_YML="$(cat "${VAULT}/_domains.yml")"
 AFTER_USER_NAME="$(git -C "$VAULT" config user.name)"
 AFTER_USER_EMAIL="$(git -C "$VAULT" config user.email)"
 AFTER_VAULT_LS="$(ls -ld "$VAULT")"
+AFTER_TRACKED_TRASH="$(git -C "$VAULT" ls-files -- .trash)"
 
 assert_eq "no new commit was created" "$BEFORE_HEAD" "$AFTER_HEAD"
 assert_eq "commit log is unchanged" "$BEFORE_LOG" "$AFTER_LOG"
@@ -152,12 +174,28 @@ assert_eq "_domains.yml was not modified" "$BEFORE_DOMAINS_YML" "$AFTER_DOMAINS_
 assert_eq "local git user.name was not changed" "$BEFORE_USER_NAME" "$AFTER_USER_NAME"
 assert_eq "local git user.email was not changed" "$BEFORE_USER_EMAIL" "$AFTER_USER_EMAIL"
 assert_eq "vault directory ownership/permissions were not touched" "$BEFORE_VAULT_LS" "$AFTER_VAULT_LS"
+assert_eq "the tracked .trash/ is still in the index" "$BEFORE_TRACKED_TRASH" "$AFTER_TRACKED_TRASH"
 assert_eq "exit code reports findings (3) rather than an error" "3" "$EXIT_CODE"
 
+assert_contains "names the note that is not UTF-8, with its fix" "$OUTPUT" \
+  "bike/windows-note.md: not valid UTF-8, so the server skips this note"
+assert_contains "names the note at the wrong depth as a finding" "$OUTPUT" \
+  "! bike/deep/too-deep.md: not at note depth"
+assert_contains "names the root page as information only" "$OUTPUT" \
+  "i Dashboard.md: at the vault root, in no domain, so the server ignores this file"
+assert_contains "counts the two warnings, not the root page" "$OUTPUT" "Findings (2):"
+case "$OUTPUT" in
+  *".trash/old.md"*) assert_eq "does not list files under dot directories" "absent" "listed" ;;
+  *) assert_eq "does not list files under dot directories" "absent" "absent" ;;
+esac
 assert_contains "reports the .gitignore fix as pending, not applied" "$OUTPUT" \
   "gitignore: add .obsidian/"
+assert_contains "reports the .trash/ entry and its untracking as pending, not applied" "$OUTPUT" \
+  "gitignore: add .trash/, and remove the already-tracked .trash directory from the index"
 assert_contains "reports the git identity fix as pending, not applied" "$OUTPUT" \
   "git config: set local user.name/user.email/commit.gpgsign"
+assert_contains "reports the upstream fix for the vault's branch and the env file's remote" "$OUTPUT" \
+  "upstream: point master at upstream/master"
 assert_contains "reports the permissions fix as pending, not applied" "$OUTPUT" \
   "permissions: chown -R vigil:vigil, chmod 0750"
 # fix_vault_domains_yml itself needs GNU grep -P (PCRE), same as production

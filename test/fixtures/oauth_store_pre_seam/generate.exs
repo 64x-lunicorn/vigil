@@ -20,6 +20,17 @@
 #
 # The identifiers it prints are not recorded anywhere. The test discovers them
 # from the tables, which keeps a long-lived bearer token out of the repository.
+#
+# THE FIXTURE KEYS CODES AND TOKENS BY THEIR RAW VALUE, AND THAT IS NOW THE
+# POINT OF IT. Since #193 the store keeps them under their SHA-256 digest and
+# migrates raw-keyed state on its first boot rather than invalidating it: every
+# binary key is rehashed in place and the file rewritten, so clients connected
+# before the upgrade stay connected. `store_compatibility_test.exs` reads the
+# raw values out of these files before the store opens them and holds the
+# migration to them. A fixture frozen at #193 or later has digests for keys and
+# no value a test could present — re-freezing past that point means the test
+# has to learn the values some other way, and this fixture should be kept
+# beside the new one as the pre-digest state.
 [state_dir] = System.argv()
 
 Application.put_env(:vigil, :issuer, "https://vault.factory-lab.org")

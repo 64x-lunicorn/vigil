@@ -4,7 +4,7 @@
 # verify() decides whether a delivery stands or is rolled back (update.sh step
 # 7), and it was a single 210-line block that could only run against a real
 # vault host: systemd, journald, Cloudflare, a git remote and a booted release.
-# So the one thing nothing could test was the thing that decides. It is twelve
+# So the one thing nothing could test was the thing that decides. It is thirteen
 # functions now, and this drives each of them against both outcomes.
 #
 # What stays real: every check's own logic — the conditions, the comparisons,
@@ -59,9 +59,11 @@ trap 'summary; cleanup' EXIT INT TERM
 SERVICE_STATE="${WORK}/service-active"
 JOURNAL="${WORK}/journal"
 HTTP_STATUS="${WORK}/http-status"
+METADATA_STATUS="${WORK}/metadata-status"
 MCP_SCRIPT="${WORK}/mcp-responses"
 GIT_REMOTE_OK="${WORK}/git-remote-ok"
 UNPUSHED="${WORK}/unpushed"
+GIT_ASKED="${WORK}/git-asked"
 
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 systemctl() {
@@ -76,18 +78,36 @@ journalctl() { cat "$JOURNAL" 2>/dev/null || true; }
 
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 curl() {
-  # verify_public_endpoint_protected is the only caller, and it asks for the
-  # status code alone.
-  cat "$HTTP_STATUS" 2>/dev/null || echo "000"
+  # verify_public_endpoint_protected, verify_healthz and health_answers are
+  # the callers, and all ask for the status code alone. The protected-resource
+  # metadata, which a release from before /healthz is judged by, answers from
+  # a file of its own.
+  local url
+  for url in "$@"; do :; done
+  case "$url" in
+    */.well-known/oauth-protected-resource) cat "$METADATA_STATUS" 2>/dev/null || echo "000" ;;
+    *) cat "$HTTP_STATUS" 2>/dev/null || echo "000" ;;
+  esac
 }
 
+# The health wait polls once a second; here the answer never changes.
+# shellcheck disable=SC2329 # called by wait_until_healthy in lib.sh
+sleep() { :; }
+
 # as_vigil runs directly, except for the two git questions the checks ask,
-# which are answered from files.
+# which are answered from files — and what each was asked about is written
+# down, so a case can say which remote and which branch a check named.
 # shellcheck disable=SC2329 # called by the checks in lib.sh
 as_vigil() {
   case "${1:-} ${4:-}" in
-    "git ls-remote") [ -f "$GIT_REMOTE_OK" ] ;;
-    "git rev-list") cat "$UNPUSHED" 2>/dev/null || echo "?" ;;
+    "git ls-remote")
+      echo "ls-remote ${5:-}" >>"$GIT_ASKED"
+      [ -f "$GIT_REMOTE_OK" ]
+      ;;
+    "git rev-list")
+      echo "rev-list ${6:-}" >>"$GIT_ASKED"
+      cat "$UNPUSHED" 2>/dev/null || echo "?"
+      ;;
     *) "$@" ;;
   esac
 }
@@ -106,7 +126,7 @@ mcp_call() {
 }
 
 reset_stubs() {
-  rm -f "$SERVICE_STATE" "$JOURNAL" "$HTTP_STATUS" "$MCP_SCRIPT" "$GIT_REMOTE_OK" "$UNPUSHED"
+  rm -f "$SERVICE_STATE" "$JOURNAL" "$HTTP_STATUS" "$METADATA_STATUS" "$MCP_SCRIPT" "$GIT_REMOTE_OK" "$UNPUSHED" "$GIT_ASKED"
   : >"$MCP_SCRIPT"
   : >"$JOURNAL"
 }
@@ -136,11 +156,14 @@ mcp_errors() {
 }
 
 
-# What verify() reads about the deployment it is checking.
+# What verify() reads about the deployment it is checking. The vault's remote
+# and branch come from the env file, as every script reads them — and neither
+# is a default, so a check that named `github` or `main` itself would show.
+mkdir -p "$(dirname "$VIGIL_ENV_FILE")"
+printf 'VIGIL_GIT_REMOTE=upstream\nVIGIL_GIT_BRANCH=master\n' >"$VIGIL_ENV_FILE"
 VIGIL_VAULT="$VIGIL_VAULT_DIR"
 VIGIL_LOCAL_URL="http://localhost:4000"
 VIGIL_RESOURCE="https://vault.example/mcp"
-VIGIL_GIT_REMOTE="github"
 VIGIL_ALLOW_UNPROTECTED=0
 VIGIL_RW_TOKEN="rw-token"
 VIGIL_RO_TOKEN="ro-token"
@@ -178,7 +201,7 @@ assert_output() {
 
 ## ── 1. Service active ────────────────────────────────────────────────────
 
-section "1/12  Service active"
+section "1/13  Service active"
 reset_stubs
 : >"$SERVICE_STATE"
 assert_check "passes while the unit is active" verify_service_active 0
@@ -188,7 +211,7 @@ assert_output "names the journal command to run" "journalctl -u vigil-under-test
 
 ## ── 2. Public endpoint protected ─────────────────────────────────────────
 
-section "2/12  Public endpoint sits behind Cloudflare Access"
+section "2/13  Public endpoint sits behind Cloudflare Access"
 reset_stubs
 echo "403" >"$HTTP_STATUS"
 assert_check "403 is the expected answer" verify_public_endpoint_protected 0
@@ -211,7 +234,7 @@ VIGIL_ALLOW_UNPROTECTED=0
 
 ## ── 3. Local call answers ────────────────────────────────────────────────
 
-section "3/12  A valid token is answered locally"
+section "3/13  A valid token is answered locally"
 reset_stubs
 mcp_responds current '{}'
 assert_check "passes when current answers" verify_local_call_answers 0
@@ -220,17 +243,18 @@ assert_check "fails when it does not" verify_local_call_answers 1
 
 ## ── 4. Git remote reachable ──────────────────────────────────────────────
 
-section "4/12  The vault's git remote is reachable"
+section "4/13  The vault's git remote is reachable"
 reset_stubs
 : >"$GIT_REMOTE_OK"
 assert_check "passes when ls-remote succeeds" verify_git_remote_reachable 0
+assert_eq "asks the remote the env file names" "ls-remote upstream" "$(cat "$GIT_ASKED")"
 reset_stubs
 assert_check "fails when it does not" verify_git_remote_reachable 1
 assert_output "points at the key as the likely cause" "deploy key missing"
 
 ## ── 5. reload pulls ──────────────────────────────────────────────────────
 
-section "5/12  reload reports no pull_failed"
+section "5/13  reload reports no pull_failed"
 reset_stubs
 mcp_responds reload '{}'
 assert_check "passes when reload is clean" verify_reload_pulls 0
@@ -242,7 +266,7 @@ assert_output "quotes the reason the server gave" "host key verification failed"
 
 ## ── 6. Chunk count ───────────────────────────────────────────────────────
 
-section "6/12  The chunk count is advisory, and remembered"
+section "6/13  The chunk count is advisory, and remembered"
 reset_stubs
 # Verbatim from Vigil.Store's own log line (lib/vigil/store.ex) — lowercase
 # `chunks`. A fabricated spelling here is what let the check pass while the
@@ -266,7 +290,7 @@ assert_output "says it could not read the count" "could not read the chunk count
 
 ## ── 7. Write and push ────────────────────────────────────────────────────
 
-section "7/12  A note is written, pushed and deleted again"
+section "7/13  A note is written, pushed and deleted again"
 reset_stubs
 mcp_responds create '{"path":"admin/verify-test.md"}'
 mcp_responds delete_note '{}'
@@ -293,10 +317,12 @@ fi
 
 ## ── 8. Nothing unpushed ──────────────────────────────────────────────────
 
-section "8/12  The vault has no unpushed commits"
+section "8/13  The vault has no unpushed commits"
 reset_stubs
 echo "0" >"$UNPUSHED"
 assert_check "passes at zero" verify_nothing_unpushed 0
+assert_eq "counts the env file's branch against the env file's remote" \
+  "rev-list upstream/master..master" "$(cat "$GIT_ASKED")"
 reset_stubs
 echo "3" >"$UNPUSHED"
 assert_check "fails with commits still local" verify_nothing_unpushed 1
@@ -304,7 +330,7 @@ assert_output "says how many" "3 local commits not pushed"
 
 ## ── 9. SkillKey enforced ─────────────────────────────────────────────────
 
-section "9/12  A write without a skill_key is refused"
+section "9/13  A write without a skill_key is refused"
 reset_stubs
 mcp_errors create 'SkillKey missing or stale'
 assert_check "passes when the gate refuses it by name" verify_skill_key_enforced 0
@@ -320,7 +346,7 @@ assert_check "fails when some other error refused it" verify_skill_key_enforced 
 
 ## ── 10. Read-only token refused ──────────────────────────────────────────
 
-section "10/12  The read-only token cannot write"
+section "10/13  The read-only token cannot write"
 reset_stubs
 mcp_errors create 'insufficient scope'
 assert_check "passes when the write is refused" verify_read_only_token_refused 0
@@ -331,7 +357,7 @@ assert_output "calls it a role separation failure" "Role separation is not worki
 
 ## ── 11. Domain drift ─────────────────────────────────────────────────────
 
-section "11/12  _domains.yml and the directories agree"
+section "11/13  _domains.yml and the directories agree"
 reset_stubs
 echo "vigil: started" >"$JOURNAL"
 assert_check "passes on a quiet log" verify_no_domain_drift 0
@@ -344,7 +370,7 @@ assert_check "fails on drift in the other direction too" verify_no_domain_drift 
 
 ## ── 12. Survives a write error ───────────────────────────────────────────
 
-section "12/12  A failed write does not take the Store down"
+section "12/13  A failed write does not take the Store down"
 reset_stubs
 VIGIL_TEST_DOMAIN="admin"
 mcp_errors create 'permission denied'
@@ -375,20 +401,65 @@ VIGIL_TEST_DOMAIN=""
 assert_check "fails when check 7 found no writable domain" verify_survives_write_error 1
 assert_output "says why it was skipped" "check 7 found no writable domain"
 
+## ── 13. /healthz ─────────────────────────────────────────────────────────
+
+section "13/13  /healthz reports the server healthy"
+reset_stubs
+echo "200" >"$HTTP_STATUS"
+assert_check "passes on 200" verify_healthz 0
+reset_stubs
+echo "503" >"$HTTP_STATUS"
+assert_check "fails on 503 — the index is not loaded or the writer does not answer" verify_healthz 1
+assert_output "names the status it got" "answers 503"
+reset_stubs
+assert_check "fails when nothing answers at all" verify_healthz 1
+
+# A release a rollback goes back to may be one from before /healthz (0.2
+# answers it 404); there the metadata document stands in. Nowhere else.
+reset_stubs
+echo "404" >"$HTTP_STATUS"
+echo "200" >"$METADATA_STATUS"
+assert_check "fails on 404 for a release switched to" verify_healthz 1
+ACCEPT_PRE_HEALTHZ_RELEASE=1
+assert_check "passes on 404 with the metadata answering, for a release gone back to" verify_healthz 0
+assert_output "says the release predates /healthz" "a release before it"
+echo "503" >"$METADATA_STATUS"
+assert_check "fails there too when the metadata does not answer" verify_healthz 1
+echo "503" >"$HTTP_STATUS"
+echo "200" >"$METADATA_STATUS"
+assert_check "a 503 is never excused by the metadata" verify_healthz 1
+ACCEPT_PRE_HEALTHZ_RELEASE=0
+
+## ── The health wait ──────────────────────────────────────────────────────
+
+section "The health wait after a start"
+
+reset_stubs
+echo "200" >"$HTTP_STATUS"
+assert_check "is over once /healthz answers 200" wait_until_healthy 0
+echo "404" >"$HTTP_STATUS"
+echo "200" >"$METADATA_STATUS"
+assert_check "does not take a 404 for up on a release switched to" wait_until_healthy 1
+ACCEPT_PRE_HEALTHZ_RELEASE=1
+assert_check "takes it, with the metadata answering, on a release gone back to" wait_until_healthy 0
+rm -f "$METADATA_STATUS"
+assert_check "but not when the metadata does not answer either" wait_until_healthy 1
+ACCEPT_PRE_HEALTHZ_RELEASE=0
+
 ## ── The list itself ──────────────────────────────────────────────────────
 
 section "The check list"
 
-EXPECTED_ORDER="verify_service_active verify_public_endpoint_protected verify_local_call_answers verify_git_remote_reachable verify_reload_pulls verify_chunk_count verify_write_and_push verify_nothing_unpushed verify_skill_key_enforced verify_read_only_token_refused verify_no_domain_drift verify_survives_write_error"
+EXPECTED_ORDER="verify_service_active verify_public_endpoint_protected verify_local_call_answers verify_git_remote_reachable verify_reload_pulls verify_chunk_count verify_write_and_push verify_nothing_unpushed verify_skill_key_enforced verify_read_only_token_refused verify_no_domain_drift verify_survives_write_error verify_healthz"
 
 # Check 7 discovers the domain that 9, 10 and 12 reuse, so the order is part of
 # what the checks mean, not a presentation detail.
 # IFS is $'\n\t' in these scripts, so "${array[*]}" joins with a newline.
 ACTUAL_ORDER="$(IFS=' ' && echo "${VIGIL_VERIFY_CHECKS[*]}")"
 if [ "$ACTUAL_ORDER" = "$EXPECTED_ORDER" ]; then
-  pass "twelve checks, in the order the later ones depend on"
+  pass "thirteen checks, in the order the later ones depend on"
 else
-  fail "twelve checks, in the order the later ones depend on" "$ACTUAL_ORDER"
+  fail "thirteen checks, in the order the later ones depend on" "$ACTUAL_ORDER"
 fi
 
 # One assertion, and it reflects the loop: a name that resolves to nothing is

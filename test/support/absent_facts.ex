@@ -44,6 +44,7 @@ defmodule Vigil.Vault.AbsentFacts do
           count_headings: fn _path -> 0 end,
           find_backlinks: fn _path -> [] end,
           find_chunk: fn _id -> nil end,
+          vanished?: fn _id -> false end,
           find_section: fn _path, _heading -> nil end
         ],
         Enum.to_list(overrides)

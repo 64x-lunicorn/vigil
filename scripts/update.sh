@@ -3,8 +3,8 @@
 # number of times, idempotent. Never touches secrets or vault content; touches
 # the systemd unit only with --update-unit.
 #
-# Usage: sudo ./scripts/update.sh [--to <ref>] [--skip-tests --force]
-#            [--update-unit] [--rollback]
+# Usage: sudo ./scripts/update.sh [--to <ref> | --rebuild] [--skip-tests --force]
+#            [--update-unit] [--accept-id-changes] [--rollback]
 #            [--dry-run] [--non-interactive] [--verbose] [--help]
 
 # shellcheck source=scripts/lib.sh
@@ -15,15 +15,23 @@ SKIP_TESTS=0
 FORCE=0
 UPDATE_UNIT=0
 ROLLBACK=0
+REBUILD=0
+TO_GIVEN=0
+ACCEPT_ID_CHANGES=0
 
 usage() {
   cat <<'EOF'
 scripts/update.sh — switch code revision.
 
   --to <ref>          target commit/tag (default: origin/main)
+  --rebuild             build the running commit again, into a new release,
+                        and switch to it (after an Erlang/OTP security update)
   --skip-tests          only together with --force; is logged
   --force              allows --skip-tests
   --update-unit         adopt a changed systemd unit
+  --accept-id-changes   switch even when the target moves chunk ids (without
+                        it, a change is asked about, or refused under
+                        --non-interactive)
   --rollback            go back to the previous release without building
   --dry-run             log changes with [DRY RUN] instead of applying them
   --non-interactive     run through without any prompts
@@ -39,11 +47,21 @@ for a in "$@"; do
   fi
 done
 
+# Kept for require_root's hint, which repeats the command as it was given, and
+# for the run of the target's own update.sh (step 3), which is given the same
+# arguments — the loop below shifts every argument out of "$@".
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --to)
       TARGET_REF="$2"
+      TO_GIVEN=1
       shift 2
+      ;;
+    --rebuild)
+      REBUILD=1
+      shift
       ;;
     --skip-tests)
       SKIP_TESTS=1
@@ -55,6 +73,10 @@ while [ $# -gt 0 ]; do
       ;;
     --update-unit)
       UPDATE_UNIT=1
+      shift
+      ;;
+    --accept-id-changes)
+      ACCEPT_ID_CHANGES=1
       shift
       ;;
     --rollback)
@@ -83,6 +105,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+if [ "$REBUILD" = "1" ] && [ "$TO_GIVEN" = "1" ]; then
+  err "--rebuild builds the running commit; it does not take --to."
+  exit 2
+fi
+if [ "$REBUILD" = "1" ] && [ "$ROLLBACK" = "1" ]; then
+  err "--rebuild and --rollback are two different runs; pick one."
+  exit 2
+fi
 if [ "$SKIP_TESTS" = "1" ] && [ "$FORCE" != "1" ]; then
   err "--skip-tests requires --force."
   exit 2
@@ -127,28 +157,62 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
   # start and stop is also recorded together with what `current` pointed at
   # when it happened, which is what lets the test assert that the symlink moved
   # while the service was down rather than under a running BEAM.
+  #
+  # The unit's start limit is modelled too (StartLimitBurst= in
+  # deploy/vigil.service): a release that crashes on boot is restarted by
+  # Restart=on-failure until the limit is used up, and from then on every
+  # start is refused until `reset-failed`. A release holding .start-fails is
+  # one whose start systemd reports as failed. One holding an executable
+  # .on-start runs it, handed the state dir, as the release does at boot what
+  # it does to the state dir — a migration of the OAuth state.
   systemctl() {
     case "${1:-}" in
       start | restart)
-        : >"${PREFIX}/.service-active"
+        if [ -f "${PREFIX}/.start-limit-hit" ]; then
+          echo "refused $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+          return 1
+        fi
         echo "start $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
+        if [ -x "$(readlink -f "$CURRENT")/.on-start" ]; then
+          "$(readlink -f "$CURRENT")/.on-start" "$STATE_DIR"
+        fi
+        [ -f "$(readlink -f "$CURRENT")/.start-fails" ] && return 1
+        : >"${PREFIX}/.service-active"
+        if [ -f "$(readlink -f "$CURRENT")/.boot-fails" ]; then
+          : >"${PREFIX}/.start-limit-hit"
+        fi
         ;;
+      reset-failed) rm -f "${PREFIX}/.start-limit-hit" ;;
       stop)
         rm -f "${PREFIX}/.service-active"
         echo "stop $(readlink "$CURRENT" 2>/dev/null || echo none)" >>"${PREFIX}/.systemctl.log"
         ;;
       is-active) [ -f "${PREFIX}/.service-active" ] ;;
+      # Recorded apart from start and stop, whose log is the switchover's.
+      daemon-reload | enable | disable) echo "$@" >>"${PREFIX}/.systemctl-units.log" ;;
       *) : ;;
     esac
   }
 
-  wait_until_healthy() { systemctl is-active --quiet "$SERVICE"; }
+  # A release directory holding .boot-fails is one that never answers on
+  # /healthz, which is how the test drives the health wait after a switch. One
+  # holding .no-healthz is a release from before /healthz: up only where the
+  # run accepts one (ACCEPT_PRE_HEALTHZ_RELEASE, scripts/lib.sh).
+  release_answers() {
+    local release
+    release="$(readlink -f "$CURRENT")"
+    [ ! -f "${release}/.boot-fails" ] &&
+      { [ ! -f "${release}/.no-healthz" ] || [ "$ACCEPT_PRE_HEALTHZ_RELEASE" = "1" ]; }
+  }
+  wait_until_healthy() {
+    systemctl is-active --quiet "$SERVICE" && release_answers
+  }
 
   # verify() is the decision the automatic rollback hangs on, and it is a
   # property of the release that was switched to — which is how the test drives
   # both outcomes, and both attempts of the rollback path independently: a
   # release directory holding .verify-fails is one that does not come up.
-  verify() { [ ! -f "$(readlink -f "$CURRENT")/.verify-fails" ]; }
+  verify() { release_answers && [ ! -f "$(readlink -f "$CURRENT")/.verify-fails" ]; }
 fi
 
 ## ── Helper: load VIGIL_* variables for verify() from the env file ────────
@@ -157,7 +221,12 @@ fi
 # freshly seeded rather than cached as plaintext anywhere — the service
 # has been running for a while; there is no "bootstrap moment" like in init.sh,
 # and no reason to leave a secret sitting in a file nobody else needs.
+#
+# Not traced under --verbose: `source` would trace every line of the env file,
+# the secrets included, and the assignments below the tokens. verify() hides
+# its own use of them.
 source_env_for_verify() {
+  hide_trace
   set -a
   # shellcheck source=/dev/null
   source "$ENV_FILE"
@@ -165,20 +234,170 @@ source_env_for_verify() {
   # shellcheck disable=SC2034
   VIGIL_LOCAL_URL="http://localhost:${VIGIL_PORT:-4000}"
   # shellcheck disable=SC2034
-  VIGIL_GIT_REMOTE="${VIGIL_GIT_REMOTE:-github}"
-  # shellcheck disable=SC2034
   VIGIL_ALLOW_UNPROTECTED=0
   # shellcheck disable=SC2034
   VIGIL_RW_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault 900)"
   # shellcheck disable=SC2034
   VIGIL_RO_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault:read 900)"
+  show_trace
+}
+
+## ── Which commit a release was built from ────────────────────────────────
+
+# release_revision <release-dir> — the short sha of the commit the release was
+# built from, or nothing when that cannot be told. The running revision is a
+# property of the release `current` points at, not of the code checkout: the
+# checkout is moved to the target before the build, so reading it after a
+# failed build or a rollback named a commit that was not running, and the same
+# update run again reported "nothing to do".
+#
+# Read from the REVISION file every build writes, and for a release built
+# before that file existed from its directory name, which has always begun
+# with the short sha.
+release_revision() {
+  local release="$1" rev
+  if [ -f "${release}/REVISION" ]; then
+    rev="$(head -n 1 "${release}/REVISION")"
+  else
+    rev="$(basename "$release")"
+    rev="${rev%%-*}"
+  fi
+  as_vigil git -C "$REPO" rev-parse --short "${rev}^{commit}" 2>/dev/null || true
+}
+
+## ── The checkout follows the running release ─────────────────────────────
+
+# The revision the code checkout has to be on when this script ends, set once
+# the running one is known; empty leaves the checkout where it is. The build
+# needs the checkout on the target, and every way out that does not end on the
+# target — a red audit or suite, a failed build, a refused unit, an automatic
+# rollback, a dry run, an abort anywhere — puts it back, so that the checkout
+# always shows what is running. A successful switch clears it.
+CHECKOUT_TARGET=""
+
+# Set by a run that handed over to the target checkout's own update.sh (step
+# 3), to the revision that is running: that is where the checkout goes back
+# to if this run ends before it has read the running revision itself. Only
+# a short sha is that: anything else was left in the environment by something
+# other than a hand-over, and taken as one it would stop this run's own
+# hand-over and send the checkout somewhere that is not a revision.
+if [ -n "${VIGIL_UPDATE_REEXEC:-}" ]; then
+  if [[ "$VIGIL_UPDATE_REEXEC" =~ ^[0-9a-f]{7,40}$ ]]; then
+    CHECKOUT_TARGET="$VIGIL_UPDATE_REEXEC"
+  else
+    warn "Ignoring VIGIL_UPDATE_REEXEC from the environment: it names no revision, so this run was not handed over."
+    unset VIGIL_UPDATE_REEXEC
+  fi
+fi
+
+restore_checkout() {
+  [ -n "$CHECKOUT_TARGET" ] || return 0
+  local head
+  head="$(as_vigil git -C "$REPO" rev-parse --short HEAD 2>/dev/null || true)"
+  [ "$head" = "$CHECKOUT_TARGET" ] && return 0
+  if as_vigil git -C "$REPO" checkout -q "$CHECKOUT_TARGET"; then
+    log "Code checkout put back on ${CHECKOUT_TARGET}, the running revision."
+  else
+    warn "Could not put the code checkout back on ${CHECKOUT_TARGET}. Fix: git -C ${REPO} checkout ${CHECKOUT_TARGET}"
+  fi
+}
+
+## ── The systemd unit follows the running release ────────────────────────
+
+# The candidate for --update-unit, taken in step 3, and the unit it replaced,
+# kept while the release that needs it is not yet known to stand.
+UNIT_CANDIDATE=""
+UNIT_CANDIDATE_DIR=""
+UNIT_BACKUP_DIR=""
+
+# restore_unit — puts back the unit the old release ran under, when this run
+# replaced it: an automatic rollback returns to the old release under its own
+# unit, not the new one. Never ends the run; the health wait judges.
+restore_unit() {
+  [ -n "$UNIT_BACKUP_DIR" ] || return 0
+  if [ -f "${UNIT_BACKUP_DIR}/unit" ]; then
+    install -m 0644 "${UNIT_BACKUP_DIR}/unit" "$UNIT_FILE" || true
+  else
+    rm -f "$UNIT_FILE"
+  fi
+  systemctl daemon-reload || true
+  rm -rf "$UNIT_BACKUP_DIR"
+  UNIT_BACKUP_DIR=""
+  log "Put back the systemd unit ${PREVIOUS_RELEASE} ran under."
+}
+
+# Replaces lib.sh's EXIT trap with one that restores the checkout first and
+# then prints the same summary, with the exit code the script ended on. The
+# units' temp copies go with it.
+# shellcheck disable=SC2329,SC2317 # invoked by the EXIT trap below
+on_exit() {
+  local rc="$1"
+  restore_checkout || true
+  rm -rf "${UNIT_CANDIDATE_DIR:-}" "${UNIT_BACKUP_DIR:-}" "${PUSH_UNITS_CANDIDATE:-}"
+  summary "$rc"
+}
+trap 'on_exit $?' EXIT
+
+## ── The OAuth state follows the running release ─────────────────────────
+
+# A release whose OAuth state format is newer migrates the state dir when it
+# boots, and marks it with its schema version (oauth_meta.dets); the release
+# before it refuses to start on that (docs/compatibility.md, "The OAuth
+# state"). So the switch takes a copy of every `*.dets` in the state dir while
+# the service is stopped for it — the state as the release that ran left it —
+# and a rollback to that release puts the copy back before starting it.
+#
+# The copy is root's: a directory under the release root, 0700, which the
+# service's sandbox (ProtectSystem=strict) cannot write and the service
+# account, whose `mix` runs every dependency's code during an update, cannot
+# open. Only the last one is kept, with the release it was taken for, so a
+# `--rollback` restores it only to the release it belongs to.
+OAUTH_SNAPSHOT="${PREFIX}/oauth-state-snapshot"
+
+# snapshot_oauth_state <release> — copies the state dir's `*.dets`, modes and
+# owners kept, into a fresh snapshot for <release>, replacing the last one only
+# once the copy is complete. Returns non-zero when it could not.
+snapshot_oauth_state() {
+  local release="$1" fresh="${OAUTH_SNAPSHOT}.new" file
+  rm -rf "$fresh"
+  install -d -m 0700 "$fresh" || return 1
+  for file in "$STATE_DIR"/*.dets; do
+    [ -f "$file" ] || continue
+    cp -p "$file" "${fresh}/" || return 1
+  done
+  echo "$release" >"${fresh}/release" || return 1
+  rm -rf "$OAUTH_SNAPSHOT"
+  mv "$fresh" "$OAUTH_SNAPSHOT"
+}
+
+# restore_oauth_state — the state dir's `*.dets` back to the snapshot: the
+# files the release switched to wrote or migrated go, the copies come back
+# with their modes and owners. For a stopped service only. Returns non-zero
+# when it could not.
+restore_oauth_state() {
+  local file
+  [ -f "${OAUTH_SNAPSHOT}/release" ] || return 1
+  for file in "$STATE_DIR"/*.dets; do
+    [ -f "$file" ] || continue
+    rm -f "$file" || return 1
+  done
+  for file in "$OAUTH_SNAPSHOT"/*.dets; do
+    [ -f "$file" ] || continue
+    cp -p "$file" "${STATE_DIR}/" || return 1
+  done
+}
+
+# The release the snapshot was taken for, resolved, or nothing.
+oauth_snapshot_release() {
+  [ -f "${OAUTH_SNAPSHOT}/release" ] || return 0
+  readlink -f "$(cat "${OAUTH_SNAPSHOT}/release")" 2>/dev/null || true
 }
 
 ## ── Rollback mode: short, separate path ──────────────────────────────────
 
 if [ "$ROLLBACK" = "1" ]; then
   step "Rollback without building"
-  require_root "$@"
+  require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
   if [ ! -f "$PREVIOUS_RELEASE_FILE" ]; then
     err "No previous release known (${PREVIOUS_RELEASE_FILE} missing)."
@@ -207,10 +426,32 @@ if [ "$ROLLBACK" = "1" ]; then
     exit 0
   fi
 
+  # The checkout goes back with the release, whatever verify() says below.
+  CHECKOUT_TARGET="$(release_revision "$OLD_RELEASE")"
+  if [ -z "$CHECKOUT_TARGET" ]; then
+    warn "Cannot tell which commit ${OLD_RELEASE} was built from — the code checkout is left where it is."
+  fi
+
+  # The release gone back to may predate /healthz.
+  ACCEPT_PRE_HEALTHZ_RELEASE=1
   systemctl stop "$SERVICE"
+
+  # The OAuth state as the release gone back to left it, when the snapshot
+  # is that release's; otherwise it stays as it is, and the operator is told
+  # what to do if that release cannot read it.
+  if [ "$(oauth_snapshot_release)" = "$(readlink -f "$OLD_RELEASE")" ]; then
+    if restore_oauth_state; then
+      log "OAuth state put back as $(basename "$OLD_RELEASE") left it, from ${OAUTH_SNAPSHOT}: registrations and grants made since the update are gone."
+    else
+      warn "Could not put the OAuth state back from ${OAUTH_SNAPSHOT}. If $(basename "$OLD_RELEASE") refuses the state dir at boot, restore the backup taken before the update (docs/guide.md, Backups)."
+    fi
+  else
+    warn "No snapshot of the OAuth state for $(basename "$OLD_RELEASE"): the state dir stays as the running release left it. If $(basename "$OLD_RELEASE") refuses it at boot (an older OAuth state format), restore the backup taken before the update (docs/guide.md, Backups)."
+  fi
+
   ln -sfn "$OLD_RELEASE" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-  systemctl start "$SERVICE"
+  start_service start || true
   wait_until_healthy || exit 1
 
   # shellcheck disable=SC2034
@@ -228,7 +469,7 @@ fi
 ## ── Step 1 — preflight (exit 2, nothing changed) ─────────────────────────
 
 step "1/8  Preflight"
-require_root "$@"
+require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
 if ! systemctl is-active --quiet "$SERVICE"; then
   err "Service is not running — update.sh requires a running service."
@@ -239,9 +480,28 @@ if [ ! -L "$CURRENT" ] || [ ! -d "$(readlink -f "$CURRENT")" ]; then
   exit 2
 fi
 
-PENDING="$(as_vigil git -C "$VAULT" rev-list --count github/main..main 2>/dev/null || echo "?")"
+# A setting every release from here on refuses to boot without, and that an
+# init.sh older than it never wrote. Checked here rather than left to boot:
+# a release that does not come up fails step 6's health wait and is rolled
+# back, but only after the service was stopped for it. The value is read as
+# the service reads it (env_file_value, quotes and all), so a line that sets
+# it to nothing counts as missing; it is only tested for being there — the
+# boot check judges it — and never printed or traced.
+hide_trace
+SKILLKEY_SECRET_SET=0
+[ -n "$(env_file_value VIGIL_SKILLKEY_SECRET)" ] && SKILLKEY_SECRET_SET=1
+show_trace
+if [ "$SKILLKEY_SECRET_SET" != "1" ]; then
+  err "${ENV_FILE} sets no VIGIL_SKILLKEY_SECRET, which vigil now requires (the SkillKey's own HMAC secret). Generate one, then run update.sh again:"
+  err "  sudo ./scripts/rotate_secret.sh skillkey"
+  exit 2
+fi
+
+GIT_REMOTE="$(vault_git_remote)"
+GIT_BRANCH="$(vault_git_branch "$VAULT")"
+PENDING="$(as_vigil git -C "$VAULT" rev-list --count "${GIT_REMOTE}/${GIT_BRANCH}..${GIT_BRANCH}" 2>/dev/null || echo "?")"
 if [ "$PENDING" != "0" ]; then
-  err "The vault has ${PENDING} unpushed commits. Secure them first: git -C ${VAULT} push github main"
+  err "The vault has ${PENDING} unpushed commits. Secure them first: git -C ${VAULT} push ${GIT_REMOTE} ${GIT_BRANCH}"
   exit 2
 fi
 
@@ -276,20 +536,39 @@ step "2/8  Fetch target revision"
 
 as_vigil git -C "$REPO" fetch --all --tags
 
-CURRENT_SHA="$(as_vigil git -C "$REPO" rev-parse --short HEAD)"
-TARGET_SHA="$(as_vigil git -C "$REPO" rev-parse --short "$TARGET_REF")"
-
-if [ "$CURRENT_SHA" = "$TARGET_SHA" ]; then
-  ok "Target commit ${TARGET_SHA} matches the running revision — nothing to do."
-  exit 0
+CURRENT_SHA="$(release_revision "$(readlink -f "$CURRENT")")"
+if [ -z "$CURRENT_SHA" ]; then
+  err "Cannot tell which commit $(readlink -f "$CURRENT") was built from. Write its sha into $(readlink -f "$CURRENT")/REVISION, then run update.sh again."
+  exit 2
 fi
+CHECKOUT_TARGET="$CURRENT_SHA"
 
-log "Switch: ${CURRENT_SHA} → ${TARGET_SHA}"
-as_vigil git -C "$REPO" log --oneline "${CURRENT_SHA}..${TARGET_SHA}" || true
+if [ "$REBUILD" = "1" ]; then
+  TARGET_SHA="$CURRENT_SHA"
+  # A directory of its own, never the running one: the running release keeps
+  # serving while this one is built, and stays the rollback target.
+  RELEASE_DIR="${RELEASES}/${TARGET_SHA}-$(date -u +%Y%m%d%H%M%S)"
+  while [ -e "$RELEASE_DIR" ]; do
+    sleep 1
+    RELEASE_DIR="${RELEASES}/${TARGET_SHA}-$(date -u +%Y%m%d%H%M%S)"
+  done
+  log "Rebuild: ${CURRENT_SHA} again, into $(basename "$RELEASE_DIR")"
+else
+  TARGET_SHA="$(as_vigil git -C "$REPO" rev-parse --short "$TARGET_REF")"
+  RELEASE_DIR="${RELEASES}/${TARGET_SHA}"
 
-CHANGED_FILES="$(as_vigil git -C "$REPO" diff --name-only "${CURRENT_SHA}..${TARGET_SHA}")"
-if echo "$CHANGED_FILES" | grep -qE '^mix\.exs$|^config/|^deploy/vigil\.service$'; then
-  warn "The change touches mix.exs, config/ or deploy/vigil.service — review the summary."
+  if [ "$CURRENT_SHA" = "$TARGET_SHA" ]; then
+    ok "Target commit ${TARGET_SHA} matches the running revision — nothing to do. (--rebuild builds it again.)"
+    exit 0
+  fi
+
+  log "Switch: ${CURRENT_SHA} → ${TARGET_SHA}"
+  as_vigil git -C "$REPO" log --oneline "${CURRENT_SHA}..${TARGET_SHA}" || true
+
+  CHANGED_FILES="$(as_vigil git -C "$REPO" diff --name-only "${CURRENT_SHA}..${TARGET_SHA}")"
+  if echo "$CHANGED_FILES" | grep -qE '^mix\.exs$|^config/|^deploy/vigil\.service$'; then
+    warn "The change touches mix.exs, config/ or deploy/vigil.service — review the summary."
+  fi
 fi
 
 record_done "fetched target revision ${TARGET_SHA}"
@@ -299,6 +578,72 @@ record_done "fetched target revision ${TARGET_SHA}"
 step "3/8  Dependency audit"
 
 as_vigil git -C "$REPO" checkout -q "$TARGET_SHA"
+
+# From here on the run is the target's: its update.sh, with its lib.sh, runs
+# again from the start with the same arguments — preflight included — and
+# this process is replaced by it. Otherwise the steps that depend on the new
+# version (what its preflight checks, how its release is built and judged,
+# which units it installs) would be this, the old version's, which bash has
+# open and keeps reading however the checkout moves. Once per update:
+# VIGIL_UPDATE_REEXEC marks the run that was handed over, and carries the
+# running revision for the checkout to go back to. `exec` runs no EXIT trap,
+# so the checkout stays on the target for the new run. Only a script that
+# knows that variable takes the run over: one from before the hand-over — an
+# older tag's, `--to` going back — would take the handed-over run for a new
+# one, and this run goes on instead.
+if [ -z "${VIGIL_UPDATE_REEXEC:-}" ]; then
+  if [ -f "${REPO}/scripts/update.sh" ] && grep -q "VIGIL_UPDATE_REEXEC" "${REPO}/scripts/update.sh"; then
+    log "Continuing with the target's own scripts/update.sh (${TARGET_SHA})."
+    exec env VIGIL_UPDATE_REEXEC="$CURRENT_SHA" \
+      bash "${REPO}/scripts/update.sh" ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
+  elif [ -f "${REPO}/scripts/update.sh" ]; then
+    warn "The target's scripts/update.sh (${TARGET_SHA}) predates the hand-over and cannot take the run over — this run goes on with the one it started with."
+  else
+    warn "The target checkout has no scripts/update.sh — this run goes on with the one it started with."
+  fi
+fi
+
+# The units this update installs are taken from the checkout now, into
+# directories of root's own, and judged there — before the first mix step:
+# the checkout belongs to the service account, whose `mix` runs every
+# dependency's code, and a unit root installs is one nothing it ran can have
+# changed. A unit refused here leaves the running service as it was.
+UNIT_SOURCE="${REPO}/deploy/vigil.service"
+UNIT_CHANGED=0
+if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
+  UNIT_CHANGED=1
+fi
+if [ "$UNIT_CHANGED" = "1" ] && [ "$UPDATE_UNIT" = "1" ] && [ "$DRY_RUN" != "1" ]; then
+  # Verified before it replaces the installed unit: a rejected unit left in
+  # /etc/systemd/system would be picked up by the next daemon-reload. Same
+  # filter as setup.sh — a release binary that does not exist yet is
+  # expected, anything else is not. Then its sandbox is scored against the
+  # recorded target, so a unit that loosened it is not adopted either. A
+  # directory rather than `mktemp --suffix`: the candidate keeps the unit's
+  # own name, and GNU's --suffix is the one flag here macOS lacks.
+  UNIT_CANDIDATE_DIR="$(mktemp -d)"
+  UNIT_CANDIDATE="${UNIT_CANDIDATE_DIR}/$(basename "$UNIT_FILE")"
+  cp "$UNIT_SOURCE" "$UNIT_CANDIDATE"
+  ANALYSIS="$(systemd-analyze verify "$UNIT_CANDIDATE" 2>&1 || true)"
+  UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
+  if [ -n "$UNEXPECTED" ]; then
+    err "systemd-analyze verify reports problems with the new unit:"
+    echo "$UNEXPECTED" >&2
+    exit 1
+  fi
+  if ! check_unit_exposure "$UNIT_CANDIDATE"; then
+    err "Not adopting the new unit; the running service is untouched."
+    exit 1
+  fi
+elif [ "$UNIT_CHANGED" = "1" ] && [ "$UPDATE_UNIT" != "1" ]; then
+  warn "deploy/vigil.service changed — adopt it with --update-unit, otherwise the old unit stays active."
+  record_next_step "run update.sh --update-unit to adopt the changed systemd unit"
+fi
+
+if ! prepare_push_units "${REPO}/deploy"; then
+  err "Not installing the push safety net's units; the running service is untouched."
+  exit 1
+fi
 
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] mix deps.get && mix hex.audit && mix deps.audit"
@@ -312,7 +657,6 @@ else
   if ! AUDIT_OUTPUT="$(as_vigil bash -c 'cd "$1" && mix deps.get && mix hex.audit && mix deps.audit' _ "$REPO" 2>&1)"; then
     echo "$AUDIT_OUTPUT"
     err "Dependency audit failed (retired package or known vulnerability). Aborting (no override in update.sh)."
-    as_vigil git -C "$REPO" checkout -q "$CURRENT_SHA"
     exit 2
   fi
   echo "$AUDIT_OUTPUT"
@@ -332,7 +676,6 @@ else
   # shellcheck disable=SC2016 # $1 is expanded by the inner bash -c, not here
   if ! as_vigil bash -c 'cd "$1" && mix test' _ "$REPO"; then
     err "mix test is red — not deploying, the running service is untouched."
-    as_vigil git -C "$REPO" checkout -q "$CURRENT_SHA"
     exit 1
   fi
   ok "mix test is green."
@@ -344,67 +687,195 @@ record_done "tests run (or deliberately skipped)"
 step "5/8  Build"
 
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] MIX_ENV=prod mix release --path ${RELEASES}/${TARGET_SHA}"
+  log "[DRY RUN] MIX_ENV=prod mix release --path ${RELEASE_DIR}"
 else
+  # The release bundles the ERTS and OTP applications installed right now,
+  # which is what makes --rebuild the way an Erlang/OTP security update reaches
+  # the service. REVISION is what release_revision reads the running commit
+  # from.
   # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
-  as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix release --overwrite --path "$2"' \
-    _ "$REPO" "${RELEASES}/${TARGET_SHA}"
-  ok "Built release ${TARGET_SHA} — the running release is untouched."
+  as_vigil bash -c 'cd "$1" && MIX_ENV=prod mix release --overwrite --path "$2" && git rev-parse HEAD >"$2/REVISION"' \
+    _ "$REPO" "$RELEASE_DIR"
+  ok "Built release $(basename "$RELEASE_DIR") — the running release is untouched."
 fi
-record_done "built release ${TARGET_SHA}"
+record_done "built release $(basename "$RELEASE_DIR")"
 
-## ── Optional: adopt the systemd unit ─────────────────────────────────────
+## ── Chunk ids: a switch that moves a reference is asked about ───────────
 
-UNIT_SOURCE="${REPO}/deploy/vigil.service"
-if ! diff -q "$UNIT_SOURCE" "$UNIT_FILE" >/dev/null 2>&1; then
-  if [ "$UPDATE_UNIT" = "1" ]; then
-    if [ "$DRY_RUN" = "1" ]; then
-      log "[DRY RUN] adopt the changed systemd unit"
-    else
-      # Verified before it replaces the installed unit: a rejected unit left
-      # in /etc/systemd/system would be picked up by the next daemon-reload.
-      # Same filter as setup.sh — a release binary that does not exist yet is
-      # expected, anything else is not.
-      UNIT_CANDIDATE="$(mktemp --suffix=.service)"
-      cp "$UNIT_SOURCE" "$UNIT_CANDIDATE"
-      ANALYSIS="$(systemd-analyze verify "$UNIT_CANDIDATE" 2>&1 || true)"
-      UNEXPECTED="$(echo "$ANALYSIS" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
-      if [ -n "$UNEXPECTED" ]; then
-        rm -f "$UNIT_CANDIDATE"
-        err "systemd-analyze verify reports problems with the new unit:"
-        echo "$UNEXPECTED" >&2
-        exit 1
-      fi
-      install -m 0644 "$UNIT_CANDIDATE" "$UNIT_FILE"
-      rm -f "$UNIT_CANDIDATE"
-      systemctl daemon-reload
-      ok "systemd unit adopted."
+# A chunk id is what every stored reference into the vault is made of — a
+# `[[note#heading]]` link, an id an assistant keeps — and the contract says a
+# release only moves one in a major version, with a note in CHANGELOG.md
+# (docs/compatibility.md). Whether this switch moves any is asked of the two
+# builds themselves, on the vault as it is now: the running release lists the
+# ids it derives (`Vigil.Release.chunk_ids/0`, through `bin/vigil eval`, which
+# loads its code and starts nothing), and the target checkout, compiled for
+# the release just built, compares that list with its own
+# (`mix vigil.slug_diff --against`). Checked here, after the build and before
+# anything is switched, because the comparison needs the target compiled; the
+# running service is untouched whatever it answers.
+#
+# A change is asked about, and refused under --non-interactive (exit 2)
+# unless --accept-id-changes says the operator has read the release notes.
+# Declining is exit 4. A running release that cannot list its ids — one built
+# before it could, whose `eval` names Vigil.Release.chunk_ids/0 as undefined —
+# is compared against nothing, and that is said. Any other failure to list
+# them stops the run (exit 1) before anything is switched: that is a release
+# that could not answer, not one too old to be asked.
+#
+# The list is taken in by this shell and written to the file by the service
+# account, which also made it. This shell (root) never opens that file:
+# /tmp is sticky, and with fs.protected_regular=2 (Debian's default) root may
+# not open for writing a file another user owns there — the redirect failed,
+# and the failure read as "a release too old to list its ids".
+check_chunk_ids() {
+  local running_ids exclude output ids eval_err
+  exclude="$(env_file_value VIGIL_EXCLUDE)"
+  eval_err="$(mktemp)"
+
+  if ! ids="$(as_vigil env VIGIL_VAULT_PATH="$VAULT" VIGIL_EXCLUDE="$exclude" \
+    "${PREVIOUS_RELEASE}/bin/vigil" eval 'Vigil.Release.chunk_ids()' 2>"$eval_err")"; then
+    if grep -q "chunk_ids/0 is undefined" "$eval_err"; then
+      rm -f "$eval_err"
+      warn "The running release cannot list its chunk ids (a release built before Vigil.Release.chunk_ids/0 cannot), so this switch is not compared. Before a slug change: mix vigil.slug_diff <vault>."
+      return 0
     fi
-    record_done "systemd unit updated"
-  else
-    warn "deploy/vigil.service changed — adopt it with --update-unit, otherwise the old unit stays active."
-    record_next_step "run update.sh --update-unit to adopt the changed systemd unit"
+    cat "$eval_err" >&2
+    rm -f "$eval_err"
+    err "The running release could not list its chunk ids (output above), so the switch cannot be compared. The running service is untouched."
+    exit 1
   fi
+  rm -f "$eval_err"
+
+  running_ids="$(as_vigil mktemp)"
+  printf '%s\n' "$ids" | as_vigil tee "$running_ids" >/dev/null
+
+  # shellcheck disable=SC2016 # $1-$3 are expanded by the inner bash -c, not here
+  if output="$(as_vigil env VIGIL_EXCLUDE="$exclude" bash -c \
+    'cd "$1" && MIX_ENV=prod mix vigil.slug_diff --against "$2" "$3"' \
+    _ "$REPO" "$running_ids" "$VAULT" 2>&1)"; then
+    rm -f "$running_ids"
+    ok "No chunk id changes: every stored reference keeps resolving."
+    return 0
+  fi
+  rm -f "$running_ids"
+  echo "$output"
+
+  if ! echo "$output" | grep -q "chunk id change(s)"; then
+    err "mix vigil.slug_diff could not compare the chunk ids (output above). The running service is untouched."
+    exit 1
+  fi
+
+  if [ "$ACCEPT_ID_CHANGES" = "1" ]; then
+    warn "Switching although chunk ids change (--accept-id-changes): references to an id marked - stop resolving."
+    return 0
+  fi
+  if [ "$NON_INTERACTIVE" = "1" ]; then
+    err "$(basename "$RELEASE_DIR") changes the chunk ids above, and references to an id marked - stop resolving. Read the release's CHANGELOG entry, then run again with --accept-id-changes to switch anyway."
+    exit 2
+  fi
+  if ! ask_yes_no "Switch anyway? References to an id marked - stop resolving." n; then
+    err "Aborted before the switch: the chunk ids would change. The running service is untouched."
+    exit 4
+  fi
+}
+
+PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
+
+if [ "$REBUILD" = "1" ]; then
+  log "Rebuild of the running commit: its chunk ids are the running release's."
+elif [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] compare the running release's chunk ids with mix vigil.slug_diff --against"
+else
+  check_chunk_ids
 fi
+record_done "compared chunk ids"
+
+## ── Adopt the systemd unit, keeping the one it replaces ──────────────────
+
+# Installed just before the switch rather than after verify(): the release
+# switched to may need its unit to boot. So the unit it replaces is kept, and
+# the automatic rollback puts it back with the old release (restore_unit).
+if [ -n "$UNIT_CANDIDATE" ]; then
+  UNIT_BACKUP_DIR="$(mktemp -d)"
+  if [ -f "$UNIT_FILE" ]; then
+    cp -p "$UNIT_FILE" "${UNIT_BACKUP_DIR}/unit"
+  fi
+  install -m 0644 "$UNIT_CANDIDATE" "$UNIT_FILE"
+  systemctl daemon-reload
+  ok "systemd unit adopted."
+  record_done "systemd unit updated"
+elif [ "$UPDATE_UNIT" = "1" ] && [ "$DRY_RUN" = "1" ] && [ "$UNIT_CHANGED" = "1" ]; then
+  log "[DRY RUN] adopt the changed systemd unit"
+fi
+
+## ── Automatic rollback ───────────────────────────────────────────────────
+
+# Back to the release that was running before step 6, for a new release that
+# does not come up (step 6) and for one that comes up and fails verify()
+# (step 7). Always exits: 3 when the old release serves again, 1 when it does
+# not either. The checkout is put back by the EXIT trap, since CHECKOUT_TARGET
+# still names the old release's revision.
+#
+# Nothing in here may end the run before the health wait has judged the old
+# release: a stop or a start that systemd answers with an error is not the
+# verdict, and under `set -e` it would leave the service down with the
+# operator told nothing about the rollback.
+roll_back_automatically() {
+  # The release that ran before may predate /healthz.
+  ACCEPT_PRE_HEALTHZ_RELEASE=1
+  systemctl stop "$SERVICE" || true
+  ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
+  chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
+  if restore_oauth_state; then
+    log "OAuth state put back as $(basename "$PREVIOUS_RELEASE") left it."
+  else
+    warn "Could not put the OAuth state back from ${OAUTH_SNAPSHOT}. If $(basename "$PREVIOUS_RELEASE") refuses the state dir at boot, restore the backup taken before the update (docs/guide.md, Backups)."
+  fi
+  restore_unit
+  start_service start || true
+
+  if wait_until_healthy; then
+    source_env_for_verify
+    # shellcheck disable=SC2034
+    VIGIL_VAULT="$VAULT"
+    if verify; then
+      err "Update rolled back to $(basename "$PREVIOUS_RELEASE"). The service is running again."
+      exit 3
+    fi
+  fi
+  err "Rollback to ${PREVIOUS_RELEASE} also failed. Manual intervention needed — restore the container's Proxmox snapshot."
+  exit 1
+}
 
 ## ── Step 6 — switch over ─────────────────────────────────────────────────
 
 step "6/8  Switch over"
 
-PREVIOUS_RELEASE="$(readlink -f "$CURRENT")"
-
 if [ "$DRY_RUN" = "1" ]; then
-  log "[DRY RUN] systemctl stop ${SERVICE}; symlink to ${TARGET_SHA}; systemctl start ${SERVICE}"
+  log "[DRY RUN] systemctl stop ${SERVICE}; snapshot the OAuth state to ${OAUTH_SNAPSHOT}; symlink to $(basename "$RELEASE_DIR"); systemctl start ${SERVICE}"
 else
   systemctl stop "$SERVICE"
-  ln -sfn "${RELEASES}/${TARGET_SHA}" "$CURRENT"
+  # Taken while nothing has the tables open, and before anything is switched:
+  # without it there is nothing the automatic rollback below could put back.
+  if ! snapshot_oauth_state "$PREVIOUS_RELEASE"; then
+    err "Could not snapshot the OAuth state into ${OAUTH_SNAPSHOT} — not switching. Starting $(basename "$PREVIOUS_RELEASE") again."
+    rm -rf "${OAUTH_SNAPSHOT}.new"
+    start_service start || true
+    exit 1
+  fi
+  ln -sfn "$RELEASE_DIR" "$CURRENT"
   chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
   echo "$PREVIOUS_RELEASE" >"$PREVIOUS_RELEASE_FILE"
-  systemctl start "$SERVICE"
-  wait_until_healthy || exit 1
-  ok "Switched to ${TARGET_SHA} (previous release: ${PREVIOUS_RELEASE})."
+  # A start systemd refuses is a release that did not come up, which is the
+  # health wait's to say and the rollback's to answer — not the end of the run.
+  start_service start || true
+  if ! wait_until_healthy; then
+    err "$(basename "$RELEASE_DIR") did not come up — rolling back automatically to ${PREVIOUS_RELEASE}."
+    roll_back_automatically
+  fi
+  ok "Switched to $(basename "$RELEASE_DIR") (previous release: ${PREVIOUS_RELEASE})."
 fi
-record_done "switched over to ${TARGET_SHA}"
+record_done "switched over to $(basename "$RELEASE_DIR")"
 
 ## ── Step 7 — verify() with automatic rollback ────────────────────────────
 
@@ -418,24 +889,25 @@ else
   VIGIL_VAULT="$VAULT"
 
   if verify; then
+    # The target runs now, and the checkout is already on it.
+    CHECKOUT_TARGET=""
     record_done "verify(): all mandatory checks passed"
   else
     err "verify() failed — rolling back automatically to ${PREVIOUS_RELEASE}."
-    systemctl stop "$SERVICE"
-    ln -sfn "$PREVIOUS_RELEASE" "$CURRENT"
-    chown -h "${SERVICE_USER}:${SERVICE_GROUP}" "$CURRENT"
-    systemctl start "$SERVICE"
-    wait_until_healthy || true
-
-    if verify; then
-      err "Update rolled back to $(basename "$PREVIOUS_RELEASE"). The service is running again."
-      exit 3
-    else
-      err "Rollback to ${PREVIOUS_RELEASE} also failed. Manual intervention needed — restore the container's Proxmox snapshot."
-      exit 1
-    fi
+    roll_back_automatically
   fi
 fi
+
+## ── The push safety net ──────────────────────────────────────────────────
+
+# On every update rather than behind a flag: the timer runs a script from the
+# code checkout this update has moved, so the units that run it move with it.
+# A host still on the cron line (/etc/cron.d/vigil-push-safety-net) is moved
+# to the timer here. Only now that the target stands: a rollback or a refusal
+# leaves the old units, or the cron line, to the old release. The copies were
+# taken and judged in step 3, before any mix step ran.
+install_push_units
+record_done "push safety net: vigil-push.timer enabled"
 
 ## ── Step 8 — cleanup ─────────────────────────────────────────────────────
 

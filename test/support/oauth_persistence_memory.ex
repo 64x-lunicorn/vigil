@@ -5,7 +5,7 @@ defmodule Vigil.OAuth.Persistence.Memory do
   value", records.
 
   Five maps behind one `Agent`: the registered clients, the authorization
-  codes, the tokens, the failed-password windows per address, and the CIMD
+  codes, the tokens, the consent attempts per key, and the CIMD
   cache. It touches no filesystem, needs no state dir and registers no name,
   so a test that wants one builds it and is isolated by construction — which
   is what lets the OAuth files run in parallel.
@@ -13,8 +13,9 @@ defmodule Vigil.OAuth.Persistence.Memory do
   It is not a reimplementation of `Vigil.OAuth.Store` with different storage.
   The two agree on what a record *is* by asking the same owners — a code's
   expiry is `Vigil.OAuth.Code`'s, a token's expiry and its grant are
-  `Vigil.OAuth.Token`'s — and on the lockout's window and the cache's hour by
-  reading them off the contract rather than restating them. What is left for
+  `Vigil.OAuth.Token`'s — and on the cache's hour by reading it off the
+  contract rather than restating it. Which clients
+  the sweep drops is `Vigil.OAuth.Client`'s, asked the same way. What is left for
   the two to disagree about is exactly what
   `test/vigil/oauth/persistence_test.exs` runs against both.
 
@@ -22,10 +23,8 @@ defmodule Vigil.OAuth.Persistence.Memory do
   `Vigil.Vault.AbsentFacts`, because only they have a use for it.
   """
 
-  alias Vigil.OAuth.{Code, Persistence, Token}
+  alias Vigil.OAuth.{Client, Code, Persistence, Token}
 
-  @rate_limit_window Persistence.rate_limit_window()
-  @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
   @cimd_ttl Persistence.cimd_ttl()
 
   @empty %{clients: %{}, codes: %{}, tokens: %{}, rate_limits: %{}, cimd_cache: %{}}
@@ -56,15 +55,22 @@ defmodule Vigil.OAuth.Persistence.Memory do
       Persistence.new(
         put_client: &put(tables, :clients, &1, &2),
         get_client: &fetch(tables, :clients, &1),
-        put_code: &put(tables, :codes, &1, &2),
-        take_code: &take(tables, :codes, &1),
-        put_token: &put(tables, :tokens, &1, &2),
-        get_token: &fetch(tables, :tokens, &1),
-        delete_token: &drop(tables, :tokens, &1),
+        count_clients: fn -> count(tables, :clients) end,
+        list_clients: fn -> Agent.get(tables, &Map.to_list(&1.clients)) end,
+        delete_client: &delete_client(tables, &1),
+        # Codes and tokens under their digest, as the `:dets` adapter keeps
+        # them: a test that reads this table sees what a backup would.
+        put_code: &put(tables, :codes, Token.digest(&1), &2),
+        take_code: &take(tables, :codes, Token.digest(&1)),
+        put_token: &put(tables, :tokens, Token.digest(&1), &2),
+        get_token: &fetch(tables, :tokens, Token.digest(&1)),
+        delete_token: &drop(tables, :tokens, Token.digest(&1)),
         revoke_grant: &revoke_grant(tables, &1),
-        rate_limited?: &rate_limited?(tables, &1, &2),
-        record_failure: &record_failure(tables, &1, &2),
-        reset_rate_limit: &drop(tables, :rate_limits, &1),
+        list_tokens: fn -> Agent.get(tables, &Map.values(&1.tokens)) end,
+        revoke_all: fn -> Agent.update(tables, &%{&1 | tokens: %{}, codes: %{}}) end,
+        take_attempt: &take_attempt(tables, &1, &2, &3),
+        return_attempt: &return_attempt(tables, &1),
+        forget_attempts: &drop(tables, :rate_limits, &1),
         cimd_cache_get: &cimd_cache_get(tables, &1, &2),
         cimd_cache_put: &cimd_cache_put(tables, &1, &2, &3),
         sweep_expired: &sweep_expired(tables, &1)
@@ -107,6 +113,20 @@ defmodule Vigil.OAuth.Persistence.Memory do
     end)
   end
 
+  ## Clients
+
+  # The client and every code issued to it, in one update: a code left behind
+  # would redeem for a client that no longer exists.
+  defp delete_client(tables, client_id) do
+    Agent.update(tables, fn state ->
+      %{
+        state
+        | clients: Map.delete(state.clients, client_id),
+          codes: Map.reject(state.codes, fn {_key, attrs} -> attrs.client_id == client_id end)
+      }
+    end)
+  end
+
   ## Tokens
 
   # A `nil` grant revokes nothing: "every token whose grant is unknown" is not
@@ -122,32 +142,37 @@ defmodule Vigil.OAuth.Persistence.Memory do
     end)
   end
 
-  ## Consent password attempts, per address
+  ## Consent password attempts
 
-  defp rate_limited?(tables, address, now) do
-    case Agent.get(tables, & &1.rate_limits[address]) do
-      {count, window_start} ->
-        count >= @rate_limit_max_attempts and now - window_start <= @rate_limit_window
-
-      nil ->
-        false
-    end
-  end
-
-  # A failure inside the open window counts against it; one after it has run
-  # out opens a new window rather than extending the old one.
-  defp record_failure(tables, address, now) do
-    Agent.update(tables, fn state ->
-      entry =
-        case state.rate_limits[address] do
-          {count, window_start} when now - window_start <= @rate_limit_window ->
-            {count + 1, window_start}
+  # `{count, opened_at, window}` per key. Each change is one
+  # `get_and_update`, so the agent answers attempts one at a time and no two
+  # are handed the same count. An attempt inside the open window counts
+  # against it; one after it has run out opens a new window rather than
+  # extending the old one.
+  defp take_attempt(tables, key, window, now) do
+    Agent.get_and_update(tables, fn state ->
+      {count, opened_at, length} =
+        case state.rate_limits[key] do
+          {count, opened_at, length} when now - opened_at <= length ->
+            {count + 1, opened_at, length}
 
           _ ->
-            {1, now}
+            {1, now, window}
         end
 
-      put_in(state.rate_limits[address], entry)
+      {count, put_in(state.rate_limits[key], {count, opened_at, length})}
+    end)
+  end
+
+  defp return_attempt(tables, key) do
+    Agent.update(tables, fn state ->
+      case state.rate_limits[key] do
+        {count, opened_at, length} ->
+          put_in(state.rate_limits[key], {max(count - 1, 0), opened_at, length})
+
+        nil ->
+          state
+      end
     end)
   end
 
@@ -171,11 +196,12 @@ defmodule Vigil.OAuth.Persistence.Memory do
   defp sweep_expired(tables, now) do
     Agent.update(tables, fn state ->
       state
+      |> update_in([:clients], &Map.reject(&1, fn {_k, attrs} -> Client.unused?(attrs, now) end))
       |> update_in([:codes], &Map.reject(&1, fn {_k, attrs} -> Code.expired?(attrs, now) end))
       |> update_in([:tokens], &Map.reject(&1, fn {_k, attrs} -> Token.expired?(attrs, now) end))
       |> update_in(
         [:rate_limits],
-        &Map.reject(&1, fn {_k, {_c, at}} -> now - at > @rate_limit_window end)
+        &Map.reject(&1, fn {_k, {_c, at, length}} -> now - at > length end)
       )
       |> update_in([:cimd_cache], &Map.reject(&1, fn {_k, {_d, at}} -> at <= now end))
     end)

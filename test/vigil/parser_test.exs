@@ -20,6 +20,45 @@ defmodule Vigil.ParserTest do
   # The note's pre-heading chunk: a body, and no heading line of its own.
   defp pre_chunk, do: struct(Chunk, body_end_line: 3)
 
+  # A heading is recognized once per line, and a note is parsed several times
+  # per write inside the single writer. The pattern used to backtrack over a
+  # run of whitespace once for every position its text could end at: time
+  # quadratic in the line's length, until PCRE's match limit gave up and the
+  # line silently was no heading at all (#201). The recognition itself is now
+  # a fraction of a millisecond; what the parse spends beyond it is the slug,
+  # which is linear.
+  describe "a heading line of 100,000 spaces" do
+    @spaces String.duplicate(" ", 100_000)
+
+    for {label, line} <- [
+          {"between text and text", "## a" <> @spaces <> "b"},
+          {"after the text", "## a" <> @spaces},
+          {"in an H1", "# a" <> @spaces <> "b"}
+        ] do
+      test "is recognized, and the note parsed, within a small fixed time, #{label}" do
+        line = unquote(line)
+        content = "---\ntype: reference\n---\n# Title\n\n#{line}\n\nbody\n"
+
+        {recognize, _kind} =
+          :timer.tc(fn -> {Vigil.Markdown.h1(line), Vigil.Markdown.heading(line)} end)
+
+        {parse, {:ok, _file}} = :timer.tc(fn -> Parser.parse("x/long.md", content, %{}) end)
+
+        assert recognize < 20_000, "recognizing the heading took #{div(recognize, 1000)} ms"
+        assert parse < 500_000, "parsing the note took #{div(parse, 1000)} ms"
+      end
+    end
+
+    test "is still the heading it was" do
+      content = "---\ntype: reference\n---\n# Title a#{@spaces}b\n\n## a#{@spaces}b\n\nbody\n"
+      {:ok, file} = Parser.parse("x/long.md", content, %{})
+
+      assert file.title == "Title a" <> @spaces <> "b"
+      assert [%Chunk{heading: heading}] = Enum.filter(file.chunks, & &1.heading)
+      assert heading == "a" <> @spaces <> "b"
+    end
+  end
+
   test "slug/1 transliterates umlauts and sharp s" do
     assert Parser.slug("Heat Pump Größe") == "heat-pump-groesse"
     assert Parser.slug("Grüße-und-Straße") == "gruesse-und-strasse"
@@ -315,11 +354,13 @@ defmodule Vigil.ParserTest do
     end
 
     # The fragmentless chunk is built on its own code path, with its own
-    # body-end computation — the rule has to be stated there too.
+    # body-end computation — the rule has to be stated there too. With no
+    # heading line to sit under, the blank line between the title and its
+    # first content line separates the two and is no part of the body either.
     test "the fragmentless pre-H2 chunk follows the same rule" do
       chunk = boundary_chunk("x/boundaries.md")
 
-      assert chunk.body == "\nText before the first heading."
+      assert chunk.body == "Text before the first heading."
       assert chunk.body_end_line == 6
     end
 
@@ -413,6 +454,104 @@ defmodule Vigil.ParserTest do
     end
   end
 
+  describe "rewrite_links/2" do
+    @retarget %{"terra-speed" => "terra-40c", "bike/terra-speed" => "bike/terra-40c"}
+    defp retarget(content), do: Parser.rewrite_links(content, &Map.get(@retarget, &1.raw))
+
+    test "rewrites wiki and Markdown link targets, keeping fragment, alias and link text" do
+      content = """
+      ---
+      type: reference
+      ---
+      # Title
+
+      See [[terra-speed]], [[ terra-speed #dimensions | the dims]] and [[terra-speed|Terra]].
+      Also [the tyre](bike/terra-speed.md#gravel-experience) and [[bike/terra-speed.md]].
+      Not [[via-carolina]] nor [x](bike/via-carolina.md).
+      """
+
+      assert retarget(content) == """
+             ---
+             type: reference
+             ---
+             # Title
+
+             See [[terra-40c]], [[ terra-40c #dimensions | the dims]] and [[terra-40c|Terra]].
+             Also [the tyre](bike/terra-40c.md#gravel-experience) and [[bike/terra-speed.md]].
+             Not [[via-carolina]] nor [x](bike/via-carolina.md).
+             """
+    end
+
+    test "splices a target holding a long run of whitespace in linear time" do
+      spaces = String.duplicate(" ", 100_000)
+      content = "See [[terra#{spaces}speed|Terra]].\n"
+
+      {micros, rewritten} =
+        :timer.tc(fn -> Parser.rewrite_links(content, fn _link -> "bike/terra-40c" end) end)
+
+      assert rewritten == "See [[bike/terra-40c|Terra]].\n"
+      assert micros < 500_000
+    end
+
+    test "the rewrite function sees what extract_links/1 would have returned" do
+      body = "See [[terra-speed#dimensions|dims]] and [t](bike/terra-speed.md)."
+      test_pid = self()
+
+      Parser.rewrite_links(body, fn link ->
+        send(test_pid, {:link, link})
+        nil
+      end)
+
+      assert_received {:link, %{raw: "terra-speed", fragment: "dimensions"}}
+      assert_received {:link, %{raw: "bike/terra-speed", fragment: nil}}
+
+      assert Parser.extract_links(body) |> Enum.sort() ==
+               [
+                 %{raw: "bike/terra-speed", fragment: nil},
+                 %{raw: "terra-speed", fragment: "dimensions"}
+               ]
+    end
+
+    test "leaves code, headings and the frontmatter block alone" do
+      content = """
+      ---
+      related: "[[terra-speed]]"
+      ---
+      # About [[terra-speed]]
+
+      ## Also [[terra-speed]]
+      Inline `[[terra-speed]]` stays, [[terra-speed]] goes.
+
+      ```
+      [[terra-speed]]
+      ```
+      """
+
+      assert retarget(content) == """
+             ---
+             related: "[[terra-speed]]"
+             ---
+             # About [[terra-speed]]
+
+             ## Also [[terra-speed]]
+             Inline `[[terra-speed]]` stays, [[terra-40c]] goes.
+
+             ```
+             [[terra-speed]]
+             ```
+             """
+    end
+
+    test "a second H1 is body text, and its link is rewritten" do
+      assert retarget("# [[terra-speed]]\n# Again [[terra-speed]]\n") ==
+               "# [[terra-speed]]\n# Again [[terra-40c]]\n"
+    end
+
+    test "a note without frontmatter and without a trailing newline keeps its shape" do
+      assert retarget("Straight to [[terra-speed]]") == "Straight to [[terra-40c]]"
+    end
+  end
+
   describe "extract_links/1" do
     test "links inside fenced code blocks and inline code are not extracted" do
       body = """
@@ -491,6 +630,31 @@ defmodule Vigil.ParserTest do
 
       assert_raise FunctionClauseError, fn -> Chunk.heading_index(pre) end
       assert Chunk.body_end_index(pre) == 3
+    end
+  end
+
+  # docs/design.md, "A note that is not UTF-8 is skipped" and "How a file is
+  # written".
+  describe "encoding" do
+    test "the frontmatter of a CRLF note is parsed, and its chunks carry no carriage return" do
+      content = "---\r\ntype: decision\r\n---\r\n# Crlf\r\n\r\n## Setup\r\nBody.\r\n"
+
+      assert {:ok, file} = Parser.parse("bike/crlf.md", content)
+      assert file.type == :decision
+      assert file.title == "Crlf"
+      assert [%Chunk{id: "bike/crlf.md#setup", heading: "Setup", body: "Body."}] = file.chunks
+    end
+
+    test "the frontmatter of a note with a byte order mark is parsed" do
+      content = "\uFEFF---\ntype: decision\n---\n# Bom\n\n## Setup\nBody.\n"
+
+      assert {:ok, %{type: :decision, title: "Bom"}} = Parser.parse("bike/bom.md", content)
+    end
+
+    test "content that is not UTF-8 is refused rather than raising" do
+      content = "---\ntype: reference\n---\n# Caf\xE9\n\n## Gr\xF6\xDFe\nSee [[caf\xE9]].\n"
+
+      assert Parser.parse("bike/cp1252.md", content) == {:error, :invalid_utf8}
     end
   end
 end

@@ -30,6 +30,13 @@ defmodule Vigil.Parser do
     be cheap (docs/design.md, "Chunking"). A chunk fresh out of the parser
     carries `nil` in both — nothing in a parse knows them, and nothing in a
     parse reads them.
+
+    `folded` is the text search compares against — the note's title, the
+    chunk's headings and its body, each put through `Vigil.Slug.fold/1` —
+    and `Vigil.Index` adds it as it indexes the chunk, for the same reason:
+    folding a body is paid once per write, not once per chunk on every query
+    (docs/design.md, "Search"). A chunk fresh out of the parser carries `nil`
+    there too.
     """
     defstruct [
       :id,
@@ -39,7 +46,6 @@ defmodule Vigil.Parser do
       :heading_line,
       :body_end_line,
       :body,
-      :body_downcased,
       :links,
       :type,
       :starts,
@@ -48,7 +54,9 @@ defmodule Vigil.Parser do
       :updated_at,
       # The note's, denormalised onto the chunk by Vigil.Index — see above.
       :domain,
-      :file_title
+      :file_title,
+      # %{title:, headings:, body:}, added by Vigil.Index — see above.
+      :folded
     ]
 
     @type t :: %__MODULE__{}
@@ -75,6 +83,20 @@ defmodule Vigil.Parser do
     @doc "0-based index of the line right after the chunk's body ends."
     @spec body_end_index(t()) :: non_neg_integer()
     def body_end_index(%__MODULE__{body_end_line: line}) when is_integer(line), do: line
+
+    @doc """
+    The chunk's content hash: SHA-256, lowercase hex, over its heading and its
+    body — what `read` hands out as `hash` and what `replace_section` and
+    `delete_section` take back as `if_match` (docs/design.md, "A retried write
+    is applied once").
+
+    Content only, never the id or a line number: those are positions, and a
+    position is exactly what moves under a caller whose write was renumbered.
+    """
+    @spec hash(t()) :: String.t()
+    def hash(%__MODULE__{heading: heading, body: body}) do
+      :crypto.hash(:sha256, "#{heading}\n#{body}") |> Base.encode16(case: :lower)
+    end
   end
 
   defmodule File_ do
@@ -87,8 +109,27 @@ defmodule Vigil.Parser do
 
   `git_meta` is `%{created_at: DateTime.t() | nil, updated_at: DateTime.t() | nil, last_author: String.t() | nil}`.
   Warnings are logged with `path` and reason; the function never raises.
+
+  `content` is read as `Vigil.Markdown.decode/1` reads it: a byte order mark
+  in front and CRLF line endings are how the note was written, not what it
+  says, so a Windows note's frontmatter is its frontmatter.
+
+  `{:error, :invalid_utf8}` for content that is not UTF-8 at all — a note
+  saved as Windows-1252, say. Nothing in it can be parsed honestly: a heading
+  with such a byte in it has no slug, and a chunk holding one cannot be
+  encoded into a response. What to do with the file is the caller's to say
+  (docs/design.md, "A note that is not UTF-8 is skipped").
   """
+  @spec parse(String.t(), binary(), map()) :: {:ok, struct()} | {:error, :invalid_utf8}
   def parse(path, content, git_meta \\ %{}) do
+    if String.valid?(content) do
+      {:ok, parse_text(path, Markdown.normalize(content), git_meta)}
+    else
+      {:error, :invalid_utf8}
+    end
+  end
+
+  defp parse_text(path, content, git_meta) do
     created_at = Map.get(git_meta, :created_at)
     updated_at = Map.get(git_meta, :updated_at)
 
@@ -99,7 +140,7 @@ defmodule Vigil.Parser do
     {title, chunks} =
       build_chunks(path, body_lines_with_offset, type, starts, ends, created_at, updated_at)
 
-    file = %File_{
+    %File_{
       path: path,
       title: title || fallback_title(path),
       type: type,
@@ -109,8 +150,6 @@ defmodule Vigil.Parser do
       created_at: created_at,
       updated_at: updated_at
     }
-
-    {:ok, file}
   end
 
   defp extract_frontmatter(path, content) do
@@ -288,7 +327,6 @@ defmodule Vigil.Parser do
       heading_line: heading_line,
       body_end_line: end_line,
       body: body,
-      body_downcased: String.downcase(body),
       links: extract_links(body),
       type: type,
       starts: starts,
@@ -341,8 +379,16 @@ defmodule Vigil.Parser do
        ) do
     # The same boundary as a heading chunk, through the same function — this
     # chunk just has no heading to fall back on, so a body with no content
-    # line at all makes no chunk.
-    {body, body_end} = close_body(rev_lines)
+    # line at all makes no chunk. It has no heading line to sit under either,
+    # so the blank lines between the title (or frontmatter) and its first
+    # content line separate it from what is above and are no part of it: this
+    # body is what `read` of the note hands back (docs/design.md, "Chunking").
+    {body, body_end} =
+      rev_lines
+      |> Enum.reverse()
+      |> Enum.drop_while(fn {line, _no} -> String.trim(line) == "" end)
+      |> Enum.reverse()
+      |> close_body()
 
     if body_end == nil do
       nil
@@ -355,7 +401,6 @@ defmodule Vigil.Parser do
         heading_line: nil,
         body_end_line: body_end,
         body: body,
-        body_downcased: String.downcase(body),
         links: extract_links(body),
         type: type,
         starts: starts,
@@ -404,6 +449,92 @@ defmodule Vigil.Parser do
     |> Enum.reject(fn {target, _fragment} -> target == "" end)
     |> Enum.uniq()
     |> Enum.map(fn {target, fragment} -> %{raw: target, fragment: fragment} end)
+  end
+
+  @doc """
+  `content` with the targets of its links rewritten — the other half of
+  `extract_links/1`, and the one `move_note`'s `update_links` goes through.
+
+  `rewrite` is asked once per link with the `%{raw:, fragment:}` that
+  `extract_links/1` would have returned for it, and answers the new target or
+  `nil` to leave the link alone. Only the target changes: the `#fragment`, a
+  wiki link's `|alias`, a Markdown link's text and the `.md` behind its path
+  stay as they were written.
+
+  A link is rewritten exactly where it would have been extracted: not in the
+  frontmatter block, not in the title, not on a heading line (a heading is no
+  chunk's body, and rewriting it would change the chunk's id), and not in
+  fenced or inline code, read the same way `extract_links/1` reads them.
+  """
+  @spec rewrite_links(String.t(), (%{raw: String.t(), fragment: String.t() | nil} ->
+                                     String.t() | nil)) :: String.t()
+  def rewrite_links(content, rewrite) do
+    {block, body} =
+      case Markdown.split_frontmatter(content) do
+        {:ok, block, body} -> {block, body}
+        _none_or_unterminated -> {"", content}
+      end
+
+    lines = String.split(body, "\n")
+
+    # The first H1 is the title and no body; a second one is body text like
+    # any other line (`build_chunks/7`).
+    {rewritten, _title_seen?} =
+      lines
+      |> Markdown.read()
+      |> Enum.map_reduce(false, fn
+        %{kind: :content, line: line}, seen -> {rewrite_line(line, rewrite), seen}
+        %{kind: {:h1, _}, line: line}, true -> {rewrite_line(line, rewrite), true}
+        %{kind: {:h1, _}, line: line}, false -> {line, true}
+        %{line: line}, seen -> {line, seen}
+      end)
+
+    # `split_frontmatter/1` hands the body back newline-terminated; a note
+    # without a block keeps whatever ending it had, because `lines` did.
+    block <> Enum.join(rewritten, "\n")
+  end
+
+  # Positions are taken from the line with its inline code blanked, which
+  # keeps every byte where it was, so they apply to the line as written.
+  defp rewrite_line(line, rewrite) do
+    masked = blank_matches(line, @inline_code_re)
+
+    [@wikilink_re, @mdlink_re]
+    |> Enum.flat_map(&Regex.scan(&1, masked, return: :index))
+    |> Enum.map(&link_span(line, &1))
+    |> Enum.sort_by(fn {start, _len, _link} -> start end, :desc)
+    |> Enum.reduce(line, fn {start, len, link}, acc ->
+      case rewrite.(link) do
+        nil -> acc
+        target -> splice_target(acc, start, len, target)
+      end
+    end)
+  end
+
+  defp link_span(line, [_whole, {start, len} | fragment]) do
+    fragment =
+      case fragment do
+        [{f_start, f_len}] when f_start >= 0 -> String.trim(binary_part(line, f_start, f_len))
+        _ -> nil
+      end
+
+    {start, len, %{raw: String.trim(binary_part(line, start, len)), fragment: fragment}}
+  end
+
+  # The whitespace around a target is the writer's, and stays.
+  defp splice_target(line, start, len, target) do
+    written = binary_part(line, start, len)
+    # Measured by trimming, not by a `\s*$` search: an unanchored search
+    # restarts at every whitespace run inside the target, which is quadratic.
+    leading =
+      binary_part(written, 0, byte_size(written) - byte_size(String.trim_leading(written)))
+
+    kept = String.trim_trailing(written)
+    trailing = binary_part(written, byte_size(kept), byte_size(written) - byte_size(kept))
+
+    binary_part(line, 0, start) <>
+      leading <>
+      target <> trailing <> binary_part(line, start + len, byte_size(line) - start - len)
   end
 
   defp trim_or_nil(nil), do: nil

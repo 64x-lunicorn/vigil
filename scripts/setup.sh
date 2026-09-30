@@ -57,6 +57,10 @@ for a in "$@"; do
   fi
 done
 
+# Kept for require_root's hint, which repeats the command as it was given —
+# the loop below shifts every argument out of "$@".
+ORIGINAL_ARGS=("$@")
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo-url)
@@ -116,7 +120,7 @@ fi
 ## ── Step 1 — preflight ───────────────────────────────────────────────────
 
 step "1/9  Preflight"
-require_root "$@"
+require_root ${ORIGINAL_ARGS[@]+"${ORIGINAL_ARGS[@]}"}
 
 if [ -r /etc/os-release ]; then
   # shellcheck source=/dev/null
@@ -192,21 +196,45 @@ record_done "preflight passed"
 
 step "2/9  Install packages"
 
-PACKAGES=(
-  git curl ca-certificates jq openssl util-linux openssh-client cron gnupg
-  build-essential libssl-dev
+# The toolchain, held as one: every Erlang package installed here and Elixir.
+# Holding only some of them let the others move on their own, so the OTP a
+# release bundled depended on which package an upgrade happened to reach. An
+# Erlang/OTP security update is taken deliberately, all of them together, and
+# reaches the service by `update.sh --rebuild` (docs/guide.md, "Erlang/OTP
+# security updates").
+TOOLCHAIN_PACKAGES=(
   erlang-base erlang-dev erlang-crypto erlang-ssl erlang-public-key
   erlang-inets erlang-xmerl erlang-tools elixir
+)
+PACKAGES=(
+  git curl ca-certificates jq openssl util-linux openssh-client gnupg
+  build-essential libssl-dev
+  "${TOOLCHAIN_PACKAGES[@]}"
 )
 
 if [ "$DRY_RUN" = "1" ]; then
   log "[DRY RUN] apt-get update && apt-get install -y --no-install-recommends ${PACKAGES[*]}"
+  log "[DRY RUN] apt-mark hold every Erlang package and elixir"
 else
   apt-get update
   apt-get install -y --no-install-recommends "${PACKAGES[@]}"
-  apt-mark hold erlang-base erlang-dev elixir >/dev/null
+  apt-mark hold "${TOOLCHAIN_PACKAGES[@]}" >/dev/null
 fi
-record_done "installed and pinned packages (erlang-base, erlang-dev, elixir)"
+record_done "installed packages, held every Erlang package and elixir"
+
+# Debian's erlang-base ships epmd.socket, enabled: systemd then listens on
+# port 4369 on every interface and starts epmd for whoever connects. vigil
+# runs without epmd (rel/vm.args.eex), and `-start_epmd false` closes nothing
+# systemd holds open — so the socket and the service are stopped and masked,
+# and nothing listens on 4369 whatever a later package upgrade enables.
+if [ "$DRY_RUN" = "1" ]; then
+  log "[DRY RUN] systemctl disable --now epmd.socket epmd.service && systemctl mask epmd.socket epmd.service"
+else
+  systemctl disable --now epmd.socket epmd.service >/dev/null 2>&1 || true
+  systemctl mask epmd.socket epmd.service >/dev/null
+  ok "epmd.socket and epmd.service stopped and masked: nothing listens on port 4369."
+fi
+record_done "masked epmd.socket and epmd.service"
 
 check_tool_versions() {
   local file="/opt/vigil/repo/.tool-versions"
@@ -291,8 +319,10 @@ case "$GITHUB_SSH_PORT" in
     ;;
 esac
 
+# Host and port are arguments to the fixed script, never spliced into it.
 tcp_reachable() {
-  timeout 5 bash -c "</dev/tcp/$1/$2" 2>/dev/null
+  # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c
+  timeout 5 bash -c '</dev/tcp/$1/$2' _ "$1" "$2" 2>/dev/null
 }
 
 # Scans <host>:<port>, refuses a key that is not GitHub's documented one, and
@@ -370,7 +400,7 @@ if [ -f "$DEPLOY_KEY" ]; then
   log "Deploy key already exists (${DEPLOY_KEY})."
 else
   run_step "generate deploy key" -- \
-    su -s /bin/bash -c "ssh-keygen -t ed25519 -N '' -C 'vigil@$(hostname)' -f ${DEPLOY_KEY}" vigil
+    as_vigil ssh-keygen -t ed25519 -N '' -C "vigil@$(hostname)" -f "$DEPLOY_KEY"
   if [ "$DRY_RUN" != "1" ]; then
     chmod 0700 "$SSH_DIR"
     chmod 0600 "$DEPLOY_KEY"
@@ -404,7 +434,7 @@ record_done "set up the service user's SSH identity"
 
 step "5/9  Clone the code repo"
 
-if [ -d /opt/vigil/repo/.git ]; then
+if [ -e /opt/vigil/repo/.git ]; then
   log "Repo already exists at /opt/vigil/repo — fetching instead of cloning."
   run_step "git fetch" -- as_vigil git -C /opt/vigil/repo fetch --all
   as_vigil git -C /opt/vigil/repo status --short || true
@@ -455,6 +485,7 @@ else
   else
     ok "systemd-analyze verify: no problems."
   fi
+  check_unit_exposure /etc/systemd/system/vigil.service || exit 2
 
   systemctl daemon-reload
   systemctl enable vigil >/dev/null
@@ -486,7 +517,7 @@ else
 
   if [ "$NON_INTERACTIVE" = "1" ]; then
     warn "Setting up the cloudflared tunnel needs an interactive 'cloudflared tunnel login' (browser) — skipped under --non-interactive."
-    record_next_step "cloudflared tunnel login && cloudflared tunnel create ${TUNNEL_NAME}, then create /etc/cloudflared/config.yml by hand"
+    record_next_step "cloudflared tunnel login && cloudflared tunnel create ${TUNNEL_NAME}, then create /etc/cloudflared/config.yml by hand and rm /root/.cloudflared/cert.pem"
   else
     if [ ! -f /root/.cloudflared/cert.pem ]; then
       log "cloudflared tunnel login — open the printed link in a browser."
@@ -531,7 +562,9 @@ EOF
         )"
         # The DNS record is what makes the hostname reach this tunnel. An
         # existing record for the hostname (the old tunnel's) is replaced.
+        DNS_ROUTED=0
         if cloudflared tunnel route dns --overwrite-dns "$TUNNEL_NAME" "$HOSTNAME_VALUE"; then
+          DNS_ROUTED=1
           ok "DNS: ${HOSTNAME_VALUE} → tunnel '${TUNNEL_NAME}'."
         else
           warn "Could not route ${HOSTNAME_VALUE} to tunnel '${TUNNEL_NAME}'."
@@ -540,9 +573,24 @@ EOF
         cloudflared service install >/dev/null 2>&1 || true
         systemctl enable --now cloudflared >/dev/null 2>&1 || true
         ok "Configured cloudflared tunnel '${TUNNEL_NAME}' (hostname ${HOSTNAME_VALUE}, no catch-all)."
+
+        # cert.pem is the account certificate `cloudflared tunnel login` left:
+        # it creates, routes and deletes tunnels anywhere in the Cloudflare
+        # account, and nothing on this host needs it once the tunnel exists —
+        # the tunnel runs on its own credentials file. Removed once the DNS
+        # route is in place; kept, with a next step saying to remove it, while
+        # the route still has to be made by hand. Running this step again logs
+        # in again.
+        if [ "$DNS_ROUTED" = "1" ]; then
+          rm -f /root/.cloudflared/cert.pem
+          ok "Removed the account certificate /root/.cloudflared/cert.pem (the tunnel runs on /root/.cloudflared/${TUNNEL_ID}.json)."
+        else
+          warn "The account certificate /root/.cloudflared/cert.pem is still on this host."
+          record_next_step "once the DNS route is made: rm /root/.cloudflared/cert.pem (it controls every tunnel in the Cloudflare account)"
+        fi
       else
         warn "Could not determine the tunnel ID — tunnel config not written."
-        record_next_step "check cloudflared tunnel list, create /etc/cloudflared/config.yml by hand"
+        record_next_step "check cloudflared tunnel list, create /etc/cloudflared/config.yml by hand, then rm /root/.cloudflared/cert.pem"
       fi
     fi
   fi
@@ -569,7 +617,7 @@ cat <<'EOF'
 
 EOF
 warn "Cloudflare Access is not configured yet (manual step)."
-record_next_step "configure Cloudflare Access (see the README) before running init.sh"
+record_next_step "configure Cloudflare Access (see docs/clients.md) before running init.sh"
 
 ## ── Step 9 — summary ─────────────────────────────────────────────────────
 

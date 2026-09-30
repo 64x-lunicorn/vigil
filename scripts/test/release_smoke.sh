@@ -58,8 +58,7 @@ SERVER_PID=""
 # keeps holding the port and the dets files, and every later run then fails
 # with a confusing 401 against the *previous* run's vault. Owning the PID
 # directly (rather than `bin/vigil daemon` + `bin/vigil stop`) keeps shutdown
-# independent of Erlang distribution, which needs epmd and a resolvable
-# hostname — neither guaranteed on a CI runner.
+# independent of Erlang distribution, which section 3b checks on its own.
 cleanup() {
   local exit_code=$?
   if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -104,6 +103,19 @@ BASE_URL="http://127.0.0.1:${PORT}"
 # and an "is this an error response?" check reads that as "no error" — a
 # rejected call would silently score as a pass. Instead the status code is
 # recorded next to the body and checked explicitly.
+# A tool call is made in a session, and a session is issued by `initialize`
+# and bound to the token that asked for it: an id the server did not issue
+# gets 404. So every call starts one, the way a client does after a restart.
+# Prints the issued id, or nothing if initialize did not issue one.
+mcp_session() {
+  local token="$1"
+  curl -sS -o /dev/null -D - -X POST "${BASE_URL}/mcp" \
+    -H "Authorization: Bearer ${token}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-smoke","version":"0"}}}' \
+    2>/dev/null | tr -d '\r' | awk 'tolower($1) == "mcp-session-id:" { print $2; exit }' || true
+}
+
 mcp_call() {
   local token="$1" tool="$2"
   # Do NOT write this as "${3:-{}}": bash ends the parameter expansion at the
@@ -112,11 +124,13 @@ mcp_call() {
   # scripts/lib.sh — an empty default plus an explicit fallback avoids it.
   local args="${3:-}"
   [ -z "$args" ] && args="{}"
+  local session_id
+  session_id="$(mcp_session "$token")"
   curl -sS -o "${WORK}/.mcp_body" -w '%{http_code}' \
     -X POST "${BASE_URL}/mcp" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
-    -H "mcp-session-id: smoke-$$-${RANDOM}" \
+    -H "mcp-session-id: ${session_id}" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}" \
     > "${WORK}/.mcp_status" 2>/dev/null || true
   cat "${WORK}/.mcp_body" 2>/dev/null || true
@@ -159,12 +173,26 @@ else
   exit 1
 fi
 
+# The cookie is all Erlang distribution checks; readable, it hands anyone on
+# the host code execution as the service user.
+if stat -c '%a' "${RELEASE}/releases/COOKIE" >/dev/null 2>&1; then
+  cookie_mode="$(stat -c '%a' "${RELEASE}/releases/COOKIE")"
+else
+  cookie_mode="$(stat -f '%Lp' "${RELEASE}/releases/COOKIE")"
+fi
+assert_eq "the release cookie is readable by its owner only" "400" "$cookie_mode"
+
 ## ── 2. Throwaway vault with a real git remote ────────────────────────────
 
 section "2/6  Provision a throwaway vault"
 
-git init --quiet --bare -b main "$UPSTREAM"
-git init --quiet -b main "$VAULT"
+# On `master`, not `main`, and nothing below says so: VIGIL_GIT_BRANCH is left
+# unset, so the release has to find the branch in the clone — its checked-out
+# branch, tracking the default remote — and then pull and push that one. The
+# branch was once `main` in every git call, and a vault on `master` failed
+# every write with a git error.
+git init --quiet --bare -b master "$UPSTREAM"
+git init --quiet -b master "$VAULT"
 git -C "$VAULT" config user.name "vigil smoke"
 git -C "$VAULT" config user.email "vigil-smoke@localhost"
 git -C "$VAULT" config commit.gpgsign false
@@ -188,9 +216,9 @@ EOF
 
 git -C "$VAULT" add -A
 git -C "$VAULT" commit --quiet -m "smoke fixture"
-git -C "$VAULT" remote add origin "$UPSTREAM"
-git -C "$VAULT" push --quiet -u origin main
-pass "vault created, committed and pushed to its bare remote"
+git -C "$VAULT" remote add github "$UPSTREAM"
+git -C "$VAULT" push --quiet -u github master
+pass "vault created on master, committed and pushed to its bare remote"
 
 ## ── 3. Seed tokens, then boot ────────────────────────────────────────────
 
@@ -199,7 +227,11 @@ section "3/6  Seed tokens and start the release"
 # Seeding must happen BEFORE the daemon starts: dets is single-writer, and a
 # second process opening the same files writes into a copy the running node
 # never sees (see the comment on vigil_seed_token in scripts/lib.sh).
-RESOURCE="${BASE_URL}/mcp"
+# In prod the issuer and resource must be https (the boot-time settings
+# check refuses anything else), so the release is given the public URL a
+# tunnel would serve, while this script talks to its loopback listener.
+ISSUER="https://vault.smoke.test"
+RESOURCE="${ISSUER}/mcp"
 AUTH_PASSWORD="smoke-test-password-not-a-secret"
 
 RW_TOKEN="$(MIX_ENV=prod mix vigil.seed_token \
@@ -217,10 +249,52 @@ fi
 export VIGIL_VAULT_PATH="$VAULT"
 export VIGIL_STATE_DIR="$STATE"
 export VIGIL_AUTH_PASSWORD="$AUTH_PASSWORD"
+# The SkillKey HMAC secret, apart from the password; the release refuses to
+# boot without one.
+VIGIL_SKILLKEY_SECRET="$(openssl rand -base64 48)"
+export VIGIL_SKILLKEY_SECRET
 export VIGIL_PORT="$PORT"
-export VIGIL_GIT_REMOTE="origin"
-export VIGIL_ISSUER="$BASE_URL"
+export VIGIL_ISSUER="$ISSUER"
 export VIGIL_RESOURCE="$RESOURCE"
+# A node name of this run's own: section 5c reaches the node through
+# `bin/vigil rpc`, as scripts/grants.sh does, and two runs on one host must
+# not answer for each other.
+export RELEASE_NODE="vigil_smoke_${PORT}"
+
+# The distribution port, off the default so this run can sit beside another
+# node. With no epmd the port, not the name, is what a node is found by, so
+# it is also what keeps two runs from answering for each other.
+DIST_PORT=$((PORT + 1000))
+export VIGIL_DIST_PORT="$DIST_PORT"
+
+# A remote or a branch the clone does not have stops boot, and says which
+# setting is wrong. Checked against the release because that is where the
+# check runs: in the application's start, before any child.
+refuses_boot() {
+  local var="$1" value="$2"
+  local log="${WORK}/refused-${var}.log"
+  env "${var}=${value}" ERL_CRASH_DUMP_SECONDS=0 "$RELEASE_BIN" start >"$log" 2>&1 &
+  local pid=$!
+  local exited=0
+  for _ in $(seq 1 60); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      exited=1
+      break
+    fi
+    sleep 1
+  done
+  if [ "$exited" = "0" ]; then
+    kill -9 "$pid" 2>/dev/null || true
+    fail "boot refuses ${var}=${value}" "the release was still running after 60s"
+  elif grep -q "${var} must be" "$log"; then
+    pass "boot refuses ${var}=${value}, naming the setting"
+  else
+    fail "boot refuses ${var}=${value}, naming the setting" "$(tail -5 "$log")"
+  fi
+}
+
+refuses_boot VIGIL_GIT_BRANCH main
+refuses_boot VIGIL_GIT_REMOTE origin
 
 "$RELEASE_BIN" start > "${WORK}/server.log" 2>&1 &
 SERVER_PID=$!
@@ -246,6 +320,84 @@ else
   exit 1
 fi
 
+# vigil's own health report, answered on loopback without a token.
+healthz="$(curl -s -w '\n%{http_code}' "${BASE_URL}/healthz")"
+if [ "$(echo "$healthz" | tail -1)" = "200" ] &&
+  echo "$healthz" | head -1 | jq -e '.healthy == true and .index_loaded == true and .writer_answers == true' >/dev/null 2>&1; then
+  pass "/healthz answers 200 on loopback, index loaded and writer answering"
+else
+  fail "/healthz answers 200 on loopback, index loaded and writer answering" "$healthz"
+fi
+
+assert_eq "/healthz is not there for a forwarded request" "404" \
+  "$(curl -o /dev/null -s -w '%{http_code}' -H 'X-Forwarded-For: 203.0.113.9' "${BASE_URL}/healthz")"
+
+## ── 3b. Loopback only ────────────────────────────────────────────────────
+
+section "3b/6  Nothing listens beyond loopback"
+
+# The node and everything it spawned. `bin/vigil start` execs its way down to
+# the BEAM, so the PID started above is the node's; its children are the port
+# programs.
+node_pids() {
+  local all="$SERVER_PID" frontier="$SERVER_PID" next pid
+  while [ -n "$frontier" ]; do
+    next=""
+    for pid in $frontier; do
+      next="${next}$(pgrep -P "$pid" 2>/dev/null || true)"$'\n'
+    done
+    frontier="$(echo "$next" | grep -v '^$' || true)"
+    [ -n "$frontier" ] && all="${all}"$'\n'"${frontier}"
+  done
+  echo "$all"
+}
+
+if command -v lsof >/dev/null 2>&1; then
+  # One "address:port" per listening TCP socket the node holds.
+  listeners="$(lsof -nP -a -iTCP -sTCP:LISTEN -p "$(node_pids | paste -sd, -)" -Fn 2>/dev/null |
+    sed -n 's/^n//p' | sort -u || true)"
+
+  if echo "$listeners" | grep -qE "^(127\.0\.0\.1|\[::1\]):${PORT}$"; then
+    pass "the HTTP listener is on loopback"
+  else
+    fail "the HTTP listener is on loopback" "listening: $(echo "$listeners" | paste -sd' ' -)"
+  fi
+  if echo "$listeners" | grep -qE "^127\.0\.0\.1:${DIST_PORT}$"; then
+    pass "Erlang distribution listens on 127.0.0.1:${DIST_PORT}"
+  else
+    fail "Erlang distribution listens on 127.0.0.1:${DIST_PORT}" "listening: $(echo "$listeners" | paste -sd' ' -)"
+  fi
+  wide="$(echo "$listeners" | grep -vE '^(127\.0\.0\.1|\[::1\]):[0-9]+$' | grep -v '^$' || true)"
+  if [ -z "$wide" ]; then
+    pass "no socket of the node listens beyond loopback"
+  else
+    fail "no socket of the node listens beyond loopback" "$(echo "$wide" | paste -sd' ' -)"
+  fi
+else
+  fail "no socket of the node listens beyond loopback" "lsof is not installed"
+fi
+
+# The path operator tooling takes into the running node, and the one
+# vigil_seed_token takes once the service is up: over loopback, with the cookie.
+rpc_out="$("$RELEASE_BIN" rpc 'IO.puts("rpc-" <> Atom.to_string(node()))' 2>&1 || true)"
+if echo "$rpc_out" | grep -qx "rpc-${RELEASE_NODE}@127.0.0.1"; then
+  pass "bin/vigil rpc reaches the running node"
+else
+  fail "bin/vigil rpc reaches the running node" "$(echo "$rpc_out" | tail -3)"
+fi
+
+# update.sh asks the running release for its chunk ids before switching away
+# from it: `bin/vigil eval`, a VM of its own that loads the code and starts
+# nothing, next to the node that is serving. Its output is the list and
+# nothing else — a log line in it would be compared as an id.
+eval_out="$(env VIGIL_VAULT_PATH="$VAULT" "$RELEASE_BIN" eval 'Vigil.Release.chunk_ids()' 2>/dev/null || true)"
+if echo "$eval_out" | grep -qx "home/diacritics-äöü-café.md" &&
+  ! echo "$eval_out" | grep -q "\[warning\]\|\[info\]\|\[error\]"; then
+  pass "bin/vigil eval lists the running release's chunk ids, and only them"
+else
+  fail "bin/vigil eval lists the running release's chunk ids, and only them" "$(echo "$eval_out" | tail -3)"
+fi
+
 ## ── 4. Read path ─────────────────────────────────────────────────────────
 
 section "4/6  Read path"
@@ -261,6 +413,32 @@ if echo "$current_response" | mcp_is_error; then
 else
   pass "current answers with a valid RW token"
 fi
+
+# A session is issued at initialize and ended by DELETE; an ended one is a 404,
+# which is what tells a client to initialize again.
+session_id="$(mcp_session "$RW_TOKEN")"
+if [ -n "$session_id" ]; then
+  pass "initialize issues a session id"
+else
+  fail "initialize issues a session id"
+fi
+
+ping_status() {
+  curl -o /dev/null -s -w '%{http_code}' -X POST "${BASE_URL}/mcp" \
+    -H "Authorization: Bearer ${RW_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -H "mcp-session-id: $1" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
+}
+
+assert_eq "a request in the issued session is answered" "200" "$(ping_status "$session_id")"
+assert_eq "a session id the server never issued gets 404" "404" "$(ping_status "smoke-$$-unissued")"
+
+status="$(curl -o /dev/null -s -w '%{http_code}' -X DELETE "${BASE_URL}/mcp" \
+  -H "Authorization: Bearer ${RW_TOKEN}" \
+  -H "mcp-session-id: ${session_id}")"
+assert_eq "DELETE /mcp ends the session with 204" "204" "$status"
+assert_eq "an ended session gets 404" "404" "$(ping_status "$session_id")"
 
 # Reading the diacritics note by its non-ASCII path is the actual locale guard.
 read_response="$(mcp_call "$RO_TOKEN" read '{"id":"home/diacritics-äöü-café.md"}')"
@@ -305,7 +483,7 @@ else
   fail "read-only token is authenticated but refused by a write tool" "$(mcp_why)"
 fi
 
-before_sha="$(git --git-dir="$UPSTREAM" rev-parse main)"
+before_sha="$(git --git-dir="$UPSTREAM" rev-parse master)"
 
 create_response="$(mcp_call "$RW_TOKEN" create \
   "{\"path\":\"home/smoke-note.md\",\"type\":\"reference\",\"content\":\"# Smoke note\\n\\nWritten by release_smoke.sh.\",\"skill_key\":\"${skill_key}\"}")"
@@ -321,12 +499,45 @@ else
   fail "the note exists on disk"
 fi
 
-after_sha="$(git --git-dir="$UPSTREAM" rev-parse main)"
+after_sha="$(git --git-dir="$UPSTREAM" rev-parse master)"
 if [ "$before_sha" != "$after_sha" ]; then
-  pass "the write was committed AND pushed to the git remote"
+  pass "the write was committed AND pushed to master on the git remote"
 else
-  fail "the write was committed AND pushed to the git remote" \
+  fail "the write was committed AND pushed to master on the git remote" \
     "remote is still at ${before_sha}"
+fi
+
+# A human pushes from a clone of their own and calls no `reload`: the next
+# write fetches and fast-forwards first, so it lands on top of the human's
+# commit and its push goes through. `force`, because the note the human pushed
+# is adopted before the write is decided, and counts as its possible duplicate.
+HUMAN="${WORK}/human-clone"
+git clone --quiet -b master "$UPSTREAM" "$HUMAN"
+mkdir -p "${HUMAN}/home"
+printf -- '---\ntype: reference\n---\n# Pushed by a human\n\nNo reload after this.\n' \
+  >"${HUMAN}/home/smoke-human.md"
+git -C "$HUMAN" add -A
+git -C "$HUMAN" -c user.name=human -c user.email=human@localhost -c commit.gpgsign=false \
+  commit --quiet -m "human edit"
+git -C "$HUMAN" push --quiet origin master
+
+after_human_response="$(mcp_call "$RW_TOKEN" create \
+  "{\"path\":\"home/smoke-after-human.md\",\"type\":\"reference\",\"content\":\"# After the human\\n\\nWritten on top.\",\"force\":true,\"skill_key\":\"${skill_key}\"}")"
+if echo "$after_human_response" | mcp_is_error; then
+  fail "a write after a human's push, without reload, is pushed" "$(mcp_why)"
+elif [ "$(echo "$after_human_response" | mcp_payload '.result.pushed')" = "true" ] &&
+  [ -f "${VAULT}/home/smoke-human.md" ] &&
+  [ "$(git -C "$VAULT" rev-parse master)" = "$(git --git-dir="$UPSTREAM" rev-parse master)" ]; then
+  pass "a write after a human's push, without reload, is pushed"
+else
+  fail "a write after a human's push, without reload, is pushed" "$after_human_response"
+fi
+
+if curl -s "${BASE_URL}/healthz" |
+  jq -e '.ahead == 0 and .behind == 0 and .last_push.pushed == true' >/dev/null 2>&1; then
+  pass "/healthz reports the vault in step and the last push succeeded"
+else
+  fail "/healthz reports the vault in step and the last push succeeded" "$(curl -s "${BASE_URL}/healthz")"
 fi
 
 ## ── 5b. The authorization flow a real client actually walks ──────────────
@@ -509,6 +720,46 @@ else
     pass "the replay revoked the whole token family"
   fi
 fi
+
+## ── 5c. Revoking access through bin/vigil rpc ────────────────────────────
+
+section "5c/6  Revoking access"
+
+# What scripts/grants.sh sends, sent the same way: into the running node, the
+# words base64-encoded one per line. The unit suite holds what the node does
+# with it; this is the one place a built release is asked.
+grants_rpc() {
+  local encoded
+  encoded="$(printf '%s\n' "$@" | openssl base64 -A)"
+  "$RELEASE_BIN" rpc "Vigil.OAuth.Grants.rpc(Vigil.OAuth.Store.over_tables(), System.system_time(:second), \"${encoded}\")" 2>&1 || true
+}
+
+GRANTS_LIST="$(grants_rpc list)"
+RO_GRANT="$(printf '%s\n' "$GRANTS_LIST" | awk '$2 == "(seeded)" && $4 == "vault:read" { print $1 }')"
+
+if printf '%s\n' "$GRANTS_LIST" | head -1 | grep -q '^GRANT  *CLIENT  *CLIENT ID  *SCOPE  *ISSUED  *EXPIRES$' &&
+  [ -n "$RO_GRANT" ]; then
+  pass "the grant list names the seeded read-only grant"
+else
+  fail "the grant list names the seeded read-only grant" "$GRANTS_LIST"
+fi
+
+case "$GRANTS_LIST" in
+  *"$RW_TOKEN"* | *"$RO_TOKEN"*) fail "the grant list prints no token value" ;;
+  *) pass "the grant list prints no token value" ;;
+esac
+
+REVOKED="$(grants_rpc revoke "${RO_GRANT:-none}")"
+case "$REVOKED" in
+  "Revoked grant ${RO_GRANT}"*) pass "the read-only grant is revoked" ;;
+  *) fail "the read-only grant is revoked" "$REVOKED" ;;
+esac
+
+mcp_call "$RO_TOKEN" "current" > /dev/null
+assert_eq "its token is refused by /mcp at once" "401" "$(mcp_status)"
+
+mcp_call "$RW_TOKEN" "current" > /dev/null
+assert_eq "the other grant's token is still accepted" "200" "$(mcp_status)"
 
 ## ── 6. reload, then shut down cleanly ────────────────────────────────────
 

@@ -22,6 +22,9 @@ defmodule Vigil.VaultCheck do
   @max_basename_length 60
   @max_frontmatter_bytes 1024
 
+  # Sobelow: an operator's own vault; the paths are files vigil enumerated
+  # there.
+  # sobelow_skip ["Traversal.FileModule"]
   def run(vault_path, exclude \\ []) do
     unless File.dir?(vault_path) do
       raise "Not a directory: #{vault_path}"
@@ -34,15 +37,36 @@ defmodule Vigil.VaultCheck do
     domain_dirs = layout.domains
     files = Layout.note_paths(layout)
 
-    entries =
-      Enum.map(files, fn rel_path ->
+    # A note that is not UTF-8 is one the server skips (docs/design.md, "A
+    # note that is not UTF-8 is skipped"), so it is reported as that and
+    # checked for nothing else: the other findings are about notes the server
+    # reads.
+    {entries, invalid_utf8} =
+      files
+      |> Enum.map(fn rel_path ->
         content = File.read!(Path.join(vault_path, rel_path))
-        {:ok, parsed} = Parser.parse(rel_path, content)
-        {rel_path, content, parsed}
+
+        case Parser.parse(rel_path, content) do
+          {:ok, parsed} -> {:ok, {rel_path, Markdown.normalize(content), parsed}}
+          {:error, :invalid_utf8} -> {:invalid_utf8, rel_path}
+        end
       end)
+      |> Enum.split_with(&match?({:ok, _entry}, &1))
+
+    entries = Enum.map(entries, fn {:ok, entry} -> entry end)
 
     %{
       overview: overview(vault_path, domain_dirs, entries),
+      b0_encoding:
+        Enum.map(Layout.non_utf8_paths(layout), fn path ->
+          %{
+            path: Layout.printable_path(path),
+            message: "file name is not valid UTF-8, so the server skips this note"
+          }
+        end) ++
+          Enum.map(invalid_utf8, fn {:invalid_utf8, path} ->
+            %{path: path, message: "not valid UTF-8, so the server skips this note"}
+          end),
       b1_frontmatter:
         Enum.flat_map(entries, fn {path, content, _} -> b1_checks(path, content) end),
       b2_filenames: b2_checks(files),
@@ -51,7 +75,8 @@ defmodule Vigil.VaultCheck do
       b5_separators:
         Enum.flat_map(entries, fn {path, _content, parsed} -> b5_checks(path, parsed) end),
       b6_consolidation:
-        Enum.flat_map(entries, fn {path, _content, parsed} -> b6_checks(path, parsed) end)
+        Enum.flat_map(entries, fn {path, _content, parsed} -> b6_checks(path, parsed) end),
+      b7_ignored_files: b7_ignored(layout)
     }
   end
 
@@ -236,6 +261,8 @@ defmodule Vigil.VaultCheck do
   # no drift at all. Drift measured against keys nobody read is one false
   # "unknown to the runtime" per domain — a report on a file the doctor could
   # not read, in the voice of one it had read.
+  # Sobelow: a fixed file name under the operator's vault root.
+  # sobelow_skip ["Traversal.FileModule"]
   defp b4_drift(vault_path, domain_dirs) do
     case File.read(Path.join(vault_path, "_domains.yml")) do
       {:ok, text} ->
@@ -308,6 +335,39 @@ defmodule Vigil.VaultCheck do
       }
     end)
   end
+
+  ## Ignored Markdown files
+
+  # A Markdown file the layout does not call a note never reaches search, and
+  # the load says nothing about it (docs/design.md, "A Markdown file that is
+  # not a note is reported"). Which files those are and why is
+  # Vigil.Vault.Layout's answer; the doctor only words it. A root page such
+  # as a Dataview dashboard is often deliberate, so it is information and
+  # never fails `init.sh --check-only`; everything else is a warning. The
+  # messages stay ASCII: init.sh reads them through jq.
+  defp b7_ignored(layout) do
+    layout
+    |> Layout.ignored_paths()
+    |> Enum.map(fn {path, reason} ->
+      %{
+        path: path,
+        reason: Atom.to_string(reason),
+        severity: if(reason == :root, do: "info", else: "warning"),
+        message: ignored_message(reason)
+      }
+    end)
+  end
+
+  defp ignored_message(:root),
+    do: "at the vault root, in no domain, so the server ignores this file"
+
+  defp ignored_message(:wrong_depth),
+    do:
+      "not at note depth (<domain>/<name>.md, projects/<project>/<name>.md), " <>
+        "so the server ignores this file"
+
+  defp ignored_message(:unknown_directory),
+    do: "in a directory that is not a domain, so the server ignores this file"
 
   ## Consolidation thresholds
 

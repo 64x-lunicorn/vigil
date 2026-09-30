@@ -22,7 +22,12 @@ defmodule Vigil.SkillsTest do
   # `remote: nil` is a vault with no remote configured, which is how a push
   # failure is provoked.
   defp target(vault, opts \\ []) do
-    %{vault_path: vault, git_remote: "origin", git: CommitLog.new(vault, opts)}
+    %{
+      vault_path: vault,
+      git_remote: "origin",
+      git_branch: "main",
+      git: CommitLog.new(vault, opts)
+    }
   end
 
   defp tmp_dir do
@@ -45,6 +50,47 @@ defmodule Vigil.SkillsTest do
     test "a vault with no skills/ directory returns an empty list" do
       vault = tmp_dir()
       assert Skills.list(vault) == []
+    end
+  end
+
+  # skill_list is the mandatory bootstrap, and its answer is JSON: a skill
+  # file whose name is not UTF-8 — `caf\xE9.md`, saved from Windows-1252 on
+  # a Linux clone — cannot be a skill name, and used to make the encoder
+  # raise on the whole list (docs/design.md, "A note that is not UTF-8 is
+  # skipped").
+  describe "a skill file whose name is not UTF-8" do
+    @non_utf8 "caf" <> <<0xE9>> <> ".md"
+
+    test "is left out of the list with a warning naming it, and the list encodes" do
+      dir = tmp_dir()
+      File.write!(Path.join(dir, "tdd.md"), "---\ndescription: Tests first\n---\n# TDD\n")
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          send(self(), {:listed, Skills.listed(dir, [@non_utf8, "tdd.md"])})
+        end)
+
+      assert_received {:listed, [%{name: "tdd", description: "Tests first"}] = listed}
+      assert log =~ "skills/caf\\xE9.md"
+      assert {:ok, _json} = Jason.encode(listed)
+    end
+
+    @tag :non_utf8_file_names
+    test "on disk, is left out of list/1" do
+      vault = tmp_dir()
+      File.mkdir_p!(Path.join(vault, "skills"))
+      File.write!(Path.join([vault, "skills", @non_utf8]), "# Caf\n")
+
+      ExUnit.CaptureLog.capture_log(fn -> send(self(), {:listed, Skills.list(vault)}) end)
+
+      assert_received {:listed, []}
+    end
+
+    test "cannot be read by that name" do
+      vault = tmp_dir()
+
+      assert {:error, "Invalid path"} = Skills.read("caf" <> <<0xE9>>, vault, @key)
+      assert {:error, "Invalid path"} = Skills.read(@non_utf8, vault, @key)
     end
   end
 
@@ -166,6 +212,106 @@ defmodule Vigil.SkillsTest do
 
       assert msg =~ "name' and 'description'"
       refute File.exists?(Path.join(vault, "skills/broken.md"))
+    end
+  end
+
+  # docs/design.md, "skills/ — one repository, two systems": a skill is an
+  # instruction every later session follows, so replacing one is a destructive
+  # operation like deleting a note, and the conventions skill is not written
+  # through MCP at all.
+  describe "write/3 on a skill that exists" do
+    @tdd "---\nname: tdd\ndescription: rewritten\n---\n# Rewritten\n"
+
+    test "without confirm it is refused, says why, and leaves the skill as it was" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+      before = File.read!(Path.join(vault, "skills/tdd.md"))
+      {git, log} = CommitLog.recording(vault, [])
+
+      assert {:error, msg} = Skills.write("tdd", @tdd, %{target(vault) | git: git})
+
+      assert msg ==
+               "Destructive operation: replaces the existing skill skills/tdd.md. " <>
+                 "Call again with confirm: true to execute it."
+
+      assert File.read!(Path.join(vault, "skills/tdd.md")) == before
+      assert CommitLog.calls(log) == []
+    end
+
+    test "confirm: false is refused the same way" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+
+      assert {:error, "Destructive operation: " <> _} =
+               Skills.write("tdd.md", @tdd, target(vault), confirm: false)
+    end
+
+    test "with confirm: true it is replaced" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+
+      assert {:ok, %{name: "tdd", pushed: true}} =
+               Skills.write("tdd", @tdd, target(vault), confirm: true)
+
+      assert File.read!(Path.join(vault, "skills/tdd.md")) == @tdd
+    end
+
+    test "a new skill needs no confirm" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+
+      assert {:ok, %{name: "fresh"}} =
+               Skills.write(
+                 "fresh",
+                 "---\nname: fresh\ndescription: d\n---\n# F\n",
+                 target(vault)
+               )
+    end
+  end
+
+  describe "write/3 on a protected skill" do
+    @conventions "---\nname: vigil-vault-conventions\ndescription: d\n---\n# Obey\n"
+
+    test "is refused even with confirm: true, and points to editing it by hand" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+      {git, log} = CommitLog.recording(vault, [])
+      target = %{target(vault) | git: git}
+
+      assert {:error, msg} =
+               Skills.write("vigil-vault-conventions", @conventions, target, confirm: true)
+
+      assert msg =~ "vigil-vault-conventions is protected"
+      assert msg =~ ~s(docs/guide.md, "Editing by hand")
+
+      refute File.exists?(Path.join(vault, "skills/vigil-vault-conventions.md"))
+      assert CommitLog.calls(log) == []
+    end
+
+    test "is refused under its file name too, whether or not it exists yet" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+      path = Path.join(vault, "skills/vigil-vault-conventions.md")
+      File.write!(path, @conventions)
+
+      assert {:error, msg} =
+               Skills.write(
+                 " vigil-vault-conventions.md ",
+                 "---\nname: x\ndescription: x\n---\n",
+                 target(vault)
+               )
+
+      assert msg =~ "is protected"
+      assert File.read!(path) == @conventions
+    end
+
+    test "is still readable" do
+      vault = Vigil.FixtureVault.build()
+      on_exit(fn -> Vigil.FixtureVault.cleanup(vault) end)
+      File.write!(Path.join(vault, "skills/vigil-vault-conventions.md"), @conventions)
+
+      assert {:ok, %{content: content}} = Skills.read("vigil-vault-conventions", vault, @key)
+      assert content =~ "# Obey"
     end
   end
 

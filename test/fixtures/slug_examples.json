@@ -1,0 +1,132 @@
+[
+  {
+    "input": "Hello World",
+    "expected": "hello-world",
+    "why": "plain words"
+  },
+  {
+    "input": "Müller Straße",
+    "expected": "mueller-strasse",
+    "why": "umlaut and ß are transliterated"
+  },
+  {
+    "input": "ÄRGER über Öl",
+    "expected": "aerger-ueber-oel",
+    "why": "uppercase umlauts downcase first"
+  },
+  {
+    "input": "Größe",
+    "expected": "groesse",
+    "why": "ö and ß in one word"
+  },
+  {
+    "input": "\u1e9e",
+    "expected": "ss",
+    "why": "capital sharp s"
+  },
+  {
+    "input": "Mu\u0308ller",
+    "expected": "mueller",
+    "why": "NFD input is composed before transliteration"
+  },
+  {
+    "input": "Ærø, Øresund und Ålborg",
+    "expected": "aeroe-oeresund-und-aalborg",
+    "why": "Nordic letters"
+  },
+  {
+    "input": "ÅÆØ",
+    "expected": "aaaeoe",
+    "why": "Nordic capitals"
+  },
+  {
+    "input": "Łódź",
+    "expected": "lodz",
+    "why": "ł is transliterated, other marks stripped"
+  },
+  {
+    "input": "Đorđe",
+    "expected": "dorde",
+    "why": "đ"
+  },
+  {
+    "input": "Þór",
+    "expected": "thor",
+    "why": "þ"
+  },
+  {
+    "input": "Crème brûlée à la façon",
+    "expected": "creme-brulee-a-la-facon",
+    "why": "other diacritics are stripped"
+  },
+  {
+    "input": "Señor Niño",
+    "expected": "senor-nino",
+    "why": "tilde"
+  },
+  {
+    "input": "İstanbul",
+    "expected": "istanbul",
+    "why": "dotted capital I"
+  },
+  {
+    "input": "  --Hello!!!   World?? -- ",
+    "expected": "hello-world",
+    "why": "punctuation runs become one hyphen, ends trimmed"
+  },
+  {
+    "input": "C++ / Rust & Go",
+    "expected": "c-rust-go",
+    "why": "symbols"
+  },
+  {
+    "input": "2026-07-10 Race Day",
+    "expected": "2026-07-10-race-day",
+    "why": "digits and existing hyphens"
+  },
+  {
+    "input": "Ride 🚴 day",
+    "expected": "ride-day",
+    "why": "emoji"
+  },
+  {
+    "input": "The quick brown fox jumps over the lazy dog and keeps running far beyond the fence line",
+    "expected": "the-quick-brown-fox-jumps-over-the-lazy-dog-and-keeps-running-far-beyond-the",
+    "why": "over 80 characters: cut at the last hyphen"
+  },
+  {
+    "input": "Wöchentliche Übersicht der Trainingseinheiten für das Frühjahr und den Sommer — Längsschnitt",
+    "expected": "woechentliche-uebersicht-der-trainingseinheiten-fuer-das-fruehjahr-und-den",
+    "why": "the cut counts the transliterated slug"
+  },
+  {
+    "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx yz",
+    "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "why": "a hyphen at position 80 is cut with what follows"
+  },
+  {
+    "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx yz",
+    "expected": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "why": "no hyphen within 80 characters: a hard cut"
+  },
+  {
+    "input": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "why": "one long word"
+  },
+  {
+    "input": "!!!",
+    "expected": null,
+    "why": "nothing alphanumeric"
+  },
+  {
+    "input": "",
+    "expected": null,
+    "why": "empty"
+  },
+  {
+    "input": "   ",
+    "expected": null,
+    "why": "whitespace only"
+  }
+]

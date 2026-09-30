@@ -197,4 +197,39 @@ defmodule Vigil.MarkdownTest do
       assert Markdown.read("") == []
     end
   end
+
+  # docs/design.md, "How a file is written": a note written on Windows is
+  # read as LF with no mark, and written back as it came.
+  describe "decode/1 and encode/2" do
+    test "a byte order mark and CRLF endings are how a note is written, not what it says" do
+      assert Markdown.decode("\uFEFF---\r\ntype: decision\r\n---\r\n") ==
+               {"---\ntype: decision\n---\n", %{bom: true, crlf: true}}
+
+      assert Markdown.decode("---\ntype: decision\n") ==
+               {"---\ntype: decision\n", %{bom: false, crlf: false}}
+    end
+
+    test "the first line break decides whether a note is CRLF" do
+      assert {"a\nb\n", %{crlf: true}} = Markdown.decode("a\r\nb\n")
+      assert {"a\nb\n", %{crlf: false}} = Markdown.decode("a\nb\r\n")
+      assert {"\n", %{crlf: false}} = Markdown.decode("\n")
+    end
+
+    test "what decode reads, encode writes back byte for byte" do
+      for content <- ["\uFEFF# T\r\n\r\nBody\r\n", "# T\r\n", "\uFEFF# T\n", "# T\n"] do
+        {text, style} = Markdown.decode(content)
+        assert Markdown.encode(text, style) == content
+      end
+    end
+
+    test "text written back in a note's style takes the note's line endings, whatever it came with" do
+      assert Markdown.encode("a\r\nb\n", %{bom: false, crlf: true}) == "a\r\nb\r\n"
+      assert Markdown.encode("a\r\nb\n", %{bom: false, crlf: false}) == "a\nb\n"
+    end
+
+    test "a CRLF note's frontmatter is found once decoded" do
+      assert Markdown.frontmatter(Markdown.normalize("---\r\ntype: event\r\n---\r\n# T\r\n")) ==
+               {:ok, "type: event", ["# T"], 3}
+    end
+  end
 end

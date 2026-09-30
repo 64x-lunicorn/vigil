@@ -18,7 +18,7 @@ defmodule Vigil.MCP.Envelope.DecisionTest do
       {result, state} = Decision.for_tool("current", nil, @now, snapshot())
 
       assert %{"_t" => "13:20"} = result
-      assert state == %{active_ids: MapSet.new(), last_active: @now}
+      assert state == %{active_ids: MapSet.new()}
     end
   end
 
@@ -58,14 +58,14 @@ defmodule Vigil.MCP.Envelope.DecisionTest do
       active_ids = MapSet.new(["bike/via-carolina.md"])
       {_result, state} = Decision.for_tool("search", nil, @now, snapshot(active_ids: active_ids))
 
-      assert state == %{active_ids: active_ids, last_active: @now}
+      assert state == %{active_ids: active_ids}
     end
   end
 
   describe "for_tool/4 — later call, nothing changed" do
     test "same active_ids yields '_t'" do
       active_ids = MapSet.new(["bike/via-carolina.md"])
-      prev_state = %{active_ids: active_ids, last_active: DateTime.add(@now, -60)}
+      prev_state = %{active_ids: active_ids}
 
       {result, _state} =
         Decision.for_tool("search", prev_state, @now, snapshot(active_ids: active_ids))
@@ -76,7 +76,7 @@ defmodule Vigil.MCP.Envelope.DecisionTest do
 
   describe "for_tool/4 — phase change during the session" do
     test "newly active event names itself with its title, not the filename stem" do
-      prev_state = %{active_ids: MapSet.new(), last_active: DateTime.add(@now, -60)}
+      prev_state = %{active_ids: MapSet.new()}
       active_ids = MapSet.new(["bike/via-carolina.md"])
       titles = %{"bike/via-carolina.md" => "Via Carolina"}
 
@@ -92,7 +92,7 @@ defmodule Vigil.MCP.Envelope.DecisionTest do
     end
 
     test "newly inactive event reports 'now finished'" do
-      prev_state = %{active_ids: MapSet.new(["bike/via-carolina.md"]), last_active: @now}
+      prev_state = %{active_ids: MapSet.new(["bike/via-carolina.md"])}
       titles = %{"bike/via-carolina.md" => "Via Carolina"}
 
       {result, _state} =
@@ -107,26 +107,13 @@ defmodule Vigil.MCP.Envelope.DecisionTest do
     end
 
     test "a title missing from the snapshot's titles falls back to the path" do
-      prev_state = %{active_ids: MapSet.new(), last_active: @now}
+      prev_state = %{active_ids: MapSet.new()}
       active_ids = MapSet.new(["bike/via-carolina.md"])
 
       {result, _state} =
         Decision.for_tool("search", prev_state, @now, snapshot(active_ids: active_ids))
 
       assert %{"_!" => "bike/via-carolina.md now active"} = result
-    end
-  end
-
-  describe "for_tool/4 — a stale session is treated as a new one" do
-    test "more than 24h since last_active re-triggers the first-call header" do
-      prev_state = %{
-        active_ids: MapSet.new(["bike/via-carolina.md"]),
-        last_active: DateTime.add(@now, -25 * 3600)
-      }
-
-      {result, _state} = Decision.for_tool("search", prev_state, @now, snapshot())
-
-      assert %{"_" => _} = result
     end
   end
 end

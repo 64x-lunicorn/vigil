@@ -27,6 +27,12 @@ defmodule Mix.Tasks.Vigil.VaultCheck do
     # Dialyzer report a broken contract here and cascade it into no_return for
     # run/1. Same effect, no spec gap, nothing to add to .dialyzer_ignore.exs.
     :logger.set_primary_config(:level, :none)
+    Vigil.Stdio.utf8()
+
+    # config/runtime.exs is where VIGIL_EXCLUDE becomes the exclusion list, and
+    # a Mix task does not evaluate it unless asked: without this the check
+    # walked excluded directories on every real run, as slug_diff did.
+    Mix.Task.run("app.config")
 
     case args do
       # The vault is this task's argument and the exclusions are the

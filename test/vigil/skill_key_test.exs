@@ -57,4 +57,43 @@ defmodule Vigil.SkillKeyTest do
     token = SkillKey.current(@key)
     assert SkillKey.valid?(token, @key)
   end
+
+  # The key a deployment derives its tokens from is the SkillKey secret and
+  # nothing else: the consent password keys nothing whose output leaves the
+  # server, so the two rotate apart.
+  describe "key/1" do
+    setup do
+      %{settings: Vigil.OAuthCase.stated_settings()}
+    end
+
+    test "is the SkillKey secret and the window, not the consent password", %{
+      settings: settings
+    } do
+      assert SkillKey.key(settings) == %{
+               secret: settings.skillkey_secret,
+               window: settings.skillkey_ttl_seconds
+             }
+
+      refute SkillKey.key(settings).secret == settings.auth_password
+    end
+
+    test "changing the consent password leaves outstanding keys valid", %{settings: settings} do
+      now = 1_700_003_600
+      token = SkillKey.current(SkillKey.key(settings), now)
+
+      new_password = %{settings | auth_password: "a-different-consent-password"}
+
+      assert SkillKey.valid?(token, SkillKey.key(new_password), now)
+    end
+
+    test "rotating the SkillKey secret invalidates outstanding keys", %{settings: settings} do
+      now = 1_700_003_600
+      token = SkillKey.current(SkillKey.key(settings), now)
+
+      rotated = %{settings | skillkey_secret: Base.encode64(:crypto.strong_rand_bytes(48))}
+
+      refute SkillKey.valid?(token, SkillKey.key(rotated), now)
+      assert rotated.auth_password == settings.auth_password
+    end
+  end
 end

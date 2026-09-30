@@ -13,6 +13,7 @@ that turns a Markdown vault into long-term memory for AI assistants.
 [![Built with Elixir](https://img.shields.io/badge/built_with-Elixir-6e4a7e?style=flat-square)](mix.exs)
 [![MCP](https://img.shields.io/badge/MCP-2025--11--25-0ea5e9?style=flat-square)](https://modelcontextprotocol.io/specification/2025-11-25)
 [![Self-hosted](https://img.shields.io/badge/self--hosted-by_design-334155?style=flat-square)](#how-it-works)
+[![OpenSSF Scorecard](https://img.shields.io/ossf-scorecard/github.com/64x-lunicorn/vigil?label=openssf+scorecard&style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/64x-lunicorn/vigil)
 
 [Quickstart](#quickstart) &nbsp; / &nbsp;
 [Documentation](docs/README.md) &nbsp; / &nbsp;
@@ -42,9 +43,11 @@ inspect every change, and take them with you.
 
 > [!NOTE]
 > vigil is an early-stage, single-user project. It is not a multi-tenant service,
-> a general-purpose sync engine, or a replacement for backups. It assumes one
-> writer: vigil. Other vault clients should be read-only; deliberate edits go
-> through a clone, a push and `reload` (see the guide's *Editing by hand*).
+> a general-purpose sync engine, or a replacement for backups. vigil is the only
+> writer of its own working tree. You can edit the vault in Obsidian (with
+> Obsidian Git) or any editor in a clone of your own and push: vigil rebases
+> its own unpushed commits onto yours, never merges or overwrites them, and
+> leaves a real conflict for you to resolve (see the guide's *Editing by hand*).
 
 ## How it works
 
@@ -95,8 +98,8 @@ git -C "$DEMO_DIR/vault" config user.email "vigil@localhost"
 git -C "$DEMO_DIR/vault" config commit.gpgsign false
 
 bash scripts/init_vault.sh "$DEMO_DIR/vault"
-git -C "$DEMO_DIR/vault" remote add origin "$DEMO_DIR/upstream.git"
-git -C "$DEMO_DIR/vault" push -u origin main
+git -C "$DEMO_DIR/vault" remote add github "$DEMO_DIR/upstream.git"
+git -C "$DEMO_DIR/vault" push -u github main
 ```
 
 This is temporary storage, not a backup. Use a persistent vault and a private
@@ -105,12 +108,13 @@ remote for real notes.
 ### 3. Start vigil
 
 In the same terminal, replace the password placeholder with a unique password
-of at least 12 characters:
+of at least 12 characters. The SkillKey secret is random bytes, never chosen:
 
 ```bash
 export VIGIL_VAULT_PATH="$DEMO_DIR/vault"
 export VIGIL_STATE_DIR="$DEMO_DIR/oauth"
 export VIGIL_AUTH_PASSWORD='replace-with-your-own-local-password'
+export VIGIL_SKILLKEY_SECRET="$(openssl rand -base64 48)"
 
 mix run --no-halt
 ```
@@ -131,7 +135,9 @@ Add `http://localhost:4000/mcp` as a remote HTTP MCP server in a client that
 supports OAuth with PKCE. Complete the consent screen using the password above.
 Choose `vault:read` for read-only access or `vault` for read/write access.
 A cloud-hosted client cannot reach your machine's `localhost`; use the
-[server deployment guide](docs/guide.md#deploy-on-a-server) instead.
+[server deployment guide](docs/guide.md#deploy-on-a-server) instead, and
+[Connecting clients](docs/clients.md) for each client's steps and the
+Cloudflare Access policy it needs.
 
 Try asking your assistant:
 
@@ -187,12 +193,17 @@ Start with the [deployment guide](docs/guide.md#deploy-on-a-server), then read
 | Guide | Start here when you want to... |
 | :--- | :--- |
 | [User guide](docs/guide.md) | Understand vault structure, tools, safe writes and day-to-day operations. |
+| [Connecting clients](docs/clients.md) | Connect Claude.ai, Claude Desktop, Claude Code, ChatGPT or Cursor, and set up Cloudflare Access for them. |
 | [Design](docs/design.md) | Explore the architecture, trade-offs and deliberate non-goals. |
 | [CI/CD](docs/ci-cd.md) | Ship a version, see what guards `main` and releases, and run the same gate locally. |
 | [OAuth](docs/oauth.md) | Integrate a client or inspect the authentication flow. |
+| [Compatibility](docs/compatibility.md) | See what vigil 1.0 keeps stable — tools, settings, state, vault conventions, scripts — and how it deprecates. |
+| [Changelog](CHANGELOG.md) | Read what changed in each release, and what to do when upgrading. |
 | [Project history](docs/history.md) | Follow implementation decisions and lessons learned. |
 | [Contributing](CONTRIBUTING.md) | Set up development, run checks and submit a focused change. |
-| [Security policy](SECURITY.md) | Report a vulnerability privately or review deployment precautions. |
+| [Security policy](SECURITY.md) | Report a vulnerability privately, see supported versions and response targets, or review deployment precautions. |
+| [Code of Conduct](CODE_OF_CONDUCT.md) | How we treat each other in every project space. |
+| [Governance](GOVERNANCE.md) | Who decides, how, and what happens if the maintainer is gone. |
 
 ## Contributing
 

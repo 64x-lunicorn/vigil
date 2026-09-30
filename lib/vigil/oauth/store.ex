@@ -16,17 +16,33 @@ defmodule Vigil.OAuth.Store do
   value they are handed, and not the suite, which asks the same way. The one
   exception is `test/vigil/oauth/persistence_test.exs`, the contract suite,
   which starts this process to run every claim against these tables as well
-  as against `Vigil.OAuth.Persistence.Memory`. It is the only test that opens
-  a `:dets` file at all.
+  as against `Vigil.OAuth.Persistence.Memory`. Beside it, only the two suites
+  about the files themselves open a `:dets` file: the schema version and the
+  migration of state an earlier release wrote
+  (`test/vigil/oauth/store_schema_version_test.exs`,
+  `test/vigil/oauth/store_compatibility_test.exs`).
 
-  Everything below `over_tables/0` is private, the fourteen answers included.
+  Codes and tokens are kept under `Vigil.OAuth.Token.digest/1` of their
+  value, never the value: `{{:sha256, digest}, attrs}`. Hashing happens here,
+  before every write, lookup and delete, so a copy of the state dir holds no
+  credential and no caller ever handles a digest. Clients are kept under
+  their `client_id`, which is public. State written before that change is
+  rekeyed when the tables are opened, in `init/1`.
+
+  The state dir carries the version of its format, `schema_version/0`, in
+  `oauth_meta.dets` (docs/compatibility.md, "The OAuth state"). An older
+  version, or none, is migrated when the tables are opened; a newer one is
+  refused before anything is opened or rewritten, since what a later release
+  wrote is not this one's to guess at.
+
+  Everything below `over_tables/0` is private, the nineteen answers included.
   They are captured from inside this module, so the value is the only way to
   reach them and the sentence above is a fact rather than a convention.
   """
   use GenServer
   require Logger
 
-  alias Vigil.OAuth.{Code, Persistence, Token}
+  alias Vigil.OAuth.{Client, Code, Persistence, Token}
 
   @clients :oauth_clients
   @codes :oauth_codes
@@ -34,12 +50,22 @@ defmodule Vigil.OAuth.Store do
   @rate_limits :oauth_rate_limits
   @cimd_cache :oauth_cimd_cache
 
-  # The lockout's budget and window and the cache's hour belong to the
-  # contract, not to this adapter: the in-memory one has to measure them the
-  # same way for the claims in `test/vigil/oauth/persistence_test.exs` to mean
-  # one thing. How they are counted is this adapter's own.
-  @rate_limit_window Persistence.rate_limit_window()
-  @rate_limit_max_attempts Persistence.rate_limit_max_attempts()
+  # What the files under the state dir are, as a number a later release can
+  # tell apart (docs/compatibility.md, "The OAuth state"):
+  #
+  #   1  codes and tokens keyed by their raw value — 0.2.0 and before, which
+  #      wrote no version at all, so a state dir without one is read as this
+  #   2  codes and tokens keyed by `{:sha256, digest}` (#193)
+  #
+  # A change to a record's shape or a table's key that an older release could
+  # not read is a new number, with its migration in `init/1`.
+  @schema_version 2
+  @meta_file "oauth_meta.dets"
+
+  # The cache's hour belongs to the contract, not to this adapter: the
+  # in-memory one has to measure it the same way for the claims in
+  # `test/vigil/oauth/persistence_test.exs` to mean one thing. How it is
+  # counted is this adapter's own.
   @cimd_ttl Persistence.cimd_ttl()
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -49,7 +75,11 @@ defmodule Vigil.OAuth.Store do
     state_dir = Keyword.fetch!(opts, :state_dir)
 
     with :ok <- safe_mkdir_p(state_dir),
-         :ok <- open_dets_files(state_dir) do
+         {:ok, found} <- stored_schema_version(state_dir),
+         :ok <- readable(found),
+         :ok <- open_dets_files(state_dir),
+         :ok <- rekey_legacy_rows(state_dir, found),
+         :ok <- write_schema_version(state_dir) do
       for name <- [@rate_limits, @cimd_cache] do
         if :ets.whereis(name) == :undefined do
           :ets.new(name, [:set, :named_table, :public])
@@ -58,12 +88,90 @@ defmodule Vigil.OAuth.Store do
 
       {:ok, %{}}
     else
+      {:error, {:newer_schema_version, found}} = error ->
+        Logger.error(
+          "Vigil.OAuth.Store refuses #{state_dir}: its OAuth state is schema version #{found}, " <>
+            "written by a newer vigil, and this release reads versions up to #{@schema_version}. " <>
+            "Nothing was changed. Run the newer release again, or restore a backup of the " <>
+            "state dir taken before it was installed (docs/compatibility.md)."
+        )
+
+        {:stop, {:oauth_store_init_failed, elem(error, 1)}}
+
       {:error, reason} ->
         Logger.error("Vigil.OAuth.Store failed to start: #{inspect(reason)}")
         {:stop, {:oauth_store_init_failed, reason}}
     end
   end
 
+  @doc """
+  The version of the state dir's format this release writes, and the newest it
+  reads. Every older one is migrated when the tables are opened.
+  """
+  @spec schema_version() :: pos_integer()
+  def schema_version, do: @schema_version
+
+  # The version the state dir says it holds, read before any table is opened:
+  # `nil` for a state dir without one — empty, or written by 0.2.0 or before.
+  # Read-only, so a state dir this release refuses is left byte for byte.
+  #
+  # Sobelow: state_dir from the operator's configuration, the name from
+  # @meta_file.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp stored_schema_version(state_dir) do
+    path = Path.join(state_dir, @meta_file)
+
+    if File.exists?(path) do
+      case :dets.open_file(make_ref(), file: String.to_charlist(path), access: :read) do
+        {:ok, meta} ->
+          found = :dets.lookup(meta, :schema_version)
+          :ok = :dets.close(meta)
+
+          case found do
+            [{:schema_version, version}] -> {:ok, version}
+            [] -> {:ok, nil}
+          end
+
+        {:error, reason} ->
+          {:error, {:dets_open_failed, path, reason}}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp readable(nil), do: :ok
+
+  defp readable(version) when is_integer(version) and version in 1..@schema_version//1,
+    do: :ok
+
+  defp readable(version) when is_integer(version) and version > @schema_version,
+    do: {:error, {:newer_schema_version, version}}
+
+  defp readable(version), do: {:error, {:unknown_schema_version, version}}
+
+  # Written after every migration has run, so a boot interrupted before it
+  # finds the old version, or none, and migrates again.
+  #
+  # Sobelow: state_dir from the operator's configuration, the name from
+  # @meta_file.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp write_schema_version(state_dir) do
+    path = Path.join(state_dir, @meta_file)
+
+    with {:ok, meta} <- :dets.open_file(make_ref(), file: String.to_charlist(path), type: :set) do
+      File.chmod(path, 0o600)
+
+      result =
+        with :ok <- :dets.insert(meta, {:schema_version, @schema_version}), do: :dets.sync(meta)
+
+      :ok = :dets.close(meta)
+      result
+    end
+  end
+
+  # Sobelow: the operator's configured state_dir, never request input.
+  # sobelow_skip ["Traversal.FileModule"]
   defp safe_mkdir_p(path) do
     case File.mkdir_p(path) do
       :ok -> :ok
@@ -71,25 +179,115 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
+  @files [
+    {@clients, "oauth_clients.dets"},
+    {@codes, "oauth_codes.dets"},
+    {@tokens, "oauth_tokens.dets"}
+  ]
+
   defp open_dets_files(state_dir) do
-    files = [
-      {@clients, "oauth_clients.dets"},
-      {@codes, "oauth_codes.dets"},
-      {@tokens, "oauth_tokens.dets"}
-    ]
-
-    Enum.reduce_while(files, :ok, fn {name, filename}, :ok ->
-      path = Path.join(state_dir, filename)
-
-      case :dets.open_file(name, file: String.to_charlist(path), type: :set) do
-        {:ok, ^name} ->
-          File.chmod(path, 0o600)
-          {:cont, :ok}
-
-        {:error, reason} ->
-          {:halt, {:error, {:dets_open_failed, path, reason}}}
+    Enum.reduce_while(@files, :ok, fn {name, filename}, :ok ->
+      case open(name, Path.join(state_dir, filename)) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
       end
     end)
+  end
+
+  # Sobelow: state_dir from the operator's configuration, file names from
+  # @files.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp open(name, path, extra \\ []) do
+    case :dets.open_file(name, [file: String.to_charlist(path), type: :set] ++ extra) do
+      {:ok, ^name} ->
+        File.chmod(path, 0o600)
+        :ok
+
+      {:error, reason} ->
+        {:error, {:dets_open_failed, path, reason}}
+    end
+  end
+
+  # State written before hashing keyed each code and token by its raw value, a
+  # binary; a digest is `{:sha256, _}`, so the two cannot be mistaken for one
+  # another. Every binary key is rehashed in place on boot — the attrs are
+  # untouched — which keeps every client connected before the deploy
+  # connected: the token it holds is looked up by its digest and found.
+  #
+  # Deleting a row does not erase it: `:dets` reuses the space without
+  # zeroing it, so the old values would still be readable in the file. Every
+  # table of a state dir written before digests — version 1, or none — is
+  # therefore rewritten from its live rows alone.
+  #
+  # Which is decided by the version, not by whether a binary key was found: a
+  # boot interrupted after the rekey synced and before the rewrite leaves no
+  # binary key, and the raw values in the free space. The version is written
+  # last, so that boot is followed by one that still reads the old version,
+  # and rewrites.
+  #
+  # Idempotent: the new row goes in before the old one goes out, and a boot
+  # interrupted anywhere finds whatever is still binary and writes the same
+  # digest again. A boot that cannot write refuses to start rather than serve
+  # with credentials still on disk.
+  defp rekey_legacy_rows(state_dir, found) do
+    Enum.reduce_while([@codes, @tokens], :ok, fn table, :ok ->
+      with :ok <- rekey(table, for({key, _} = row <- all_rows(table), is_binary(key), do: row)),
+           :ok <- if(found in [nil, 1], do: rewrite(table, state_dir), else: :ok) do
+        {:cont, :ok}
+      else
+        {:error, reason} -> {:halt, {:error, {:rekey_failed, table, reason}}}
+      end
+    end)
+  end
+
+  defp rekey(_table, []), do: :ok
+
+  defp rekey(table, legacy) do
+    with :ok <- :dets.insert(table, for({key, attrs} <- legacy, do: {Token.digest(key), attrs})),
+         :ok <- delete_each(table, Enum.map(legacy, &elem(&1, 0))),
+         :ok <- :dets.sync(table) do
+      # A count, never a key: those keys were bearer credentials.
+      Logger.info("Vigil.OAuth.Store: rekeyed #{length(legacy)} #{table} rows to their digests")
+    end
+  end
+
+  defp delete_each(table, keys) do
+    Enum.reduce_while(keys, :ok, fn key, :ok ->
+      case :dets.delete(table, key) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  # Writes the table's live rows into a fresh file and moves it over the old
+  # one. `repair: :force` would do the same, but announces itself on stdout
+  # outside Logger; this says nothing it was not asked to.
+  defp rewrite(table, state_dir) do
+    {^table, filename} = List.keyfind(@files, table, 0)
+    path = Path.join(state_dir, filename)
+    fresh = path <> ".rekeyed"
+    rows = all_rows(table)
+
+    with :ok <- :dets.close(table),
+         :ok <- write_fresh(fresh, rows),
+         :ok <- File.rename(fresh, path) do
+      open(table, path)
+    end
+  end
+
+  # Sobelow: state_dir from the operator's configuration, file names from
+  # @files.
+  # sobelow_skip ["Traversal.FileModule"]
+  defp write_fresh(path, rows) do
+    File.rm(path)
+
+    with {:ok, fresh} <- :dets.open_file(make_ref(), file: String.to_charlist(path), type: :set) do
+      File.chmod(path, 0o600)
+      result = :dets.insert(fresh, rows)
+      :ok = :dets.close(fresh)
+      result
+    end
   end
 
   @impl true
@@ -107,15 +305,20 @@ defmodule Vigil.OAuth.Store do
     Persistence.new(
       put_client: &put_client/2,
       get_client: &get_client/1,
+      count_clients: &count_clients/0,
+      list_clients: &list_clients/0,
+      delete_client: &delete_client/1,
       put_code: &put_code/2,
       take_code: &take_code/1,
       put_token: &put_token/2,
       get_token: &get_token/1,
       delete_token: &delete_token/1,
       revoke_grant: &revoke_grant/1,
-      rate_limited?: &rate_limited?/2,
-      record_failure: &record_failure/2,
-      reset_rate_limit: &reset_rate_limit/1,
+      list_tokens: &list_tokens/0,
+      revoke_all: &revoke_all/0,
+      take_attempt: &take_attempt/3,
+      return_attempt: &return_attempt/1,
+      forget_attempts: &forget_attempts/1,
       cimd_cache_get: &cimd_cache_get/2,
       cimd_cache_put: &cimd_cache_put/3,
       sweep_expired: &sweep_expired/1
@@ -124,10 +327,7 @@ defmodule Vigil.OAuth.Store do
 
   ## Clients
 
-  defp put_client(client_id, attrs) do
-    :dets.insert(@clients, {client_id, attrs})
-    :dets.sync(@clients)
-  end
+  defp put_client(client_id, attrs), do: write(@clients, {client_id, attrs})
 
   defp get_client(client_id) do
     case :dets.lookup(@clients, client_id) do
@@ -136,19 +336,35 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
-  ## Authorization codes
+  defp count_clients, do: :dets.info(@clients, :size)
 
-  defp put_code(code, attrs) do
-    :dets.insert(@codes, {code, attrs})
-    :dets.sync(@codes)
+  defp list_clients, do: all_rows(@clients)
+
+  # The codes first: a code outstanding for a client that is gone would still
+  # redeem into a pair, since redemption checks the code, not the client.
+  defp delete_client(client_id) do
+    Enum.each(all_rows(@codes), fn {key, attrs} ->
+      if attrs.client_id == client_id, do: delete_key(@codes, key)
+    end)
+
+    delete_key(@clients, client_id)
   end
+
+  ## Authorization codes
+  #
+  # Kept under `Token.digest/1` of the code, never the code itself — hashed
+  # here, before every write, lookup and delete, so no caller holds a digest
+  # and no row holds a code.
+
+  defp put_code(code, attrs), do: write(@codes, {Token.digest(code), attrs})
 
   # Looks up and immediately deletes a code (one-time use).
   defp take_code(code) do
-    case :dets.lookup(@codes, code) do
-      [{^code, attrs}] ->
-        :dets.delete(@codes, code)
-        :dets.sync(@codes)
+    key = Token.digest(code)
+
+    case :dets.lookup(@codes, key) do
+      [{^key, attrs}] ->
+        delete_key(@codes, key)
         {:ok, attrs}
 
       [] ->
@@ -156,24 +372,20 @@ defmodule Vigil.OAuth.Store do
     end
   end
 
-  ## Tokens (access + refresh share a table)
+  ## Tokens (access + refresh share a table, keyed by digest like the codes)
 
-  defp put_token(token, attrs) do
-    :dets.insert(@tokens, {token, attrs})
-    :dets.sync(@tokens)
-  end
+  defp put_token(token, attrs), do: write(@tokens, {Token.digest(token), attrs})
 
   defp get_token(token) do
-    case :dets.lookup(@tokens, token) do
-      [{^token, attrs}] -> {:ok, attrs}
+    key = Token.digest(token)
+
+    case :dets.lookup(@tokens, key) do
+      [{^key, attrs}] -> {:ok, attrs}
       [] -> :error
     end
   end
 
-  defp delete_token(token) do
-    :dets.delete(@tokens, token)
-    :dets.sync(@tokens)
-  end
+  defp delete_token(token), do: delete_key(@tokens, Token.digest(token))
 
   # Deletes every token descended from one authorization grant.
   #
@@ -187,44 +399,70 @@ defmodule Vigil.OAuth.Store do
   defp revoke_grant(nil), do: :ok
 
   defp revoke_grant(grant_id) do
-    Enum.each(all_tokens(), fn {token, attrs} ->
-      if Token.grant_of(attrs) == grant_id, do: delete_token(token)
+    Enum.each(all_rows(@tokens), fn {key, attrs} ->
+      if Token.grant_of(attrs) == grant_id, do: delete_key(@tokens, key)
     end)
   end
 
-  ## Rate limiting (consent password attempts, per IP)
+  defp list_tokens, do: for({_digest, attrs} <- all_rows(@tokens), do: attrs)
 
-  defp rate_limited?(ip, now) do
-    case :ets.lookup(@rate_limits, ip) do
-      [{^ip, count, window_start}] ->
-        count >= @rate_limit_max_attempts and now - window_start <= @rate_limit_window
-
-      [] ->
-        false
-    end
-  end
-
-  defp record_failure(ip, now) do
-    case :ets.lookup(@rate_limits, ip) do
-      [{^ip, count, window_start}] when now - window_start <= @rate_limit_window ->
-        :ets.insert(@rate_limits, {ip, count + 1, window_start})
-
-      _ ->
-        :ets.insert(@rate_limits, {ip, 1, now})
+  # Codes too: one minted a moment ago would otherwise redeem into a fresh
+  # pair after everything else was revoked.
+  defp revoke_all do
+    for table <- [@tokens, @codes] do
+      :ok = :dets.delete_all_objects(table)
+      :ok = :dets.sync(table)
     end
 
     :ok
   end
 
-  defp reset_rate_limit(ip) do
-    :ets.delete(@rate_limits, ip)
+  # A write is stored or it is an error: `:dets.insert/2` answers
+  # `{:error, reason}` on a full disk or at the size limit, and the answer is
+  # handed back rather than dropped, so `Vigil.OAuth.Persistence.stored!/1`
+  # can refuse the request instead of handing out a value nobody can look up.
+  defp write(table, row) do
+    with :ok <- :dets.insert(table, row), do: :dets.sync(table)
+  end
+
+  defp delete_key(table, key) do
+    :dets.delete(table, key)
+    :dets.sync(table)
+  end
+
+  ## Consent password attempts
+  #
+  # One row per key: `{key, count, closes_at}`, the last instant the window
+  # still counts at. Every change is one atomic ETS operation, never a lookup
+  # followed by an insert: that let parallel attempts all read the same count
+  # and all be answered as if they were the only one.
+
+  # An elapsed window is first replaced by an empty one. `select_replace/2`
+  # matches on the old window's end, so of two attempts racing to open the new
+  # window only the first does; the second finds it open and counts in it.
+  # Then the attempt is counted, and the count it is answered is its own.
+  defp take_attempt(key, window, now) do
+    :ets.select_replace(@rate_limits, [
+      {{key, :_, :"$1"}, [{:<, :"$1", now}], [{{{:const, key}, 0, now + window}}]}
+    ])
+
+    :ets.update_counter(@rate_limits, key, {2, 1}, {key, 0, now + window})
+  end
+
+  # Floored at zero. A row the sweep took in the meantime is recreated as one
+  # that has already closed, which the next sweep takes again.
+  defp return_attempt(key) do
+    :ets.update_counter(@rate_limits, key, {2, -1, 0, 0}, {key, 0, 0})
+    :ok
+  end
+
+  defp forget_attempts(key) do
+    :ets.delete(@rate_limits, key)
     :ok
   end
 
   defp sweep_rate_limits(now) do
-    sweep_table(@rate_limits, fn {_ip, _count, window_start} ->
-      now - window_start > @rate_limit_window
-    end)
+    :ets.select_delete(@rate_limits, [{{:_, :_, :"$1"}, [{:<, :"$1", now}], [true]}])
   end
 
   ## CIMD cache (1h TTL, ephemeral)
@@ -266,27 +504,25 @@ defmodule Vigil.OAuth.Store do
   ## Janitor sweeps
 
   defp sweep_expired(now) do
-    Enum.each(all_codes(), fn {code, attrs} ->
-      if Code.expired?(attrs, now), do: delete_code(code)
+    Enum.each(all_rows(@clients), fn {client_id, attrs} ->
+      if Client.unused?(attrs, now), do: delete_key(@clients, client_id)
     end)
 
-    Enum.each(all_tokens(), fn {token, attrs} ->
-      if Token.expired?(attrs, now), do: delete_token(token)
+    Enum.each(all_rows(@codes), fn {key, attrs} ->
+      if Code.expired?(attrs, now), do: delete_key(@codes, key)
+    end)
+
+    Enum.each(all_rows(@tokens), fn {key, attrs} ->
+      if Token.expired?(attrs, now), do: delete_key(@tokens, key)
     end)
 
     sweep_rate_limits(now)
     sweep_cimd_cache(now)
   end
 
-  ## The folds the answers above are built on
+  ## The fold the answers above are built on
 
-  defp all_codes, do: :dets.foldl(fn {code, attrs}, acc -> [{code, attrs} | acc] end, [], @codes)
-
-  defp all_tokens,
-    do: :dets.foldl(fn {token, attrs}, acc -> [{token, attrs} | acc] end, [], @tokens)
-
-  defp delete_code(code) do
-    :dets.delete(@codes, code)
-    :dets.sync(@codes)
-  end
+  # Every row as stored, digest and all: what walks it deletes by the key it
+  # found rather than hashing it a second time.
+  defp all_rows(table), do: :dets.foldl(fn row, acc -> [row | acc] end, [], table)
 end

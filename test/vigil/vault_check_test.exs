@@ -584,4 +584,123 @@ defmodule Vigil.VaultCheckTest do
       assert Enum.any?(report.b6_consolidation, &(&1.path == note))
     end
   end
+
+  # docs/design.md, "A Markdown file that is not a note is reported". Obsidian
+  # creates a note wherever its user happens to be; one the layout does not
+  # call a note never reaches search, and this is where somebody is told.
+  describe "ignored Markdown files" do
+    setup %{vault: vault} do
+      for path <-
+            ~w(Dashboard.md domaina/deep/too-deep.md projects/loose.md
+               _templates/daily.md .obsidian/x.md .trash/old.md domaina/_drafts/x.md
+               geheim/deep/x.md skills/deep/x.md) do
+        abs = Path.join(vault, path)
+        File.mkdir_p!(Path.dirname(abs))
+        File.write!(abs, "# X\n")
+      end
+
+      :ok
+    end
+
+    test "a file at the wrong depth is a warning, with its reason", %{vault: vault} do
+      findings = VaultCheck.run(vault, ["geheim"]).b7_ignored_files
+
+      assert %{
+               path: "domaina/deep/too-deep.md",
+               reason: "wrong_depth",
+               severity: "warning",
+               message: message
+             } = Enum.find(findings, &(&1.path == "domaina/deep/too-deep.md"))
+
+      assert message =~ "ignores this file"
+      assert Enum.find(findings, &(&1.path == "projects/loose.md")).reason == "wrong_depth"
+    end
+
+    test "a file at the vault root is information, not a warning", %{vault: vault} do
+      findings = VaultCheck.run(vault, ["geheim"]).b7_ignored_files
+
+      assert %{reason: "root", severity: "info"} =
+               Enum.find(findings, &(&1.path == "Dashboard.md"))
+    end
+
+    test "files under underscore and dot directories, excluded ones and skills are not listed",
+         %{vault: vault} do
+      paths =
+        vault
+        |> VaultCheck.run(["geheim"])
+        |> Map.fetch!(:b7_ignored_files)
+        |> Enum.map(& &1.path)
+
+      assert paths == ["Dashboard.md", "domaina/deep/too-deep.md", "projects/loose.md"]
+    end
+
+    # init.sh reads the report through jq; a non-ASCII byte in a message has
+    # broken that before (#200).
+    test "every message is plain ASCII", %{vault: vault} do
+      for finding <- VaultCheck.run(vault, ["geheim"]).b7_ignored_files do
+        assert finding.message =~ ~r/\A[\x20-\x7E]*\z/, finding.path
+      end
+    end
+
+    test "a vault with nothing ignored lists nothing", %{vault: vault} do
+      for path <- ~w(Dashboard.md domaina/deep/too-deep.md projects/loose.md),
+          do: File.rm!(Path.join(vault, path))
+
+      assert VaultCheck.run(vault, ["geheim"]).b7_ignored_files == []
+    end
+  end
+
+  # docs/design.md, "A note that is not UTF-8 is skipped".
+  describe "encoding" do
+    test "a note that is not UTF-8 is named, and checked for nothing else", %{vault: vault} do
+      path = "domaina/windows-note.md"
+      File.write!(Path.join(vault, path), "# Caf\xE9\n\n## Gr\xF6\xDFe\nSee [[caf\xE9]].\n")
+
+      report = VaultCheck.run(vault)
+
+      assert report.b0_encoding == [
+               %{path: path, message: "not valid UTF-8, so the server skips this note"}
+             ]
+
+      refute Enum.any?(report.b1_frontmatter, &(&1.path == path))
+      refute Enum.any?(report.b3_chunk_diff.changes, &(&1.path == path))
+      assert Jason.encode!(report)
+    end
+
+    @tag :non_utf8_file_names
+    test "a note whose file name is not UTF-8 is named, and checked for nothing else", %{
+      vault: vault
+    } do
+      File.write!(Path.join(vault, "domaina/caf" <> <<0xE9>> <> ".md"), "# Cafe\n\n## Part\n")
+
+      report = VaultCheck.run(vault)
+
+      assert report.b0_encoding == [
+               %{
+                 path: "domaina/caf\\xE9.md",
+                 message: "file name is not valid UTF-8, so the server skips this note"
+               }
+             ]
+
+      assert Jason.encode!(report)
+    end
+
+    test "the frontmatter of a CRLF note and of a note with a byte order mark is read", %{
+      vault: vault
+    } do
+      File.write!(
+        Path.join(vault, "domaina/crlf-note.md"),
+        "---\r\ntype: reference\r\n---\r\n# C\r\n"
+      )
+
+      File.write!(
+        Path.join(vault, "domaina/bom-note.md"),
+        "\uFEFF---\ntype: reference\n---\n# B\n"
+      )
+
+      findings = VaultCheck.run(vault).b1_frontmatter
+
+      refute Enum.any?(findings, &(&1.path in ["domaina/crlf-note.md", "domaina/bom-note.md"]))
+    end
+  end
 end

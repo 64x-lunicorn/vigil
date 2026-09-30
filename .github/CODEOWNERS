@@ -1,6 +1,10 @@
-# Every file needs a reviewer. With "Require review from Code Owners" enabled
-# in the branch ruleset, this is what makes the review requirement real rather
-# than advisory.
+# Every file has an owner, so every pull request from someone else requests
+# the maintainer's review. vigil has one maintainer (GOVERNANCE.md), and the
+# branch ruleset follows the Solo model in docs/ci-cd.md: no required
+# approval and no code-owner review, because nobody can approve their own
+# pull request. What binds every merge, admins included, is the CI gate.
+# This file becomes enforcing only when a second maintainer joins and the
+# ruleset turns on "Require review from Code Owners".
 * @64x-lunicorn
 
 # The paths where a mistake is expensive and silent: these run as root on the

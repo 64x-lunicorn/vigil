@@ -24,7 +24,11 @@ server.
 
 This inventory reflects [`mix.lock`](mix.lock). Versions and declared licenses
 were checked against the locally installed Hex packages' metadata on
-2026-09-09. Optional dependencies absent from the lockfile are not included.
+2026-09-29. Optional dependencies absent from the lockfile are not included.
+The test suite fails when a locked package or version is missing here, or a
+package listed here is no longer locked
+(`test/vigil/third_party_notices_test.exs`), so a dependency bump updates this
+file in the same change.
 
 ### Runtime dependencies
 
@@ -41,7 +45,7 @@ you redistribute a build.
 | [plug_crypto](https://hex.pm/packages/plug_crypto/2.2.0) | 2.2.0 | Apache-2.0 |
 | [telemetry](https://hex.pm/packages/telemetry/1.4.2) | 1.4.2 | Apache-2.0 |
 | [thousand_island](https://hex.pm/packages/thousand_island/1.5.0) | 1.5.0 | MIT |
-| [tz](https://hex.pm/packages/tz/0.28.2) | 0.28.2 | Apache-2.0 |
+| [tz](https://hex.pm/packages/tz/0.28.4) | 0.28.4 | Apache-2.0 |
 | [websock](https://hex.pm/packages/websock/0.5.3) | 0.5.3 | MIT |
 | [yamerl](https://hex.pm/packages/yamerl/0.10.0) | 0.10.0 | BSD-2-Clause |
 | [yaml_elixir](https://hex.pm/packages/yaml_elixir/2.12.2) | 2.12.2 | MIT |
@@ -52,9 +56,9 @@ Hex lists yamerl's license as `BSD 2-Clause`; the table uses the SPDX identifier
 ### Development and CI dependencies
 
 Declared `only: [:dev, :test], runtime: false` in [`mix.exs`](mix.exs). They run
-the quality gate (formatting, static analysis, dependency auditing) and are
-**not** part of a `MIX_ENV=prod` release, so they are outside the scope of the
-redistribution note below.
+the quality gate (formatting, static analysis, security scanning, dependency
+auditing) and are **not** part of a `MIX_ENV=prod` release, so they are outside
+the scope of the redistribution note below.
 
 | Package | Locked version | Declared license |
 | :--- | :--- | :--- |
@@ -64,6 +68,7 @@ redistribution note below.
 | [erlex](https://hex.pm/packages/erlex/0.2.9) | 0.2.9 | Apache-2.0 |
 | [file_system](https://hex.pm/packages/file_system/1.1.1) | 1.1.1 | Apache-2.0 |
 | [mix_audit](https://hex.pm/packages/mix_audit/2.1.5) | 2.1.5 | BSD-3-Clause |
+| [sobelow](https://hex.pm/packages/sobelow/0.15.0) | 0.15.0 | Apache-2.0 |
 
 Dependencies are fetched by Mix and are not vendored into the source
 repository. This table is an attribution inventory, not a replacement for
@@ -78,6 +83,10 @@ Apache-licensed components rather than presenting an entire bundle as
 MIT-only. Check the actual artifacts you ship, including the Elixir/Erlang
 runtime and any operating-system packages; those are outside the Hex inventory
 above.
+
+The release tarballs published on GitHub carry this file and `LICENSE` at
+their root, and a CycloneDX SBOM beside them lists the packages, the Erlang/OTP
+runtime and the Elixir version each one bundles.
 
 Update this inventory when the lockfile or bundled third-party material
 changes. Your own vault content is separate from this software and is not

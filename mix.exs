@@ -48,9 +48,11 @@ defmodule Vigil.MixProject do
       {:yaml_elixir, "~> 2.9"},
       {:tz, "~> 0.28"},
       {:plug, "~> 1.16"},
+      {:telemetry, "~> 1.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
-      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.13", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -74,6 +76,9 @@ defmodule Vigil.MixProject do
         "format --check-formatted",
         "compile --warnings-as-errors --force",
         "credo --strict",
+        # Settings, skips and the exit threshold live in .sobelow-conf, so
+        # this line and the CI job run the same scan.
+        "sobelow",
         "cmd mix hex.audit",
         "deps.audit",
         # --warnings-as-errors here as well as on compile: elixirc_paths only
@@ -102,8 +107,19 @@ defmodule Vigil.MixProject do
   defp releases do
     [
       vigil: [
-        include_executables_for: [:unix]
+        include_executables_for: [:unix],
+        steps: [:assemble, &restrict_cookie/1]
       ]
     ]
+  end
+
+  # The cookie is all that distribution checks: whoever reads it can run code
+  # as the service user through the node's loopback port. Mix writes it under
+  # the umask, which leaves it readable by every account on the host, and
+  # rewrites it only when it is missing — so a rebuild with --overwrite keeps
+  # this mode, and the owner, who is the only reader bin/vigil needs, keeps it.
+  defp restrict_cookie(release) do
+    File.chmod!(Path.join([release.path, "releases", "COOKIE"]), 0o400)
+    release
   end
 end

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# scripts/lib.sh — shared library for setup.sh / init.sh / update.sh.
-# Sourced via `source "$(dirname "$0")/lib.sh"`; has no execution path of its
-# own.
+# scripts/lib.sh — shared library for the operator scripts: setup.sh,
+# init.sh, update.sh, grants.sh, rotate_secret.sh and push_pending.sh, and
+# for the shell suites that test them. Sourced via
+# `source "$(dirname "$0")/lib.sh"`; has no execution path of its own.
 #
-# Exit codes (identical across all three scripts):
+# Exit codes (identical across every script that sources it):
 #   0  success
 #   1  runtime error (unexpected — anything not explicitly 2/3/4)
 #   2  preflight failed — nothing was changed
@@ -37,9 +38,10 @@ NEXT_STEPS=()
 # to refuse the overrides outside its own test. They live here now, and that
 # refusal is gone.
 #
-# The defaults are the production install. Overriding them is what
-# scripts/test/verify_test.sh and scripts/test/update_test.sh do; nothing else
-# should.
+# The defaults are the production install. Overriding them is what the shell
+# suites do that drive the scripts against a temp directory — verify_test.sh,
+# update_test.sh, check_only_test.sh, git_settings_test.sh, grants_test.sh,
+# operator_secrets_test.sh and push_safety_net_test.sh; nothing else should.
 #
 # The *shell* names are unprefixed on purpose: `source_env_for_verify` does
 # `set -a; source "$ENV_FILE"`, and /etc/vigil/env owns the VIGIL_* namespace,
@@ -61,6 +63,10 @@ VAULT="${VIGIL_VAULT_DIR:-${STATE_DIR}/vault}"
 ENV_FILE="${VIGIL_ENV_FILE:-/etc/vigil/env}"
 # shellcheck disable=SC2034 # read by the sourcing script
 UNIT_FILE="${VIGIL_UNIT_FILE:-/etc/systemd/system/vigil.service}"
+# Where the push safety net's units go: beside the service's.
+SYSTEMD_DIR="$(dirname "$UNIT_FILE")"
+# The cron line the push safety net used to be, removed wherever it is found.
+OLD_PUSH_CRON_FILE="${VIGIL_PUSH_CRON_FILE:-/etc/cron.d/vigil-push-safety-net}"
 
 SERVICE="${VIGIL_SERVICE_NAME:-vigil}"
 SERVICE_USER="${VIGIL_SERVICE_USER:-vigil}"
@@ -74,9 +80,308 @@ CURRENT="${PREFIX}/current"
 # shellcheck disable=SC2034 # read by the sourcing script
 PREVIOUS_RELEASE_FILE="${PREFIX}/.previous_release"
 
-# What wait_until_healthy polls. Unauthenticated and answered before any token
-# exists, which is what makes it usable as a readiness probe.
-HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/.well-known/oauth-protected-resource}"
+# What wait_until_healthy polls: vigil's own health report, unauthenticated and
+# answered on this host only (docs/design.md, "The server stays in step with
+# the remote"). It answers 200 once the index is loaded and the writer
+# answers — a static metadata document answered as soon as the HTTP listener
+# was up, whatever state the vault was in.
+HEALTH_URL="${VIGIL_HEALTH_URL:-http://localhost:4000/healthz}"
+
+# 1 while the release being started is one this run goes *back* to — an
+# automatic rollback, `update.sh --rollback` — which may predate /healthz
+# (vigil 0.2 has none, and answers it 404). Such a release is taken as up
+# when /healthz is a 404 and its protected-resource metadata, the document
+# that release's own scripts waited for, answers. A release switched *to* has
+# /healthz, and a 404 there is a failure like any other.
+ACCEPT_PRE_HEALTHZ_RELEASE=0
+
+## ── The vault's remote and branch ────────────────────────────────────────
+#
+# Every pull and push names these two, and the env file is where a deployment
+# states them: VIGIL_GIT_REMOTE and VIGIL_GIT_BRANCH, read by the server and by
+# every script from there rather than repeated in each. A file that does not
+# state one gets the server's default (config/runtime.exs and
+# Vigil.Settings.Check), and this is the one place the scripts name those.
+DEFAULT_GIT_REMOTE="github"
+DEFAULT_GIT_BRANCH="main"
+
+# env_file_value <NAME> — what the env file sets NAME to, without the quotes a
+# value with a space is written in and without the backslashes env_line puts
+# inside them; empty when the line is missing. Read rather than sourced, so
+# that asking for one value does not bring the whole VIGIL_* namespace into
+# the calling shell.
+#
+# A caller that cannot read the file is a unit's process: systemd read it as
+# root (EnvironmentFile=) and exported every line, so the value is asked of
+# the environment instead — the same file, read by the one who may.
+env_file_value() {
+  if [ ! -r "$ENV_FILE" ]; then
+    printenv "$1" 2>/dev/null || true
+    return 0
+  fi
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 |
+    sed -e '/^".*"$/ {
+      s/^"\(.*\)"$/\1/
+      s/\\\([\\"$`]\)/\1/g
+    }'
+}
+
+# env_line <NAME> <value> — the line that sets NAME to value in the env file,
+# read back as that value by the three things that read the file: systemd's
+# EnvironmentFile=, `source` in these scripts (as root), and env_file_value.
+# A value of only the characters no shell or systemd treats specially is
+# written bare; anything else goes in double quotes with \, ", $ and ` escaped
+# — the four both bash and systemd unescape there, and the only four that
+# could end the quotes or run something when root sources the file. Not
+# `printf %q`: its \  and $'…' forms are bash's, and systemd and env_file_value
+# would read them as different values. A value with a line break is refused:
+# the file is one setting per line.
+env_line() {
+  local name="$1" value="$2"
+  case "$value" in
+    *$'\n'* | *$'\r'*)
+      err "${name}: a value with a line break cannot be written to the env file."
+      return 1
+      ;;
+  esac
+  if [[ "$value" =~ ^[A-Za-z0-9_./:,+=@%-]*$ ]]; then
+    printf '%s=%s\n' "$name" "$value"
+    return 0
+  fi
+  # sed rather than ${value//…}: how a replacement's backslashes are read
+  # changed between bash 3.2 and 5.2.
+  printf '%s="%s"\n' "$name" "$(printf '%s' "$value" | sed 's/[\\"$`]/\\&/g')"
+}
+
+# env_file_update <path> [--add-missing] — reads NAME=value lines on stdin
+# (env_line's) and puts each into the file: in place of the line that sets
+# NAME, or appended when none does. Every other line — the settings nobody
+# named, the comments — is kept as it was. With --add-missing a NAME the file
+# already sets keeps its line, and only the others are added.
+#
+# On stdin rather than as arguments so that a secret is never a word a trace
+# prints, and the tracing is off while the lines are in hand. Atomic, like
+# write_file_atomically: a temp file in the same directory, then mv. The new
+# file has the old one's mode and owner; a file that did not exist yet is
+# 0600 root:root, which is what /etc/vigil/env is.
+env_file_update() {
+  local path="$1" add_missing=0
+  [ "${2:-}" = "--add-missing" ] && add_missing=1
+  hide_trace
+  local line name i tmp mode owner
+  local names=() lines=() written=()
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    name="${line%%=*}"
+    if ! [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || [ "$name" = "$line" ]; then
+      err "env_file_update: not a NAME=value line (for ${path})."
+      show_trace
+      return 1
+    fi
+    names+=("$name")
+    lines+=("$line")
+    written+=(0)
+  done
+  if [ "${#names[@]}" -eq 0 ]; then
+    show_trace
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY RUN] set $(IFS=' ' && echo "${names[*]}") in ${path}, keeping every other line"
+    show_trace
+    return 0
+  fi
+
+  if [ -f "$path" ]; then
+    mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path")"
+    owner="$(stat -c '%u:%g' "$path" 2>/dev/null || stat -f '%u:%g' "$path")"
+  else
+    mode=0600
+    owner=0:0
+  fi
+
+  tmp="$(mktemp "${path}.XXXXXX")"
+  if [ -f "$path" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      name="${line%%=*}"
+      for i in "${!names[@]}"; do
+        [ "$line" != "$name" ] && [ "${names[$i]}" = "$name" ] || continue
+        if [ "$add_missing" = "1" ]; then
+          written[i]=1
+          break
+        fi
+        # A second line setting the same name is dropped: the value is the one
+        # line this call wrote, not one of two.
+        if [ "${written[$i]}" = "0" ]; then
+          printf '%s\n' "${lines[$i]}"
+          written[i]=1
+        fi
+        continue 2
+      done
+      printf '%s\n' "$line"
+    done <"$path" >"$tmp"
+  fi
+  for i in "${!names[@]}"; do
+    [ "${written[$i]}" = "0" ] && printf '%s\n' "${lines[$i]}" >>"$tmp"
+  done
+  chmod "$mode" "$tmp"
+  chown "$owner" "$tmp"
+  mv -f "$tmp" "$path"
+  show_trace
+}
+
+# vault_git_remote — the remote every pull and push names.
+vault_git_remote() {
+  local remote
+  remote="$(env_file_value VIGIL_GIT_REMOTE)"
+  echo "${remote:-$DEFAULT_GIT_REMOTE}"
+}
+
+# vault_git_branch [<vault>] — the branch every pull and push names. Unset, it
+# is the vault's checked-out branch when that tracks a branch on the remote,
+# and the default otherwise: the rule Vigil.Settings.Check applies at boot, so
+# a script and the server it serves never name two branches.
+vault_git_branch() {
+  local vault="${1:-$VAULT}"
+  local branch head
+  branch="$(env_file_value VIGIL_GIT_BRANCH)"
+  if [ -z "$branch" ]; then
+    head="$(as_vigil git -C "$vault" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    if [ -n "$head" ] &&
+      [ "$(as_vigil git -C "$vault" config "branch.${head}.remote" 2>/dev/null || true)" = "$(vault_git_remote)" ]; then
+      branch="$head"
+    fi
+  fi
+  echo "${branch:-$DEFAULT_GIT_BRANCH}"
+}
+
+# install_conventions_skill <vault> <template> <remote> <branch> — puts the
+# conventions skill into the vault as a commit of its own, named after the
+# template's file name, and pushes it. Prints `kept` when the vault already
+# holds one (an adopted vault's own, tuned by its owner, is never replaced),
+# `pushed` when the commit reached the remote, `committed` when only the push
+# failed, `failed` when there is no commit. The server refuses to write this skill through MCP (docs/design.md,
+# "skills/ — one repository, two systems"), so it arrives the way a hand edit
+# does: as a commit, before the server starts.
+install_conventions_skill() {
+  local vault="$1" template="$2" remote="$3" branch="$4"
+  local rel
+  rel="skills/$(basename "$template")"
+  if [ -f "${vault}/${rel}" ]; then
+    echo kept
+    return 0
+  fi
+  # Called in a command substitution, where `set -e` does not reach: each step
+  # says whether it worked.
+  if ! { as_vigil mkdir -p "${vault}/skills" &&
+    as_vigil tee "${vault}/${rel}" <"$template" >/dev/null &&
+    as_vigil git -C "$vault" add -- "$rel" &&
+    as_vigil git -C "$vault" -c user.name=vigil -c user.email=vigil@local -c commit.gpgsign=false \
+      commit -q -m "init: ${rel}" -- "$rel"; } >/dev/null 2>&1; then
+    echo failed
+    return 0
+  fi
+  if as_vigil git -C "$vault" push -q "$remote" "$branch" >/dev/null 2>&1; then
+    echo pushed
+  else
+    echo committed
+  fi
+}
+
+# The directories Obsidian keeps inside a vault that belong to the device it
+# runs on and never to the vault's history: `.obsidian/`, its settings and
+# plugins, and `.trash/`, where a note deleted with the trash setting at
+# "Obsidian trash" goes. Committed, Obsidian Git pushes both to every other
+# clone — one device's settings, and every note ever deleted.
+OBSIDIAN_LOCAL_DIRS=(.obsidian .trash)
+
+# ignore_obsidian_dirs <vault> <mode> — mode "check" | "apply". For each of
+# OBSIDIAN_LOCAL_DIRS the vault's .gitignore does not name, or the index still
+# tracks, prints one line: in "check" what would be done, changing nothing; in
+# "apply" what was done — the entry appended to .gitignore, the directory
+# removed from the index (its files stay on disk). Prints nothing when all are
+# in order. Commits nothing: what it stages is the caller's to commit.
+# Returns 1 when a change fails: it is called in a command substitution, where
+# `set -e` does not reach.
+#
+# A .gitignore names a directory in any of the four spellings that ignore it
+# at the vault's root — `.trash/`, `.trash`, `/.trash/`, `/.trash` — so one
+# written by hand is not given a second line.
+ignore_obsidian_dirs() {
+  local vault="$1" mode="$2"
+  local gitignore="${vault}/.gitignore"
+  local dir needs_append is_tracked
+
+  for dir in "${OBSIDIAN_LOCAL_DIRS[@]}"; do
+    needs_append=1
+    is_tracked=0
+    if [ -f "$gitignore" ] && grep -qxE -- "/?${dir//./[.]}/?" "$gitignore"; then
+      needs_append=0
+    fi
+    if as_vigil git -C "$vault" ls-files --error-unmatch -- "$dir" >/dev/null 2>&1; then
+      is_tracked=1
+    fi
+    [ "$needs_append" = "0" ] && [ "$is_tracked" = "0" ] && continue
+
+    if [ "$mode" = "check" ]; then
+      if [ "$needs_append" = "0" ]; then
+        echo "gitignore: remove the already-tracked ${dir} directory from the index (.gitignore names it already)"
+      else
+        echo "gitignore: add ${dir}/$(
+          [ "$is_tracked" = "1" ] && echo ", and remove the already-tracked ${dir} directory from the index"
+        )"
+      fi
+      continue
+    fi
+
+    if [ "$needs_append" = "1" ]; then
+      # shellcheck disable=SC2016 # $1/$2 are expanded by the inner bash -c, not here
+      as_vigil bash -c '
+        file="$1"
+        # A last byte that is not a newline survives the command substitution.
+        if [ -n "$(tail -c1 "$file" 2>/dev/null)" ]; then
+          printf "\n" >>"$file"
+        fi
+        printf "%s/\n" "$2" >>"$file"
+      ' _ "$gitignore" "$dir" || return 1
+    fi
+    if [ "$is_tracked" = "1" ]; then
+      as_vigil git -C "$vault" rm -r -q --cached -- "$dir" >/dev/null || return 1
+    fi
+    if [ "$needs_append" = "0" ]; then
+      echo "removed the already-tracked ${dir} directory from the index (.gitignore names it already)"
+    else
+      echo "added ${dir}/ to .gitignore$(
+        [ "$is_tracked" = "1" ] && echo " (and removed the already-tracked ${dir} directory from the index)"
+      )"
+    fi
+  done
+}
+
+# issuer_for_host <hostname> — the OAuth issuer for the public hostname an
+# operator gave: https://<hostname>. In prod the boot check refuses an issuer
+# that is not https (Vigil.Settings.Check), so a hostname that is missing, or
+# given as http://, is refused here with the boot check's words rather than
+# written into an env file the service then will not start on.
+issuer_for_host() {
+  local host="${1#https://}"
+  host="${host%/}"
+  case "$host" in
+    "")
+      err "VIGIL_ISSUER must be an https URL, and no public hostname was given (none is configured for cloudflared in /etc/cloudflared/config.yml either). Give the hostname the tunnel serves, e.g. vault.example.org."
+      return 1
+      ;;
+    http://*)
+      err "VIGIL_ISSUER must be an https URL, got \"${host}\". Give the hostname alone; it is served over https."
+      return 1
+      ;;
+    */* | *[[:space:]]*)
+      err "\"${host}\" is not a hostname: give it alone, e.g. vault.example.org."
+      return 1
+      ;;
+  esac
+  printf 'https://%s\n' "$host"
+}
 
 ## ── Logging ──────────────────────────────────────────────────────────────
 
@@ -117,6 +422,37 @@ step() {
 record_done() { DONE_ITEMS+=("$1"); }
 record_next_step() { NEXT_STEPS+=("$1"); }
 
+## ── Tracing and secrets ──────────────────────────────────────────────────
+#
+# --verbose is `set -x`, and a trace prints every word after expansion — a
+# token's, a secret's, every line of an env file that is sourced. Code that
+# holds one runs between hide_trace and show_trace: the first turns tracing
+# off without tracing itself, the second turns it back on if it was on. They
+# nest, so a function that hides its own work can be called from a stretch
+# that is hidden already, and only the outermost show_trace turns it back on.
+# A secret passed to a function is traced at the call, so the call has to be
+# inside the stretch too — not only the function's body.
+TRACE_HIDDEN=0
+TRACE_WAS_ON=0
+
+hide_trace() {
+  { local was_on=0; case "$-" in *x*) was_on=1 ;; esac; set +x; } 2>/dev/null
+  if [ "$TRACE_HIDDEN" -eq 0 ]; then
+    TRACE_WAS_ON="$was_on"
+  fi
+  TRACE_HIDDEN=$((TRACE_HIDDEN + 1))
+}
+
+show_trace() {
+  if [ "$TRACE_HIDDEN" -gt 0 ]; then
+    TRACE_HIDDEN=$((TRACE_HIDDEN - 1))
+  fi
+  if [ "$TRACE_HIDDEN" -eq 0 ] && [ "$TRACE_WAS_ON" = "1" ]; then
+    set -x
+  fi
+  return 0
+}
+
 ## ── Error trap ───────────────────────────────────────────────────────────
 
 error_trap() {
@@ -129,8 +465,10 @@ trap 'error_trap $? $LINENO' ERR
 
 ## ── Final summary (always runs, including on abort) ──────────────────────
 
+# summary [rc] — the exit code comes from the caller when it has one: update.sh
+# runs its own cleanup in the EXIT trap first, and hands on the code it saw.
 summary() {
-  local rc=$?
+  local rc="${1:-$?}"
   local duration=$(( $(date +%s) - SCRIPT_START ))
   local minutes=$(( duration / 60 ))
   local seconds=$(( duration % 60 ))
@@ -172,7 +510,11 @@ trap summary EXIT
 
 ## ── Helpers ──────────────────────────────────────────────────────────────
 
+# require_root "<the arguments the script was given>" — the hint repeats the
+# command, so a caller passes every argument it was run with. Joined with a
+# space: the IFS these scripts set would put each on a line of its own.
 require_root() {
+  local IFS=' '
   if [ "$(id -u)" -ne 0 ]; then
     err "This script must run as root. Fix: sudo $0 $*"
     exit 2
@@ -231,23 +573,28 @@ confirm_destructive() {
 }
 
 # as_vigil <cmd...>  — e.g. as_vigil git -C "$VAULT" fetch
-#                        or   as_vigil bash -c 'cd ... && mix test'
+#                        or   as_vigil bash -c 'cd "$1" && mix test' _ "$REPO"
 # Always starts from the service account's home (the state dir), never from the caller's
 # cwd. root often runs these scripts from directories vigil cannot access
 # (/root/... for instance); without an explicit cd even a plain "git
 # --version" fails with "Permission denied" while stat'ing the inherited
 # working directory.
+#
+# runuser rather than `su -c`: the command and its arguments are handed over
+# as words, never joined into a string a shell parses again, so a value with
+# a quote in it stays one argument. The inner bash is a fixed script that
+# only changes directory; what it runs arrives as "$@". A caller that needs a
+# shell of its own passes values the same way: as arguments after the
+# script, never spliced into it.
 as_vigil() {
-  local quoted
-  quoted="$(printf '%q ' "$@")"
   # LANG/LC_ALL: without a UTF-8 locale the BEAM (mix test, mix release)
   # treats filenames as raw bytes instead of Unicode — vault fixtures with
   # non-ASCII names then fail with "no such file or directory" on a path
   # File.ls itself just returned. C.UTF-8 is part of glibc, no locale-gen
   # needed.
-  local quoted_home
-  quoted_home="$(printf '%q' "$STATE_DIR")"
-  su -s /bin/bash -c "cd ${quoted_home} && LANG=C.UTF-8 LC_ALL=C.UTF-8 ${quoted}" "$SERVICE_USER"
+  # shellcheck disable=SC2016 # $1 and $@ are expanded by the inner bash
+  runuser -u "$SERVICE_USER" -- env LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+    bash -c 'cd -- "$1" || exit; shift; exec "$@"' as_vigil "$STATE_DIR" "$@"
 }
 
 # run_step "<description>" -- <cmd...>  — honours --dry-run consistently.
@@ -278,13 +625,52 @@ write_file_atomically() {
   mv -f "$tmp" "$path"
 }
 
+# generate_secret — 48 random bytes, base64: what init.sh makes both
+# VIGIL_AUTH_PASSWORD and VIGIL_SKILLKEY_SECRET of, one call each, so the two
+# are never the same value. 48 rather than the 32 the boot check asks the
+# SkillKey secret for, and one 64-character line with no padding: nothing in
+# it that systemd's EnvironmentFile or `source` would read differently.
+# Printed to stdout — the caller captures it, and it never reaches log/warn/err.
+generate_secret() {
+  openssl rand -base64 48
+}
+
+# start_service <start|restart> — starts the service, or restarts it, after
+# clearing systemd's count of its failed starts. deploy/vigil.service gives up
+# after StartLimitBurst failed starts within StartLimitIntervalSec, and with
+# Restart=on-failure and RestartSec=1 a release that crashes on boot uses them
+# all up by itself inside the 30s health wait; every start after that — the
+# automatic rollback's, the next run's — would be refused, and the service
+# left down. What a start then does is wait_until_healthy's to judge, so a
+# caller that has a way back runs this as `start_service start || true`.
+start_service() {
+  systemctl reset-failed "$SERVICE" >/dev/null 2>&1 || true
+  systemctl "$1" "$SERVICE"
+}
+
+# health_answers — whether the service answers healthy right now: /healthz at
+# 200, or, for a release ACCEPT_PRE_HEALTHZ_RELEASE allows, a /healthz that is
+# not there (404) beside metadata that is. Asked for the status code rather
+# than with -f, which cannot tell a 404 from a connection refused.
+health_answers() {
+  local status
+  status="$(curl -o /dev/null -s -w '%{http_code}' "$HEALTH_URL" 2>/dev/null || true)"
+  [ "$status" = "200" ] && return 0
+  if [ "$status" != "404" ] || [ "$ACCEPT_PRE_HEALTHZ_RELEASE" != "1" ]; then
+    return 1
+  fi
+  status="$(curl -o /dev/null -s -w '%{http_code}' \
+    "${HEALTH_URL%/healthz}/.well-known/oauth-protected-resource" 2>/dev/null || true)"
+  [ "$status" = "200" ]
+}
+
 # wait_until_healthy — waits up to 30s for the local endpoint to answer.
 # Required after every systemctl start/restart, BEFORE anything tries to talk
 # to the node (bearer call or `bin/vigil rpc`) — otherwise that fails with
 # "noconnection"/connection refused because the BEAM has not finished booting.
 wait_until_healthy() {
   local i=0
-  while ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; do
+  while ! health_answers; do
     i=$((i + 1))
     if [ "$i" -ge 30 ]; then
       err "Service did not become healthy within 30s. journalctl -u ${SERVICE} -n 50:"
@@ -294,6 +680,118 @@ wait_until_healthy() {
     sleep 1
   done
   ok "Service is up and answering."
+}
+
+## ── The systemd unit's sandbox (shared by setup.sh/update.sh) ────────────
+
+# The highest exposure `systemd-analyze security` may give the unit, in the
+# tenths --threshold counts in: 30 is 3.0. The target is recorded in
+# docs/guide.md (Security model); a unit above it is not installed.
+UNIT_EXPOSURE_THRESHOLD=30
+
+# check_unit_exposure <unit file> — scores the file itself (--offline), so a
+# unit can be judged before it replaces the installed one. Returns 1, and
+# prints the report's worst lines, when the score is above the threshold or
+# systemd-analyze cannot score it at all.
+check_unit_exposure() {
+  local unit="$1" report
+  if report="$(systemd-analyze security --offline=true --threshold="$UNIT_EXPOSURE_THRESHOLD" "$unit" 2>&1)"; then
+    ok "systemd-analyze security: $(echo "$report" | tail -1)"
+    return 0
+  fi
+  err "systemd-analyze security scores the unit above $((UNIT_EXPOSURE_THRESHOLD / 10)).$((UNIT_EXPOSURE_THRESHOLD % 10)):"
+  echo "$report" | tail -25 >&2
+  return 1
+}
+
+## ── The push safety net (shared by init.sh/update.sh) ────────────────────
+
+# The units that make it, all from deploy/: the push itself, the timer that
+# starts it, and the notification its OnFailure= starts.
+PUSH_UNITS=(vigil-push.service vigil-push.timer vigil-notify@.service)
+
+# The units are taken in two steps, so that a caller can take them before it
+# runs any code that is not its own, and install them only once it is sure it
+# wants them:
+#
+#   prepare_push_units <deploy dir> — copies the three units into a directory
+#     of root's own (PUSH_UNITS_CANDIDATE), and judges the copies there: the
+#     push unit and the timer are verified and the push unit's sandbox scored,
+#     as update.sh does for the service's unit, and the notification template
+#     must run as a dynamic user — it is started by every failure, and nothing
+#     scores it. Returns 1 then, having installed nothing. The checkout the
+#     units come from belongs to the service account, whose `mix` runs every
+#     dependency's code: a copy taken before that is one nothing it ran can
+#     have changed.
+#   install_push_units — installs the prepared copies, removes the cron file
+#     they replace, and enables the timer.
+#
+# install_push_timer <deploy dir> is both at once. Idempotent: init.sh runs
+# the pair once, update.sh on every update, which is how a host set up with
+# the cron line moves over.
+PUSH_UNITS_CANDIDATE=""
+
+prepare_push_units() {
+  local source_dir="$1" candidate_dir unit analysis unexpected notify
+  PUSH_UNITS_CANDIDATE=""
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY RUN] verify ${PUSH_UNITS[*]} from ${source_dir}, score vigil-push.service"
+    return 0
+  fi
+
+  candidate_dir="$(mktemp -d)"
+  for unit in "${PUSH_UNITS[@]}"; do
+    cp "${source_dir}/${unit}" "${candidate_dir}/${unit}"
+  done
+  # The candidate directory first in the unit path, so OnFailure='s template
+  # and the timer's service are found among the candidates. Same filter as
+  # setup.sh: a missing executable is expected on a host whose code checkout
+  # is not in place yet, anything else is not.
+  analysis="$(SYSTEMD_UNIT_PATH="${candidate_dir}:" systemd-analyze verify \
+    "${candidate_dir}/vigil-push.service" "${candidate_dir}/vigil-push.timer" 2>&1 || true)"
+  unexpected="$(echo "$analysis" | grep -v -E "Executable .* does not exist|is not executable: No such file or directory|^$" || true)"
+  if [ -n "$unexpected" ]; then
+    rm -rf "$candidate_dir"
+    err "systemd-analyze verify reports problems with the push safety net's units:"
+    echo "$unexpected" >&2
+    return 1
+  fi
+  if ! check_unit_exposure "${candidate_dir}/vigil-push.service"; then
+    rm -rf "$candidate_dir"
+    return 1
+  fi
+  notify="${candidate_dir}/vigil-notify@.service"
+  if ! grep -qx 'DynamicUser=yes' "$notify" || grep -qE '^(User|Group)=' "$notify"; then
+    rm -rf "$candidate_dir"
+    err "vigil-notify@.service does not run as a dynamic user (DynamicUser=yes, no User= or Group=), as the one deploy/ ships does."
+    return 1
+  fi
+  PUSH_UNITS_CANDIDATE="$candidate_dir"
+}
+
+install_push_units() {
+  local unit
+  if [ "$DRY_RUN" = "1" ]; then
+    log "[DRY RUN] install ${PUSH_UNITS[*]} into ${SYSTEMD_DIR}, remove ${OLD_PUSH_CRON_FILE}, enable vigil-push.timer"
+    return 0
+  fi
+  for unit in "${PUSH_UNITS[@]}"; do
+    install -m 0644 "${PUSH_UNITS_CANDIDATE}/${unit}" "${SYSTEMD_DIR}/${unit}"
+  done
+  rm -rf "$PUSH_UNITS_CANDIDATE"
+  PUSH_UNITS_CANDIDATE=""
+  if [ -e "$OLD_PUSH_CRON_FILE" ]; then
+    rm -f "$OLD_PUSH_CRON_FILE"
+    ok "Removed the push safety net's cron file (${OLD_PUSH_CRON_FILE})."
+  fi
+  systemctl daemon-reload
+  systemctl enable --now vigil-push.timer >/dev/null
+  ok "Push safety net: vigil-push.timer enabled, failures start vigil-notify@vigil-push.service."
+}
+
+install_push_timer() {
+  prepare_push_units "$1" || return 1
+  install_push_units
 }
 
 ## ── Token bootstrap (shared by init.sh/update.sh) ────────────────────────
@@ -317,12 +815,13 @@ wait_until_healthy() {
 # `mix vigil.seed_token` does — and `Vigil.ScriptCallsTest` holds its arity to
 # the one `Vigil.OAuth.Token` exports, which is how it fell behind once already.
 #
-# An optional third argument is the lifetime in seconds, ten years by default.
-# The tokens init.sh prints for the owner keep the default; the pair update.sh
-# mints only to run verify() gets minutes, so updates do not pile up live
-# full-access tokens nobody holds.
+# An optional third argument is the lifetime in seconds, 90 days by default —
+# the same default as `mix vigil.seed_token`. The tokens init.sh prints for
+# the owner keep the default; the ones init.sh --keep-token and update.sh mint
+# only to run verify() get minutes, so nobody piles up live full-access tokens
+# nobody holds. Any of them can be revoked early with scripts/grants.sh.
 vigil_seed_token() {
-  local resource="$1" scope="$2" ttl_seconds="${3:-315360000}"
+  local resource="$1" scope="$2" ttl_seconds="${3:-7776000}"
   if systemctl is-active --quiet "$SERVICE"; then
     local ausdruck
     ausdruck="IO.puts(Vigil.OAuth.Token.issue_out_of_band(Vigil.OAuth.Store.over_tables(), \"${resource}\", \"${scope}\", String.to_integer(\"${ttl_seconds}\"), System.system_time(:second)))"
@@ -335,6 +834,49 @@ vigil_seed_token() {
 }
 
 ## ── MCP calls used by verify() ───────────────────────────────────────────
+
+# curl_config_string <value> — value as a double-quoted string in curl's
+# config syntax: \\ and \" escaped, a line break written as \n, which curl
+# reads back as one.
+curl_config_string() {
+  printf '"%s"' "$(printf '%s\n' "$1" | sed 's/[\\"]/\\&/g' | awk 'NR > 1 { printf "\\n" } { printf "%s", $0 }')"
+}
+
+# mcp_post <base_url> <token> <body> [<session_id>] [<curl option>...] — POSTs
+# a JSON-RPC body to /mcp with the token as the bearer.
+#
+# The token, the session id and the body (which carries the SkillKey) reach
+# curl as a config on its stdin (`-K -`), never as arguments: a process's
+# argument vector is readable by every local user in `ps` and /proc. The
+# tracing is off while they are in hand; the caller's call is its own to hide.
+mcp_post() {
+  local base_url="$1" token="$2" body="$3" session_id="${4:-}"
+  shift 3
+  [ $# -gt 0 ] && shift
+  hide_trace
+  local rc=0
+  {
+    printf 'header = %s\n' "$(curl_config_string "Authorization: Bearer ${token}")"
+    if [ -n "$session_id" ]; then
+      printf 'header = %s\n' "$(curl_config_string "mcp-session-id: ${session_id}")"
+    fi
+    printf 'data-binary = %s\n' "$(curl_config_string "$body")"
+  } | curl -K - -fsS -X POST -H "Content-Type: application/json" "$@" "${base_url}/mcp" || rc=$?
+  show_trace
+  return "$rc"
+}
+
+# mcp_session <base_url> <token>  → prints the Mcp-Session-Id `initialize`
+# issues for <token>. A tool call is made in a session, a session is bound to
+# the token that initialized it, and an id the server did not issue is a 404 —
+# so every call starts its own, the way a client does after a restart.
+mcp_session() {
+  local base_url="$1" token="$2"
+  mcp_post "$base_url" "$token" \
+    '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"vigil-verify","version":"0"}}}' \
+    "" -o /dev/null -D - |
+    tr -d '\r' | awk 'tolower($1) == "mcp-session-id:" { print $2; exit }'
+}
 
 # mcp_call <base_url> <token> <tool> [<json_args>]  → prints the raw JSON-RPC
 # response on stdout.
@@ -354,12 +896,12 @@ mcp_call() {
   if [ -z "$args" ]; then
     args="{}"
   fi
-  local session_id="verify-$$-${RANDOM}"
-  curl -fsS -X POST "${base_url}/mcp" \
-    -H "Authorization: Bearer ${token}" \
-    -H "Content-Type: application/json" \
-    -H "mcp-session-id: ${session_id}" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}"
+  local session_id
+  session_id="$(mcp_session "$base_url" "$token")" || return 1
+  [ -n "$session_id" ] || return 1
+  mcp_post "$base_url" "$token" \
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"${tool}\",\"arguments\":${args}}}" \
+    "$session_id"
 }
 
 # True for a tool-level isError:true AND for a JSON-RPC-level error (a parse
@@ -387,8 +929,9 @@ mcp_error_text() {
 #
 # Expects to be set: VIGIL_VAULT, VIGIL_RW_TOKEN, VIGIL_RO_TOKEN,
 # VIGIL_RESOURCE (public MCP endpoint URL, e.g. https://vault.example.org/mcp),
-# VIGIL_LOCAL_URL (e.g. http://localhost:4000), VIGIL_GIT_REMOTE,
-# VIGIL_ALLOW_UNPROTECTED (0/1).
+# VIGIL_LOCAL_URL (e.g. http://localhost:4000), VIGIL_ALLOW_UNPROTECTED (0/1).
+# The vault's remote and branch are read from the env file, like everywhere
+# else (vault_git_remote, vault_git_branch).
 # Returns 0 when every mandatory check passes, 1 otherwise.
 
 # Each check is a function of its own: it prints its verdict and answers 0 or
@@ -457,10 +1000,12 @@ verify_local_call_answers() {
 
 # 4. Git remote reachable
 verify_git_remote_reachable() {
-  if as_vigil git -C "$VIGIL_VAULT" ls-remote "$VIGIL_GIT_REMOTE" >/dev/null 2>&1; then
-    echo "  ✓ [4] git ls-remote ${VIGIL_GIT_REMOTE} succeeded"
+  local remote
+  remote="$(vault_git_remote)"
+  if as_vigil git -C "$VIGIL_VAULT" ls-remote "$remote" >/dev/null 2>&1; then
+    echo "  ✓ [4] git ls-remote ${remote} succeeded"
   else
-    echo "  ✗ [4] git ls-remote ${VIGIL_GIT_REMOTE} failed — host key or deploy key missing"
+    echo "  ✗ [4] git ls-remote ${remote} failed — host key or deploy key missing"
     return 1
   fi
 }
@@ -571,8 +1116,9 @@ verify_write_and_push() {
 
 # 8. No pending local commits
 verify_nothing_unpushed() {
-  local pending
-  pending="$(as_vigil git -C "$VIGIL_VAULT" rev-list --count "${VIGIL_GIT_REMOTE}/main..main" 2>/dev/null || echo "?")"
+  local pending branch
+  branch="$(vault_git_branch "$VIGIL_VAULT")"
+  pending="$(as_vigil git -C "$VIGIL_VAULT" rev-list --count "$(vault_git_remote)/${branch}..${branch}" 2>/dev/null || echo "?")"
   if [ "$pending" = "0" ]; then
     echo "  ✓ [8] No pending local commits in the vault"
   else
@@ -663,6 +1209,25 @@ verify_survives_write_error() {
   [ "$check12_ok" = "1" ]
 }
 
+# 13. /healthz answers 200: the index is loaded and the writer answers. Asked
+# of the local URL, since it answers nowhere else.
+#
+# A release gone back to may predate /healthz (ACCEPT_PRE_HEALTHZ_RELEASE):
+# there a 404 is that release's answer, and its metadata document stands in.
+verify_healthz() {
+  local status
+  status="$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_LOCAL_URL}/healthz" || echo "000")"
+  if [ "$status" = "200" ]; then
+    echo "  ✓ [13] /healthz answers 200 — index loaded, writer answers"
+  elif [ "$status" = "404" ] && [ "$ACCEPT_PRE_HEALTHZ_RELEASE" = "1" ] &&
+    [ "$(curl -o /dev/null -s -w '%{http_code}' "${VIGIL_LOCAL_URL}/.well-known/oauth-protected-resource" || echo "000")" = "200" ]; then
+    echo "  ✓ [13] No /healthz (a release before it) — its protected-resource metadata answers 200"
+  else
+    echo "  ✗ [13] /healthz answers ${status} instead of 200 — curl -s ${VIGIL_LOCAL_URL}/healthz says which part is down"
+    return 1
+  fi
+}
+
 # The checks, in the order they run. Named here so the list is one thing rather
 # than a sequence buried in a 210-line function — and so a test can ask for the
 # list rather than repeat it.
@@ -679,11 +1244,16 @@ VIGIL_VERIFY_CHECKS=(
   verify_read_only_token_refused
   verify_no_domain_drift
   verify_survives_write_error
+  verify_healthz
 )
 
 verify() {
   local all_ok=1
   local check
+
+  # Every check hands the tokens to a function, and a trace would print them
+  # at each call. The verdicts are echoed, so --verbose loses nothing it needs.
+  hide_trace
 
   echo
   echo "=== verify() ==="
@@ -697,9 +1267,9 @@ verify() {
   echo
   if [ "$all_ok" = "1" ]; then
     ok "verify(): all mandatory checks passed."
-    return 0
   else
     err "verify(): at least one mandatory check failed."
-    return 1
   fi
+  show_trace
+  [ "$all_ok" = "1" ]
 }

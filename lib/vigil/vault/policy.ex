@@ -20,6 +20,7 @@ defmodule Vigil.Vault.Policy do
   """
 
   alias Vigil.{Index, Markdown, Slug}
+  alias Vigil.Parser.Chunk
   alias Vigil.Vault.{Decision, Facts, Frontmatter, Layout}
 
   @type op ::
@@ -123,6 +124,7 @@ defmodule Vigil.Vault.Policy do
 
     with :ok <- section_id_writable(id, facts),
          {:ok, chunk} <- section_chunk(id, facts, "replaced"),
+         :ok <- if_match(chunk, id, Map.get(request, :if_match)),
          :ok <- replacement_content(Map.fetch!(request, :content)) do
       {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
@@ -132,7 +134,8 @@ defmodule Vigil.Vault.Policy do
     id = Map.fetch!(request, :id)
 
     with :ok <- section_id_writable(id, facts),
-         {:ok, chunk} <- section_chunk(id, facts, "deleted") do
+         {:ok, chunk} <- section_chunk(id, facts, "deleted"),
+         :ok <- if_match(chunk, id, Map.get(request, :if_match)) do
       {:ok, %Decision.Section{path: chunk.path, chunk: chunk}}
     end
   end
@@ -147,6 +150,7 @@ defmodule Vigil.Vault.Policy do
     with {:ok, from_candidate, _changed?} <- canonical(from),
          {:ok, normalized_from} <- existing_note(from_candidate, facts),
          content = note_content(normalized_from, facts),
+         :ok <- utf8(normalized_from, content),
          {:ok, normalized_to, _changed?} <- canonical(to),
          {:ok, domain, _create_dir} <- writable_path(normalized_to, facts, false),
          :ok <- naming_convention(normalized_to, domain, content, facts),
@@ -155,7 +159,12 @@ defmodule Vigil.Vault.Policy do
       # No project directory to create: the move asks `writable_path/3` with
       # directory creation switched off, and `Vigil.Store` creates one for
       # `:create` alone.
-      {:ok, %Decision.MoveNote{from: normalized_from, to: normalized_to}}
+      {:ok,
+       %Decision.MoveNote{
+         from: normalized_from,
+         to: normalized_to,
+         update_links: Map.get(request, :update_links, false) == true
+       }}
     end
   end
 
@@ -250,17 +259,71 @@ defmodule Vigil.Vault.Policy do
   defp append_target(_path, nil, _facts), do: {:ok, :end}
 
   defp append_target(path, heading, facts) do
-    case facts.find_section.(path, heading) do
-      nil -> {:ok, {:new_section, heading}}
-      chunk -> {:ok, {:section, chunk}}
+    with :ok <- one_line_heading(heading) do
+      case facts.find_section.(path, heading) do
+        nil -> {:ok, {:new_section, heading}}
+        chunk -> {:ok, {:section, chunk}}
+      end
     end
   end
 
+  # The heading is written as one `## ` line. A line break in it would write
+  # what follows as lines of their own — another heading, or a fence that
+  # swallows the rest of the note — and `## ` with nothing after it is not a
+  # heading at all: the next parse reads the appended content as part of the
+  # section above.
+  defp one_line_heading(heading) do
+    cond do
+      String.contains?(heading, ["\n", "\r"]) ->
+        {:error, "heading must be a single line: it must not contain a line break"}
+
+      String.trim(heading) == "" ->
+        {:error, "heading must not be empty or blank"}
+
+      true ->
+        :ok
+    end
+  end
+
+  # A section id that does not resolve now and did before one of the last
+  # reloads of the index names a section the remote changed underneath the
+  # caller: what it read is gone. "Not found" would be true and would not say
+  # what to do about it (docs/design.md, "The server stays in step with the
+  # remote"). Only this verdict is worded so: a refusal that came before the
+  # id was resolved keeps its own reason.
+  #
+  # Only an id that vanished is caught. A positional id that now resolves to
+  # another section than the caller read — a heading renamed into the name
+  # of one that was removed — resolves, and only `if_match` refuses the edit.
   defp section_chunk(id, facts, verb) do
     case facts.find_chunk.(id) do
-      nil -> {:error, "Not found: #{id}"}
+      nil -> {:error, not_found(id, facts.vanished?.(id))}
       %{heading: nil} -> {:error, "A section without a heading cannot be #{verb}: #{id}"}
       chunk -> {:ok, chunk}
+    end
+  end
+
+  defp not_found(id, true = _vanished) do
+    "#{id} no longer resolves: the note changed on the remote since it was read. " <>
+      "Read it again before editing it."
+  end
+
+  defp not_found(id, false), do: "Not found: #{id}"
+
+  # A section id is a position: deleting a section renumbers the ones below
+  # it, so a retried delete_section would take whatever moved into the id.
+  # `if_match` is the hash of the content the caller read, and content does
+  # not move (docs/design.md, "A retried write is applied once"). Optional —
+  # without it the id alone decides, as it always did.
+  defp if_match(_chunk, _id, nil), do: :ok
+
+  defp if_match(chunk, id, expected) do
+    if Chunk.hash(chunk) == expected do
+      :ok
+    else
+      {:error,
+       "#{id} no longer holds the content if_match names: it changed or was renumbered " <>
+         "since it was read. Read it again before editing it."}
     end
   end
 
@@ -272,6 +335,20 @@ defmodule Vigil.Vault.Policy do
     case facts.read_note.(path) do
       {:ok, content} -> content
       _ -> ""
+    end
+  end
+
+  # A note the load skipped for not being UTF-8 is not moved: the index would
+  # be handed it at its new path, and it cannot be parsed there either
+  # (docs/design.md, "A note that is not UTF-8 is skipped"). Deleting it is
+  # allowed — that is one way of fixing it.
+  defp utf8(path, content) do
+    if String.valid?(content) do
+      :ok
+    else
+      {:error,
+       "#{path} is not valid UTF-8, so vigil does not index or move it. " <>
+         "Re-save it as UTF-8, then reload."}
     end
   end
 
@@ -340,8 +417,12 @@ defmodule Vigil.Vault.Policy do
     end
   end
 
+  # A replaced section sits mid-note like an append into an existing one, so
+  # the same open-fence rule holds, for the same reason (see below).
   defp replacement_content(content) do
-    refute_headings(content, "content must not contain headings (## through ####)")
+    with :ok <- refute_headings(content, "content must not contain headings (## through ####)") do
+      refute_open_fence(content)
+    end
   end
 
   # A heading spliced into the middle of an existing section splits that
@@ -357,7 +438,8 @@ defmodule Vigil.Vault.Policy do
   # line below the splice point — the whole rest of the note becomes part of
   # the sample, and every section under it loses its chunk id. That is a
   # larger blast than the split this gate exists to prevent, and only the
-  # mid-note targets can suffer it: the other two append at the end of the
+  # mid-note writes can suffer it — an append into an existing section and
+  # `replace_section`: the other two append targets write at the end of the
   # file, where there is nothing below to swallow.
   defp appended_content({:section, _chunk}, content) do
     with :ok <-
@@ -371,10 +453,11 @@ defmodule Vigil.Vault.Policy do
 
   defp appended_content(_target, _content), do: :ok
 
+  # One message for both writes that splice into the middle of a note.
   defp refute_open_fence(content) do
     if Markdown.unclosed_fence?(content) do
       {:error,
-       "content appended to an existing section must not leave a fenced block open: every line below it in the note would become part of the code sample"}
+       "content written into an existing section must not leave a fenced block open: every line below it in the note would become part of the code sample"}
     else
       :ok
     end

@@ -30,12 +30,31 @@ defmodule Vigil.OAuth.Flow do
   nothing, so they still take the persistence alone.
   """
 
+  require Logger
+
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Cimd, Client, Code, RedirectUri, Server, Token}
+  alias Vigil.OAuth.{Cimd, Client, Code, Persistence, RedirectUri, Server, Token}
+
+  # The consent lockout (`docs/oauth.md`, "Is the rate limit per client, per
+  # address, or global"): five wrong passwords per address in fifteen
+  # minutes, and a budget per hour for every address together, which the
+  # deployment sets. The shared one is counted under a key no address can
+  # be: every address key is a string.
+  @lockout_window 900
+  @lockout_attempts 5
+  @all_addresses :all_addresses
+  @all_addresses_window 3600
 
   @doc """
-  Dynamic client registration. Returns the registration response, or
-  `{:error, "invalid_redirect_uri"}` when no usable redirect URI was offered.
+  Dynamic client registration. Returns the registration response, or one of:
+
+    * `{:error, "invalid_redirect_uri"}` when no usable redirect URI was
+      offered, and `{:error, "invalid_client_metadata"}` when the metadata is
+      not a JSON object;
+    * `{:error, error, description}` when a field is over its cap — the
+      description names the field;
+    * `:unavailable` when the client table is full or the record could not be
+      stored, which the endpoint answers as `temporarily_unavailable`.
   """
   def register(persistence, json, now \\ System.system_time(:second))
 
@@ -43,16 +62,11 @@ defmodule Vigil.OAuth.Flow do
     do: {:error, "invalid_client_metadata"}
 
   def register(persistence, json, now) do
+    name = client_name(json)
     redirect_uris = Map.get(json, "redirect_uris", [])
 
-    if valid_redirect_uris?(redirect_uris) do
-      client =
-        Client.register(
-          persistence,
-          client_name(json),
-          redirect_uris,
-          now
-        )
+    with :ok <- Client.check_metadata(name, redirect_uris) do
+      client = Client.register(persistence, name, redirect_uris, now)
 
       {:ok,
        %{
@@ -64,15 +78,10 @@ defmodule Vigil.OAuth.Flow do
          token_endpoint_auth_method: "none",
          client_id_issued_at: now
        }}
-    else
-      {:error, "invalid_redirect_uri"}
     end
+  rescue
+    Persistence.Unavailable -> :unavailable
   end
-
-  defp valid_redirect_uris?([_ | _] = uris),
-    do: Enum.all?(uris, &(is_binary(&1) and RedirectUri.valid_candidate?(&1)))
-
-  defp valid_redirect_uris?(_), do: false
 
   # Shown on the consent page, so it must be a string whatever the client sent.
   defp client_name(%{"client_name" => name}) when is_binary(name) and name != "", do: name
@@ -121,6 +130,12 @@ defmodule Vigil.OAuth.Flow do
     state = params["state"]
 
     cond do
+      # Checked first: every check below reads a parameter as a string. The
+      # client and its redirect URI are trusted by now, so the refusal goes
+      # back to it — without a `state` that is not one to echo.
+      not flat?(params) ->
+        {:error, {:redirect, redirect_uri, "invalid_request", if(is_binary(state), do: state)}}
+
       params["response_type"] != "code" ->
         {:error, {:redirect, redirect_uri, "invalid_request", state}}
 
@@ -150,15 +165,29 @@ defmodule Vigil.OAuth.Flow do
   end
 
   @doc """
-  Decides an "allow" on the consent page for a client at `ip`.
+  Decides an "allow" on the consent page for a client at `ip` — the key
+  `Vigil.OAuth.ClientAddr` counts it under, an IPv6 client's /64.
 
   `:rate_limited` once too many wrong passwords have come from that address,
-  `:wrong_password` otherwise, and `{:ok, code}` with a fresh one-time
-  authorization code when the password is right. Recording the attempt is part
-  of the decision, so the caller cannot forget to.
+  or once every address together has spent the deployment's hourly budget of
+  wrong passwords (`consent_failures_per_hour`) — the second logs a warning
+  when it is first reached. `:wrong_password` otherwise, and `{:ok, code}`
+  with a fresh one-time authorization code when the password is right.
+  Counting the attempt is part of the decision, so the caller cannot forget
+  to.
+
+  The attempt is counted *before* the password is compared, not after it
+  turned out wrong. Counted after, every request in flight at once would
+  have been compared against a budget none of them had spent yet; counted
+  first, each is handed its own place in the window, and the one past the
+  budget is refused without a comparison. A right password gives back what
+  it took.
+
+  `:unavailable` when the right password was given but the code could not be
+  stored: a code that was never written is not handed to the client.
   """
   @spec consent(Server.t(), String.t(), String.t() | nil, map(), integer()) ::
-          :rate_limited | :wrong_password | {:ok, String.t()}
+          :rate_limited | :wrong_password | :unavailable | {:ok, String.t()}
   def consent(
         %Server{persistence: persistence, settings: settings},
         ip,
@@ -166,18 +195,73 @@ defmodule Vigil.OAuth.Flow do
         ctx,
         now \\ System.system_time(:second)
       ) do
+    with :ok <- take_attempt(persistence, ip, now, settings) do
+      if password_matches?(password, settings.auth_password) do
+        persistence.forget_attempts.(ip)
+        persistence.return_attempt.(@all_addresses)
+        issue_code(persistence, ctx, now)
+      else
+        :wrong_password
+      end
+    end
+  end
+
+  # The address's own window first: an address already locked out spends
+  # nothing of the budget every address shares. An attempt refused by the
+  # shared budget gives back what it took from the address's, since no
+  # password was compared.
+  defp take_attempt(persistence, ip, now, settings) do
+    budget = settings.consent_failures_per_hour
+
     cond do
-      persistence.rate_limited?.(ip, now) ->
+      persistence.take_attempt.(ip, @lockout_window, now) > @lockout_attempts ->
         :rate_limited
 
-      Plug.Crypto.secure_compare(password || "", settings.auth_password) ->
-        persistence.reset_rate_limit.(ip)
-        {:ok, Code.issue(persistence, ctx, now)}
+      (spent = persistence.take_attempt.(@all_addresses, @all_addresses_window, now)) > budget ->
+        persistence.return_attempt.(ip)
+        if spent == budget + 1, do: warn_all_addresses_spent(budget)
+        :rate_limited
 
       true ->
-        persistence.record_failure.(ip, now)
-        :wrong_password
+        :ok
     end
+  end
+
+  # Once per window, on the attempt that first finds the budget spent — every
+  # refusal after it would say the same thing, as often as it is asked.
+  defp warn_all_addresses_spent(budget) do
+    Logger.warning(
+      "consent: #{budget} wrong passwords within the hour from all addresses together " <>
+        "(VIGIL_CONSENT_FAILURES_PER_HOUR); the consent form answers 429 until the hour is up"
+    )
+  end
+
+  @doc """
+  Whether `given` is the consent password, in time that does not depend on
+  either one's length.
+
+  `Plug.Crypto.secure_compare/2` is constant-time only between two values of
+  the same length: it answers `false` at once when the lengths differ, so how
+  fast a guess is refused says whether the guess had the password's length.
+  Both values are hashed first, and it is the two digests — always 32 bytes
+  each — that are compared. Hashing the guess takes time in the guess's
+  length, which the guesser already knows; nothing about the password's
+  length reaches the answer.
+  """
+  @spec password_matches?(String.t() | nil, String.t()) :: boolean()
+  def password_matches?(given, password) when is_binary(password) do
+    Plug.Crypto.secure_compare(digest(given || ""), digest(password))
+  end
+
+  defp digest(value), do: :crypto.hash(:sha256, value)
+
+  # The client's first code is recorded before the code is minted, so a code
+  # never reaches a client the unused-client sweep would still take.
+  defp issue_code(persistence, ctx, now) do
+    Client.authorized(persistence, ctx.client.client_id, now)
+    {:ok, Code.issue(persistence, ctx, now)}
+  rescue
+    Persistence.Unavailable -> :unavailable
   end
 
   @doc """
@@ -186,13 +270,26 @@ defmodule Vigil.OAuth.Flow do
   Both grants are deliberately uniform about failure: every way an
   authorization code can be wrong reports `invalid_grant`, so a caller
   learns nothing from which check rejected it.
+
+  A write that did not persist answers `{:error, 503,
+  "temporarily_unavailable"}` rather than a pair nobody can look up again —
+  RFC 6749's code for a server "unable to handle the request due to a
+  temporary overloading or maintenance", and the status that says so.
   """
   def grant(persistence, params, now \\ System.system_time(:second)) do
     # Redeeming a code and rotating a refresh token are each a lookup followed
     # by a delete, not one step. Two requests racing on the same code or the
     # same refresh token must not both succeed, so grants run one at a time.
     # The token endpoint is rate-limited and rare; the lock costs nothing.
-    :global.trans({__MODULE__, :grant}, fn -> do_grant(persistence, params, now) end)
+    :global.trans({__MODULE__, :grant}, fn -> stored_grant(persistence, params, now) end)
+  end
+
+  defp stored_grant(persistence, params, now) do
+    if flat?(params),
+      do: do_grant(persistence, params, now),
+      else: {:error, 400, "invalid_request"}
+  rescue
+    Persistence.Unavailable -> {:error, 503, "temporarily_unavailable"}
   end
 
   defp do_grant(persistence, %{"grant_type" => "authorization_code"} = params, now) do
@@ -226,7 +323,7 @@ defmodule Vigil.OAuth.Flow do
     aud = Code.audience_of(record)
 
     if target_ok?(params, aud) do
-      {:ok, Token.issue_pair(persistence, record, now)}
+      {:ok, Token.issue_pair(persistence, scope_defaulted(record), now)}
     else
       {:error, 400, "invalid_target"}
     end
@@ -244,12 +341,19 @@ defmodule Vigil.OAuth.Flow do
         {:error, 400, "invalid_target"}
 
       true ->
-        # Rotation: the presented token is spent before the new pair is minted,
-        # so a replay is refused — and, because it is marked rather than
-        # deleted, recognised as a replay rather than mistaken for a token that
-        # never existed.
+        # Rotation: the presented token is spent, so a replay is refused — and,
+        # because it is marked rather than deleted, recognised as a replay
+        # rather than mistaken for a token that never existed.
+        #
+        # The pair is stored *before* the spend, and only handed out once both
+        # are. A write that fails part-way then leaves the presented token
+        # live, and the client's retry is a retry rather than a replay that
+        # would revoke its whole grant. What a failed spend leaves behind is a
+        # pair nobody was given, which expires on its own. Grants run one at a
+        # time (`grant/3`), so the order opens no race.
+        pair = Token.issue_pair(persistence, scope_defaulted(data), now)
         Token.spend_refresh(persistence, refresh_token, data, now)
-        {:ok, Token.issue_pair(persistence, data, now)}
+        {:ok, pair}
     end
   end
 
@@ -272,6 +376,27 @@ defmodule Vigil.OAuth.Flow do
     persistence.revoke_grant.(Token.grant_of(data))
     {:error, 400, "invalid_grant"}
   end
+
+  # `scope=""` is accepted at the authorization endpoint as "no scope asked
+  # for", and no scope asked for is the default one. The token endpoint is
+  # where that is decided, for a code and for a refresh token alike: a pair is
+  # never issued with the empty string, which the allow-list at `/mcp` would
+  # read as a scope that may not write. Deciding it here rather than at
+  # consent also carries a family redeemed before this rule into `vault` on
+  # its next rotation.
+  defp scope_defaulted(%{scope: ""} = record), do: %{record | scope: OAuth.scope()}
+  defp scope_defaulted(record), do: record
+
+  @doc """
+  Whether every parameter of a request is a single string.
+
+  The endpoint decodes queries and forms with `Plug.Conn.Query`, where
+  `client_id[]=x` is a list and `state[a]=x` a map. Nothing in OAuth is
+  either, and every check in this module reads a parameter as a string, so a
+  request carrying one is `invalid_request` before it is anything else.
+  """
+  @spec flat?(map()) :: boolean()
+  def flat?(params), do: Enum.all?(params, fn {_name, value} -> is_binary(value) end)
 
   defp target_ok?(params, expected) do
     is_nil(params["resource"]) or params["resource"] == expected

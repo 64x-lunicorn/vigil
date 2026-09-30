@@ -63,7 +63,7 @@ defmodule Vigil.Vault.Decision do
   end
 
   defmodule UpdateFrontmatter do
-    @moduledoc "A note's frontmatter block, replaced by the type it now claims."
+    @moduledoc "The keys vigil owns in a note's frontmatter block, set to the type it now claims."
     @enforce_keys [:path, :type, :starts, :ends]
     defstruct @enforce_keys
 
@@ -87,11 +87,14 @@ defmodule Vigil.Vault.Decision do
   end
 
   defmodule MoveNote do
-    @moduledoc "A note to move, from one path in the vault to another."
-    @enforce_keys [:from, :to]
+    @moduledoc """
+    A note to move, from one path in the vault to another — and whether the
+    links that point at it are rewritten in the same commit.
+    """
+    @enforce_keys [:from, :to, :update_links]
     defstruct @enforce_keys
 
-    @type t :: %__MODULE__{from: String.t(), to: String.t()}
+    @type t :: %__MODULE__{from: String.t(), to: String.t(), update_links: boolean()}
   end
 
   @type t ::

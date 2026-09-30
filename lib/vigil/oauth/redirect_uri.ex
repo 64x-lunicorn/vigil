@@ -2,13 +2,17 @@ defmodule Vigil.OAuth.RedirectUri do
   @moduledoc false
 
   @doc "Registration-time validity: https://, or http:// with host localhost/127.0.0.1."
-  def valid_candidate?(uri_string) do
+  def valid_candidate?(uri_string) when is_binary(uri_string) do
     case URI.parse(uri_string) do
       %URI{scheme: "https", host: host} when is_binary(host) and host != "" -> true
       %URI{scheme: "http", host: host} when host in ["localhost", "127.0.0.1"] -> true
       _ -> false
     end
   end
+
+  # A registration or a CIMD document can say anything in `redirect_uris`;
+  # what is not a string is not a candidate, rather than a crash.
+  def valid_candidate?(_not_a_string), do: false
 
   @doc """
   Authorize-time match against the registered list (section 6):

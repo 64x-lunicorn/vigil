@@ -405,10 +405,10 @@ defmodule Vigil.OAuth.TokenTest do
     end
 
     test "it carries no refresh token", %{persistence: persistence} do
-      # One record written, and it is the token that came back. "How many rows
-      # are in the table" is not one of the fourteen questions, so the claim is
-      # made where it is actually about the minting: by watching what
-      # `issue_out_of_band/5` writes through the seam it was handed.
+      # One record written, and it is the token that came back. The claim is
+      # about the minting, not about what the table holds, so it is made
+      # there: by watching what `issue_out_of_band/5` writes through the seam
+      # it was handed.
       now = System.system_time(:second)
       test = self()
 

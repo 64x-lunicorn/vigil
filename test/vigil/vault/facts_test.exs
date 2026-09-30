@@ -74,7 +74,8 @@ defmodule Vigil.Vault.FactsTest do
       vault =
         Enum.into(vault_overrides, %{
           layout: AbsentFacts.layout(domains: ["gear"]),
-          naming: %{}
+          naming: %{},
+          vanished: []
         })
 
       Facts.over_vault(Index.build(notes), vault, now)
@@ -125,6 +126,15 @@ defmodule Vigil.Vault.FactsTest do
                  "gear/laufrad.md#specs" => Index.strength(:body_occurrence)
                }
       end
+    end
+
+    test "vanished? answers for the ids one of the reloads handed in took away" do
+      facts =
+        facts_over([], vanished: [MapSet.new(["gear/a.md#x"]), MapSet.new(["gear/b.md#y"])])
+
+      assert facts.vanished?.("gear/a.md#x")
+      assert facts.vanished?.("gear/b.md#y")
+      refute facts.vanished?.("gear/c.md#z")
     end
 
     test "the similarity search honours the domain it is asked about" do

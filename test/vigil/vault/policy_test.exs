@@ -441,6 +441,29 @@ defmodule Vigil.Vault.PolicyTest do
       assert msg =~ "must not leave a fenced block open"
     end
 
+    # A heading is one line. A line break in it would write whatever follows
+    # into the note as its own line — another heading, or a fence that swallows
+    # the rest of the note.
+    test "a heading with a line break in it is refused", %{f: f} do
+      for heading <- ["Weather\n## Injected", "Weather\r\n```", "Weather\rmore"] do
+        assert {:error, msg} =
+                 Policy.check(:append, %{path: "bike/x.md", heading: heading, content: "text"}, f)
+
+        assert msg =~ "heading must be a single line"
+      end
+    end
+
+    # `## ` with nothing after it is not a heading: the next parse would read
+    # the appended content as part of the section above it.
+    test "an empty or blank heading is refused", %{f: f} do
+      for heading <- ["", "   ", "\t"] do
+        assert {:error, msg} =
+                 Policy.check(:append, %{path: "bike/x.md", heading: heading, content: "text"}, f)
+
+        assert msg =~ "heading must not be empty"
+      end
+    end
+
     test "the same content is fine at the end of the file and in a new section", %{f: f} do
       content = "## Fine here\ntext"
 
@@ -470,6 +493,35 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:replace_section, %{id: "bike/x.md#s", content: "## Nope"}, f)
 
       assert msg =~ "must not contain headings"
+    end
+
+    # The same blast as for an append into an existing section: a fence the
+    # replacement opens and never closes swallows every section below it.
+    test "replacement content that leaves a fenced block open is refused with append's message" do
+      f =
+        facts(
+          path_exists?: fn _ -> true end,
+          find_section: fn _p, _h -> %{heading: "Gear", path: "bike/x.md"} end,
+          find_chunk: fn _ -> %{heading: "Gear", path: "bike/x.md"} end
+        )
+
+      content = "Sample:\n\n```markdown\n## X\n"
+
+      assert {:error, append_msg} =
+               Policy.check(:append, %{path: "bike/x.md", heading: "Gear", content: content}, f)
+
+      assert {:error, ^append_msg} =
+               Policy.check(:replace_section, %{id: "bike/x.md#gear", content: content}, f)
+
+      assert append_msg =~ "must not leave a fenced block open"
+    end
+
+    test "replacement content with a closed fenced sample goes through" do
+      f = facts(find_chunk: fn _ -> %{heading: "Gear", path: "bike/x.md"} end)
+      content = "Sample:\n\n```markdown\n## X\n```\n"
+
+      assert {:ok, _} =
+               Policy.check(:replace_section, %{id: "bike/x.md#gear", content: content}, f)
     end
   end
 
@@ -698,6 +750,33 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:replace_section, %{id: "bike/x.md#nope", content: "## H"}, facts())
     end
 
+    # docs/design.md, "The server stays in step with the remote": an id a
+    # reload of the index took away names a section the remote changed under
+    # the caller. Only the not-found verdict says so; a refusal that comes
+    # before the id is resolved keeps its own reason.
+    test "an id a reload took away is refused as changed on the remote, for both section ops" do
+      f = facts(vanished?: fn id -> id == "bike/x.md#gear" end)
+
+      for op <- [:replace_section, :delete_section] do
+        assert {:error, msg} = Policy.check(op, %{id: "bike/x.md#gear", content: "text"}, f)
+        assert msg =~ "bike/x.md#gear no longer resolves"
+        assert msg =~ "Read it again"
+
+        assert {:error, "Not found: bike/x.md#other"} =
+                 Policy.check(op, %{id: "bike/x.md#other", content: "text"}, f)
+      end
+    end
+
+    test "a refusal before the id is resolved is not turned into one about the remote" do
+      f = facts(vanished?: fn _id -> true end)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:replace_section, %{id: "skills/x.md#gear", content: "text"}, f)
+
+      assert {:error, "Invalid path"} =
+               Policy.check(:delete_section, %{id: "work/x.md#gear"}, f)
+    end
+
     test "a section without a heading cannot be replaced or deleted" do
       f = facts(find_chunk: fn _ -> %{heading: nil, path: "bike/x.md"} end)
 
@@ -734,6 +813,56 @@ defmodule Vigil.Vault.PolicyTest do
       # messy segment that resolves into skills/ is caught the same way.
       assert {:error, "Invalid path"} =
                Policy.check(:replace_section, %{id: "Skills/tdd.md#h", content: "text"}, f)
+    end
+  end
+
+  # docs/design.md, "A retried write is applied once": a section id names a
+  # position, and a delete renumbers the ids below it. `if_match` names the
+  # content the caller read, so a retried delete_section cannot take the
+  # section that was renumbered into the deleted one's id.
+  describe "if_match on the section ops" do
+    alias Vigil.Parser.Chunk
+
+    defp section(heading, body),
+      do: %Chunk{id: "bike/x.md#setup", path: "bike/x.md", heading: heading, body: body}
+
+    test "the hash of the content the id resolves to lets the edit through" do
+      chunk = section("Setup", "First setup.")
+      f = facts(find_chunk: fn _ -> chunk end)
+      hash = Chunk.hash(chunk)
+
+      assert {:ok, _} =
+               Policy.check(:delete_section, %{id: "bike/x.md#setup", if_match: hash}, f)
+
+      assert {:ok, _} =
+               Policy.check(
+                 :replace_section,
+                 %{id: "bike/x.md#setup", content: "text", if_match: hash},
+                 f
+               )
+    end
+
+    test "content renumbered into the id since it was read is refused" do
+      deleted = section("Setup", "First setup.")
+      renumbered = section("Setup", "Second setup.")
+      f = facts(find_chunk: fn _ -> renumbered end)
+
+      for request <- [
+            {:delete_section, %{id: "bike/x.md#setup", if_match: Chunk.hash(deleted)}},
+            {:replace_section,
+             %{id: "bike/x.md#setup", content: "text", if_match: Chunk.hash(deleted)}}
+          ] do
+        {op, params} = request
+        assert {:error, msg} = Policy.check(op, params, f)
+        assert msg =~ "bike/x.md#setup"
+        assert msg =~ "if_match"
+      end
+    end
+
+    test "without if_match the id alone decides, as before" do
+      f = facts(find_chunk: fn _ -> section("Setup", "Second setup.") end)
+      assert {:ok, _} = Policy.check(:delete_section, %{id: "bike/x.md#setup"}, f)
+      assert {:ok, _} = Policy.check(:delete_section, %{id: "bike/x.md#setup", if_match: nil}, f)
     end
   end
 
@@ -795,20 +924,31 @@ defmodule Vigil.Vault.PolicyTest do
                Policy.check(:move_note, %{from: "bike/a.md", to: "work/a.md", confirm: true}, f)
     end
 
-    # The decision says where the note comes from and where it goes, and
-    # nothing else: a move creates no project directory, and no writer ever
-    # read the domain it resolved.
-    test "an ordinary move is allowed, and resolves to nothing but from and to" do
+    # The decision says where the note comes from, where it goes and whether
+    # its links go with it, and nothing else: a move creates no project
+    # directory, and no writer ever read the domain it resolved.
+    test "an ordinary move is allowed, and resolves to nothing but from, to and update_links" do
       f = facts(path_exists?: fn p -> p == "bike/a.md" end)
 
-      assert {:ok, %{from: "bike/a.md", to: "training/b.md"} = resolved} =
+      assert {:ok, %{from: "bike/a.md", to: "training/b.md", update_links: false} = resolved} =
                Policy.check(
                  :move_note,
                  %{from: "bike/a.md", to: "training/b.md", confirm: true},
                  f
                )
 
-      assert Enum.sort(Map.keys(Map.from_struct(resolved))) == [:from, :to]
+      assert Enum.sort(Map.keys(Map.from_struct(resolved))) == [:from, :to, :update_links]
+    end
+
+    test "update_links: true is carried into the decision" do
+      f = facts(path_exists?: fn p -> p == "bike/a.md" end)
+
+      assert {:ok, %{update_links: true}} =
+               Policy.check(
+                 :move_note,
+                 %{from: "bike/a.md", to: "training/b.md", confirm: true, update_links: true},
+                 f
+               )
     end
   end
 end

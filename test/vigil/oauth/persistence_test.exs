@@ -14,7 +14,7 @@ defmodule Vigil.OAuth.PersistenceTest do
   than through an endpoint, and asserted against both adapters: that a code is
   single-use, that rotation marks a refresh token spent rather than deleting
   it, that revoking a grant takes down a family, that the consent lockout
-  counts per address and expires with its window, that the CIMD cache honours
+  counts per key, atomically, and expires with its window, that the CIMD cache honours
   its hour, and that a sweep drops exactly what has expired. Two adapters
   drifting apart is the one thing that can go wrong with a second one, which
   is why the contract is tested rather than assumed.
@@ -22,10 +22,14 @@ defmodule Vigil.OAuth.PersistenceTest do
   use ExUnit.Case, async: true
 
   alias Vigil.OAuth
-  alias Vigil.OAuth.{Persistence, Store, Token}
+  alias Vigil.OAuth.{Client, Flow, Persistence, Store, Token}
   alias Vigil.OAuthCase
 
   @now 1_700_000_000
+
+  # A window for the consent attempts below. Its length is the caller's to
+  # choose; this is the one `Vigil.OAuth.Flow` counts an address in.
+  @window 900
 
   # The audience the token records below carry. Persistence stores it and
   # gives it back; what it says is nothing this seam decides, so the test
@@ -38,15 +42,20 @@ defmodule Vigil.OAuth.PersistenceTest do
   @questions [
     put_client: 2,
     get_client: 1,
+    count_clients: 0,
+    list_clients: 0,
+    delete_client: 1,
     put_code: 2,
     take_code: 1,
     put_token: 2,
     get_token: 1,
     delete_token: 1,
     revoke_grant: 1,
-    rate_limited?: 2,
-    record_failure: 2,
-    reset_rate_limit: 1,
+    list_tokens: 0,
+    revoke_all: 0,
+    take_attempt: 3,
+    return_attempt: 1,
+    forget_attempts: 1,
     cimd_cache_get: 2,
     cimd_cache_put: 3,
     sweep_expired: 1
@@ -132,6 +141,50 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert :error = persistence.get_client.("never-registered")
       end
 
+      test "the clients are counted, and a rewrite is not a second client", %{
+        persistence: persistence
+      } do
+        assert persistence.count_clients.() == 0
+
+        :ok = persistence.put_client.("client-1", %{name: "App", redirect_uris: []})
+        :ok = persistence.put_client.("client-2", %{name: "App", redirect_uris: []})
+        :ok = persistence.put_client.("client-1", %{name: "Renamed", redirect_uris: []})
+
+        assert persistence.count_clients.() == 2
+      end
+
+      # A registration is free to anyone the rate limit lets through, so one
+      # that never went on to an authorization is the table's only unbounded
+      # growth. The sweep drops those once their window is up — and nothing
+      # else: not a client that was handed a code, not one still inside its
+      # window, and not one written before the record said which it was.
+      test "a sweep drops the clients that received no code in time, and only those", %{
+        persistence: persistence
+      } do
+        window = Client.unused_ttl()
+        uris = [OAuthCase.redirect_uri()]
+
+        unused = Client.register(persistence, "Unused", uris, @now - window)
+        fresh = Client.register(persistence, "Fresh", uris, @now - window + 1)
+        used = Client.register(persistence, "Used", uris, @now - window)
+        :ok = Client.authorized(persistence, used.client_id, @now - window + 60)
+
+        :ok =
+          persistence.put_client.("legacy", %{
+            name: "Legacy",
+            redirect_uris: uris,
+            issued_at: @now - 10 * window
+          })
+
+        assert :ok = persistence.sweep_expired.(@now)
+
+        assert :error = persistence.get_client.(unused.client_id)
+        assert {:ok, _} = persistence.get_client.(fresh.client_id)
+        assert {:ok, _} = persistence.get_client.(used.client_id)
+        assert {:ok, _} = persistence.get_client.("legacy")
+        assert persistence.count_clients.() == 3
+      end
+
       test "an authorization code is single-use", %{persistence: persistence} do
         code = mint_code(persistence)
 
@@ -184,6 +237,79 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert {:ok, _} = persistence.get_token.("no-family")
       end
 
+      # What an operator lists grants from: the records, and never a value or
+      # a digest a caller could present — the store keeps no value, and the
+      # digest stays inside the adapter.
+      test "every token record is listed, and only its record", %{persistence: persistence} do
+        :ok = persistence.put_token.("access-1", token_attrs(%{}))
+        :ok = persistence.put_token.("refresh-1", refresh_attrs(%{}))
+
+        listed = persistence.list_tokens.()
+
+        assert Enum.sort_by(listed, &Map.has_key?(&1, :type)) ==
+                 [token_attrs(%{}), refresh_attrs(%{})]
+
+        refute inspect(listed) =~ "access-1"
+        refute inspect(listed) =~ "refresh-1"
+        refute inspect(listed) =~ "sha256"
+      end
+
+      test "the clients are listed by their id", %{persistence: persistence} do
+        :ok = persistence.put_client.("client-1", %{name: "One", redirect_uris: []})
+        :ok = persistence.put_client.("client-2", %{name: "Two", redirect_uris: []})
+
+        assert Enum.sort(persistence.list_clients.()) == [
+                 {"client-1", %{name: "One", redirect_uris: []}},
+                 {"client-2", %{name: "Two", redirect_uris: []}}
+               ]
+      end
+
+      # A code outstanding for a deleted client would still redeem: redemption
+      # checks the code, not the client.
+      test "deleting a client takes its record and its codes, and nothing else", %{
+        persistence: persistence
+      } do
+        # Each code is minted for a client of its own; reading one back and
+        # writing it again is how the test learns whose it is.
+        [{code, client_id}, {other, other_client}] =
+          for _ <- 1..2 do
+            code = mint_code(persistence)
+            {:ok, attrs} = persistence.take_code.(code)
+            :ok = persistence.put_code.(code, attrs)
+            {code, attrs.client_id}
+          end
+
+        :ok = persistence.put_token.("refresh-1", refresh_attrs(%{client_id: client_id}))
+
+        assert :ok = persistence.delete_client.(client_id)
+
+        assert :error = persistence.get_client.(client_id)
+        assert :error = persistence.take_code.(code)
+        assert {:ok, _} = persistence.get_client.(other_client)
+        assert {:ok, _} = persistence.take_code.(other)
+        # Tokens are revoked by grant, above the seam, not here.
+        assert {:ok, _} = persistence.get_token.("refresh-1")
+
+        assert :ok = persistence.delete_client.("never-registered")
+      end
+
+      test "revoking everything takes every token and code, and leaves the clients", %{
+        persistence: persistence
+      } do
+        code = mint_code(persistence)
+        :ok = persistence.put_token.("access-1", token_attrs(%{}))
+        :ok = persistence.put_token.("refresh-1", refresh_attrs(%{}))
+        :ok = persistence.put_token.("other-family", token_attrs(%{grant_id: "grant-2"}))
+        :ok = persistence.put_token.("no-family", token_attrs(%{}) |> Map.delete(:grant_id))
+
+        assert :ok = persistence.revoke_all.()
+
+        assert persistence.list_tokens.() == []
+        assert :error = persistence.get_token.("no-family")
+        assert :error = persistence.take_code.(code)
+        assert persistence.count_clients.() == 1
+      end
+
       # "Every token whose grant is unknown" is not a family, so one replay
       # must not take down a stranger's token written before grants existed.
       test "a nil grant revokes nothing", %{persistence: persistence} do
@@ -193,63 +319,71 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert {:ok, _} = persistence.get_token.("no-family")
       end
 
-      test "the consent lockout counts wrong passwords per address", %{persistence: persistence} do
-        attempts = Persistence.rate_limit_max_attempts()
+      test "consent attempts are counted per key", %{persistence: persistence} do
+        for n <- 1..5, do: assert(persistence.take_attempt.("198.51.100.1", @window, @now) == n)
 
-        for _ <- 1..(attempts - 1) do
-          assert :ok = persistence.record_failure.("198.51.100.1", @now)
-          refute persistence.rate_limited?.("198.51.100.1", @now)
+        # Per key: the neighbour has spent nothing.
+        assert persistence.take_attempt.("198.51.100.2", @window, @now) == 1
+      end
+
+      # Every caller at once is answered a count of its own. A count read and
+      # then written back hands two callers the same one, and a budget checked
+      # against it lets both through on one free slot.
+      test "parallel attempts are each answered a count of their own", %{
+        persistence: persistence
+      } do
+        for n <- 1..20 do
+          counts =
+            Vigil.AtOnce.run(100, fn -> persistence.take_attempt.({:key, n}, @window, @now) end)
+
+          assert Enum.sort(counts) == Enum.to_list(1..100)
         end
-
-        assert :ok = persistence.record_failure.("198.51.100.1", @now)
-        assert persistence.rate_limited?.("198.51.100.1", @now)
-
-        # Per address: the neighbour has spent nothing.
-        refute persistence.rate_limited?.("198.51.100.2", @now)
       end
 
-      test "the consent lockout expires with its window", %{persistence: persistence} do
-        window = Persistence.rate_limit_window()
+      test "a window lasts the length it was opened with", %{persistence: persistence} do
+        for _ <- 1..3, do: persistence.take_attempt.("ip", @window, @now)
 
-        for _ <- 1..Persistence.rate_limit_max_attempts(),
-            do: persistence.record_failure.("ip", @now)
+        assert persistence.take_attempt.("ip", @window, @now + @window) == 4
+        assert persistence.take_attempt.("ip", @window, @now + 2 * @window + 1) == 1
 
-        assert persistence.rate_limited?.("ip", @now + window)
-        refute persistence.rate_limited?.("ip", @now + window + 1)
+        # Two keys, two lengths: the hour-long one outlives the short one.
+        assert persistence.take_attempt.("short", 10, @now) == 1
+        assert persistence.take_attempt.("long", 3600, @now) == 1
+        assert persistence.take_attempt.("short", 10, @now + 11) == 1
+        assert persistence.take_attempt.("long", 3600, @now + 11) == 2
       end
 
-      # A failure arriving after the window ran out opens a new one rather
-      # than topping up the old count — otherwise an address locked out once
-      # would stay locked out on one attempt an hour, and an address that had
-      # ever been locked out could never be locked out again.
-      #
-      # Asserted by spending the *new* window rather than by reading the old
-      # one: an elapsed window already answers "not limited", so `refute`
-      # alone passes whether the count rolled over or not.
-      test "a failure after the window opens a new one", %{persistence: persistence} do
-        attempts = Persistence.rate_limit_max_attempts()
-        later = @now + Persistence.rate_limit_window() + 1
+      # An attempt after the window ran out opens a new one rather than
+      # topping up the old count — otherwise an address locked out once would
+      # stay locked out on one attempt an hour.
+      test "an attempt after the window opens a new one", %{persistence: persistence} do
+        later = @now + @window + 1
 
-        for _ <- 1..attempts, do: persistence.record_failure.("ip", @now)
+        for _ <- 1..5, do: persistence.take_attempt.("ip", @window, @now)
 
-        assert :ok = persistence.record_failure.("ip", later)
-        refute persistence.rate_limited?.("ip", later)
-
-        for _ <- 1..(attempts - 2), do: persistence.record_failure.("ip", later)
-        refute persistence.rate_limited?.("ip", later)
-
-        assert :ok = persistence.record_failure.("ip", later)
-        assert persistence.rate_limited?.("ip", later)
+        assert persistence.take_attempt.("ip", @window, later) == 1
+        assert persistence.take_attempt.("ip", @window, later + @window) == 2
       end
 
-      test "the right password forgets an address's attempts", %{persistence: persistence} do
-        for _ <- 1..Persistence.rate_limit_max_attempts(),
-            do: persistence.record_failure.("ip", @now)
+      test "an attempt given back is no longer counted, and never below zero", %{
+        persistence: persistence
+      } do
+        for _ <- 1..3, do: persistence.take_attempt.("ip", @window, @now)
 
-        assert persistence.rate_limited?.("ip", @now)
+        assert :ok = persistence.return_attempt.("ip")
+        assert persistence.take_attempt.("ip", @window, @now) == 3
 
-        assert :ok = persistence.reset_rate_limit.("ip")
-        refute persistence.rate_limited?.("ip", @now)
+        for _ <- 1..5, do: assert(:ok = persistence.return_attempt.("ip"))
+        assert persistence.take_attempt.("ip", @window, @now) == 1
+
+        assert :ok = persistence.return_attempt.("never-counted")
+      end
+
+      test "forgetting a key's attempts starts it over", %{persistence: persistence} do
+        for _ <- 1..5, do: persistence.take_attempt.("ip", @window, @now)
+
+        assert :ok = persistence.forget_attempts.("ip")
+        assert persistence.take_attempt.("ip", @window, @now) == 1
       end
 
       test "the CIMD cache honours its TTL", %{persistence: persistence} do
@@ -291,11 +425,10 @@ defmodule Vigil.OAuth.PersistenceTest do
         # The two ephemeral tables are here for the "and nothing else" half.
         # Reclaiming an elapsed window or a stale cache entry is not
         # observable through the contract — both already read as absent before
-        # the sweep runs, and `record_failure` opens a new window over a stale
+        # the sweep runs, and `take_attempt` opens a new window over a stale
         # one by itself. Bounding their memory is the production adapter's,
         # asserted against its tables under "the :dets tables alone".
-        for _ <- 1..(Persistence.rate_limit_max_attempts() - 1),
-            do: persistence.record_failure.("ip-live", @now)
+        for _ <- 1..4, do: persistence.take_attempt.("ip-live", @window, @now)
 
         doc = %{client_id: "c", name: "C", redirect_uris: []}
         :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
@@ -310,10 +443,9 @@ defmodule Vigil.OAuth.PersistenceTest do
         assert persistence.get_token.("spent-expired") == :error
         assert {:ok, _} = persistence.get_token.("spent-live")
 
-        # A live window keeps the attempts it had: one more failure locks the
-        # address out, which it would not if the sweep had taken the row.
-        assert :ok = persistence.record_failure.("ip-live", @now)
-        assert persistence.rate_limited?.("ip-live", @now)
+        # A live window keeps the attempts it had, which it would not if the
+        # sweep had taken the row.
+        assert persistence.take_attempt.("ip-live", @window, @now) == 5
 
         assert {:ok, ^doc} = persistence.cimd_cache_get.("https://fresh.example/m", @now)
       end
@@ -363,12 +495,11 @@ defmodule Vigil.OAuth.PersistenceTest do
     test "the sweep reclaims the ephemeral rows rather than only hiding them", %{
       persistence: persistence
     } do
-      window = Persistence.rate_limit_window()
       ttl = Persistence.cimd_ttl()
       doc = %{client_id: "c", name: "C", redirect_uris: []}
 
-      :ok = persistence.record_failure.("ip-stale", @now - window - 1)
-      :ok = persistence.record_failure.("ip-live", @now)
+      1 = persistence.take_attempt.("ip-stale", @window, @now - @window - 1)
+      1 = persistence.take_attempt.("ip-live", @window, @now)
       :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
       :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
 
@@ -385,10 +516,94 @@ defmodule Vigil.OAuth.PersistenceTest do
                :ets.lookup(:oauth_cimd_cache, "https://fresh.example/m")
     end
 
+    # A copy of the state dir — a backup, a container snapshot — must hold
+    # nothing a caller could present. So the claim is made against what is
+    # stored: every row of every table, and the bytes of every file.
+    test "no code or token it was handed is kept as itself", %{
+      persistence: persistence,
+      state_dir: state_dir
+    } do
+      code = mint_code(persistence)
+      {:ok, record} = persistence.take_code.(code)
+      pair = Token.issue_pair(persistence, record, @now)
+      pending = mint_code(persistence)
+      seeded = Token.issue_out_of_band(persistence, @resource, OAuth.scope(), 3600, @now)
+
+      values = [code, pending, pair.access_token, pair.refresh_token, seeded]
+
+      stored =
+        for table <- [:oauth_clients, :oauth_codes, :oauth_tokens],
+            row <- :dets.foldl(fn row, acc -> [row | acc] end, [], table),
+            do: :erlang.term_to_binary(row)
+
+      files =
+        for file <- ["oauth_clients.dets", "oauth_codes.dets", "oauth_tokens.dets"],
+            do: File.read!(Path.join(state_dir, file))
+
+      for value <- values, bytes <- stored ++ files do
+        refute String.contains?(bytes, value)
+      end
+
+      # Kept under the digest instead, and found by the value all the same.
+      assert [{{:sha256, _}, _}] = :dets.lookup(:oauth_codes, Token.digest(pending))
+      assert {:ok, _} = persistence.get_token.(pair.access_token)
+    end
+
     test "the files it opens are readable by their owner alone", %{state_dir: state_dir} do
       for file <- ["oauth_clients.dets", "oauth_codes.dets", "oauth_tokens.dets"] do
         assert {:ok, %File.Stat{mode: mode}} = File.stat(Path.join(state_dir, file))
         assert Bitwise.band(mode, 0o077) == 0
+      end
+    end
+  end
+
+  describe "the :dets tables, when a write does not persist" do
+    setup :dets_tables
+
+    # A full disk and the `:dets` size limit both make `:dets.insert/2`
+    # answer `{:error, reason}`. A table reopened read-only answers the same
+    # way, which is how this makes one happen: the store is stopped, and the
+    # named tables its adapter writes to are reopened under the same names
+    # with nothing but read access.
+    setup %{persistence: persistence, state_dir: state_dir} do
+      :ok = persistence.put_token.("refresh-1", refresh_attrs(%{}))
+
+      stop_supervised!(Store)
+
+      for {table, file} <- [oauth_codes: "oauth_codes.dets", oauth_tokens: "oauth_tokens.dets"] do
+        path = String.to_charlist(Path.join(state_dir, file))
+        {:ok, ^table} = :dets.open_file(table, file: path, access: :read, type: :set)
+        on_exit(fn -> :dets.close(table) end)
+      end
+
+      :ok
+    end
+
+    test "a write answers the error rather than :ok", %{persistence: persistence} do
+      assert {:error, _} = persistence.put_token.("token-1", token_attrs(%{}))
+      assert {:error, _} = persistence.put_code.("code-1", %{expires_at: @now + 60})
+    end
+
+    test "the token endpoint answers temporarily_unavailable, and the refresh token stays live",
+         %{persistence: persistence} do
+      assert Flow.grant(
+               persistence,
+               %{
+                 "grant_type" => "refresh_token",
+                 "refresh_token" => "refresh-1",
+                 "client_id" => "client-1"
+               },
+               @now
+             ) == {:error, 503, "temporarily_unavailable"}
+
+      # Not spent: the client's retry is a retry, not a replay that would
+      # revoke its grant.
+      assert {:ok, _} = Token.fetch_refresh(persistence, "refresh-1")
+    end
+
+    test "a minted token is refused rather than handed out", %{persistence: persistence} do
+      assert_raise Persistence.Unavailable, fn ->
+        Token.issue_out_of_band(persistence, @resource, OAuth.scope(), 3600, @now)
       end
     end
   end
@@ -413,12 +628,11 @@ defmodule Vigil.OAuth.PersistenceTest do
     # sweep entirely and the contract suite would stay green.
     test "the sweep reclaims the ephemeral rows rather than only hiding them" do
       {persistence, tables} = Persistence.Memory.holding()
-      window = Persistence.rate_limit_window()
       ttl = Persistence.cimd_ttl()
       doc = %{client_id: "c", name: "C", redirect_uris: []}
 
-      :ok = persistence.record_failure.("ip-stale", @now - window - 1)
-      :ok = persistence.record_failure.("ip-live", @now)
+      1 = persistence.take_attempt.("ip-stale", @window, @now - @window - 1)
+      1 = persistence.take_attempt.("ip-live", @window, @now)
       :ok = persistence.cimd_cache_put.("https://stale.example/m", doc, @now - ttl)
       :ok = persistence.cimd_cache_put.("https://fresh.example/m", doc, @now - ttl + 1)
 
@@ -429,7 +643,7 @@ defmodule Vigil.OAuth.PersistenceTest do
 
       assert Persistence.Memory.count(tables, :rate_limits) == 1
       assert Persistence.Memory.count(tables, :cimd_cache) == 1
-      assert persistence.rate_limited?.("ip-live", @now) == false
+      assert persistence.take_attempt.("ip-live", @window, @now) == 2
       assert {:ok, ^doc} = persistence.cimd_cache_get.("https://fresh.example/m", @now)
     end
 

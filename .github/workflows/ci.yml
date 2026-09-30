@@ -179,6 +179,62 @@ jobs:
       - name: Dialyzer
         run: mix dialyzer --format github
 
+  # CodeQL has no Elixir support, so Sobelow is the static security scan.
+  # Everything it is told lives in .sobelow-conf, which is what `mix ci` reads
+  # as well: fail on any finding at any confidence, skip only what was triaged
+  # — a `# sobelow_skip` comment with its reason above the function, or an
+  # entry in .sobelow-skips with its reason in that file's header — and no
+  # update check over the network.
+  sobelow:
+    name: Security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # upload the SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # checkout otherwise leaves the workflow token in .git/config,
+          # readable by every later step in the job. Nothing here pushes
+          # over git.
+          persist-credentials: false
+
+      - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Cache deps and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-sobelow-${{ hashFiles('**/mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-sobelow-
+
+      - name: Fetch dependencies
+        run: mix deps.get --check-locked
+
+      - name: Sobelow
+        run: mix sobelow
+
+      # The same scan again as SARIF, for the Security tab. --exit none: the
+      # step above is the one that decides, and this one has to produce the
+      # file whether or not it found something.
+      - name: Sobelow (SARIF)
+        if: ${{ !cancelled() }}
+        run: mix sobelow --format sarif --out sobelow.sarif --exit none
+
+      # A pull request from a fork gets a read-only token whatever the job
+      # asks for, so its upload could only fail; the gate above still ran.
+      - name: Upload to code scanning
+        if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: sobelow.sarif
+          category: sobelow
+
   scripts:
     name: Deployment scripts
     runs-on: ubuntu-latest
@@ -217,7 +273,8 @@ jobs:
           SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
         run: |
           set -euo pipefail
-          curl -sSfL -o shellcheck.tar.xz             "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          curl -sSfL -o shellcheck.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
           echo "${SHELLCHECK_SHA256}  shellcheck.tar.xz" | sha256sum -c -
           tar -xJf shellcheck.tar.xz "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
           "./shellcheck-v${SHELLCHECK_VERSION}/shellcheck" --version
@@ -232,10 +289,107 @@ jobs:
       - name: update.sh switches over, rolls back and prunes correctly
         run: bash scripts/test/update_test.sh
 
-      # verify() is what the automatic rollback hangs on. Each of its twelve
+      # verify() is what the automatic rollback hangs on. Each of its thirteen
       # checks is driven against both outcomes here.
       - name: verify() decides each check correctly
         run: bash scripts/test/verify_test.sh
+
+      # The consent password and the SkillKey secret are generated apart, and
+      # the SkillKey secret is random bytes enough for the boot check.
+      - name: init.sh generates both secrets apart
+        run: bash scripts/test/secrets_test.sh
+
+      # The vault's remote and branch are two lines in the env file, and every
+      # script reads them from there rather than naming `github` and `main`.
+      - name: The scripts read the vault's remote and branch from the env file
+        run: bash scripts/test/git_settings_test.sh
+
+      # The push safety net: the lock only the service user can take, hooks
+      # off, a stalled remote stopped, failures and old commits reported, and
+      # the units init.sh and update.sh install in place of the cron line.
+      - name: The push safety net pushes sandboxed and fails loudly
+        run: bash scripts/test/push_safety_net_test.sh
+
+      # skill_write refuses the conventions skill, so init.sh commits and
+      # pushes it itself, and keeps a vault's own.
+      - name: init.sh installs the conventions skill as a commit
+        run: bash scripts/test/conventions_skill_test.sh
+
+      # init_vault.sh installs the Obsidian templates and never overwrites a
+      # vault's own.
+      - name: init_vault.sh installs the Obsidian templates
+        run: bash scripts/test/obsidian_templates_test.sh
+
+      # Adoption keeps Obsidian's settings and its trash out of the vault's
+      # history, and a new vault's .gitignore names both.
+      - name: Vault adoption ignores .obsidian/ and .trash/
+        run: bash scripts/test/obsidian_dirs_test.sh
+
+      # The Obsidian template's slug is a JavaScript copy of Vigil.Slug. The
+      # test job checks the Elixir against test/fixtures/slug_examples.json;
+      # this checks the copy against the same table. Node is pinned like
+      # every other tool here rather than taken from the runner image.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: The Obsidian slug agrees with Vigil.Slug
+        run: node scripts/test/slug_js_test.mjs
+
+      # The operator's revocation command: what it sends into the node, what
+      # it asks before revoking everything, and the exit codes.
+      - name: grants.sh lists and revokes through the running node
+        run: bash scripts/test/grants_test.sh
+
+      # The tunnel's peer is loopback, so that is the proxy whose
+      # CF-Connecting-IP is believed; init.sh writes both lines.
+      - name: init.sh writes the tunnel's proxy settings
+        run: bash scripts/test/proxy_settings_test.sh
+
+      # Debian's epmd.socket listens on 4369 on every interface; setup.sh
+      # stops and masks it.
+      - name: setup.sh leaves nothing listening on epmd's port
+        run: bash scripts/test/setup_test.sh
+
+      # No token in curl's arguments, no secret in a --verbose trace, an
+      # operator's answer kept a value, and one secret rotated at a time.
+      - name: The operator scripts never expose a secret
+        run: bash scripts/test/operator_secrets_test.sh
+
+      # The check the contracts job below runs, against throwaway branches.
+      - name: check_changelog.sh finds a contract change without an entry
+        run: bash scripts/test/check_changelog_test.sh
+
+      # The release packaging release.yml runs: the same release gives the
+      # same tarball bytes, with the notices inside and nothing of the
+      # packaging machine's owner, times or umask.
+      - name: package_release.sh packs a release deterministically
+        run: bash scripts/test/package_release_test.sh
+
+  # A recorded contract (test/fixtures/contracts/) is what connected clients
+  # are handed, and the slug table (test/fixtures/slug_examples.json) what
+  # every stored reference is made of; docs/compatibility.md says every change
+  # to either is named in CHANGELOG.md. A pull request or a merge group that changes one without
+  # touching CHANGELOG.md fails here. A push to main and a release run have no
+  # base to compare against; they passed this as a pull request.
+  contracts:
+    name: Contract changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The base commit has to be here for the three-dot diff.
+          fetch-depth: 0
+
+      - name: A contract change carries a CHANGELOG entry
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: bash scripts/check_changelog.sh "$BASE_SHA" HEAD
 
   release-smoke:
     name: Release smoke test
@@ -294,13 +448,18 @@ jobs:
           # over git.
           persist-credentials: false
 
+      # Pinned and checksum-verified like gitleaks and ShellCheck: the digest
+      # is the release's own actionlint_<version>_checksums.txt entry for
+      # linux_amd64, so a replaced asset fails here instead of running.
       - name: actionlint
         env:
           ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
         run: |
           set -euo pipefail
           curl -sSfL -o actionlint.tar.gz \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -color
 
@@ -319,13 +478,18 @@ jobs:
       # --persona=regular and not pedantic: pedantic adds findings that are
       # style preferences rather than security properties, and a gate that
       # argues about taste gets bypassed rather than respected.
+      #
+      # The version and the digest of every one of its wheels are pinned in
+      # .github/zizmor-requirements.txt. --require-hashes refuses a wheel whose
+      # digest is not listed there, and --only-binary refuses the sdist, whose
+      # build would pull in a toolchain nothing here verifies.
       - name: zizmor
-        env:
-          ZIZMOR_VERSION: 1.30.1
         run: |
           set -euo pipefail
-          pipx install "zizmor==${ZIZMOR_VERSION}"
-          zizmor --persona=regular --min-severity=low .github/workflows
+          python3 -m venv "${RUNNER_TEMP}/zizmor"
+          "${RUNNER_TEMP}/zizmor/bin/pip" install --quiet --require-hashes --only-binary=:all: \
+            -r .github/zizmor-requirements.txt
+          "${RUNNER_TEMP}/zizmor/bin/zizmor" --persona=regular --min-severity=low .github/workflows
 
   secrets:
     name: Secret scan
@@ -360,7 +524,7 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [test, static, scripts, release-smoke, workflows, secrets]
+    needs: [test, static, sobelow, scripts, contracts, release-smoke, workflows, secrets]
     runs-on: ubuntu-latest
     permissions: {}
     steps:

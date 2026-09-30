@@ -1,0 +1,11 @@
+# Every issue starts from a form, so a report arrives with the version and the
+# steps it needs. A vulnerability never belongs in a public issue: the first
+# link sends it to the repository's private advisory form (see SECURITY.md).
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/64x-lunicorn/vigil/security/advisories/new
+    about: Report it privately through a GitHub Security Advisory. Never in a public issue.
+  - name: Documentation
+    url: https://github.com/64x-lunicorn/vigil/blob/main/docs/README.md
+    about: Installation, configuration, operations and the design notes.

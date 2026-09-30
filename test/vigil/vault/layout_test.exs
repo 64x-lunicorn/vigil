@@ -56,6 +56,28 @@ defmodule Vigil.Vault.LayoutTest do
     end
   end
 
+  # docs/design.md, "A note that is not UTF-8 is skipped": a file whose name
+  # is not UTF-8 cannot become a chunk id, a slug or a line of JSON, so the
+  # walk every reader of the vault shares leaves it out and names it apart.
+  describe "a note whose file name is not UTF-8" do
+    @tag :non_utf8_file_names
+    test "is not among the note paths, and is listed apart", %{root: root} do
+      name = "bike/caf" <> <<0xE9>> <> ".md"
+      File.write!(Path.join(root, name), "# Caf\u00e9\n")
+
+      layout = Layout.over_vault(root)
+      refute name in Layout.note_paths(layout)
+      assert Layout.non_utf8_paths(layout) == [name]
+      assert Layout.ignored_paths(layout) == []
+    end
+
+    test "is named with its stray bytes spelled out" do
+      assert Layout.printable_path("bike/caf" <> <<0xE9>> <> ".md") == "bike/caf\\xE9.md"
+      assert Layout.printable_path(<<0xFF, 0xFE>> <> "/x.md") == "\\xFF\\xFE/x.md"
+      assert Layout.printable_path("bike/café.md") == "bike/café.md"
+    end
+  end
+
   describe "note_paths/1" do
     test "notes live one level down, except under projects", %{root: root} do
       assert root |> Layout.over_vault() |> Layout.note_paths() == [
@@ -124,6 +146,53 @@ defmodule Vigil.Vault.LayoutTest do
       if created?, do: assert(note? == path in discovered, why)
 
       assert note? != path_refused?(layout, path), why
+    end
+  end
+
+  # A Markdown file the layout does not call a note is one the server ignores
+  # without a word. Why it is ignored is the layout's answer too, so the
+  # doctor can name the reason without restating the rules that gave it.
+  describe "why a Markdown file is not a note" do
+    @reasons [
+      {"Dashboard.md", :root, "a file at the vault root is in no domain"},
+      {"bike/deep/terra.md", :wrong_depth, "one level too deep"},
+      {"projects/loose.md", :wrong_depth, "one level too shallow for projects/"},
+      {"projects/vigil/deep/x.md", :wrong_depth, "and one too deep for it"},
+      {"garden/x.md", :unknown_directory, "a directory that is not a domain"},
+      {"projects/ghost/x.md", :unknown_directory, "nor is a missing project"},
+      {"bike/terra.md", nil, "a note is not ignored"},
+      {"projects/vigil/vigil.md", nil, "nor is a project note"},
+      {"skills/tdd.md", nil, "a skill is read as a skill"},
+      {"work/secret.md", nil, "an excluded file is behind the boundary, not ignored"},
+      {"_templates/daily.md", nil, "underscore directories are outside the vault model"},
+      {".obsidian/notes.md", nil, "and so are dot directories"},
+      {"bike/_drafts/x.md", nil, "at any depth"},
+      {"bike/terra.txt", nil, "only Markdown files are ever notes"}
+    ]
+
+    test "each reason is the layout's own answer", %{root: root} do
+      layout = Layout.over_vault(root, ["work"])
+
+      for {path, reason, why} <- @reasons do
+        assert Layout.ignored_reason(layout, path) == reason, why
+      end
+    end
+
+    test "every ignored Markdown file on disk is listed with its reason", %{root: root} do
+      for path <-
+            ~w(Dashboard.md bike/deep/terra.md projects/loose.md _internal/x.md
+               .obsidian/x.md bike/_drafts/x.md bike/.trash/x.md work/deep/x.md
+               skills/deep/x.md bike/notes.txt) do
+        abs = Path.join(root, path)
+        File.mkdir_p!(Path.dirname(abs))
+        File.write!(abs, "# X")
+      end
+
+      assert root |> Layout.over_vault(["work"]) |> Layout.ignored_paths() == [
+               {"Dashboard.md", :root},
+               {"bike/deep/terra.md", :wrong_depth},
+               {"projects/loose.md", :wrong_depth}
+             ]
     end
   end
 

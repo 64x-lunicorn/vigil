@@ -12,9 +12,9 @@ defmodule Vigil.RateLimit do
   only one place should hold it.
 
   The key is whatever the caller counts by and the budget is the caller's to
-  choose, so the same window serves `/mcp` keyed by access token (AP-6.3) and
-  the authorization server keyed by client address. Both are defence in depth,
-  independent of Cloudflare — not a replacement for it.
+  choose, so the same window serves `/mcp` keyed by the access token's digest
+  (AP-6.3) and the authorization server keyed by client address. Both are
+  defence in depth, independent of Cloudflare — not a replacement for it.
 
   `now` is an argument because a test that cannot name the instant can only
   observe the window by waiting a minute for it.
@@ -113,9 +113,13 @@ defmodule Vigil.RateLimit do
   and the warning keeps it from being invisible: a limit that is quietly not
   the one you configured is worse than a loud one.
 
+  A deployment does not get this far with one: `Vigil.Settings.Check` refuses
+  a budget that is not a positive integer before anything starts. What is left
+  here is the router built outside the supervision tree.
+
   `key` is taken for that warning and nothing else, and this is where it
   belongs: the function that decides to ignore what a deployment configured is
-  the one that has to say so, and a deployment configures three budgets, so it
+  the one that has to say so, and a deployment configures four budgets, so it
   has to say which. A caller that warned on this function's behalf would leave
   every other caller falling back in silence.
   """
@@ -129,22 +133,23 @@ defmodule Vigil.RateLimit do
 
   # True if `key` has exceeded `budget` requests for the fixed window
   # containing `now`; otherwise records the request and returns false.
+  #
+  # Two atomic steps, and no read in between that a decision rests on. A
+  # lookup followed by an insert let every request that read the same count
+  # write the same count plus one, so a burst of parallel requests could all
+  # be let through on the last free slot. Here an elapsed window is first
+  # replaced by an empty one — `select_replace/2` matches on the old window's
+  # start, so of two requests racing to open the new window only one does —
+  # and then the request is counted by `update_counter/4`, whose answer is the
+  # count including this request and nobody else's. A refused request is
+  # counted too, which changes nothing: the window's start is fixed, so a
+  # count past the budget only stays past it.
   defp limited?(key, budget, now) do
-    cutoff = cutoff(now)
+    :ets.select_replace(@table, [
+      {{key, :_, :"$1"}, [{:<, :"$1", cutoff(now)}], [{{{:const, key}, 0, now}}]}
+    ])
 
-    case :ets.lookup(@table, key) do
-      [{^key, count, window_start}] when window_start >= cutoff ->
-        if count >= budget do
-          true
-        else
-          :ets.insert(@table, {key, count + 1, window_start})
-          false
-        end
-
-      _ ->
-        :ets.insert(@table, {key, 1, now})
-        false
-    end
+    :ets.update_counter(@table, key, {2, 1}, {key, 0, now}) > budget
   end
 
   # Drops the windows that have elapsed at `now` and returns how many were

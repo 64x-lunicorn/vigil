@@ -11,7 +11,9 @@ Bug reports, clearer documentation and focused code changes are welcome.
 - Read the [project overview](README.md) and [design notes](docs/design.md).
   Plain Markdown, Git-backed history and the single-writer model are deliberate
   constraints, not missing features.
-- Keep discussions respectful, constructive and focused on the work.
+- Keep discussions respectful, constructive and focused on the work. The
+  [Code of Conduct](CODE_OF_CONDUCT.md) applies to every project space, and
+  [GOVERNANCE.md](GOVERNANCE.md) says how decisions are made.
 - For vulnerabilities, follow [SECURITY.md](SECURITY.md) rather than opening a
   public issue.
 
@@ -58,24 +60,40 @@ Before pushing, run the whole gate in one command:
 mix ci
 ```
 
-This is exactly what CI runs, in the same order: unused lock entries,
-formatting, compilation with warnings as errors, Credo, the dependency audits,
-the test suite and Dialyzer. The first Dialyzer run builds a PLT and takes a
-few minutes; later runs reuse it from `priv/plts/`.
+This is the Elixir part of CI, in one run: unused lock entries, formatting,
+compilation with warnings as errors, Credo, Sobelow, the dependency audits,
+the test suite and Dialyzer. CI spreads the same checks over its Test, Static
+analysis and Security scan jobs; the deployment scripts, the contract check,
+the release smoke test and the workflow and secret scans are further jobs,
+below. The first Dialyzer run builds a PLT and takes a few minutes; later runs
+reuse it from `priv/plts/`.
 
 Tests run in `MIX_ENV=test`; do not run them with `MIX_ENV=prod` or source
 production environment files first. Test configuration pins the vault path,
-the OAuth state path and the authorization server's issuer, resource and
-consent password independently of deployment environment variables.
+the OAuth state path, the authorization server's issuer, resource and
+consent password, and the SkillKey secret independently of deployment environment variables.
 
-For changes to the deployment scripts, also run ShellCheck and the existing
-shell tests:
+For changes to the deployment scripts, also run ShellCheck and the shell
+tests — the same list, in the same order, as CI's Deployment scripts job:
 
 ```bash
 shellcheck -x scripts/*.sh scripts/test/*.sh
 bash scripts/test/check_only_test.sh
 bash scripts/test/update_test.sh
 bash scripts/test/verify_test.sh
+bash scripts/test/secrets_test.sh
+bash scripts/test/git_settings_test.sh
+bash scripts/test/push_safety_net_test.sh
+bash scripts/test/conventions_skill_test.sh
+bash scripts/test/obsidian_templates_test.sh
+bash scripts/test/obsidian_dirs_test.sh
+node scripts/test/slug_js_test.mjs
+bash scripts/test/grants_test.sh
+bash scripts/test/proxy_settings_test.sh
+bash scripts/test/setup_test.sh
+bash scripts/test/operator_secrets_test.sh
+bash scripts/test/check_changelog_test.sh
+bash scripts/test/package_release_test.sh
 ```
 
 CI pins ShellCheck to the version named in
@@ -83,7 +101,7 @@ CI pins ShellCheck to the version named in
 ShellCheck is older it may report findings that version no longer emits, and
 miss ones it does — match it when a local run and CI disagree.
 
-`verify_test.sh` drives each of `verify()`'s twelve checks against both
+`verify_test.sh` drives each of `verify()`'s thirteen checks against both
 outcomes, with `systemctl`, `journalctl`, `curl`, `mcp_call` and `as_vigil`
 replaced by stand-ins and the installation layout pointed at a temp directory.
 Every check's own logic — its conditions, its verdict, its exit code — is the
@@ -91,15 +109,68 @@ real one.
 
 `update_test.sh` drives `update.sh` against a throwaway prefix: the
 switchover, the automatic rollback when `verify()` goes red, `--rollback`, the
-refusals that must leave the running service alone, and the release retention
-rule. It needs no root, no systemd and no production paths.
+refusals that must leave the running service alone (among them an env file
+without `VIGIL_SKILLKEY_SECRET`), the chunk-id comparison before a switch
+(the question it asks, `--accept-id-changes`), the hand-over to the target
+checkout's own `update.sh`, the units taken before `mix` runs and put back by a
+rollback, the unit's start limit, and the release retention rule. It needs no root, no systemd and no production paths.
 
-Those two and `release_smoke.sh` source
+`check_changelog_test.sh` drives `scripts/check_changelog.sh`, the CI check
+that a change to a recorded contract carries a CHANGELOG entry, against
+throwaway branches.
+
+`secrets_test.sh` checks the secrets `init.sh` writes: that what it generates
+passes the boot check's floor for the SkillKey secret, and that the consent
+password and the SkillKey secret are generated apart and both written.
+
+`git_settings_test.sh` checks that the scripts read the vault's remote and
+branch from the env file — against a real repository on `master` — and that no
+script or deploy file names `github` or `main` as either again.
+
+`push_safety_net_test.sh` drives `push_pending.sh` against real repositories —
+the lock directory it refuses, a refusing pre-push hook that must not run, an
+ssh that never answers, a remote that is gone, commits older than the alert —
+and `install_push_timer` against a throwaway systemd directory, with
+`systemctl` and `systemd-analyze` as stand-ins on `PATH`.
+
+`grants_test.sh` drives `grants.sh`, the operator's command for listing and
+revoking grants, against a fake release that records what it is asked to
+evaluate: the arguments it accepts, the confirmation before revoking
+everything, that an id reaches the node as data, and the exit codes. It also
+holds `init.sh --keep-token` to minting no long-lived token.
+
+`operator_secrets_test.sh` holds the scripts to exposing no secret: a `curl`
+on `PATH` records every argument `verify()` gives it and none is a token or a
+SkillKey (and a real curl, against a listener on loopback, sends what was
+handed to it on stdin); `verify()`, `update.sh --rollback` and
+`rotate_secret.sh` under `--verbose` trace none; an answer with a quote, a
+`$(…)` or a backtick comes back from the env file and through `as_vigil` (a
+`runuser` stand-in on `PATH`) as that value; and `rotate_secret.sh` replaces
+one line, keeps every other, restarts the service and names
+`grants.sh revoke-all`.
+
+Every shell suite but `check_only_test.sh` — `release_smoke.sh` and
+`reproducible_release.sh` included — sources
 [`scripts/test/harness.sh`](scripts/test/harness.sh) for the counting and the
-reporting — `pass`, `fail`, `assert_eq`, `section`, and the `report` a suite
+reporting: `pass`, `fail`, `assert_eq`, `section`, and the `report` a suite
 ends on, which is what decides its exit code. `check_only_test.sh` is the
 exception: its `assert_eq` and `assert_contains` carry a message shape of
 their own. A new suite sources the harness.
+
+`obsidian_dirs_test.sh` holds vault adoption to keeping `.obsidian/` and
+`.trash/` out of a vault's history. `proxy_settings_test.sh` and
+`setup_test.sh` hold `init.sh` and `setup.sh` to their own text where they
+cannot run off a host: the tunnel's proxy lines and an `https` issuer, and
+epmd masked. `package_release_test.sh` packs a stand-in release twice and
+compares the bytes, and checks that a release unpacked from the tarball writes
+its own cookie.
+
+`obsidian_templates_test.sh` runs `init_vault.sh` against a temp directory:
+that a new vault gets the Obsidian templates committed, and that a vault's own
+copies are kept. `slug_js_test.mjs` is plain Node without dependencies: it
+checks the JavaScript slug in the Templater user script against
+`test/fixtures/slug_examples.json`, the table `mix test` checks `Vigil.Slug`
+against. Change one slug and the table, and both have to follow.
 
 For changes to `mix.exs`, `config/`, the release or anything on the boot path,
 run the release smoke test. It builds a production release, boots it against a
@@ -110,16 +181,23 @@ write-commit-push path and shutdown:
 bash scripts/test/release_smoke.sh
 ```
 
-If your change touches the MCP tool table (`Vigil.MCP.Tools`) or the OAuth
-metadata (`Vigil.OAuth`), the recorded contracts under
-`test/fixtures/contracts/` will no longer match and the suite will say so.
-These files are what already-connected clients see, so a change to one is a
-change to a published interface. Read the diff the failure prints; if it is
-what you meant, record it and commit the updated file with the change:
+If your change touches the MCP tool table (`Vigil.MCP.Tools`), what a tool
+answers, the `initialize` result or the OAuth metadata (`Vigil.OAuth`), the
+recorded contracts under `test/fixtures/contracts/` will no longer match and
+the suite will say so. These files are what already-connected clients see, so
+a change to one is a change to a published interface. Read the diff the failure
+prints; if it is what you meant, record it and commit the updated file with the
+change:
 
 ```bash
 UPDATE_CONTRACTS=1 mix test test/vigil/contracts_test.exs
 ```
+
+Then name the change under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) —
+CI fails a pull request that changes a recorded contract without it — and check
+[docs/compatibility.md](docs/compatibility.md) for whether it is a major, minor
+or patch change. Any change an operator or a client would notice belongs in the
+changelog too, contract file or not.
 
 These checks use throwaway fixture vaults and do not require root or a
 production installation. Do not run the root-level deployment workflow just
@@ -132,6 +210,7 @@ The pipeline itself is described in [docs/ci-cd.md](docs/ci-cd.md).
 
 ## Writing a useful issue
 
+Open issues from the [bug report or feature request form](https://github.com/64x-lunicorn/vigil/issues/new/choose).
 Include:
 
 - The version or commit, operating system, and Elixir/Erlang versions.

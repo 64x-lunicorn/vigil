@@ -13,8 +13,14 @@ defmodule Vigil.Markdown do
   # H1 is deliberately not a heading: it is the note title and creates no
   # chunk. H5 and deeper are not headings either — chunk ids derive from
   # H2–H4 only (see docs/design.md, "Chunking").
-  @h1_re ~r/^\#\s+(.+?)\s*$/
-  @heading_re ~r/^(\#{2,4})\s+(.+?)\s*$/
+  #
+  # The text is captured greedily and trimmed afterwards, not matched lazily
+  # up to a trailing `\s*$`: the lazy form retried the whitespace run once for
+  # every position the text could end at, which is quadratic in the length of
+  # the line — and past PCRE's match limit, a long heading silently was no
+  # heading at all (docs/design.md, "Input sizes are bounded").
+  @h1_re ~r/^\#\s+(.+)$/
+  @heading_re ~r/^(\#{2,4})\s+(.+)$/
 
   @frontmatter_marker "---"
 
@@ -37,6 +43,62 @@ defmodule Vigil.Markdown do
           | :content
 
   @type read_line :: %{line: String.t(), kind: line_kind()}
+
+  @bom "\uFEFF"
+
+  @typedoc """
+  How a note's author wrote its bytes, apart from what they say: a UTF-8 byte
+  order mark in front, and CRLF line endings. Every reader works on `\\n`
+  and no BOM (`decode/1`); a writer puts back what the file had (`encode/2`).
+  """
+  @type style :: %{bom: boolean(), crlf: boolean()}
+
+  @doc """
+  `content` as every reader in this project reads it, and the style it was
+  written in: `{text, style}`, where `text` has no byte order mark and `\\n`
+  line endings.
+
+  A note written on Windows starts with a BOM or ends its lines with CRLF, and
+  either one used to make its first line something other than `---` — a note
+  read as having no frontmatter, and handed a second block in front of the
+  first by `update_frontmatter` (docs/design.md, "How a file is written").
+
+  Whether a note is CRLF is decided by its first line break; a file that mixes
+  the two is written back in whichever one that is.
+  """
+  @spec decode(String.t()) :: {String.t(), style()}
+  def decode(content) do
+    {bom?, rest} =
+      case content do
+        @bom <> rest -> {true, rest}
+        rest -> {false, rest}
+      end
+
+    {String.replace(rest, "\r\n", "\n"), %{bom: bom?, crlf: crlf?(rest)}}
+  end
+
+  @doc "`content` without its byte order mark and with `\\n` line endings — `decode/1`'s text."
+  @spec normalize(String.t()) :: String.t()
+  def normalize(content), do: content |> decode() |> elem(0)
+
+  @doc """
+  `text` written back in `style`: the line endings and the byte order mark the
+  note had when `decode/1` read it. Whatever line endings `text` arrived with,
+  it leaves with the note's own.
+  """
+  @spec encode(String.t(), style()) :: String.t()
+  def encode(text, %{bom: bom?, crlf: crlf?}) do
+    text = String.replace(text, "\r\n", "\n")
+    text = if crlf?, do: String.replace(text, "\n", "\r\n"), else: text
+    if bom?, do: @bom <> text, else: text
+  end
+
+  defp crlf?(content) do
+    case :binary.match(content, "\n") do
+      {pos, _len} when pos > 0 -> :binary.at(content, pos - 1) == ?\r
+      _no_line_break_or_first_byte -> false
+    end
+  end
 
   @doc """
   `content` ending in exactly one `\\n` — the shape of every file vigil writes.

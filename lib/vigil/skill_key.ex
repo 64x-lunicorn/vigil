@@ -23,12 +23,14 @@ defmodule Vigil.SkillKey do
   @doc """
   The key this deployment's tokens are derived from.
 
-  The HMAC secret is the consent password — the same secret in a second role,
-  which is why nothing resolves it twice — and the window is the deployment's
-  rotation window.
+  The HMAC secret is the deployment's SkillKey secret (`VIGIL_SKILLKEY_SECRET`)
+  and nothing else: a token is handed to every client and ends up in chat
+  transcripts, so it is keyed with random bytes no one chose, never with the
+  consent password, which a human may have. The two rotate apart. The window
+  is the deployment's rotation window.
   """
   @spec key(Settings.t()) :: t
-  def key(%Settings{auth_password: secret, skillkey_ttl_seconds: window}),
+  def key(%Settings{skillkey_secret: secret, skillkey_ttl_seconds: window}),
     do: %{secret: secret, window: window}
 
   @doc "Current token for `now` (defaults to real time), derived from `key`."

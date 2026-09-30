@@ -1,10 +1,22 @@
 [
   {
-    "description": "Searches chunk bodies and headings for a phrase.",
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Searches note titles, headings and chunk bodies. Chunks holding the query as a phrase rank first, then chunks holding all of its words apart. Case and accents are ignored, and umlauts match their transliteration (heizoel finds Heizöl). Results come a page at a time, with next_cursor for the next one.",
     "inputSchema": {
       "properties": {
+        "cursor": {
+          "description": "Optional: next_cursor from the previous page, with the same other parameters. Refused once a write changed the answer.",
+          "maxLength": 1024,
+          "type": "string"
+        },
         "domain": {
           "description": "Restrict results to this domain.",
+          "maxLength": 1024,
           "type": "string"
         },
         "limit": {
@@ -23,7 +35,8 @@
           "type": "string"
         },
         "query": {
-          "description": "Exact search phrase.",
+          "description": "Words or a phrase to search for.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         },
@@ -42,18 +55,80 @@
       ],
       "type": "object"
     },
-    "name": "search"
+    "name": "search",
+    "title": "Search the vault"
   },
   {
-    "description": "Reads a chunk, or the table of contents of a note. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Lists notes as cards (id, title, type, updated_at), never bodies, page by page: the whole vault or one domain, most recently updated first or by title. journal is listed only when named as the domain.",
     "inputSchema": {
       "properties": {
+        "cursor": {
+          "description": "Optional: next_cursor from the previous page, with the same other parameters. Refused once a write changed the answer.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "domain": {
+          "description": "Only notes in this domain.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum number of notes per page (default 25).",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sort": {
+          "description": "updated (most recent first, the default) or title.",
+          "enum": [
+            "updated",
+            "title"
+          ],
+          "type": "string"
+        },
+        "type": {
+          "description": "Only notes of this type.",
+          "enum": [
+            "reference",
+            "decision",
+            "event"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "list",
+    "title": "List notes"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Reads a chunk, or a note: its body (the text before its first ## heading) and its table of contents. Notes carry a compact links counter (out/in/broken); the links tool has the details.",
+    "inputSchema": {
+      "properties": {
+        "at": {
+          "description": "Optional: a commit (from history) to read the note as it was then, under the path it had then. An unknown revision is an error.",
+          "maxLength": 1024,
+          "type": "string"
+        },
         "backlinks": {
           "description": "Append the chunk ids that link here.",
           "type": "boolean"
         },
         "id": {
           "description": "path#heading-slug, or just path.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -63,14 +138,21 @@
       ],
       "type": "object"
     },
-    "name": "read"
+    "name": "read",
+    "title": "Read a note or section"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Shows outgoing and incoming references of a note or chunk — [[wiki]] and [text](path.md) links, resolved with status ok/ambiguous/broken.",
     "inputSchema": {
       "properties": {
         "depth": {
-          "description": "Defaults to 1; 2 adds each directly connected note's own depth-1 view.",
+          "description": "Defaults to 1; 2 adds each directly connected note's own depth-1 view, for at most 25 notes (truncated: true when there were more).",
           "maximum": 2,
           "minimum": 1,
           "type": "integer"
@@ -86,6 +168,7 @@
         },
         "id": {
           "description": "path, or path#heading-slug.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -95,14 +178,53 @@
       ],
       "type": "object"
     },
-    "name": "links"
+    "name": "links",
+    "title": "Show links"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Lists the commits that touched a note, newest first, following renames: commit, date, author, by (vigil or human), message, and the path the note had in that commit.",
+    "inputSchema": {
+      "properties": {
+        "limit": {
+          "description": "Maximum number of commits (default 20).",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "domain/filename.md.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "history",
+    "title": "Show a note's history"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Creates a new note. The path is normalized first — the response contains path_normalized_from when that changed it.",
     "inputSchema": {
       "properties": {
         "content": {
           "description": "Markdown body, starting with an H1.",
+          "maxLength": 1000000,
           "minLength": 1,
           "type": "string"
         },
@@ -112,6 +234,7 @@
         },
         "ends": {
           "description": "ISO timestamp, only for type: event.",
+          "maxLength": 1024,
           "type": "string"
         },
         "force": {
@@ -120,16 +243,24 @@
         },
         "path": {
           "description": "domain/filename.md.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         },
         "starts": {
           "description": "ISO timestamp, only for type: event.",
+          "maxLength": 1024,
           "type": "string"
         },
         "type": {
@@ -150,28 +281,44 @@
       ],
       "type": "object"
     },
-    "name": "create"
+    "name": "create",
+    "title": "Create a note"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Appends content to an existing note.",
     "inputSchema": {
       "properties": {
         "content": {
           "description": "Markdown text to append.",
+          "maxLength": 1000000,
           "minLength": 1,
           "type": "string"
         },
         "heading": {
-          "description": "Section name; without it, appends at end of file.",
+          "description": "Section name, one non-empty line; without it, appends at end of file.",
+          "maxLength": 1024,
           "type": "string"
         },
         "path": {
           "description": "domain/filename.md.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -183,24 +330,44 @@
       ],
       "type": "object"
     },
-    "name": "append"
+    "name": "append",
+    "title": "Append to a note"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Replaces the body of exactly one chunk.",
     "inputSchema": {
       "properties": {
         "content": {
           "description": "New body, without headings of its own.",
+          "maxLength": 1000000,
           "minLength": 1,
           "type": "string"
         },
         "id": {
           "description": "path#heading-slug.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "if_match": {
+          "description": "Optional: the section's hash from read. The edit is refused if the id no longer holds that content.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -212,10 +379,17 @@
       ],
       "type": "object"
     },
-    "name": "replace_section"
+    "name": "replace_section",
+    "title": "Replace a section"
   },
   {
-    "description": "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold.",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Replaces the entire body of a note; frontmatter is preserved. Requires confirm: true only past the shrink threshold. The result lists the links from other notes into its sections that the rewrite broke.",
     "inputSchema": {
       "properties": {
         "confirm": {
@@ -224,16 +398,24 @@
         },
         "content": {
           "description": "New body, starting with an H1.",
+          "maxLength": 1000000,
           "minLength": 1,
           "type": "string"
         },
         "path": {
           "description": "domain/filename.md.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -245,19 +427,38 @@
       ],
       "type": "object"
     },
-    "name": "rewrite_note"
+    "name": "rewrite_note",
+    "title": "Rewrite a note"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Removes a chunk including its heading.",
     "inputSchema": {
       "properties": {
         "id": {
           "description": "path#heading-slug.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "if_match": {
+          "description": "Optional: the section's hash from read. The edit is refused if the id no longer holds that content.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -268,28 +469,44 @@
       ],
       "type": "object"
     },
-    "name": "delete_section"
+    "name": "delete_section",
+    "title": "Delete a section"
   },
   {
-    "description": "Sets type/starts/ends in the frontmatter of an existing note, writing the block if the note has none; the body is untouched.",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Sets type/starts/ends in the frontmatter of an existing note, keeping every other key, and writes the block if the note has none; the body is untouched.",
     "inputSchema": {
       "properties": {
         "ends": {
           "description": "ISO timestamp, only for type: event.",
+          "maxLength": 1024,
           "type": "string"
         },
         "path": {
           "description": "domain/filename.md.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         },
         "starts": {
           "description": "ISO timestamp, only for type: event.",
+          "maxLength": 1024,
           "type": "string"
         },
         "type": {
@@ -309,9 +526,16 @@
       ],
       "type": "object"
     },
-    "name": "update_frontmatter"
+    "name": "update_frontmatter",
+    "title": "Update frontmatter"
   },
   {
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
     "description": "Permanently deletes a note. Destructive — requires confirm: true.",
     "inputSchema": {
       "properties": {
@@ -321,11 +545,18 @@
         },
         "path": {
           "description": "domain/filename.md.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -336,10 +567,17 @@
       ],
       "type": "object"
     },
-    "name": "delete_note"
+    "name": "delete_note",
+    "title": "Delete a note"
   },
   {
-    "description": "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true.",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Moves or renames a note; both paths are normalized. Destructive — requires confirm: true. With update_links: true, the links that point at the note are rewritten in the same commit.",
     "inputSchema": {
       "properties": {
         "confirm": {
@@ -348,18 +586,30 @@
         },
         "from": {
           "description": "Existing path.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         },
         "to": {
           "description": "New path.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
+        },
+        "update_links": {
+          "description": "Rewrites the wiki links and Markdown links in every note that links to the moved one, keeping each link's text and #fragment.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -369,46 +619,97 @@
       ],
       "type": "object"
     },
-    "name": "move_note"
+    "name": "move_note",
+    "title": "Move a note"
   },
   {
-    "description": "Reports duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes.",
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Reports notes that are not UTF-8, duplicate headings, sentence-like headings, broken links, overlong notes and stale decision notes. Each category lists at most 50; totals counts them all and truncated says whether any were cut.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "lint"
+    "name": "lint",
+    "title": "Check the vault"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Returns the current time plus active and nearby events.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "current"
+    "name": "current",
+    "title": "Current time and events"
   },
   {
-    "description": "Runs git pull and reparses the vault.",
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true,
+      "readOnlyHint": false
+    },
+    "description": "Fetches from the remote, puts vigil's unpushed commits on top of what it holds, and reparses the vault.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "reload"
+    "name": "reload",
+    "title": "Reload from the remote"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
+    "description": "Reports whether the index is loaded and the writer answers, commits ahead of and behind the remote (as of the last fetch), the last push's result and time, and, as stale, when and why the vault last failed to update from the remote.",
+    "inputSchema": {
+      "properties": {},
+      "type": "object"
+    },
+    "name": "status",
+    "title": "Server status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Lists available skills with their description, without bodies.",
     "inputSchema": {
       "properties": {},
       "type": "object"
     },
-    "name": "skill_list"
+    "name": "skill_list",
+    "title": "List skills"
   },
   {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true
+    },
     "description": "Reads the full content of a skill.",
     "inputSchema": {
       "properties": {
         "name": {
           "description": "Skill name, with or without .md.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -418,24 +719,43 @@
       ],
       "type": "object"
     },
-    "name": "skill_read"
+    "name": "skill_read",
+    "title": "Read a skill"
   },
   {
-    "description": "Creates or replaces a skill; only on explicit instruction.",
+    "annotations": {
+      "destructiveHint": true,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": false
+    },
+    "description": "Creates or replaces a skill; only on explicit instruction. Replacing an existing skill is destructive — requires confirm: true. vigil-vault-conventions is protected and cannot be written.",
     "inputSchema": {
       "properties": {
+        "confirm": {
+          "description": "Must be true to replace a skill that exists, otherwise the call is rejected; a new skill needs none.",
+          "type": "boolean"
+        },
         "content": {
           "description": "Full file content including frontmatter.",
+          "maxLength": 1000000,
           "minLength": 1,
           "type": "string"
         },
         "name": {
           "description": "Skill name, with or without .md.",
+          "maxLength": 1024,
           "minLength": 1,
+          "type": "string"
+        },
+        "request_id": {
+          "description": "Optional, unique per write. A retry with the same request_id returns the first result (already_applied: true) instead of writing again.",
+          "maxLength": 1024,
           "type": "string"
         },
         "skill_key": {
           "description": "Current key from skill_read.",
+          "maxLength": 1024,
           "minLength": 1,
           "type": "string"
         }
@@ -447,6 +767,7 @@
       ],
       "type": "object"
     },
-    "name": "skill_write"
+    "name": "skill_write",
+    "title": "Write a skill"
   }
 ]

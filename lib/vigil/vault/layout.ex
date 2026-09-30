@@ -66,19 +66,14 @@ defmodule Vigil.Vault.Layout do
   defp segment_count(_domain), do: 2
 
   @doc """
-  The one domain that nests, and where a project directory inside it lives.
+  The one domain that nests.
 
-  Callers that build or read a path in the nesting domain ask rather than
-  writing the name themselves: `Vigil.Store` creates the one directory a
-  `create` may create, and `Vigil.Vault.Policy`'s duplicate gate tells two
-  notes in the same project folder apart from two that merely share a domain.
+  Callers that read a path in the nesting domain ask rather than writing the
+  name themselves: `Vigil.Vault.Policy`'s duplicate gate tells two notes in
+  the same project folder apart from two that merely share a domain.
   """
   @spec nesting_domain() :: String.t()
   def nesting_domain, do: @nesting_domain
-
-  @doc "Where `project`'s directory lives, relative to the vault root."
-  @spec project_dir(String.t()) :: Path.t()
-  def project_dir(project), do: Path.join(@nesting_domain, project)
 
   @doc "The project a path lies in, or `nil` when it lies in none."
   @spec project_of(Path.t()) :: String.t() | nil
@@ -162,20 +157,90 @@ defmodule Vigil.Vault.Layout do
   """
   @spec classify(t, Path.t()) :: classification
   def classify(%__MODULE__{} = layout, path) do
+    case shape(layout, path) do
+      {:not_a_note, _why} -> :not_a_note
+      classification -> classification
+    end
+  end
+
+  # `classify/2` with the reason a path is not a note still attached. The write
+  # gate needs none of it; `ignored_reason/2` needs the part that tells a file
+  # at the root from one at the wrong depth, and takes it from here rather than
+  # counting segments a second time.
+  defp shape(layout, path) do
     parts = String.split(path, "/")
     domain = hd(parts)
 
     cond do
-      not String.ends_with?(List.last(parts), ".md") -> :not_a_note
+      not String.ends_with?(List.last(parts), ".md") -> {:not_a_note, :not_markdown}
       domain == "skills" -> :skill
       excluded?(layout, parts) -> :excluded
-      Slug.reserved_segment?(domain) -> :not_a_note
-      length(parts) != segment_count(domain) -> :not_a_note
+      Slug.reserved_segment?(domain) -> {:not_a_note, :reserved}
+      length(parts) == 1 -> {:not_a_note, :root}
+      length(parts) != segment_count(domain) -> {:not_a_note, :wrong_depth}
       domain not in layout.domains -> {:unknown_domain, domain}
       domain == @nesting_domain -> project(layout, domain, Enum.at(parts, 1))
       true -> {:note, domain}
     end
   end
+
+  @typedoc """
+  Why a Markdown file is not a note: it sits at the vault root, at a depth no
+  note has in its domain, or in a directory that is neither a domain nor a
+  project directory.
+  """
+  @type ignored_reason :: :root | :wrong_depth | :unknown_directory
+
+  @doc """
+  Why the server ignores the Markdown file at `path`, or `nil` when it does
+  not.
+
+  `nil` for a note, and for every path the server does not ignore by
+  accident: a skill, an excluded path (the boundary, not an oversight), a
+  file that is not Markdown, and anything in a `_`- or dot-prefixed directory
+  at any depth, which lies deliberately outside the vault model
+  (`_templates/`, `.obsidian/`, `.trash/`).
+  """
+  @spec ignored_reason(t, Path.t()) :: ignored_reason | nil
+  def ignored_reason(%__MODULE__{} = layout, path) do
+    directories = path |> String.split("/") |> Enum.drop(-1)
+
+    if Enum.any?(directories, &Slug.reserved_segment?/1) do
+      nil
+    else
+      case shape(layout, path) do
+        {:not_a_note, reason} when reason in [:root, :wrong_depth] -> reason
+        {:unknown_domain, _domain} -> :unknown_directory
+        {:missing_project, _domain, _project} -> :unknown_directory
+        _ -> nil
+      end
+    end
+  end
+
+  @doc """
+  Every Markdown file the server ignores, with `ignored_reason/2`'s answer,
+  sorted by path.
+
+  Walks what discovery walks — the domains — plus the vault root, and nothing
+  else: every other top-level directory is `skills/`, excluded, or `_`- or
+  dot-prefixed, and none of those holds a file ignored by accident.
+  """
+  @spec ignored_paths(t) :: [{Path.t(), ignored_reason}]
+  def ignored_paths(%__MODULE__{} = layout) do
+    [Path.join(layout.vault_path, "*.md") | Enum.map(layout.domains, &domain_glob(layout, &1))]
+    |> Enum.flat_map(&Path.wildcard/1)
+    |> Enum.map(&Path.relative_to(&1, layout.vault_path))
+    |> Enum.map(&printable_path/1)
+    |> Enum.sort()
+    |> Enum.flat_map(fn path ->
+      case ignored_reason(layout, path) do
+        nil -> []
+        reason -> [{path, reason}]
+      end
+    end)
+  end
+
+  defp domain_glob(layout, domain), do: Path.join([layout.vault_path, domain, "**", "*.md"])
 
   # A path is excluded when any of its segments is. `VIGIL_EXCLUDE` names
   # directories, not domains, and the only directories below a domain that
@@ -208,12 +273,99 @@ defmodule Vigil.Vault.Layout do
   """
   @spec note_paths(t) :: [Path.t()]
   def note_paths(%__MODULE__{} = layout) do
-    Enum.flat_map(layout.domains, &domain_notes(layout, &1))
+    layout |> all_note_paths() |> Enum.filter(&String.valid?/1)
   end
 
+  @doc """
+  The notes `note_paths/1` leaves out because their file name is not UTF-8,
+  sorted by domain.
+
+  Linux keeps a file name as the bytes it was given, so a note saved under a
+  Windows-1252 name (`caf\\xE9.md`) is a note on disk. It cannot be one in the
+  vault: its name would be a chunk id, a slug and a line of JSON, and none of
+  those can hold it — the slug function used to raise on it while the index
+  was built, which at boot is a restart loop (docs/design.md, "A note that is
+  not UTF-8 is skipped"). So the walk every reader shares leaves it out, and
+  whoever reports on the vault asks for it here and names it with
+  `printable_path/1`.
+  """
+  #
+  # The walk is by the bytes on disk, not through `Path.wildcard/1`: a VM
+  # under a UTF-8 locale drops a file name that is not UTF-8 from every
+  # listing without a word (Erlang's `+fnu`, which ignores such names), so
+  # the wildcard would never show one. Under any other locale the VM reads
+  # names as latin1, and the wildcard does hand it over — which is why
+  # `note_paths/1` filters it out as well.
+  @spec non_utf8_paths(t) :: [Path.t()]
+  def non_utf8_paths(%__MODULE__{} = layout) do
+    layout.domains
+    |> Enum.flat_map(fn domain ->
+      layout.vault_path
+      |> raw_markdown(domain)
+      |> Enum.reject(&String.valid?/1)
+      |> Enum.filter(&match?({:note, ^domain}, classify(layout, &1)))
+    end)
+    |> Enum.sort()
+  end
+
+  # Every `.md` below `rel`, as a path relative to the vault in the bytes it
+  # has on disk. Dot-prefixed entries are skipped, as the wildcard skips them.
+  defp raw_markdown(vault_path, rel) do
+    case :file.list_dir_all(raw_join(vault_path, rel)) do
+      {:ok, names} ->
+        names
+        |> Enum.map(&raw_name/1)
+        |> Enum.reject(&String.starts_with?(&1, "."))
+        |> Enum.flat_map(fn name ->
+          path = rel <> "/" <> name
+
+          cond do
+            File.dir?(raw_join(vault_path, path)) -> raw_markdown(vault_path, path)
+            String.ends_with?(name, ".md") -> [path]
+            true -> []
+          end
+        end)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp raw_join(vault_path, rel), do: IO.chardata_to_string(vault_path) <> "/" <> rel
+
+  # `:file.list_dir_all/1` hands a name the VM cannot decode over as its raw
+  # bytes, and every other name as characters: bytes under latin1, code
+  # points under UTF-8.
+  defp raw_name(name) when is_binary(name), do: name
+
+  defp raw_name(chars) do
+    case :file.native_name_encoding() do
+      :latin1 -> :erlang.list_to_binary(chars)
+      :utf8 -> :unicode.characters_to_binary(chars)
+    end
+  end
+
+  @doc """
+  `path` as a message, a log line or a JSON string can carry it: unchanged
+  when it is UTF-8, and otherwise with every byte that is not spelled out as
+  `\\xHH`, so `bike/caf\\xE9.md` still says which file is meant.
+  """
+  @spec printable_path(binary()) :: String.t()
+  def printable_path(path) do
+    path
+    |> String.chunk(:valid)
+    |> Enum.map_join(fn chunk ->
+      if String.valid?(chunk), do: chunk, else: for(<<byte <- chunk>>, into: "", do: hex(byte))
+    end)
+  end
+
+  defp hex(byte), do: "\\x" <> String.pad_leading(Integer.to_string(byte, 16), 2, "0")
+
+  defp all_note_paths(layout), do: Enum.flat_map(layout.domains, &domain_notes(layout, &1))
+
   defp domain_notes(layout, domain) do
-    [layout.vault_path, domain, "**", "*.md"]
-    |> Path.join()
+    layout
+    |> domain_glob(domain)
     |> Path.wildcard()
     |> Enum.map(&Path.relative_to(&1, layout.vault_path))
     |> Enum.filter(&match?({:note, ^domain}, classify(layout, &1)))

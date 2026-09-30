@@ -63,8 +63,19 @@ defmodule Vigil.MCP.ToolsDispatchTest do
                domain: nil,
                type: nil,
                prefer: nil,
-               limit: 10
+               limit: 10,
+               cursor: nil
              }
+    end
+
+    test "list sends its declared operation, its defaults and the enum's atom" do
+      store = start_store()
+
+      assert {:ok, :stub_result} =
+               Tools.dispatch(store, "list", %{"domain" => "bike", "sort" => "title"}, @now, @key)
+
+      assert_receive {:store_call, {:list, params}}
+      assert params == %{domain: "bike", type: nil, sort: :title, limit: 25, cursor: nil}
     end
 
     test "a parameterless tool sends an empty params map" do
@@ -116,6 +127,28 @@ defmodule Vigil.MCP.ToolsDispatchTest do
       assert_receive {:store_call, {:move_note, params}}
       assert params.from == "training/a.md"
       assert params.to == "training/b.md"
+      assert params.update_links == false
+    end
+
+    test "move_note's update_links travels as the boolean it was sent" do
+      store = start_store({:ok, %{moved: true}})
+
+      assert {:ok, %{moved: true}} =
+               Tools.dispatch(
+                 store,
+                 "move_note",
+                 %{
+                   "from" => "training/a.md",
+                   "to" => "training/b.md",
+                   "confirm" => true,
+                   "update_links" => true,
+                   "skill_key" => skill_key()
+                 },
+                 @now,
+                 @key
+               )
+
+      assert_receive {:store_call, {:move_note, %{update_links: true}}}
     end
   end
 
@@ -229,7 +262,68 @@ defmodule Vigil.MCP.ToolsDispatchTest do
       )
 
       assert_receive {:store_call, {:skill_write, params}}
-      assert Map.keys(params) |> Enum.sort() == [:content, :name]
+      assert Map.keys(params) |> Enum.sort() == [:confirm, :content, :name, :request_id]
+    end
+  end
+
+  # docs/design.md, "A retried write is applied once": unlike skill_key, the
+  # request_id and the if_match are the operation's, and reach the writer.
+  describe "request_id and if_match travel with the call" do
+    test "delete_section hands both to the writer" do
+      store = start_store({:ok, %{path: "bike/x.md"}})
+
+      Tools.dispatch(
+        store,
+        "delete_section",
+        %{
+          "id" => "bike/x.md#a",
+          "if_match" => "abc",
+          "request_id" => "r-1",
+          "skill_key" => skill_key()
+        },
+        @now,
+        @key
+      )
+
+      assert_receive {:store_call, {:delete_section, params}}
+      assert params.request_id == "r-1"
+      assert params.if_match == "abc"
+    end
+
+    test "a write without them hands the writer nil for both" do
+      store = start_store({:ok, %{path: "bike/x.md"}})
+
+      Tools.dispatch(
+        store,
+        "delete_section",
+        %{"id" => "bike/x.md#a", "skill_key" => skill_key()},
+        @now,
+        @key
+      )
+
+      assert_receive {:store_call, {:delete_section, params}}
+      assert params.request_id == nil
+      assert params.if_match == nil
+    end
+
+    test "a request_id that is not a string is refused before the writer is reached" do
+      store = start_store()
+
+      assert {:error, "Invalid parameter request_id: expected a string"} =
+               Tools.dispatch(
+                 store,
+                 "append",
+                 %{
+                   "path" => "bike/x.md",
+                   "content" => "x",
+                   "request_id" => 7,
+                   "skill_key" => skill_key()
+                 },
+                 @now,
+                 @key
+               )
+
+      refute_received {:store_call, _}
     end
   end
 
@@ -305,6 +399,23 @@ defmodule Vigil.MCP.ToolsDispatchTest do
 
       assert Tools.dispatch(store, "read", %{"id" => "bike/nope.md"}, @now, @key) ==
                {:error, "no such note"}
+    end
+
+    # docs/design.md, "Reads see what another clone pushed": a read answered
+    # while the vault could not be brought up to date carries `stale: true`
+    # beside its result, whatever the result is.
+    test "a stale answer is lifted the same way, and says it is stale" do
+      store = start_store({:stale, [%{id: "bike/x.md#a"}]})
+
+      assert Tools.dispatch(store, "search", %{"query" => "tires"}, @now, @key) ==
+               {:ok, [%{id: "bike/x.md#a"}], %{stale: true}}
+    end
+
+    test "a stale error says it is stale too" do
+      store = start_store({:stale, {:error, "Not found: bike/nope.md"}})
+
+      assert Tools.dispatch(store, "read", %{"id" => "bike/nope.md"}, @now, @key) ==
+               {:error, "Not found: bike/nope.md", %{stale: true}}
     end
 
     test "an {:ok, value} answer is not wrapped twice" do

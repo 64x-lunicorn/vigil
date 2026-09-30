@@ -23,11 +23,18 @@ defmodule Vigil.MCP.Envelope do
   including which form a given tool gets. This module holds the state that
   decision is made against, reads the clock and fetches the snapshot it is
   made with, and nothing else.
+
+  Whether a row in the table is a session at all — issued, bound to a token,
+  expired or ended — is `Vigil.MCP.Session`'s, and so is the row's shape: the
+  envelope's state is one field of a session, asked for and recorded through
+  that module. A session that was never issued, or ended while its response
+  was being decided, has no row, and recording its state does not add one.
   """
   use GenServer
 
   alias Vigil.Clock
   alias Vigil.MCP.Envelope.Decision
+  alias Vigil.MCP.Session
   alias Vigil.Store
 
   # The name an envelope registers under, and — the same atom — the name of the
@@ -71,17 +78,15 @@ defmodule Vigil.MCP.Envelope do
     now = Clock.now(tz)
 
     {envelope, session_state} =
-      Decision.for_tool(tool, previous(sessions, session_id), now, Store.snapshot(store, now))
+      Decision.for_tool(
+        tool,
+        Session.envelope_state(sessions, session_id),
+        now,
+        Store.snapshot(store, now)
+      )
 
-    :ets.insert(sessions, {session_id, session_state})
+    Session.put_envelope_state(sessions, session_id, session_state)
     {envelope, now}
-  end
-
-  defp previous(sessions, session_id) do
-    case :ets.lookup(sessions, session_id) do
-      [{^session_id, session_state}] -> session_state
-      [] -> nil
-    end
   end
 
   @impl true

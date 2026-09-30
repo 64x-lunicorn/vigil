@@ -26,6 +26,7 @@ defmodule Vigil.Index do
   """
 
   alias Vigil.{Events, LinkIndex, Parser, Slug}
+  alias Vigil.Parser.Chunk
   alias Vigil.Vault.Rules
 
   @stale_decision_days 180
@@ -38,6 +39,9 @@ defmodule Vigil.Index do
   @body_occurrence_cap 5
   @preferred_type 5
   @preview_len 120
+
+  # A word of a query, once folded: a run of letters and digits.
+  @word ~r/[\p{L}\p{N}]+/u
 
   defmodule Note do
     @moduledoc "One vault note, as the index carries it."
@@ -54,20 +58,30 @@ defmodule Vigil.Index do
     ]
   end
 
-  defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}
+  # `invalid_utf8` is the paths the load skipped for not being UTF-8
+  # (docs/design.md, "A note that is not UTF-8 is skipped") — no note, no
+  # chunk, only a `lint` finding.
+  defstruct notes: %{}, chunks: %{}, links_out: %{}, links_in: %{}, invalid_utf8: []
 
   @typedoc "The whole index as one value: the notes, their chunks, and the links between them."
   @type t :: %__MODULE__{}
 
-  @doc "Builds an index from the vault's parsed files."
-  def build(parsed_files) do
+  @doc """
+  Builds an index from the vault's parsed files, and the paths of the notes the
+  load skipped because they are not UTF-8.
+  """
+  def build(parsed_files, invalid_utf8 \\ []) do
     {notes, chunks} =
       Enum.reduce(parsed_files, {%{}, %{}}, fn file, {notes, chunks} ->
         {note, file_chunks} = index_file(file)
         {Map.put(notes, note.path, note), Map.merge(chunks, file_chunks)}
       end)
 
-    rebuild_links(%__MODULE__{notes: notes, chunks: chunks})
+    rebuild_links(%__MODULE__{
+      notes: notes,
+      chunks: chunks,
+      invalid_utf8: Enum.sort(invalid_utf8)
+    })
   end
 
   @doc """
@@ -144,11 +158,14 @@ defmodule Vigil.Index do
   defp drop_source(index, path, path), do: index
   defp drop_source(index, from, _to), do: drop(index, from)
 
+  # A note the load skipped is only a path here, and deleting it is how it
+  # leaves `lint`'s findings before the next load.
   defp drop(index, path) do
     %{
       index
       | notes: Map.delete(index.notes, path),
-        chunks: Map.drop(index.chunks, old_chunk_ids(index, path))
+        chunks: Map.drop(index.chunks, old_chunk_ids(index, path)),
+        invalid_utf8: List.delete(index.invalid_utf8, path)
     }
   end
 
@@ -167,6 +184,88 @@ defmodule Vigil.Index do
 
   @doc "Incoming references to `key` (a note path or a full chunk id) — the write path's backlinks question."
   def backlinks(index, key), do: backlinks_for(index, key)
+
+  @doc """
+  The links a move of `from` to `to` has to rewrite for every link to the
+  note to keep leading to it: `%{source_path => %{raw => new_raw}}`, keyed by
+  the linking note's path before the move — `from` itself for a note that
+  links to itself.
+
+  Only links that resolve to `from` now and would not resolve to `to` after
+  the move are named, so a basename link that still finds the note is left as
+  it was written. The new target keeps the link's style where that still
+  leads to `to` from where the linking note will stand: a basename stays a
+  basename unless the cascade would pick another note or none, and then it
+  becomes the vault-relative path, which cannot be ambiguous. A path keeps a
+  `.md` it was written with.
+  """
+  @spec relinks(t(), String.t(), String.t()) :: %{String.t() => %{String.t() => String.t()}}
+  def relinks(index, from, to) do
+    resolve = LinkIndex.resolver(files_after_move(index, from, to))
+
+    index
+    |> backlinks_for(from)
+    |> Enum.group_by(&Map.fetch!(index.chunks, &1).path)
+    |> Enum.map(fn {source_path, chunk_ids} ->
+      source_after = if source_path == from, do: to, else: source_path
+
+      rewrites =
+        for chunk_id <- chunk_ids,
+            %{status: :ok, target_note: ^from, raw: raw} <-
+              Map.get(index.links_out, chunk_id, []),
+            new_raw = retarget(raw, source_after, to, resolve),
+            new_raw != nil,
+            into: %{},
+            do: {raw, new_raw}
+
+      {source_path, rewrites}
+    end)
+    |> Enum.reject(fn {_source_path, rewrites} -> rewrites == %{} end)
+    |> Map.new()
+  end
+
+  defp files_after_move(index, from, to) do
+    moved = %{path: to, domain: domain_of(to)}
+
+    index.notes
+    |> Map.delete(from)
+    |> Map.values()
+    |> Enum.map(&%{path: &1.path, domain: &1.domain})
+    |> then(&[moved | &1])
+  end
+
+  defp retarget(raw, source_after, to, resolve) do
+    basename = Path.basename(to, ".md")
+
+    cond do
+      resolve.(raw, source_after) == {:ok, to} -> nil
+      not String.contains?(raw, "/") and resolve.(basename, source_after) == {:ok, to} -> basename
+      String.ends_with?(raw, ".md") -> to
+      true -> Path.rootname(to, ".md")
+    end
+  end
+
+  @doc """
+  Every link from another note into one of `path`'s sections:
+  `[%{from: source_chunk_id, to: chunk_id}]`. The note's own links into
+  itself are not counted, and neither are links to the note as a whole —
+  those survive anything but a delete or a move. What `rewrite_note` asks
+  before it writes, to report the ones it broke.
+  """
+  @spec inbound_chunk_links(t(), String.t()) :: [%{from: String.t(), to: String.t()}]
+  def inbound_chunk_links(index, path) do
+    case note(index, path) do
+      nil ->
+        []
+
+      note ->
+        for chunk_id <- note.chunk_ids,
+            chunk_id != path,
+            source <- backlinks_for(index, chunk_id),
+            Map.fetch!(index.chunks, source).path != path,
+            do: %{from: source, to: chunk_id}
+    end
+  end
 
   @doc """
   The chunk a section id resolves to, or `nil` — through `resolve/2`, the same
@@ -254,6 +353,10 @@ defmodule Vigil.Index do
   zero without matching the query anywhere. `Vigil.Vault.Policy`'s duplicate
   gate is asked without a preference, which is what makes the reading it
   relies on true.
+
+  A words hit is scored on the same scale, one word at a time, and scores its
+  weakest word: it reaches `strength(:title)` only when every word of the
+  query does — each one names the note, if the phrase does not.
   """
   @spec strength(atom) :: pos_integer
   def strength(:title), do: @title
@@ -264,77 +367,227 @@ defmodule Vigil.Index do
 
   @doc """
   Answers the `search` tool: the domain and type filters apply before
-  matching, `journal/` is hidden unless asked for by name, matching is a
-  literal phrase against a chunk's title/headings/body, scoring is the
-  additive scale `strength/1` publishes, and `hub` is attached when exactly
-  one other note links to the hit's note.
+  matching, `journal/` is hidden unless asked for by name, and `hub` is
+  attached when exactly one other note links to the hit's note.
 
-  `opts` inside `params`: `:prefer`, and `:limit`, which is required. The
-  bound on `limit` is declared in `Vigil.MCP.Tools`' table and refused there;
-  a limit that arrives here has already been validated against it, so this
-  function takes the caller at its word rather than silently returning fewer
-  hits than asked for.
+  The query is trimmed and folded (`Vigil.Slug.fold/1`) as every chunk's
+  title, headings and body were when it was indexed. A chunk that holds the
+  folded query as a phrase is a *phrase hit*, scored on the additive scale
+  `strength/1` publishes. A chunk that does not, but holds every one of the
+  query's words somewhere in its title, headings or body, is a *words hit*:
+  each word is scored on the same scale as if it were the query, and the hit
+  scores what its weakest word scores. Every phrase hit ranks above every
+  words hit; within each, the higher score first, then the more recently
+  updated chunk, then the lower id — so the order is the same on every call.
+
+  `opts` inside `params`: `:prefer`, `:cursor`, and `:limit`, which is
+  required. The bound on `limit` is declared in `Vigil.MCP.Tools`' table and
+  refused there; a limit that arrives here has already been validated against
+  it, so this function takes the caller at its word rather than silently
+  returning fewer hits than asked for.
+
+  Answers `{:ok, %{results:, next_cursor:}}`: `next_cursor` is `nil` on the
+  last page, and handed back as `:cursor` it answers the page after. A cursor
+  that does not match the call is `{:error, message}` (see "Paging" below).
   """
   def search(index, params) do
     query = Map.fetch!(params, :query)
     domain = Map.get(params, :domain)
     type_filter = Map.get(params, :type)
     prefer = Map.get(params, :prefer)
-    limit = Map.fetch!(params, :limit)
 
-    index.chunks
-    |> Map.values()
-    |> Enum.filter(&search_filter?(&1, domain, type_filter))
-    |> rank(query, %{limit: limit, prefer: prefer})
-    |> Enum.map(&attach_hub(index, &1))
+    ranked =
+      index.chunks
+      |> Map.values()
+      |> Enum.filter(&(visible?(&1.domain, domain) and of_type?(&1, type_filter)))
+      |> rank(query, prefer)
+
+    with {:ok, hits, next_cursor} <- page(ranked, :search, params) do
+      results =
+        Enum.map(hits, fn {score, chunk} ->
+          attach_hub(index, to_search_result(chunk, score))
+        end)
+
+      {:ok, %{results: results, next_cursor: next_cursor}}
+    end
   end
 
-  defp search_filter?(chunk, domain, type_filter) do
-    domain_ok =
-      case domain do
-        nil -> chunk.domain != "journal"
-        d -> chunk.domain == d
-      end
+  # The one rule for what a read that enumerates shows by default: `journal/`
+  # only when it is the domain asked for (docs/design.md, "Search"). `search`
+  # and `list` both ask it.
+  defp visible?(item_domain, nil), do: item_domain != "journal"
+  defp visible?(item_domain, domain), do: item_domain == domain
 
-    type_ok = type_filter == nil or chunk.type == type_filter
-    domain_ok and type_ok
-  end
+  defp of_type?(_item, nil), do: true
+  defp of_type?(item, type), do: item.type == type
 
-  defp rank(chunks, query, opts) do
-    q = String.downcase(query)
-    limit = Map.fetch!(opts, :limit)
-    prefer = Map.get(opts, :prefer)
+  # Every hit, sorted, each beside the key it was sorted on — the key is what
+  # a page's cursor is checked against (page/3).
+  defp rank(chunks, query, prefer) do
+    phrase = query |> String.trim() |> Slug.fold()
+    words = query_words(phrase)
 
     chunks
-    |> Enum.map(&{score(&1, q, prefer), &1})
-    |> Enum.filter(fn {score, _} -> score > 0 end)
-    |> Enum.sort_by(fn {score, chunk} -> {-score, negated_time(chunk.updated_at)} end)
-    |> Enum.take(limit)
-    |> Enum.map(fn {score, chunk} -> to_search_result(chunk, score) end)
+    |> Enum.map(&{match(&1, phrase, words, prefer), &1})
+    |> Enum.filter(fn {{_group, score}, _} -> score > 0 end)
+    |> Enum.map(fn {{group, score}, chunk} ->
+      {{group, -score, negated_time(chunk.updated_at), chunk.id}, {score, chunk}}
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+  end
+
+  @doc """
+  Answers the `list` tool: a card per note — `id` (its path), `title`, `type`,
+  `updated_at` — never a body, with the same `journal/` rule `search/2`
+  follows. `domain` and `type` filter; `sort` is `:updated` (most recently
+  updated first, a note git knows no date for last) or `:title` (folded as
+  search folds, so case and accents do not split the order). Ties break on the
+  path, so the order is the same on every call.
+
+  `params` carries `:sort` and `:limit`, both required and both supplied by
+  `Vigil.MCP.Tools`' table, and an optional `:cursor` from the page before.
+  Answers `{:ok, %{notes:, next_cursor:}}`, or `{:error, message}` for a
+  cursor that does not match the call (see "Paging" below).
+  """
+  def list(index, params) do
+    domain = Map.get(params, :domain)
+    type = Map.get(params, :type)
+    sort = Map.fetch!(params, :sort)
+
+    sorted =
+      index.notes
+      |> Map.values()
+      |> Enum.filter(&(visible?(&1.domain, domain) and of_type?(&1, type)))
+      |> Enum.map(&{list_key(&1, sort), &1})
+      |> Enum.sort_by(&elem(&1, 0))
+
+    with {:ok, notes, next_cursor} <- page(sorted, :list, params) do
+      {:ok, %{notes: Enum.map(notes, &card/1), next_cursor: next_cursor}}
+    end
+  end
+
+  defp list_key(note, :updated), do: {negated_time(note.updated_at), note.path}
+  defp list_key(note, :title), do: {Slug.fold(note.title || ""), note.path}
+
+  defp card(note) do
+    %{id: note.path, title: note.title, type: note.type, updated_at: iso(note.updated_at)}
+  end
+
+  ## Paging
+  #
+  # docs/design.md, "Reads that enumerate are paged". A cursor is an offset
+  # into the whole ordered answer, together with a fingerprint of that answer:
+  # the call it came from (the operation and every parameter but `limit` and
+  # `cursor`) and the sort key of every item, in order. While nothing is
+  # written the same call orders the same items the same way, so the
+  # fingerprint matches and the offset lands where the last page ended. A
+  # write that changes what the call would answer, or in what order, changes
+  # the fingerprint, and the cursor is refused rather than continued at an
+  # offset that no longer means what it meant — a note skipped or shown twice
+  # without a word is the thing paging must not do. A write elsewhere leaves
+  # the cursor valid.
+  #
+  # Opaque to the caller, short whatever the ids are, and nothing in it is
+  # trusted beyond two bounded integers.
+  @fingerprint_range 4_294_967_296
+
+  defp page(sorted, op, params) do
+    limit = Map.fetch!(params, :limit)
+    call = Map.drop(params, [:limit, :cursor])
+    fingerprint = :erlang.phash2({op, call, Enum.map(sorted, &elem(&1, 0))}, @fingerprint_range)
+
+    with {:ok, offset} <- cursor_offset(Map.get(params, :cursor), fingerprint, op) do
+      items = sorted |> Enum.drop(offset) |> Enum.take(limit) |> Enum.map(&elem(&1, 1))
+      next = offset + limit
+      next_cursor = if next < length(sorted), do: encode_cursor(next, fingerprint)
+
+      {:ok, items, next_cursor}
+    end
+  end
+
+  defp cursor_offset(nil, _fingerprint, _op), do: {:ok, 0}
+
+  defp cursor_offset(cursor, fingerprint, op) do
+    case decode_cursor(cursor) do
+      {:ok, offset, ^fingerprint} ->
+        {:ok, offset}
+
+      {:ok, _offset, _other} ->
+        {:error,
+         "The cursor no longer matches: the vault changed since it was issued, " <>
+           "or #{op} was called with other parameters. Call #{op} again without a cursor."}
+
+      :error ->
+        {:error, "Invalid cursor: pass next_cursor from the previous page unchanged."}
+    end
+  end
+
+  defp encode_cursor(offset, fingerprint),
+    do: Base.url_encode64("#{offset}.#{fingerprint}", padding: false)
+
+  defp decode_cursor(cursor) do
+    with {:ok, raw} <- Base.url_decode64(cursor, padding: false),
+         [_, offset, fingerprint] <- Regex.run(~r/\A(\d{1,9})\.(\d{1,10})\z/, raw) do
+      {:ok, String.to_integer(offset), String.to_integer(fingerprint)}
+    else
+      _ -> :error
+    end
+  end
+
+  # The words of a folded query: its runs of letters and digits, each once,
+  # of two characters or more. A one-letter word (`C#`, `Plan B`) is in
+  # nearly every chunk, inside longer words too, so as a word it narrows
+  # nothing and caps a hit's score at a handful of stray letters; it stays in
+  # the phrase. A query that is one word and nothing else has no words beyond
+  # its phrase, and is not matched a second time.
+  defp query_words(phrase) do
+    words =
+      @word
+      |> Regex.scan(phrase)
+      |> List.flatten()
+      |> Enum.filter(&(String.length(&1) >= 2))
+      |> Enum.uniq()
+
+    case words do
+      [^phrase] -> []
+      words -> words
+    end
   end
 
   defp negated_time(nil), do: 0
   defp negated_time(%DateTime{} = dt), do: -DateTime.to_unix(dt)
 
-  defp score(chunk, q, prefer) when q != "" do
-    title_hit? = String.contains?(String.downcase(chunk.file_title), q)
+  # `{group, score}`: group 0 is a phrase hit, group 1 everything else, so a
+  # phrase hit sorts first whatever the scores.
+  defp match(_chunk, "", _words, _prefer), do: {1, 0}
 
-    heading_hit? =
-      Enum.any?(chunk.heading_path, fn h -> String.contains?(String.downcase(h), q) end)
+  defp match(chunk, phrase, words, prefer) do
+    preferred = if prefer && chunk.type == prefer, do: @preferred_type, else: 0
 
-    body_hits = count_occurrences(chunk.body_downcased, q)
+    case occurrence_score(chunk.folded, phrase) do
+      0 -> {1, words_score(chunk.folded, words) + preferred}
+      score -> {0, score + preferred}
+    end
+  end
+
+  # A words hit is only as strong as the weakest of the words it must hold;
+  # a word it does not hold at all scores 0, and so does the hit.
+  defp words_score(_folded, []), do: 0
+
+  defp words_score(folded, words) do
+    words |> Enum.map(&occurrence_score(folded, &1)) |> Enum.min()
+  end
+
+  defp occurrence_score(folded, needle) do
+    title_hit? = String.contains?(folded.title, needle)
+    heading_hit? = Enum.any?(folded.headings, &String.contains?(&1, needle))
+    body_hits = count_occurrences(folded.body, needle)
 
     score = 0
     score = if title_hit?, do: score + @title, else: score
     score = if heading_hit?, do: score + @heading, else: score
-    score = score + @body_occurrence * min(body_hits, @body_occurrence_cap)
-    score = if prefer && chunk.type == prefer, do: score + @preferred_type, else: score
-    score
+    score + @body_occurrence * min(body_hits, @body_occurrence_cap)
   end
-
-  defp score(_chunk, "", _prefer), do: 0
-
-  defp count_occurrences(_haystack, ""), do: 0
 
   defp count_occurrences(haystack, needle) do
     case :binary.matches(haystack, needle) do
@@ -408,7 +661,8 @@ defmodule Vigil.Index do
 
   @doc """
   A fragment id returns the chunk (with backlinks when asked). A bare path
-  returns the note's table of contents, its `links` out/in/broken counters
+  returns the note's `body` (the text before its first `##`, its preamble),
+  its table of contents, its `links` out/in/broken counters
   and, when asked, its backlinks. Which of the two an id names, and whether it
   names anything at all, is `resolve/2`'s answer; what is left here is the
   rendering of it — a path that fails the safety check answers "Invalid path",
@@ -502,6 +756,7 @@ defmodule Vigil.Index do
       starts: iso(chunk.starts),
       ends: iso(chunk.ends),
       body: chunk.body,
+      hash: Chunk.hash(chunk),
       created_at: iso(chunk.created_at),
       updated_at: iso(chunk.updated_at)
     }
@@ -513,13 +768,31 @@ defmodule Vigil.Index do
     end
   end
 
+  # The note's preamble — the chunk whose id is the path itself, holding the
+  # text between the H1 (or frontmatter) and the first `##` — comes back as its
+  # `body`; every chunk with a heading comes back as an entry of its `toc`.
+  # Between them they cover every chunk the note has, so nothing `search` can
+  # hit is out of `read`'s reach. A note with no preamble answers `""`, not a
+  # missing key: the shape of a note read does not depend on the note.
   defp note_result(index, note, backlinks?) do
+    chunks = note.chunk_ids |> Enum.map(&Map.get(index.chunks, &1)) |> Enum.reject(&is_nil/1)
+
+    body =
+      case Enum.find(chunks, &is_nil(&1.heading)) do
+        nil -> ""
+        preamble -> preamble.body
+      end
+
     toc =
-      note.chunk_ids
-      |> Enum.map(&Map.get(index.chunks, &1))
-      |> Enum.filter(&(&1 && &1.heading))
+      chunks
+      |> Enum.filter(& &1.heading)
       |> Enum.map(fn chunk ->
-        %{id: chunk.id, heading: chunk.heading, heading_path: chunk.heading_path}
+        %{
+          id: chunk.id,
+          heading: chunk.heading,
+          heading_path: chunk.heading_path,
+          hash: Chunk.hash(chunk)
+        }
       end)
 
     base = %{
@@ -530,6 +803,7 @@ defmodule Vigil.Index do
       ends: iso(note.ends),
       created_at: iso(note.created_at),
       updated_at: iso(note.updated_at),
+      body: body,
       toc: toc,
       links: note_link_counts(index, note)
     }
@@ -565,7 +839,9 @@ defmodule Vigil.Index do
   link to an existing note with a missing fragment names the fragment),
   incoming references, direction `:out`/`:in`/`:both`, depth 1, depth 2
   adding each directly connected note's own depth-1 view with no further
-  recursion, and the same lenient id resolution `read/2` uses.
+  recursion, and the same lenient id resolution `read/2` uses. Depth 2
+  describes at most 25 neighbours, the first by path, and says `truncated:
+  true` when there were more.
 
   `params` is the `links` tool's own parameter map: `:id`, `:direction` and
   `:depth`, under the names `Vigil.MCP.Tools`' table gives them. `depth` is
@@ -602,7 +878,29 @@ defmodule Vigil.Index do
         do: Map.put(base, :incoming, incoming_for(index, id)),
         else: base
 
-    if depth == 2, do: Map.put(base, :neighbors, neighbors_for(index, base, id)), else: base
+    if depth == 2, do: with_neighbors(base, index, id), else: base
+  end
+
+  # How many directly connected notes depth 2 describes. A hub note links to
+  # and from dozens, and each neighbour brings its own out/in lists: the
+  # answer grows with the square of how connected the vault is. The first
+  # ones by path are kept, and `truncated` says whether that was all of them.
+  @neighbors_max 25
+
+  defp with_neighbors(base, index, id) do
+    paths = neighbor_paths(base, id)
+
+    neighbors =
+      paths
+      |> Enum.take(@neighbors_max)
+      |> Map.new(fn note_path ->
+        chunk_ids = note_chunk_ids(index, note_path)
+
+        {note_path,
+         %{outgoing: outgoing_for(index, chunk_ids), incoming: incoming_for(index, note_path)}}
+      end)
+
+    Map.merge(base, %{neighbors: neighbors, truncated: length(paths) > @neighbors_max})
   end
 
   defp outgoing_for(index, chunk_ids) do
@@ -649,7 +947,7 @@ defmodule Vigil.Index do
   # depth: 2 — for each directly connected note its own depth-1 out/in, with
   # no further recursion. Beyond that the value drops off fast while the
   # response size does not.
-  defp neighbors_for(index, base, own_id) do
+  defp neighbor_paths(base, own_id) do
     own_note = own_id |> String.split("#", parts: 2) |> hd()
 
     outgoing_notes =
@@ -666,12 +964,7 @@ defmodule Vigil.Index do
     (outgoing_notes ++ incoming_notes)
     |> Enum.uniq()
     |> Enum.reject(&(&1 == own_note))
-    |> Map.new(fn note_path ->
-      chunk_ids = note_chunk_ids(index, note_path)
-
-      {note_path,
-       %{outgoing: outgoing_for(index, chunk_ids), incoming: incoming_for(index, note_path)}}
-    end)
+    |> Enum.sort()
   end
 
   defp note_chunk_ids(index, note_path) do
@@ -682,14 +975,17 @@ defmodule Vigil.Index do
   end
 
   @doc """
-  Answers the `lint` tool's five findings: duplicate headings, sentence-like
-  headings, orphaned links (broken outgoing links, labelled with their
-  fragment where present), overlong notes and decision notes stale relative to
-  `now`. The three note-hygiene definitions — duplicate headings,
+  Answers the `lint` tool's six findings: notes the load skipped for not being
+  UTF-8, duplicate headings, sentence-like headings, orphaned links (broken
+  outgoing links, labelled with their fragment where present), overlong notes
+  and decision notes stale relative to `now`. The three note-hygiene definitions — duplicate headings,
   sentence-like headings, overlong notes — come from `Vigil.Vault.Rules`, so
   `mix vigil.vault_check` reports the same notes for the same reasons. The
   other two are this module's own: a broken link is the link index's verdict,
   and the stale-decision horizon is a constant here.
+
+  Each category holds at most 50 findings, in a fixed order; `totals` counts
+  every finding per category and `truncated` is `true` when any was cut.
 
   `params` carries `:now` — the instant the response's envelope was decided
   at. This module is a pure value and reads no clock of its own; a caller with
@@ -700,12 +996,32 @@ defmodule Vigil.Index do
     chunks = Map.values(index.chunks)
 
     %{
+      invalid_utf8: index.invalid_utf8,
       duplicate_headings: lint_duplicate_headings(chunks),
       sentence_headings: lint_sentence_headings(chunks),
       orphaned_links: lint_orphaned_links(index),
       overlong_notes: lint_overlong_notes(index, notes),
       stale_decisions: lint_stale_decisions(notes, now)
     }
+    |> capped()
+  end
+
+  # How many findings one category reports. A vault imported from elsewhere
+  # can carry thousands of broken links, and an answer that size is one no
+  # assistant reads to the end. Each category is in a fixed order, so the
+  # findings kept are the same on every call; `totals` says how many there
+  # are, and `truncated` whether any category was cut.
+  @findings_max 50
+
+  defp capped(findings) do
+    totals = Map.new(findings, fn {category, list} -> {category, length(list)} end)
+
+    findings
+    |> Map.new(fn {category, list} -> {category, Enum.take(list, @findings_max)} end)
+    |> Map.merge(%{
+      totals: totals,
+      truncated: Enum.any?(totals, fn {_category, total} -> total > @findings_max end)
+    })
   end
 
   # Per note, because that is the scope a chunk id is unique in — and what
@@ -736,6 +1052,7 @@ defmodule Vigil.Index do
     chunks
     |> Enum.filter(fn c -> c.heading && Rules.sentence_heading?(c.heading) end)
     |> Enum.map(fn c -> %{id: c.id, heading: c.heading} end)
+    |> Enum.sort_by(& &1.id)
   end
 
   defp lint_orphaned_links(index) do
@@ -745,6 +1062,7 @@ defmodule Vigil.Index do
     |> Enum.filter(&(&1.status == :broken))
     |> Enum.map(&link_label/1)
     |> Enum.uniq()
+    |> Enum.sort()
   end
 
   # "Overlong" is Vigil.Vault.Rules' definition, the same one Vigil.VaultCheck
@@ -755,6 +1073,7 @@ defmodule Vigil.Index do
     |> Enum.map(fn note -> {note, Rules.note_length(note_chunks(index, note))} end)
     |> Enum.filter(fn {_note, length} -> Rules.overlong?(length) end)
     |> Enum.map(fn {note, length} -> Map.put(length, :path, note.path) end)
+    |> Enum.sort_by(& &1.path)
   end
 
   defp note_chunks(index, note) do
@@ -775,6 +1094,7 @@ defmodule Vigil.Index do
         DateTime.compare(n.updated_at, cutoff) == :lt
     end)
     |> Enum.map(fn n -> %{path: n.path, updated_at: iso(n.updated_at)} end)
+    |> Enum.sort_by(& &1.path)
   end
 
   @doc """
@@ -816,9 +1136,20 @@ defmodule Vigil.Index do
     # denormalised onto it (`Vigil.Parser.Chunk`): search filters and titles
     # per chunk, and a note lookup per chunk is what this pays to avoid
     # (docs/design.md, "Chunking").
+    #
+    # And the text search compares against, folded once here rather than on
+    # every query (docs/design.md, "Search").
+    title_folded = Slug.fold(file.title)
+
     chunks =
       Map.new(file.chunks, fn chunk ->
-        {chunk.id, %{chunk | domain: domain, file_title: file.title}}
+        folded = %{
+          title: title_folded,
+          headings: Enum.map(chunk.heading_path, &Slug.fold/1),
+          body: Slug.fold(chunk.body)
+        }
+
+        {chunk.id, %{chunk | domain: domain, file_title: file.title, folded: folded}}
       end)
 
     {note, chunks}

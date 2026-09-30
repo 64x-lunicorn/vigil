@@ -101,6 +101,18 @@ defmodule Vigil.RateLimitTest do
         refute limiter.limited?.("key-c", 1, @now + 61)
       end
 
+      # A count read and then written back lets every request that read the
+      # same count through on the same free slot. Two hundred at once against
+      # a budget of ten must let exactly ten through, whichever ten they are —
+      # asked over twenty keys, because one burst can miss the race.
+      test "parallel requests cannot spend more than the budget", %{limiter: limiter} do
+        for n <- 1..20 do
+          results = Vigil.AtOnce.run(200, fn -> limiter.limited?.({"key-p", n}, 10, @now) end)
+
+          assert Enum.count(results, &(&1 == false)) == 10
+        end
+      end
+
       test "different keys have independent budgets", %{limiter: limiter} do
         refute limiter.limited?.("key-d1", 1, @now)
         refute limiter.limited?.("key-d2", 1, @now)

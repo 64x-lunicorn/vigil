@@ -35,9 +35,10 @@ defmodule Vigil.Slug do
   @doc """
   Slugifies a single segment (file basename, directory name, heading).
 
-  Pipeline: NFC normalize, trim, downcase, explicit transliteration, generic
-  diacritic stripping, non-alphanumeric runs to a single hyphen, collapse and
-  trim hyphens, truncate to #{@max_length} characters at a hyphen boundary.
+  Pipeline: trim, `fold/1` (NFC normalize, downcase, explicit
+  transliteration, generic diacritic stripping), non-alphanumeric runs to a
+  single hyphen, collapse and trim hyphens, truncate to #{@max_length}
+  characters at a hyphen boundary.
 
   Returns `{:ok, slug}`, or `{:error, :empty}` when nothing is left (input had
   no alphanumeric characters at all).
@@ -45,11 +46,8 @@ defmodule Vigil.Slug do
   def slugify(text) do
     slug =
       text
-      |> String.normalize(:nfc)
       |> String.trim()
-      |> String.downcase()
-      |> transliterate()
-      |> strip_diacritics()
+      |> fold()
       |> String.replace(~r/[^a-z0-9]+/u, "-")
       |> collapse_hyphens()
       |> truncate()
@@ -59,6 +57,26 @@ defmodule Vigil.Slug do
     else
       {:ok, slug}
     end
+  end
+
+  @doc """
+  The text in the form two strings are compared in: NFC normalized,
+  downcased, transliterated (`ä` to `ae`, `ß` to `ss`, …) and stripped of
+  the diacritics that remain.
+
+  The first steps of `slugify/1`, stopping before anything that is not a
+  letter is touched — so `Heizöl`, `heizoel` and a decomposed (NFD) `Heizöl`
+  all fold to `heizoel`, while spaces and punctuation are kept. Search folds
+  its query and every note's text with it (docs/design.md, "Search"), which is
+  what makes a query find what a path would be named after.
+  """
+  @spec fold(String.t()) :: String.t()
+  def fold(text) do
+    text
+    |> String.normalize(:nfc)
+    |> String.downcase()
+    |> transliterate()
+    |> strip_diacritics()
   end
 
   defp transliterate(text) do

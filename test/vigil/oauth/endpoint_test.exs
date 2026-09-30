@@ -131,6 +131,106 @@ defmodule Vigil.OAuth.EndpointTest do
     assert body["authorization_servers"] == [@settings.issuer]
   end
 
+  ## Origin
+
+  # The three POST endpoints, each with a request it would answer with
+  # something other than 403 — a registration, a consent with no client, an
+  # unknown code — so that a 403 can only be the origin check's.
+  @posts [
+    {"/oauth/register", :json},
+    {"/oauth/authorize", :form},
+    {"/oauth/token", :form}
+  ]
+
+  defp post_from(endpoint, path, kind, origin, via \\ &call/2) do
+    conn =
+      case kind do
+        :json ->
+          conn(
+            :post,
+            path,
+            Jason.encode!(%{client_name: "Test", redirect_uris: ["https://claude.ai/cb"]})
+          )
+          |> put_req_header("content-type", "application/json")
+
+        :form ->
+          conn(:post, path, URI.encode_query(%{"grant_type" => "authorization_code"}))
+          |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      end
+
+    conn = if origin, do: put_req_header(conn, "origin", origin), else: conn
+    via.(conn, endpoint)
+  end
+
+  test "a POST with no Origin, from the issuer's or from a listed origin is answered", %{
+    persistence: persistence
+  } do
+    endpoint =
+      endpoint(
+        persistence: persistence,
+        origins: Vigil.Origin.allowed(@settings.issuer, ["https://claude.ai"])
+      )
+
+    for {path, kind} <- @posts, origin <- [nil, @settings.issuer, "https://claude.ai"] do
+      assert post_from(endpoint, path, kind, origin).status != 403, "#{path} #{origin}"
+    end
+  end
+
+  test "a POST from any other origin is refused with 403", %{endpoint: endpoint} do
+    for {path, kind} <- @posts,
+        origin <- ["https://claude.ai", "https://evil.example", "http://127.0.0.1:4000", "null"] do
+      assert post_from(endpoint, path, kind, origin).status == 403, "#{path} #{origin}"
+    end
+  end
+
+  test "the origins are read from the settings when none are handed in", %{
+    persistence: persistence
+  } do
+    endpoint = OAuth.Endpoint.init(persistence: persistence, settings: @settings)
+
+    assert endpoint[:origins] ==
+             Vigil.Origin.allowed(
+               @settings.issuer,
+               Application.fetch_env!(:vigil, :allowed_origins)
+             )
+  end
+
+  test "a refused POST is not counted against the rate limit", %{persistence: persistence} do
+    endpoint = endpoint(persistence: persistence, limits: budgets(%{register: 1}))
+
+    assert post_from(endpoint, "/oauth/register", :json, "https://evil.example").status == 403
+    assert post_from(endpoint, "/oauth/register", :json, "https://evil.example").status == 403
+    assert post_from(endpoint, "/oauth/register", :json, nil).status == 201
+  end
+
+  test "the consent form's refusal is a page a browser renders", %{endpoint: endpoint} do
+    conn = post_from(endpoint, "/oauth/authorize", :form, "https://evil.example")
+
+    assert conn.status == 403
+    assert get_resp_header(conn, "content-type") == ["text/html; charset=utf-8"]
+    assert get_resp_header(conn, "x-frame-options") == ["DENY"]
+  end
+
+  test "the check holds when Vigil.MCP.Server forwards the request", %{endpoint: endpoint} do
+    for {path, kind} <- @posts do
+      assert post_from(endpoint, path, kind, "https://evil.example", &server_call/2).status ==
+               403
+
+      assert post_from(endpoint, path, kind, @settings.issuer, &server_call/2).status != 403
+    end
+  end
+
+  test "a GET is not checked: discovery and the consent page are read, not changed", %{
+    endpoint: endpoint
+  } do
+    conn =
+      conn(:get, "/.well-known/oauth-authorization-server")
+      |> put_req_header("origin", "https://evil.example")
+      |> call(endpoint)
+
+    assert conn.status == 200
+  end
+
   ## Discovery
 
   test "both protected-resource discovery paths return identical JSON, no auth required", %{
@@ -179,6 +279,128 @@ defmodule Vigil.OAuth.EndpointTest do
   test "DCR accepts a bare http://localhost redirect_uri", %{endpoint: endpoint} do
     {status, _body} = register(endpoint, ["http://localhost/callback"])
     assert status == 201
+  end
+
+  ## Registration bounds
+
+  test "a registration body over the size limit is refused before it is decoded", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    # Valid JSON whose only fault is its size: the refusal is the read's.
+    padding = String.duplicate("a", 16_384)
+
+    conn =
+      post_json(endpoint, "/oauth/register", %{
+        redirect_uris: ["https://claude.ai/cb"],
+        software_statement: padding
+      })
+
+    assert conn.status == 413
+    assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    assert persistence.count_clients.() == 0
+  end
+
+  test "a field over its cap is refused with a description naming it", %{endpoint: endpoint} do
+    {status, body} = register(endpoint, ["https://claude.ai/cb"], String.duplicate("n", 201))
+
+    assert status == 400
+    assert body["error"] == "invalid_client_metadata"
+    assert body["error_description"] =~ "client_name"
+
+    uris = for i <- 1..11, do: "https://claude.ai/cb/#{i}"
+    {status, body} = register(endpoint, uris)
+
+    assert status == 400
+    assert body["error"] == "invalid_redirect_uri"
+    assert body["error_description"] =~ "redirect_uris"
+  end
+
+  test "a full client table answers temporarily_unavailable", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    for i <- 1..Vigil.OAuth.Client.max_clients() do
+      :ok = persistence.put_client.("filler-#{i}", %{name: "F", redirect_uris: []})
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {status, body} = register(endpoint, ["https://claude.ai/cb"])
+
+        assert status == 503
+        assert body["error"] == "temporarily_unavailable"
+      end)
+
+    assert log =~ "registration refused"
+  end
+
+  ## Parameters that are not strings
+
+  test "a nested or array parameter on GET /oauth/authorize is an invalid request", %{
+    endpoint: endpoint
+  } do
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+    {201, client} = register(endpoint, [redirect_uri])
+    {_verifier, challenge} = pkce_pair()
+    query = URI.encode_query(authorize_query(client["client_id"], redirect_uri, challenge))
+
+    for extra <- ["scope[]=vault", "resource[a]=b", "code_challenge[]=x"] do
+      conn = conn(:get, "/oauth/authorize?" <> query <> "&" <> extra) |> call(endpoint)
+
+      assert conn.status == 302
+      [location] = get_resp_header(conn, "location")
+      assert String.starts_with?(location, redirect_uri)
+      assert extract_query_param(location, "error") == "invalid_request"
+    end
+
+    # A `state` that is not a string is not echoed back.
+    conn = conn(:get, "/oauth/authorize?" <> query <> "&state[a]=b") |> call(endpoint)
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "invalid_request"
+    assert extract_query_param(location, "state") == nil
+  end
+
+  test "a nested or array parameter on POST /oauth/authorize is an invalid request", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+    {201, client} = register(endpoint, [redirect_uri])
+    {_verifier, challenge} = pkce_pair()
+
+    form =
+      authorize_query(client["client_id"], redirect_uri, challenge, %{"decision" => "allow"})
+      |> URI.encode_query()
+
+    conn =
+      conn(:post, "/oauth/authorize", form <> "&password[]=" <> @settings.auth_password)
+      |> put_req_header("content-type", "application/x-www-form-urlencoded")
+      |> call(endpoint)
+
+    assert conn.status == 302
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "invalid_request"
+    assert extract_query_param(location, "code") == nil
+    assert {:ok, %{first_code_at: nil}} = persistence.get_client.(client["client_id"])
+  end
+
+  test "a nested or array parameter on /oauth/token is an invalid request", %{
+    endpoint: endpoint
+  } do
+    for body <- [
+          "grant_type[]=authorization_code",
+          "grant_type=authorization_code&code[a]=b",
+          "grant_type=refresh_token&refresh_token[]=x"
+        ] do
+      conn =
+        conn(:post, "/oauth/token", body)
+        |> put_req_header("content-type", "application/x-www-form-urlencoded")
+        |> call(endpoint)
+
+      assert conn.status == 400
+      assert Jason.decode!(conn.resp_body)["error"] == "invalid_request"
+    end
   end
 
   test "the consent page names a client registered without a name in English", %{
@@ -287,6 +509,70 @@ defmodule Vigil.OAuth.EndpointTest do
 
     {:ok, record} = persistence.get_token.(body["access_token"])
     assert record.aud == @settings.resource
+  end
+
+  # What a full disk or the `:dets` size limit looks like through the seam:
+  # the write answers an error instead of :ok.
+  defp refusing(persistence, write) do
+    Map.put(persistence, write, fn _value, _attrs -> {:error, :enospc} end)
+  end
+
+  defp consent_code(endpoint, client_id, redirect_uri, challenge) do
+    post_form(
+      endpoint,
+      "/oauth/authorize",
+      Map.merge(authorize_query(client_id, redirect_uri, challenge), %{
+        "password" => @settings.auth_password,
+        "decision" => "allow"
+      })
+    )
+  end
+
+  test "a pair that could not be stored is refused with temporarily_unavailable", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
+    {verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    [location] =
+      endpoint
+      |> consent_code(client["client_id"], redirect_uri, challenge)
+      |> get_resp_header("location")
+
+    full_disk = endpoint(persistence: refusing(persistence, :put_token))
+
+    conn =
+      post_form(full_disk, "/oauth/token", %{
+        "grant_type" => "authorization_code",
+        "code" => extract_query_param(location, "code"),
+        "redirect_uri" => redirect_uri,
+        "client_id" => client["client_id"],
+        "code_verifier" => verifier
+      })
+
+    assert conn.status == 503
+    assert Jason.decode!(conn.resp_body) == %{"error" => "temporarily_unavailable"}
+    assert get_resp_header(conn, "cache-control") == ["no-store"]
+  end
+
+  test "a code that could not be stored is not redirected to the client", %{
+    endpoint: endpoint,
+    persistence: persistence
+  } do
+    {201, client} = register(endpoint, ["https://claude.ai/api/mcp/auth_callback"])
+    {_verifier, challenge} = pkce_pair()
+    redirect_uri = "https://claude.ai/api/mcp/auth_callback"
+
+    full_disk = endpoint(persistence: refusing(persistence, :put_code))
+    conn = consent_code(full_disk, client["client_id"], redirect_uri, challenge)
+
+    assert conn.status == 302
+    [location] = get_resp_header(conn, "location")
+    assert extract_query_param(location, "error") == "temporarily_unavailable"
+    assert extract_query_param(location, "state") == "xyz"
+    assert extract_query_param(location, "code") == nil
   end
 
   test "wrong code_verifier is rejected and the code becomes permanently unusable", %{
@@ -551,6 +837,37 @@ defmodule Vigil.OAuth.EndpointTest do
           do: consent_as(endpoint, params, {203, 0, 113, 7}, "198.51.100.#{i}").status
 
     assert List.last(results) == 429
+  end
+
+  # A /64 is one line or one host. Counted per /128, its holder would get a
+  # fresh lockout for every address it picked.
+  test "two IPv6 addresses in the same /64 share a lockout", %{endpoint: endpoint} do
+    params = wrong_password_params(endpoint)
+
+    for n <- 1..5 do
+      peer = {0x2001, 0xDB8, 1, 2, 0, 0, 0, n}
+      assert consent_as(endpoint, params, peer, "ignored").status == 200
+    end
+
+    same_64 = {0x2001, 0xDB8, 1, 2, 0xDEAD, 0xBEEF, 0, 1}
+    assert consent_as(endpoint, params, same_64, "ignored").status == 429
+
+    next_64 = {0x2001, 0xDB8, 1, 3, 0, 0, 0, 1}
+    assert consent_as(endpoint, params, next_64, "ignored").status == 200
+  end
+
+  test "past the hourly budget every address is answered 429", %{persistence: persistence} do
+    endpoint =
+      endpoint(persistence: persistence, settings: %{@settings | consent_failures_per_hour: 2})
+
+    params = wrong_password_params(endpoint)
+
+    assert consent_as(endpoint, params, {192, 0, 2, 1}, "ignored").status == 200
+    assert consent_as(endpoint, params, {192, 0, 2, 2}, "ignored").status == 200
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert consent_as(endpoint, params, {192, 0, 2, 3}, "ignored").status == 429
+    end)
   end
 
   ## Issuer identification (RFC 9207)

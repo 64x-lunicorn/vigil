@@ -10,12 +10,19 @@ defmodule Vigil.OAuth.Endpoint do
 
   alias Vigil.OAuth
   alias Vigil.OAuth.{ClientAddr, ConsentPage, Flow, Server, Store}
+  alias Vigil.Origin
   alias Vigil.RateLimit
   alias Vigil.Settings
 
   @default_rpm 30
   @default_register_rpm 5
 
+  # The most a registration body may be. A registration that fits every cap
+  # `Vigil.OAuth.Flow.register/3` applies is a few kilobytes of JSON; this is
+  # read before any of them runs, so nothing larger is buffered at all.
+  @max_register_body 16_384
+
+  plug(:check_origin)
   plug(:match)
   plug(:dispatch)
 
@@ -48,7 +55,9 @@ defmodule Vigil.OAuth.Endpoint do
       |> Keyword.put_new_lazy(:limiter, &RateLimit.over_table/0)
       |> Keyword.put_new_lazy(:settings, &Settings.from_env/0)
 
-    Keyword.put(opts, :server, Server.new(opts[:persistence], opts[:settings]))
+    opts
+    |> Keyword.put_new_lazy(:origins, fn -> configured_origins(opts[:settings]) end)
+    |> Keyword.put(:server, Server.new(opts[:persistence], opts[:settings]))
   end
 
   @impl true
@@ -58,18 +67,30 @@ defmodule Vigil.OAuth.Endpoint do
     |> put_private(:oauth_limits, opts[:limits])
     |> put_private(:oauth_server, opts[:server])
     |> put_private(:oauth_limiter, opts[:limiter])
+    |> put_private(:oauth_origins, opts[:origins])
     |> super(opts)
   end
 
-  defp configured_limits do
-    rpm = RateLimit.configured_budget(:oauth_rate_limit_rpm, @default_rpm)
+  # The issuer's origin and the listed ones, for a caller that hands in none.
+  # Production's are handed down from `Vigil.Application`, built from the list
+  # `Vigil.Settings.Check` has already judged.
+  defp configured_origins(settings),
+    do: Origin.allowed(settings.issuer, Application.fetch_env!(:vigil, :allowed_origins))
 
-    %{
-      authorize: rpm,
-      token: rpm,
-      register: RateLimit.configured_budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
-    }
+  defp configured_limits do
+    limits(
+      RateLimit.configured_budget(:oauth_rate_limit_rpm, @default_rpm),
+      RateLimit.configured_budget(:oauth_register_rate_limit_rpm, @default_register_rpm)
+    )
   end
+
+  @doc """
+  The `:limits` option: per client address per minute, `rpm` for
+  `/oauth/authorize` and `/oauth/token` each, and `register_rpm` for
+  `/oauth/register`.
+  """
+  @spec limits(pos_integer(), pos_integer()) :: %{atom() => pos_integer()}
+  def limits(rpm, register_rpm), do: %{authorize: rpm, token: rpm, register: register_rpm}
 
   ## Discovery
 
@@ -117,6 +138,29 @@ defmodule Vigil.OAuth.Endpoint do
   match _ do
     send_resp(conn, 404, "")
   end
+
+  ## Origin
+
+  # Every POST here changes something — a client registered, a consent given, a
+  # token handed out — so a browser on another site must not be able to send
+  # one (`Vigil.Origin`). Checked before the route runs: before the rate limit
+  # counts the request, before the body is read and before a password is
+  # compared. The discovery documents and the consent page itself are GETs a
+  # browser navigates to; they change nothing and are not checked.
+  defp check_origin(%{method: "POST"} = conn, _opts) do
+    if Origin.allowed?(conn, conn.private.oauth_origins) do
+      conn
+    else
+      conn
+      |> send_html(
+        403,
+        error_html("This request came from an origin this server does not accept.")
+      )
+      |> halt()
+    end
+  end
+
+  defp check_origin(conn, _opts), do: conn
 
   ## Rate limits
 
@@ -175,16 +219,39 @@ defmodule Vigil.OAuth.Endpoint do
 
   ## Registration
 
+  # A body over the limit answers `{:more, ...}` and is refused with 413
+  # before a byte of it is decoded. RFC 7591 §3.2.2 names the error codes for
+  # metadata; a body too large to read is not metadata yet, so it gets the
+  # HTTP status that says what happened and the generic `invalid_request`.
+  #
+  # A full client table, or a record that could not be stored, is 503
+  # `temporarily_unavailable` like the token endpoint's: nothing was
+  # registered, and the client may try again later.
   defp handle_register(conn) do
-    with {:ok, body, conn} <- Plug.Conn.read_body(conn),
-         {:ok, json} <- Jason.decode(body) do
-      case Flow.register(persistence(conn), json) do
-        {:ok, registration} -> send_json(conn, 201, registration)
-        {:error, error} -> send_json(conn, 400, %{error: error})
-      end
-    else
-      _ -> send_json(conn, 400, %{error: "invalid_request"})
+    case Plug.Conn.read_body(conn, length: @max_register_body, read_length: @max_register_body) do
+      {:ok, body, conn} -> register_body(conn, body)
+      {:more, _partial, conn} -> send_json(conn, 413, %{error: "invalid_request"})
+      {:error, _reason} -> send_json(conn, 400, %{error: "invalid_request"})
     end
+  end
+
+  defp register_body(conn, body) do
+    case Jason.decode(body) do
+      {:ok, json} -> send_registration(conn, Flow.register(persistence(conn), json))
+      {:error, _} -> send_json(conn, 400, %{error: "invalid_request"})
+    end
+  end
+
+  defp send_registration(conn, {:ok, registration}), do: send_json(conn, 201, registration)
+  defp send_registration(conn, {:error, error}), do: send_json(conn, 400, %{error: error})
+
+  defp send_registration(conn, {:error, error, description}),
+    do: send_json(conn, 400, %{error: error, error_description: description})
+
+  defp send_registration(conn, :unavailable) do
+    conn
+    |> put_retry_after()
+    |> send_json(503, %{error: "temporarily_unavailable"})
   end
 
   ## Authorization
@@ -223,6 +290,12 @@ defmodule Vigil.OAuth.Endpoint do
 
       :rate_limited ->
         send_resp(conn, 429, "")
+
+      # RFC 6749 §4.1.2.1 names this one for the authorization endpoint: the
+      # code could not be stored, so the client is told to try again rather
+      # than handed one it can never redeem.
+      :unavailable ->
+        redirect_with_error(conn, ctx.redirect_uri, "temporarily_unavailable", ctx.state)
     end
   end
 
@@ -276,12 +349,23 @@ defmodule Vigil.OAuth.Endpoint do
   # and decoding the part that arrived would decide on fields the caller did
   # not finish sending; one that could not be read answers no body at all.
   # Both are refused, each in the shape of the surface that asked.
+  #
+  # Decoded the way `fetch_query_params/1` decodes the query on
+  # `GET /oauth/authorize`, so `client_id[]=x` is a list in a form exactly as
+  # in a query, and `Vigil.OAuth.Flow.flat?/1` refuses it the same way in
+  # both. A body that is not valid form encoding is no form either.
   defp read_form(conn) do
     case Plug.Conn.read_body(conn) do
-      {:ok, body, conn} -> {:ok, URI.decode_query(body), conn}
+      {:ok, body, conn} -> decode_form(body, conn)
       {:more, _partial, conn} -> {:error, conn}
       {:error, _reason} -> {:error, conn}
     end
+  end
+
+  defp decode_form(body, conn) do
+    {:ok, Plug.Conn.Query.decode(body), conn}
+  rescue
+    Plug.Conn.InvalidQueryError -> {:error, conn}
   end
 
   defp redirect_with_error(conn, redirect_uri, error_code, state) do
@@ -339,6 +423,9 @@ defmodule Vigil.OAuth.Endpoint do
     |> send_resp(status, Jason.encode!(payload))
   end
 
+  # Sobelow: every caller builds html with its variable parts escaped
+  # (ConsentPage.render/1, error_html/1).
+  # sobelow_skip ["XSS.SendResp"]
   defp send_html(conn, status, html, nonce \\ nil) do
     conn
     |> put_resp_content_type("text/html")

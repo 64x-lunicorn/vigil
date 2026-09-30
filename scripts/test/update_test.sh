@@ -83,6 +83,15 @@ build_fake_mix() {
 set -euo pipefail
 echo "$*" >>"${FAKE_MIX_LOG}"
 case "${1:-}" in
+  deps.get)
+    # A dependency's code runs as the service account here, in the checkout
+    # it owns: the test says when it rewrites the units it finds there.
+    if [ -f "${FAKE_MIX_TAMPERS:-/nonexistent}" ]; then
+      for unit in deploy/vigil.service deploy/vigil-push.service deploy/vigil-notify@.service; do
+        echo "ExecStartPre=/tmp/planted" >>"$unit"
+      done
+    fi
+    ;;
   test)
     [ -f "${FAKE_MIX_TEST_FAILS:-/nonexistent}" ] && exit 1
     echo "42 tests, 0 failures"
@@ -98,6 +107,16 @@ case "${1:-}" in
   deps.audit)
     echo "No vulnerabilities found."
     ;;
+  vigil.slug_diff)
+    # vigil.slug_diff --against <ids-file> <vault>: records the list the
+    # running release gave, and answers a change when the test says so.
+    echo "slug_diff saw: $(cat "${3:-/nonexistent}" 2>/dev/null) exclude=${VIGIL_EXCLUDE:-} env=${MIX_ENV:-}" >>"${FAKE_MIX_LOG}"
+    if [ -f "${FAKE_SLUG_DIFF_CHANGES:-/nonexistent}" ]; then
+      printf '2 chunk id change(s):\n\n  - note.md#oil-1\n  + note.md#oil-2\n'
+      exit 1
+    fi
+    echo "No chunk id changes (1 ids compared)."
+    ;;
   release)
     # A release here is a directory with a bin/vigil in it, which is all the
     # switchover touches.
@@ -110,14 +129,65 @@ case "${1:-}" in
       echo "fake mix: release without --path" >&2
       exit 1
     fi
+    if [ -f "${FAKE_MIX_RELEASE_FAILS:-/nonexistent}" ]; then
+      echo "fake mix: the build failed" >&2
+      exit 1
+    fi
     mkdir -p "${path}/bin"
-    echo "#!/bin/sh" >"${path}/bin/vigil"
-    chmod +x "${path}/bin/vigil"
+    cp "$(dirname "$0")/release-bin" "${path}/bin/vigil"
     ;;
 esac
 exit 0
 MIX
   chmod +x "${BIN}/mix"
+
+  # A release's bin/vigil, as the fake build above and make_release below
+  # write it: `eval` is the only command update.sh gives it
+  # outside systemd, and it answers with the chunk ids the running release
+  # derives — one id naming the release, so the test can see whose list
+  # reached the comparison. A release holding .no-chunk-ids is one built
+  # before Vigil.Release.chunk_ids/0 existed, and says so the way `eval` does;
+  # one holding .chunk-ids-crash fails for any other reason.
+  cat >"${BIN}/release-bin" <<'REL'
+#!/bin/sh
+release="$(cd "$(dirname "$0")/.." && pwd)"
+if [ "${1:-}" = "eval" ]; then
+  if [ -f "${release}/.no-chunk-ids" ]; then
+    echo "** (UndefinedFunctionError) function Vigil.Release.chunk_ids/0 is undefined (module Vigil.Release is not available)" >&2
+    exit 1
+  fi
+  if [ -f "${release}/.chunk-ids-crash" ]; then
+    echo "** (File.Error) could not read vault: permission denied" >&2
+    exit 1
+  fi
+  echo "note.md#seen-by-$(basename "$release") vault=${VIGIL_VAULT_PATH:-}"
+fi
+exit 0
+REL
+  chmod +x "${BIN}/release-bin"
+}
+
+# A `systemd-analyze` that accepts every unit it is asked to verify and scores
+# every sandbox as within the target, unless the test says otherwise. What
+# update.sh asked it is logged, so the test can see which file was judged
+# against which threshold.
+build_fake_systemd_analyze() {
+  mkdir -p "$BIN"
+  cat >"${BIN}/systemd-analyze" <<'SA'
+#!/usr/bin/env bash
+echo "$*" >>"${FAKE_SA_LOG}"
+case "${1:-}" in
+  security)
+    if [ -f "${FAKE_SA_EXPOSED:-/nonexistent}" ]; then
+      echo "→ Overall exposure level for vigil.service: 9.6 UNSAFE"
+      exit 1
+    fi
+    echo "→ Overall exposure level for vigil.service: 2.0 OK"
+    ;;
+esac
+exit 0
+SA
+  chmod +x "${BIN}/systemd-analyze"
 }
 
 # A code repo with two commits, so `--to` has something real to move between.
@@ -129,6 +199,11 @@ build_repo() {
   git -C "$repo" config user.name "Update Test"
   mkdir -p "${repo}/deploy"
   echo "[Unit]" >"${repo}/deploy/vigil.service"
+  # The push safety net's units as this checkout ships them: update.sh
+  # installs them on every update.
+  for unit in vigil-push.service vigil-push.timer vigil-notify@.service; do
+    cp "${REPO_ROOT}/deploy/${unit}" "${repo}/deploy/${unit}"
+  done
   echo "v1" >"${repo}/version"
   git -C "$repo" add -A
   git -C "$repo" commit -q -m "v1"
@@ -139,25 +214,38 @@ build_repo() {
   git -C "$repo" checkout -q "$OLD_SHA"
 }
 
-# A vault whose `github/main..main` count is 0, which is what preflight asks.
+# A vault whose `upstream/master..master` count is 0, which is what preflight
+# asks. Neither name is a default: the env file below states both, and a
+# preflight that counted `github/main..main` instead could not count at all
+# and would refuse every update here.
 build_vault() {
   mkdir -p "$VAULT"
-  git -C "$VAULT" init -q -b main
+  git -C "$VAULT" init -q -b master
   git -C "$VAULT" config user.email test@example.com
   git -C "$VAULT" config user.name "Update Test"
   echo "# note" >"${VAULT}/note.md"
   git -C "$VAULT" add -A
   git -C "$VAULT" commit -q -m "note"
-  git -C "$VAULT" update-ref refs/remotes/github/main HEAD
+  git -C "$VAULT" update-ref refs/remotes/upstream/master HEAD
 }
 
-# One release directory, optionally one that does not come up.
+# One release directory, optionally one that does not come up. Each one
+# carries the commit it was built from, as update.sh writes it: the running
+# revision is read from there, not from the checkout.
 make_release() {
   local name="$1" healthy="${2:-healthy}"
   mkdir -p "${PREFIX}/releases/${name}/bin"
-  echo "#!/bin/sh" >"${PREFIX}/releases/${name}/bin/vigil"
+  cp "${BIN}/release-bin" "${PREFIX}/releases/${name}/bin/vigil"
+  git -C "${PREFIX}/repo" rev-parse "$OLD_SHA" >"${PREFIX}/releases/${name}/REVISION"
   [ "$healthy" = "broken" ] && touch "${PREFIX}/releases/${name}/.verify-fails"
   echo "${PREFIX}/releases/${name}"
+}
+
+# A release switched to that never answers on /healthz, as opposed to one that
+# answers and fails the acceptance check.
+make_unbootable() {
+  mkdir -p "${PREFIX}/releases/$1"
+  touch "${PREFIX}/releases/$1/.boot-fails"
 }
 
 # Everything the authorization server has persisted lives beside the vault, in
@@ -218,6 +306,9 @@ build_host() {
   cat >"$ENV_FILE" <<ENV
 VIGIL_RESOURCE=https://vault.example/mcp
 VIGIL_PORT=4000
+VIGIL_SKILLKEY_SECRET=not-a-real-secret-the-stubbed-release-never-reads-it
+VIGIL_GIT_REMOTE=upstream
+VIGIL_GIT_BRANCH=master
 ENV
   local first
   first="$(make_release v0)"
@@ -236,20 +327,29 @@ run_update() {
     VIGIL_UPDATE_TEST_STUBS=1 \
     VIGIL_PREFIX="${PREFIX_OVERRIDE:-$PREFIX}" \
     VIGIL_VAULT_DIR="$VAULT" \
+    VIGIL_STATE_DIR="$(dirname "$VAULT")" \
     VIGIL_ENV_FILE="$ENV_FILE" \
     VIGIL_UNIT_FILE="${WORK}/etc/vigil.service" \
+    VIGIL_PUSH_CRON_FILE="${WORK}/etc/cron.d/vigil-push-safety-net" \
     VIGIL_SERVICE_USER="$(id -un)" \
     VIGIL_SERVICE_GROUP="$(id -gn)" \
     FAKE_MIX_LOG="$FAKE_MIX_LOG" \
     FAKE_MIX_TEST_FAILS="${FAKE_MIX_TEST_FAILS:-/nonexistent}" \
     FAKE_MIX_AUDIT_CRITICAL="${FAKE_MIX_AUDIT_CRITICAL:-/nonexistent}" \
-    bash "$UPDATE_SH" "$@" >"${WORK}/out.log" 2>&1
+    FAKE_MIX_RELEASE_FAILS="${FAKE_MIX_RELEASE_FAILS:-/nonexistent}" \
+    FAKE_SA_LOG="${WORK}/systemd-analyze.log" \
+    FAKE_SA_EXPOSED="${FAKE_SA_EXPOSED:-/nonexistent}" \
+    FAKE_SLUG_DIFF_CHANGES="${FAKE_SLUG_DIFF_CHANGES:-/nonexistent}" \
+    FAKE_MIX_TAMPERS="${FAKE_MIX_TAMPERS:-/nonexistent}" \
+    VIGIL_UPDATE_REEXEC="${INHERITED_REEXEC:-}" \
+    bash "$UPDATE_SH" "$@" <"${UPDATE_STDIN:-/dev/null}" >"${WORK}/out.log" 2>&1
   local rc=$?
   set -e
   echo "$rc"
 }
 
 current_release() { basename "$(readlink "${PREFIX}/current")"; }
+checkout_sha() { git -C "${PREFIX}/repo" rev-parse --short HEAD; }
 
 # The recorded start/stop calls as one line: "stop v0 | start 7a1b2c3". Each
 # entry carries what `current` pointed at when the call was made, so the line
@@ -265,10 +365,11 @@ systemctl_calls() {
 service_running() { [ -f "${PREFIX}/.service-active" ] && echo yes || echo no; }
 
 build_fake_mix
+build_fake_systemd_analyze
 
 ## ── 1. The happy path ────────────────────────────────────────────────────
 
-section "1/7  A healthy release is switched to"
+section "1/8  A healthy release is switched to"
 
 build_host
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
@@ -290,7 +391,7 @@ fi
 
 ## ── 2. A release that does not come up is rolled back ────────────────────
 
-section "2/7  A red verify() rolls back automatically"
+section "2/8  A red verify() rolls back automatically"
 
 build_host
 # The release update.sh is about to build is the one that will not come up.
@@ -308,7 +409,7 @@ assert_eq "the service was cycled twice, ending on the old release" \
 
 ## ── 3. When the rollback does not come up either ─────────────────────────
 
-section "3/7  A rollback that is also red is reported as such"
+section "3/8  A rollback that is also red is reported as such"
 
 build_host
 rm -rf "${PREFIX}/releases/v0"
@@ -329,7 +430,7 @@ fi
 
 ## ── 4. --rollback ────────────────────────────────────────────────────────
 
-section "4/7  --rollback returns to the recorded release"
+section "4/8  --rollback returns to the recorded release"
 
 # `.previous_release` is produced by a real update rather than written by hand,
 # so the round trip an operator actually performs is the one under test.
@@ -367,7 +468,7 @@ fi
 
 ## ── 5. Refusals leave the running service alone ──────────────────────────
 
-section "5/7  A red suite does not reach the switchover"
+section "5/8  A red suite does not reach the switchover"
 
 build_host
 FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
@@ -391,6 +492,34 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 
 assert_eq "exits 2 — nothing was touched" "2" "$RC"
 assert_eq "current still points at the old release" "v0" "$(current_release)"
+
+section "5b2  An env file without the SkillKey secret aborts the preflight"
+
+# A host set up before VIGIL_SKILLKEY_SECRET existed. The new release would
+# refuse to boot; step 6 would roll it back, but only after stopping the
+# service, so preflight catches it first, and says what to add.
+build_host
+sed -i.bak '/^VIGIL_SKILLKEY_SECRET=/d' "$ENV_FILE"
+rm -f "${ENV_FILE}.bak"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 2 — nothing was touched" "2" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+if grep -q "VIGIL_SKILLKEY_SECRET" "${WORK}/out.log" &&
+  grep -q "sudo ./scripts/rotate_secret.sh skillkey" "${WORK}/out.log"; then
+  pass "names the variable and the command that adds it"
+else
+  fail "names the variable and the command that adds it" "$(tail -3 "${WORK}/out.log")"
+fi
+
+# A line that sets it to nothing is read as the service reads it: missing.
+build_host
+sed -i.bak 's/^VIGIL_SKILLKEY_SECRET=.*/VIGIL_SKILLKEY_SECRET=""/' "$ENV_FILE"
+rm -f "${ENV_FILE}.bak"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "an empty value: exits 2" "2" "$RC"
+assert_eq "an empty value: the service was never stopped" "yes" "$(service_running)"
 
 ## ── 5c. Persisted auth state survives the delivery ───────────────────────
 
@@ -419,9 +548,98 @@ RC="$(run_update --to "$NEW_SHA" --non-interactive)"
 assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
 assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_fingerprint)"
 
+## ── 5d. A rollback puts back the OAuth state the old release left ───────
+
+section "5d   A rollback puts back the OAuth state the release it returns to left"
+
+# A release whose OAuth state format is newer migrates the state dir when it
+# boots, and the release before it cannot read the result (docs/compatibility.md,
+# "The OAuth state"). A release holding an executable .on-start is one that
+# does something to the state dir when it starts, the way that migration does:
+# it rewrites the tables and marks them with oauth_meta.dets.
+migrating_release() {
+  local dir="${PREFIX}/releases/$1"
+  mkdir -p "$dir"
+  cat >"${dir}/.on-start" <<'HOOK'
+#!/usr/bin/env bash
+for table in clients codes tokens; do
+  echo "migrated-${table}" >"$1/oauth_${table}.dets"
+done
+echo "2" >"$1/oauth_meta.dets"
+chmod 600 "$1"/oauth_*.dets
+HOOK
+  chmod +x "${dir}/.on-start"
+  echo "$dir"
+}
+
+SNAPSHOT="${PREFIX}/oauth-state-snapshot"
+
+build_host
+BEFORE="$(state_fingerprint)"
+touch "$(migrating_release "$NEW_SHA")/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+assert_eq "the automatic rollback put the tables back, and took the new release's marker away" \
+  "$BEFORE" "$(state_fingerprint)"
+
+build_host
+BEFORE="$(state_fingerprint)"
+migrating_release "$NEW_SHA" >/dev/null
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "an update to a release that migrates the state exits 0" "0" "$RC"
+if [ "$BEFORE" != "$(state_fingerprint)" ]; then
+  pass "the new release migrated the state"
+else
+  fail "the new release migrated the state" "the tables are unchanged"
+fi
+assert_eq "the snapshot is kept outside the state dir, for root alone" "700" "$(mode_of "$SNAPSHOT")"
+assert_eq "it holds the tables with their modes" "600 600 600" \
+  "$(for t in clients codes tokens; do mode_of "${SNAPSHOT}/oauth_${t}.dets"; done | paste -sd' ' -)"
+assert_eq "and names the release it was taken for" "${PREFIX}/releases/v0" \
+  "$(cat "${SNAPSHOT}/release")"
+
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback to that release exits 0" "0" "$RC"
+assert_eq "--rollback put the tables back as that release left them" \
+  "$BEFORE" "$(state_fingerprint)"
+if grep -q "OAuth state" "${WORK}/out.log"; then
+  pass "--rollback says it put the OAuth state back"
+else
+  fail "--rollback says it put the OAuth state back" "$(tail -3 "${WORK}/out.log")"
+fi
+
+# Only the last snapshot is kept: a later update replaces it.
+build_host
+migrating_release "$NEW_SHA" >/dev/null
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+RC="$(run_update --rebuild --non-interactive)"
+assert_eq "a second update exits 0" "0" "$RC"
+assert_eq "its snapshot replaced the first, and names the release it replaced" \
+  "${PREFIX}/releases/${NEW_SHA}" "$(cat "${SNAPSHOT}/release")"
+assert_eq "one snapshot, no leftovers beside it" "oauth-state-snapshot" \
+  "$(find "$PREFIX" -maxdepth 1 -name 'oauth-state-snapshot*' -exec basename {} \; | paste -sd' ' -)"
+
+# A --rollback to a release the snapshot was not taken for leaves the state
+# as it is and says what the operator's backup is for.
+build_host
+migrating_release "$NEW_SHA" >/dev/null
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+AFTER_UPDATE="$(state_fingerprint)"
+echo "${PREFIX}/releases/other" >"${PREFIX}/.previous_release"
+make_release other >/dev/null
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback to another release exits 0" "0" "$RC"
+assert_eq "it leaves the state as it is" "$AFTER_UPDATE" "$(state_fingerprint)"
+if grep -q "backup" "${WORK}/out.log"; then
+  pass "and warns that the state may need the operator's backup"
+else
+  fail "and warns that the state may need the operator's backup" "$(tail -3 "${WORK}/out.log")"
+fi
+
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 
-section "6/7  Cleanup keeps three releases and never the running one"
+section "6/8  Cleanup keeps three releases and never the running one"
 
 build_host
 for old in old1 old2 old3; do
@@ -471,7 +689,7 @@ fi
 
 ## ── 7. A prefix reached through a symlink ────────────────────────────────
 
-section "7/7  Cleanup keeps the running release behind a symlinked prefix"
+section "7/8  Cleanup keeps the running release behind a symlinked prefix"
 
 # The regression this pins: the cleanup compared `readlink -f` output against
 # the unresolved directory listing, so with any symlink in the prefix nothing
@@ -496,6 +714,676 @@ if [ -d "${PREFIX}/releases/v0" ]; then
   pass "the previous release survived the cleanup"
 else
   fail "the previous release survived the cleanup"
+fi
+
+## ── 8. --update-unit ships the unit ──────────────────────────────────────
+
+section "8/8  --update-unit installs the unit the target revision carries"
+
+SHIPPED_UNIT="${REPO_ROOT}/deploy/vigil.service"
+
+# A third commit whose deploy/vigil.service is the real one from this
+# checkout, so what the test sees installed is the unit this change ships.
+commit_shipped_unit() {
+  local repo="${PREFIX}/repo"
+  git -C "$repo" checkout -q main
+  cp "$SHIPPED_UNIT" "${repo}/deploy/vigil.service"
+  git -C "$repo" commit -qam "hardened unit"
+  UNIT_SHA="$(git -C "$repo" rev-parse --short HEAD)"
+  git -C "$repo" checkout -q "$OLD_SHA"
+}
+
+build_host
+commit_shipped_unit
+: >"${WORK}/systemd-analyze.log"
+RC="$(run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if cmp -s "$SHIPPED_UNIT" "${WORK}/etc/vigil.service"; then
+  pass "the installed unit is deploy/vigil.service of the target revision"
+else
+  fail "the installed unit is deploy/vigil.service of the target revision"
+fi
+assert_eq "the installed unit is 0644" "644" "$(mode_of "${WORK}/etc/vigil.service")"
+if grep -qE "^security --offline=true --threshold=30 .*/vigil\.service$" "${WORK}/systemd-analyze.log"; then
+  pass "its sandbox was scored against the 3.0 target before it was installed"
+else
+  fail "its sandbox was scored against the 3.0 target before it was installed" \
+    "systemd-analyze calls: $(paste -sd'|' "${WORK}/systemd-analyze.log")"
+fi
+
+section "8b   Without --update-unit the unit is left alone"
+
+build_host
+commit_shipped_unit
+RC="$(run_update --to "$UNIT_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if [ -e "${WORK}/etc/vigil.service" ]; then
+  fail "no unit was installed"
+else
+  pass "no unit was installed"
+fi
+if grep -q -- "--update-unit" "${WORK}/out.log"; then
+  pass "says how to adopt the changed unit"
+else
+  fail "says how to adopt the changed unit" "$(tail -3 "${WORK}/out.log")"
+fi
+
+section "8c   A unit above the exposure target is refused"
+
+build_host
+commit_shipped_unit
+FAKE_SA_EXPOSED="${WORK}/unit-is-exposed"
+touch "$FAKE_SA_EXPOSED"
+RC="$(run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+FAKE_SA_EXPOSED=""
+
+assert_eq "exits 1" "1" "$RC"
+if [ -e "${WORK}/etc/vigil.service" ]; then
+  fail "the exposed unit was not installed"
+else
+  pass "the exposed unit was not installed"
+fi
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+
+section "8c2  An automatic rollback puts the old unit back"
+
+# The release switched to may need its unit to boot, so --update-unit
+# installs it before the switch; the old release goes back under its own.
+build_host
+commit_shipped_unit
+printf '[Unit]\n# the unit v0 runs under\n' >"${WORK}/etc/vigil.service"
+cp "${WORK}/etc/vigil.service" "${WORK}/old-unit"
+BROKEN_TARGET="${PREFIX}/releases/${UNIT_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+
+assert_eq "rolled back (exit 3)" "3" "$RC"
+if cmp -s "${WORK}/old-unit" "${WORK}/etc/vigil.service"; then
+  pass "the installed unit is the old one again"
+else
+  fail "the installed unit is the old one again" "$(head -3 "${WORK}/etc/vigil.service")"
+fi
+assert_eq "systemd was reloaded for each unit" "2" \
+  "$(grep -cx 'daemon-reload' "${PREFIX}/.systemctl-units.log" 2>/dev/null || true)"
+
+section "8c3  The unit installed is the one taken before any mix step ran"
+
+build_host
+commit_shipped_unit
+touch "${WORK}/mix-tampers"
+RC="$(FAKE_MIX_TAMPERS="${WORK}/mix-tampers" run_update --to "$UNIT_SHA" --update-unit --non-interactive)"
+rm -f "${WORK}/mix-tampers"
+
+assert_eq "exits 0" "0" "$RC"
+for pair in "vigil.service:${SHIPPED_UNIT}" \
+  "vigil-push.service:${REPO_ROOT}/deploy/vigil-push.service" \
+  "vigil-notify@.service:${REPO_ROOT}/deploy/vigil-notify@.service"; do
+  if cmp -s "${pair#*:}" "${WORK}/etc/${pair%%:*}"; then
+    pass "${pair%%:*} is installed as committed, not as the build left it"
+  else
+    fail "${pair%%:*} is installed as committed, not as the build left it"
+  fi
+done
+
+section "8d   The shipped unit carries the sandbox"
+
+# The options #217 asked for, one line each. `systemd-analyze security` on a
+# host is the judgement; this is what keeps one of them from quietly going
+# missing in between.
+for directive in \
+  "UMask=0077" \
+  "Environment=ERL_CRASH_DUMP_SECONDS=0" \
+  "LimitCORE=0" \
+  "ReadOnlyPaths=-/var/lib/vigil/.ssh" \
+  "ReadWritePaths=/var/lib/vigil" \
+  "CapabilityBoundingSet=" \
+  "AmbientCapabilities=" \
+  "ProtectKernelTunables=true" \
+  "ProtectKernelModules=true" \
+  "ProtectKernelLogs=true" \
+  "ProtectControlGroups=true" \
+  "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6" \
+  "SystemCallFilter=@system-service" \
+  "StartLimitIntervalSec=300" \
+  "StartLimitBurst=5"; do
+  if grep -qxF "$directive" "$SHIPPED_UNIT"; then
+    pass "deploy/vigil.service sets ${directive}"
+  else
+    fail "deploy/vigil.service sets ${directive}"
+  fi
+done
+if grep -q "^MemoryDenyWriteExecute=" "$SHIPPED_UNIT"; then
+  fail "MemoryDenyWriteExecute stays off for the JIT"
+else
+  pass "MemoryDenyWriteExecute stays off for the JIT"
+fi
+
+## ── 9. The push safety net ───────────────────────────────────────────────
+
+section "9/9  An update moves the push safety net from cron to the timer"
+
+build_host
+mkdir -p "${WORK}/etc/cron.d"
+echo "*/15 * * * * root /opt/vigil/repo/scripts/push_pending.sh" \
+  >"${WORK}/etc/cron.d/vigil-push-safety-net"
+: >"${WORK}/systemd-analyze.log"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+if [ -e "${WORK}/etc/cron.d/vigil-push-safety-net" ]; then
+  fail "the cron file is removed"
+else
+  pass "the cron file is removed"
+fi
+for unit in vigil-push.service vigil-push.timer vigil-notify@.service; do
+  if cmp -s "${REPO_ROOT}/deploy/${unit}" "${WORK}/etc/${unit}"; then
+    pass "${unit} is installed as shipped"
+  else
+    fail "${unit} is installed as shipped"
+  fi
+done
+if grep -qx "enable --now vigil-push.timer" "${PREFIX}/.systemctl-units.log" 2>/dev/null &&
+  grep -qx "daemon-reload" "${PREFIX}/.systemctl-units.log"; then
+  pass "systemd is reloaded and the timer enabled and started"
+else
+  fail "systemd is reloaded and the timer enabled and started" \
+    "systemctl calls: $(paste -sd'|' "${PREFIX}/.systemctl-units.log" 2>/dev/null)"
+fi
+if grep -qE "^security --offline=true --threshold=30 .*/vigil-push\.service$" "${WORK}/systemd-analyze.log"; then
+  pass "the push unit's sandbox was scored against the 3.0 target"
+else
+  fail "the push unit's sandbox was scored against the 3.0 target" \
+    "systemd-analyze calls: $(paste -sd'|' "${WORK}/systemd-analyze.log")"
+fi
+
+section "9a2  A rolled-back update leaves the old push safety net in place"
+
+build_host
+mkdir -p "${WORK}/etc/cron.d"
+echo "*/15 * * * * root /opt/vigil/repo/scripts/push_pending.sh" \
+  >"${WORK}/etc/cron.d/vigil-push-safety-net"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "rolled back (exit 3)" "3" "$RC"
+if [ -e "${WORK}/etc/cron.d/vigil-push-safety-net" ] && [ ! -e "${WORK}/etc/vigil-push.service" ]; then
+  pass "the cron file is kept and no push unit installed"
+else
+  fail "the cron file is kept and no push unit installed"
+fi
+
+section "9a3  A notification unit that is not a dynamic user's is refused"
+
+build_host
+git -C "${PREFIX}/repo" checkout -q main
+sed -i.bak 's/^DynamicUser=yes$/User=root/' "${PREFIX}/repo/deploy/vigil-notify@.service"
+rm -f "${PREFIX}/repo/deploy/vigil-notify@.service.bak"
+git -C "${PREFIX}/repo" commit -qam "notify as root"
+ROOT_NOTIFY_SHA="$(git -C "${PREFIX}/repo" rev-parse --short HEAD)"
+git -C "${PREFIX}/repo" checkout -q "$OLD_SHA"
+RC="$(run_update --to "$ROOT_NOTIFY_SHA" --non-interactive)"
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never cycled" "(none)" "$(systemctl_calls)"
+if grep -q "dynamic user" "${WORK}/out.log"; then
+  pass "says why"
+else
+  fail "says why" "$(tail -3 "${WORK}/out.log")"
+fi
+if [ -s "$FAKE_MIX_LOG" ]; then
+  fail "refused before any mix step" "mix log: $(paste -sd'|' "$FAKE_MIX_LOG")"
+else
+  pass "refused before any mix step"
+fi
+
+section "9b   A push unit above the exposure target stops the update before the switch"
+
+build_host
+FAKE_SA_EXPOSED="${WORK}/unit-is-exposed"
+touch "$FAKE_SA_EXPOSED"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+FAKE_SA_EXPOSED=""
+
+assert_eq "exits 1" "1" "$RC"
+if [ -e "${WORK}/etc/vigil-push.service" ]; then
+  fail "the exposed push unit was not installed"
+else
+  pass "the exposed push unit was not installed"
+fi
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+
+## ── 10. The checkout follows the running release ────────────────────────
+
+section "10   A failed build leaves the checkout on the running revision"
+
+# Before, the checkout stayed on the target after a failed build, and the
+# running revision was read from the checkout — so the same update, run again,
+# found the target "running" and reported nothing to do.
+build_host
+FAKE_MIX_RELEASE_FAILS="${WORK}/build-fails"
+touch "$FAKE_MIX_RELEASE_FAILS"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+FAKE_MIX_RELEASE_FAILS=""
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current still points at the old release" "v0" "$(current_release)"
+assert_eq "the service was never stopped" "yes" "$(service_running)"
+assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "10b  The same update, run again after a failed build, proceeds"
+
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+if grep -q "nothing to do" "${WORK}/out.log"; then
+  fail "does not report nothing to do" "$(grep "nothing to do" "${WORK}/out.log")"
+else
+  pass "does not report nothing to do"
+fi
+assert_eq "the checkout is on the new revision" "$NEW_SHA" "$(checkout_sha)"
+assert_eq "the new release records the commit it was built from" \
+  "$(git -C "${PREFIX}/repo" rev-parse "$NEW_SHA")" \
+  "$(cat "${PREFIX}/releases/${NEW_SHA}/REVISION")"
+
+section "10c  The running revision is read from the release, not the checkout"
+
+# A checkout moved by hand, onto the target: the release still runs the old
+# commit, so the update is not "nothing to do".
+build_host
+git -C "${PREFIX}/repo" checkout -q "$NEW_SHA"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+
+section "10d  After an automatic rollback the checkout matches the running release"
+
+build_host
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the failed update rolled back (exit 3)" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the checkout is on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+rm -f "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "the same update, run again once fixed, exits 0" "0" "$RC"
+assert_eq "and switches to the new release" "$NEW_SHA" "$(current_release)"
+
+section "10e  --rollback puts the checkout back on the release it returns to"
+
+build_host
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "the update it rolls back exits 0" "0" "$RC"
+RC="$(run_update --rollback --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the recorded previous release" "v0" "$(current_release)"
+assert_eq "the checkout is on the revision of that release" "$OLD_SHA" "$(checkout_sha)"
+
+section "10f  A release that never comes up is rolled back too"
+
+# The health wait after the switch used to exit on its own, leaving the new
+# release switched in and the service down. And a release that crashes on
+# boot uses up the unit's start limit while it is waited for, so the start
+# of the old release is refused unless the failed starts are cleared first:
+# the stand-in systemctl logs that start as "refused".
+build_host
+make_unbootable "$NEW_SHA"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 3 — rolled back, service running" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the service is running again" "yes" "$(service_running)"
+assert_eq "the service was cycled twice, ending on the old release" \
+  "stop v0 | start ${NEW_SHA} | stop ${NEW_SHA} | start v0" "$(systemctl_calls)"
+assert_eq "the checkout is on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "10g  When the previous release does not come up either, that is said"
+
+build_host
+make_unbootable v0
+make_unbootable "$NEW_SHA"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 1 — manual intervention" "1" "$RC"
+if grep -q "Manual intervention needed" "${WORK}/out.log"; then
+  pass "says manual intervention is needed"
+else
+  fail "says manual intervention is needed" "$(tail -3 "${WORK}/out.log")"
+fi
+
+section "10h  A start systemd refuses is rolled back, not the end of the run"
+
+build_host
+make_unbootable "$NEW_SHA"
+rm -f "${PREFIX}/releases/${NEW_SHA}/.boot-fails"
+touch "${PREFIX}/releases/${NEW_SHA}/.start-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 3 — rolled back, service running" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+assert_eq "the service is running again" "yes" "$(service_running)"
+
+section "10i  A release from before /healthz is one the rollback can go back to"
+
+# vigil 0.2 answers /healthz with 404. Going back to it — automatically or with
+# --rollback — is going back to a release that is up; switching to one is not.
+build_host
+touch "${PREFIX}/releases/v0/.no-healthz"
+BROKEN_TARGET="${PREFIX}/releases/${NEW_SHA}"
+mkdir -p "$BROKEN_TARGET"
+touch "${BROKEN_TARGET}/.verify-fails"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "the automatic rollback to it exits 3, not 1" "3" "$RC"
+assert_eq "current points back at it" "v0" "$(current_release)"
+assert_eq "the service is running" "yes" "$(service_running)"
+
+build_host
+touch "${PREFIX}/releases/v0/.no-healthz"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "an update away from it exits 0" "0" "$RC"
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback to it exits 0" "0" "$RC"
+assert_eq "--rollback: current points at it" "v0" "$(current_release)"
+
+build_host
+make_unbootable "$NEW_SHA"
+rm -f "${PREFIX}/releases/${NEW_SHA}/.boot-fails"
+touch "${PREFIX}/releases/${NEW_SHA}/.no-healthz"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "a release switched to without /healthz is rolled back (exit 3)" "3" "$RC"
+assert_eq "current points back at the previous release" "v0" "$(current_release)"
+
+## ── 11. --rebuild ────────────────────────────────────────────────────────
+
+section "11   --rebuild builds the running commit into a new release and switches to it"
+
+build_host
+RC="$(run_update --rebuild --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+REBUILT="$(current_release)"
+case "$REBUILT" in
+  "${OLD_SHA}-"*) pass "the new release is named after the running commit" ;;
+  *) fail "the new release is named after the running commit" "current: ${REBUILT}" ;;
+esac
+if [ -x "${PREFIX}/releases/${REBUILT}/bin/vigil" ]; then
+  pass "the new release directory was built"
+else
+  fail "the new release directory was built"
+fi
+assert_eq "it records the commit it was built from" \
+  "$(git -C "${PREFIX}/repo" rev-parse "$OLD_SHA")" \
+  "$(cat "${PREFIX}/releases/${REBUILT}/REVISION")"
+assert_eq "the previous release is recorded" "${PREFIX}/releases/v0" \
+  "$(cat "${PREFIX}/.previous_release")"
+assert_eq "stopped on the old release, started on the rebuilt one" \
+  "stop v0 | start ${REBUILT}" "$(systemctl_calls)"
+assert_eq "the checkout is on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "11b  A second --rebuild builds yet another release, and --rollback returns"
+
+RC="$(run_update --rebuild --non-interactive)"
+assert_eq "exits 0" "0" "$RC"
+if [ "$(current_release)" != "$REBUILT" ]; then
+  pass "switched to a release directory of its own"
+else
+  fail "switched to a release directory of its own" "current: $(current_release)"
+fi
+RC="$(run_update --rollback --non-interactive)"
+assert_eq "--rollback exits 0" "0" "$RC"
+assert_eq "and returns to the first rebuild" "$REBUILT" "$(current_release)"
+
+section "11c  --rebuild does not combine with --to or --rollback"
+
+build_host
+RC="$(run_update --rebuild --to "$NEW_SHA" --non-interactive)"
+assert_eq "--rebuild --to exits 2" "2" "$RC"
+RC="$(run_update --rebuild --rollback --non-interactive)"
+assert_eq "--rebuild --rollback exits 2" "2" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+
+## ── 12. Chunk ids ────────────────────────────────────────────────────────
+
+section "12   The running release's chunk ids are compared with the target's"
+
+build_host
+echo "VIGIL_EXCLUDE=private" >>"$ENV_FILE"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "no change: exits 0" "0" "$RC"
+assert_eq "and switches" "$NEW_SHA" "$(current_release)"
+if grep -q "^slug_diff saw: note.md#seen-by-v0 vault=${VAULT} exclude=private env=prod$" "$FAKE_MIX_LOG"; then
+  pass "the running release's list of the vault, with its exclusions, reached the target's comparison"
+else
+  fail "the running release's list of the vault, with its exclusions, reached the target's comparison" \
+    "mix log: $(grep slug_diff "$FAKE_MIX_LOG" || echo none)"
+fi
+
+section "12b  A change is refused under --non-interactive without --accept-id-changes"
+
+build_host
+touch "${WORK}/slug-diff-changes"
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 2" "2" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+assert_eq "the service was never cycled" "(none)" "$(systemctl_calls)"
+assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+if grep -q -- "- note.md#oil-1" "${WORK}/out.log" && grep -q -- "--accept-id-changes" "${WORK}/out.log"; then
+  pass "names the ids that would move and the flag that accepts it"
+else
+  fail "names the ids that would move and the flag that accepts it" "$(tail -5 "${WORK}/out.log")"
+fi
+
+section "12c  --accept-id-changes switches anyway"
+
+build_host
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" run_update --to "$NEW_SHA" --non-interactive --accept-id-changes)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+
+section "12d  Asked interactively, no aborts and yes switches"
+
+build_host
+echo "n" >"${WORK}/answer"
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" UPDATE_STDIN="${WORK}/answer" run_update --to "$NEW_SHA")"
+assert_eq "declined: exits 4" "4" "$RC"
+assert_eq "declined: current is unchanged" "v0" "$(current_release)"
+assert_eq "declined: the service was never cycled" "(none)" "$(systemctl_calls)"
+
+build_host
+echo "y" >"${WORK}/answer"
+RC="$(FAKE_SLUG_DIFF_CHANGES="${WORK}/slug-diff-changes" UPDATE_STDIN="${WORK}/answer" run_update --to "$NEW_SHA")"
+assert_eq "accepted: exits 0" "0" "$RC"
+assert_eq "accepted: current points at the new release" "$NEW_SHA" "$(current_release)"
+rm -f "${WORK}/slug-diff-changes"
+
+section "12e  A running release that cannot list its ids is not compared, and that is said"
+
+build_host
+touch "${PREFIX}/releases/v0/.no-chunk-ids"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the new release" "$NEW_SHA" "$(current_release)"
+if grep -q "cannot list its chunk ids" "${WORK}/out.log"; then
+  pass "says the switch was not compared"
+else
+  fail "says the switch was not compared" "$(grep -i chunk "${WORK}/out.log" || echo none)"
+fi
+if grep -q "slug_diff" "$FAKE_MIX_LOG"; then
+  fail "the target was not asked to compare against nothing"
+else
+  pass "the target was not asked to compare against nothing"
+fi
+
+section "12e2 A running release that fails to list its ids stops the run"
+
+# Only a release too old to be asked is let through uncompared. Any other
+# failure — the one fs.protected_regular=2 made of root writing the list into
+# a file the service account had made in /tmp, say — used to read the same.
+build_host
+touch "${PREFIX}/releases/v0/.chunk-ids-crash"
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+assert_eq "the service was never cycled" "(none)" "$(systemctl_calls)"
+if grep -q "permission denied" "${WORK}/out.log" && grep -q "could not list its chunk ids" "${WORK}/out.log"; then
+  pass "shows what the release said and that the switch is not made"
+else
+  fail "shows what the release said and that the switch is not made" "$(grep -i chunk "${WORK}/out.log" || echo none)"
+fi
+
+# The list reaches the comparison through a file the service account writes;
+# the root shell never opens one it did not create itself.
+# shellcheck disable=SC2016 # the needle is update.sh's text, not an expansion
+if grep -nE '>>? *"\$running_ids"' "$UPDATE_SH"; then
+  fail "update.sh never redirects into the service account's ids file"
+else
+  pass "update.sh never redirects into the service account's ids file"
+fi
+
+section "12f  --rebuild moves no id and compares nothing"
+
+build_host
+RC="$(run_update --rebuild --non-interactive)"
+assert_eq "exits 0" "0" "$RC"
+if grep -q "slug_diff" "$FAKE_MIX_LOG"; then
+  fail "no comparison for the running commit"
+else
+  pass "no comparison for the running commit"
+fi
+
+## ── 13. The target's own update.sh finishes the run ────────────────────
+
+section "13   The run is handed to the target checkout's update.sh"
+
+# A target commit whose scripts/update.sh is the one given, with lib.sh beside
+# it: a recorder, or the real pair from this checkout.
+commit_target_scripts() {
+  local repo="${PREFIX}/repo" kind="$1"
+  git -C "$repo" checkout -q main
+  mkdir -p "${repo}/scripts"
+  if [ "$kind" = "recorder" ]; then
+    cat >"${repo}/scripts/update.sh" <<'REC'
+#!/usr/bin/env bash
+{
+  echo "args: $*"
+  echo "guard: ${VIGIL_UPDATE_REEXEC:-none}"
+  echo "head: $(git -C "$(dirname "$0")/.." rev-parse --short HEAD)"
+} >"${FAKE_MIX_LOG%/*}/target-update.log"
+exit 0
+REC
+    : >"${repo}/scripts/lib.sh"
+  elif [ "$kind" = "older" ]; then
+    # An update.sh from before the hand-over (0.2's, or an older tag's): it
+    # knows nothing of the guard, and would run the update again from the
+    # start — handing over to it is not what it expects.
+    cat >"${repo}/scripts/update.sh" <<'REC'
+#!/usr/bin/env bash
+echo "older script ran" >"${FAKE_MIX_LOG%/*}/target-update.log"
+exit 0
+REC
+    : >"${repo}/scripts/lib.sh"
+  else
+    cp "$UPDATE_SH" "${REPO_ROOT}/scripts/lib.sh" "${repo}/scripts/"
+  fi
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm "scripts (${kind})"
+  SCRIPTS_SHA="$(git -C "$repo" rev-parse --short HEAD)"
+  git -C "$repo" checkout -q "$OLD_SHA"
+}
+
+build_host
+commit_target_scripts recorder
+rm -f "${WORK}/target-update.log"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive --accept-id-changes)"
+
+assert_eq "the target's script decides the exit code" "0" "$RC"
+assert_eq "it was given the arguments the run was started with" \
+  "args: --to ${SCRIPTS_SHA} --non-interactive --accept-id-changes" \
+  "$(sed -n 1p "${WORK}/target-update.log" 2>/dev/null)"
+assert_eq "and the running revision, which also stops a second hand-over" \
+  "guard: ${OLD_SHA}" "$(sed -n 2p "${WORK}/target-update.log" 2>/dev/null)"
+assert_eq "the checkout is on the target when it starts" \
+  "head: ${SCRIPTS_SHA}" "$(sed -n 3p "${WORK}/target-update.log" 2>/dev/null)"
+assert_eq "the script it started with switched nothing" "v0" "$(current_release)"
+assert_eq "and built nothing" "0" "$(grep -c '^release' "$FAKE_MIX_LOG" || true)"
+
+section "13b  The target's real update.sh runs the update once"
+
+build_host
+commit_target_scripts real
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "current points at the target" "$SCRIPTS_SHA" "$(current_release)"
+assert_eq "handed over exactly once" "1" "$(grep -c "Continuing with the target's own" "${WORK}/out.log")"
+assert_eq "the suite ran once, in the target's run" "1" "$(grep -cx 'test' "$FAKE_MIX_LOG")"
+
+section "13c  A handed-over run that fails puts the checkout back"
+
+build_host
+commit_target_scripts real
+FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
+touch "$FAKE_MIX_TEST_FAILS"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive)"
+FAKE_MIX_TEST_FAILS=""
+
+assert_eq "exits 1" "1" "$RC"
+assert_eq "current is unchanged" "v0" "$(current_release)"
+assert_eq "the checkout is back on the running revision" "$OLD_SHA" "$(checkout_sha)"
+
+section "13d  A target whose update.sh cannot take the run over is not handed it"
+
+# `--to <older tag>`: the target's script predates the hand-over.
+build_host
+commit_target_scripts older
+rm -f "${WORK}/target-update.log"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive --accept-id-changes)"
+
+assert_eq "exits 0" "0" "$RC"
+assert_eq "the older script was not run" "no" \
+  "$([ -f "${WORK}/target-update.log" ] && echo yes || echo no)"
+assert_eq "the script it started with switched to the target" "$SCRIPTS_SHA" "$(current_release)"
+if grep -q "cannot take the run over" "${WORK}/out.log"; then
+  pass "says it goes on with the script it started with"
+else
+  fail "says it goes on with the script it started with" "$(grep -i "update.sh" "${WORK}/out.log" | tail -3)"
+fi
+
+section "13e  A VIGIL_UPDATE_REEXEC from the environment that names no revision is ignored"
+
+build_host
+commit_target_scripts recorder
+rm -f "${WORK}/target-update.log"
+INHERITED_REEXEC="1; left over from a shell"
+RC="$(run_update --to "$SCRIPTS_SHA" --non-interactive --accept-id-changes)"
+INHERITED_REEXEC=""
+
+assert_eq "the run is handed over all the same" "guard: ${OLD_SHA}" \
+  "$(sed -n 2p "${WORK}/target-update.log" 2>/dev/null)"
+if grep -q "Ignoring VIGIL_UPDATE_REEXEC" "${WORK}/out.log"; then
+  pass "says it ignored the variable"
+else
+  fail "says it ignored the variable" "$(head -5 "${WORK}/out.log")"
 fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────

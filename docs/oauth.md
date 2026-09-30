@@ -1,9 +1,12 @@
 # OAuth 2.1
 
-vigil is its own authorization server. There is no static bearer token: every
-client authenticates through a standard OAuth 2.1 Authorization Code flow with
-PKCE, registering either via Dynamic Client Registration or via a Client-ID
-Metadata Document.
+vigil is its own authorization server. Every client authenticates through a
+standard OAuth 2.1 Authorization Code flow with PKCE, registering either via
+Dynamic Client Registration or via a Client-ID Metadata Document. There is no
+bearer token in the configuration: the one exception to a consent is a token
+the operator seeds for a grant of its own (`init.sh`, `mix vigil.seed_token`,
+90 days by default), which is stored, listed and revoked like any other (see
+"Revoking a grant" below).
 
 This document describes the implemented surface. The code in
 [`lib/vigil/oauth/`](../lib/vigil/oauth/) and
@@ -23,21 +26,23 @@ cannot exist with a lookup. The audience is stored at issue time and compared
 at verification time.
 
 **Persistence is reached through a value.** What the server remembers is
-declared as fourteen questions in `Vigil.OAuth.Persistence` — a struct of
+declared as nineteen questions in `Vigil.OAuth.Persistence` — a struct of
 functions with no defaults — and the `:dets`/`:ets` implementation is an
 adapter behind it, `Vigil.OAuth.Store.over_tables/0`. The six modules that
 read and write records ask through the value they are handed rather than
 naming a globally registered module with hard-coded table atoms, and the
 routers resolve the production adapter once, when they are initialized. There
 is a second adapter, `Vigil.OAuth.Persistence.Memory`, which the suite runs on;
-`test/vigil/oauth/persistence_test.exs` runs every claim above against both and
-is the only test that opens a `:dets` file. See [design.md](design.md), "OAuth
+`test/vigil/oauth/persistence_test.exs` runs every claim above against both,
+and is the only test that opens a `:dets` file to ask one; the two others that
+open one are about the files themselves, their schema version and the
+migration of what an earlier release wrote. See [design.md](design.md), "OAuth
 persistence is reached through a value", for the reasoning and the shape it
 follows.
 
 **The token record has one owner.** `Vigil.OAuth.Token` is the module that
 says what a stored token is. It writes every one that exists — the pair a
-grant redemption produces, the lone long-lived token that
+grant redemption produces, the lone token (90 days by default) that
 `mix vigil.seed_token` seeds, and the spent marker rotation leaves behind —
 it classifies one (`access`, `refresh`, `spent_refresh`), and it answers
 whether a token is a valid access token for a resource and at what scope.
@@ -154,7 +159,7 @@ sender-constrained or use refresh token rotation" — and acts on the detection
 §4.14.2 asks for, rather than only generating it.
 
 The mechanism is a marker, not a deletion. The presented token is marked
-**spent** before the new pair is minted; presenting a spent token is the
+**spent** as the new pair is minted; presenting a spent token is the
 signal, because §4.14.2's case is precisely that "if a refresh token is
 compromised and subsequently used by both the attacker and the legitimate
 client, one of them will present an invalidated refresh token". vigil cannot
@@ -212,20 +217,33 @@ the consent page is about a different thing — that any local process can *ask*
 for consent while looking like the client. (§2.5, and RFC 8252 §8.3)
 
 **Is the rate limit per client, per address, or global — and what does an
-attacker gain by exhausting it for someone else?** There are three limits and
-they cover different things:
+attacker gain by exhausting it for someone else?** There are several limits
+and they cover different things:
 
 | Limit | Keyed on | Budget | Covers |
 |---|---|---|---|
 | `Vigil.RateLimit` at `/mcp` | access token | `VIGIL_RATE_LIMIT_RPM`/min | every `/mcp` request, and only once the token has validated |
+| `Vigil.RateLimit` for `reload` | access token | `VIGIL_RELOAD_RATE_LIMIT_RPM`/min | `reload` calls, counted again under a key of their own |
 | `Vigil.RateLimit` at the OAuth endpoints | client address | `VIGIL_OAUTH_RATE_LIMIT_RPM`/min, `VIGIL_OAUTH_REGISTER_RATE_LIMIT_RPM`/min | `/oauth/register`, `/oauth/authorize`, `/oauth/token` |
-| OAuth persistence's `rate_limited?` | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+| consent lockout | client address | 5 per 15 min | wrong passwords on the consent form, and nothing else |
+| consent budget | every address together | `VIGIL_CONSENT_FAILURES_PER_HOUR`/hour (default 50) | wrong passwords on the consent form; past it the form answers 429 for everyone and a warning is logged |
 
-The first two rows are one table, `Vigil.RateLimit`'s, and the third is OAuth
-persistence's — the budget and the window are stated once, on the contract in
-`Vigil.OAuth.Persistence`, so both adapters behind it count the same way.
-`Vigil.OAuth.Janitor` sweeps both, on the schedule "Storage and cleanup" below
-sets out.
+The first three rows are one table, `Vigil.RateLimit`'s, and the last two are
+OAuth persistence's. Their budgets and windows are `Vigil.OAuth.Flow`'s, handed
+in with every attempt; persistence only counts. `Vigil.OAuth.Janitor` sweeps
+both tables, on the schedule "Storage and cleanup" below sets out.
+
+"Client address" is `Vigil.OAuth.ClientAddr`'s answer, and for IPv6 it is the
+/64 rather than the address: one line or one host is handed a /64, and a key
+per address would give its holder 2^64 budgets. Every counter is changed by one
+atomic operation, and a consent attempt is counted *before* the password is
+compared — each attempt in flight is handed its own place in the window, and
+the one past the budget is refused without a comparison — so parallel requests
+cannot spend more than a budget. A right password gives its attempt back. The
+comparison itself hashes both the guess and the password with SHA-256 and
+compares the digests with `Plug.Crypto.secure_compare/2`, which on the raw
+values would answer early for a guess of another length and so tell the
+guesser the password's length.
 
 The middle row is the one that bounds an unauthenticated caller, and it is
 checked *before* the handler runs rather than inside it, so a refusal costs
@@ -239,8 +257,14 @@ body for the two endpoints a program reads.
 What an attacker gains by exhausting someone else's budget is bounded by the
 key: with the proxy settings configured it is one address's budget, and
 without them it is the single global bucket described in the next answer. The
-consent limit is the one worth spending, and it locks out consenting for
-fifteen minutes rather than anything longer-lived.
+consent limits are the ones worth spending. One address's lockout locks that
+address out for fifteen minutes. The shared budget is there for the guesser
+spread over many addresses, which no per-address limit catches, and spending
+it locks *everyone* out of consenting — the owner included — until its hour is
+up: an hour's denial of consent is the price of bounding guesses to
+`VIGIL_CONSENT_FAILURES_PER_HOUR` an hour. The Cloudflare Access policy the
+guide recommends for `/oauth/authorize`, an identity-provider login with MFA,
+keeps a stranger from reaching the form to spend either.
 
 **Which address is a limit keyed on, behind a proxy?** Whatever
 `Vigil.OAuth.ClientAddr` says, which is `conn.remote_ip` until the deployment
@@ -256,7 +280,11 @@ hop it did not add itself, and falls back to the peer on anything it cannot
 account for — an untrusted peer, an unparseable hop, a list that is entirely
 its own proxies. Both settings are empty by default, so a deployment that has
 not been told about its proxy keeps the single global bucket it always had
-rather than silently getting worse. (§4.13)
+rather than silently getting worse. The deployment the guide describes is told:
+cloudflared runs on the same host and connects over loopback, so `init.sh`
+writes `VIGIL_TRUSTED_PROXIES=127.0.0.1/32,::1/128` with `CF-Connecting-IP` —
+Cloudflare's edge ranges would never match a peer that is always loopback.
+(§4.13)
 
 Two things the walk confirmed in passing: the authorization server never
 redirects to an unregistered `redirect_uri` — an untrusted client or URI gets a
@@ -280,7 +308,7 @@ is in front of the endpoint. They are the defences that were absent behind it.
 ## Endpoints
 
 All served by `Vigil.OAuth.Endpoint`, which `Vigil.MCP.Server` forwards to for
-everything that is not `/mcp`. The decisions behind them — registration, the
+everything that is not `/mcp` or `/healthz`. The decisions behind them — registration, the
 checks on an `/authorize` request, both grants — live in `Vigil.OAuth.Flow`
 and take no `Plug.Conn`.
 
@@ -294,9 +322,20 @@ and take no `Plug.Conn`.
 | `/oauth/authorize` | POST | process consent, issue code, redirect |
 | `/oauth/token` | POST | code → access token, refresh → access token |
 | `/mcp` | POST | the MCP endpoint itself |
+| `/mcp` | DELETE | ends the MCP session its `Mcp-Session-Id` names (204; 404 for one that is not a live session of the token) |
+| `/healthz` | GET | health report, no token, answered on the host only — 200/503; 404 to anything forwarded or remote (see the user guide) |
 
 No revocation endpoint and no introspection endpoint — neither is needed for a
 single-user deployment.
+
+**Every POST checks `Origin` first**, and so does every request to `/mcp`
+(`Vigil.Origin`). A request with no `Origin` is a program and passes; one from
+the issuer's own origin — the consent form posting back — passes; one from an
+origin listed in `VIGIL_ALLOWED_ORIGINS` passes. Anything else, `null`
+included, is answered 403 before the rate limit counts it, before the body is
+read and before a token or a password is looked at. The consent form's refusal
+is the HTML error page; the other two answer an empty 403. The GETs are not
+checked: a browser navigates to them, and none of them changes anything.
 
 ---
 
@@ -354,6 +393,20 @@ WWW-Authenticate: Bearer resource_metadata="https://vault.example.org/.well-know
 Empty body. **Without this header the client cannot find the authorization
 server** and reports only that it could not reach the MCP server.
 
+A request that presented a token which was not accepted gets the same
+challenge with `error="invalid_token"` first (RFC 6750 §3.1):
+
+```http
+WWW-Authenticate: Bearer error="invalid_token", resource_metadata="…", scope="vault"
+```
+
+"Presented" means one `Authorization` header with the `Bearer` scheme — matched
+case-insensitively, as RFC 9110 has every auth scheme — and a non-empty token.
+No header, another scheme or an empty token is a request with no token, and
+gets the challenge without an error code. Which check refused a presented
+token is still not said: expired, unknown, another resource's and a refresh
+token all read `invalid_token`.
+
 ---
 
 ## Client registration
@@ -367,6 +420,43 @@ Redirect URIs are validated at registration: each must be `https://`, or
 `http://` with host `localhost` or `127.0.0.1`. Anything else is rejected with
 `invalid_redirect_uri`.
 
+**Registration is bounded in size, count and lifetime.** It is reachable
+without a token, and every accepted one is a `:dets` row on the disk that also
+holds the vault, so the per-address rate limit alone would still let one
+caller grow the table without end.
+
+| Bound | Limit | Answer when over it |
+|---|---|---|
+| request body | 16 KB, read before anything is decoded | 413 `invalid_request` |
+| `client_name` | 200 characters | 400 `invalid_client_metadata`, `error_description` naming the field |
+| `redirect_uris` | 10 URIs, each at most 2000 bytes | 400 `invalid_redirect_uri`, `error_description` naming the field |
+| stored clients | 1000 (`Vigil.OAuth.Client.max_clients/0`) | 503 `temporarily_unavailable` with `Retry-After`, and a warning in the journal |
+| unused clients | swept 24 h after registration if they received no code | — |
+
+The caps are constants rather than settings: they sit far above anything a
+real client registers (claude.ai sends one redirect URI and a short name), and
+a thousand clients is a few megabytes at most. A client record that could not be
+stored is answered the same 503: a `client_id` nobody can resolve is not
+handed out, just as a code or a token is not.
+
+The client record carries `first_code_at`: `nil` at registration, and the
+instant of the first consent that handed the client a code. The janitor drops
+a client whose `first_code_at` is still `nil` 24 hours after `issued_at`, so
+the stored-client cap is only ever held by clients a human actually approved
+and by registrations from the last day. A record written before the field
+existed does not have it and is kept — whoever wrote it could not say whether
+it was ever authorized — until its next code gives it one.
+
+**Every OAuth parameter is a single string.** `GET /oauth/authorize` decodes
+its query with `Plug.Conn.Query`, and the consent form and the token request
+are decoded the same way, so `client_id[]=x` is a list and `state[a]=b` a map
+on every path. Nothing in OAuth is either: a request carrying one answers
+`invalid_request` — a redirect to the client once the client and its redirect
+URI are trusted (without `state` if that was the parameter), and 400 at the
+token endpoint — before any other check reads the parameter as a string. A
+`client_id` or `redirect_uri` that is not a string is untrusted like any
+unknown one.
+
 ### Client-ID Metadata Document
 
 If `client_id` is an `https://` URL, the document is fetched and validated:
@@ -377,8 +467,15 @@ If `client_id` is an `https://` URL, the document is fetched and validated:
    on the chunk that crosses the cap — so an oversized response is never
    buffered in full.
 2. `client_id` inside the document must equal the URL exactly.
-3. Required fields present: `client_id`, `client_name`, `redirect_uris`.
-4. Result cached for one hour.
+3. Required fields present: `client_id`, `client_name` (a string),
+   `redirect_uris` (a non-empty list of redirect URIs).
+4. `client_name` and `redirect_uris` within the caps registration has
+   (`Vigil.OAuth.Client.check_metadata/2`, one check for both paths): a CIMD
+   client's name and redirect URIs are cached and shown on the consent page
+   just as a registered one's are, and a 64 KB document can hold far more of
+   either than any client needs. A document over a cap is refused like any
+   other invalid one.
+5. Result cached for one hour.
 
 **SSRF protection.** HTTPS only, and redirects are not followed, so a 302 into
 the private range cannot be followed either.
@@ -397,14 +494,39 @@ both the SNI extension and the reference identity the hostname check runs
 against — so TLS is still verified against the system trust store, for the name
 in the `client_id`, not for the address.
 
-The address must not fall into any of:
+The host is resolved under a 5 s deadline, both families together, so a name
+server that never answers fails the fetch rather than holding the request open.
+
+The address is checked against an **allow-list**: an IPv4 address is reachable
+only if it is public unicast, and an IPv6 address only if it is inside
+`2000::/3`, the global unicast space. Everything in the IANA IPv4 and IPv6
+Special-Purpose Address Registries is refused on top of that — every entry,
+including the few the registry marks globally reachable, since an anycast relay
+or an AS112 sink is never where a client publishes its metadata.
 
 | Family | Refused |
 |---|---|
-| IPv4 | `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`, `198.18.0.0/15` (benchmarking), `224.0.0.0/4` (multicast), `255.255.255.255` (broadcast) |
-| IPv6 | `::`, `::1`, `fc00::/7` (unique local), `fe80::/10` (link-local) |
-| IPv4-mapped IPv6 | `::ffff:a.b.c.d` is unfolded to `a.b.c.d` first, so every IPv4 row above covers its mapped form |
-| IPv4-compatible IPv6 | `::a.b.c.d` (deprecated) is unfolded to `a.b.c.d` first, so every IPv4 row above covers its compatible form |
+| IPv4 | `0.0.0.0/8` (this network), `10.0.0.0/8`, `100.64.0.0/10` (CGNAT), `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.0.0.0/24` (IETF protocol assignments), `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` (TEST-NET-1 to 3), `192.31.196.0/24` and `192.175.48.0/24` (AS112), `192.52.193.0/24` (AMT), `192.88.99.0/24` (6to4 relay anycast), `192.168.0.0/16`, `198.18.0.0/15` (benchmarking), `224.0.0.0/4` (multicast), `240.0.0.0/4` (reserved, with `255.255.255.255`) |
+| IPv6 | everything outside `2000::/3` — `::`, `::1`, `100::/64`, `fc00::/7` (unique local), `fe80::/10` (link-local), `fec0::/10` (site-local), `ff00::/8` (multicast) among it — and inside it `2001::/23` (IETF protocol assignments), `2001:db8::/32` and `3fff::/20` (documentation), `2620:4f:8000::/48` (AS112), `5f00::/16` (SRv6 SIDs) |
+| NAT64 local-use | `64:ff9b:1::/48` is refused outright: where the IPv4 address sits depends on a prefix length the address does not carry |
+
+Five IPv6 forms are an IPv4 address in transit. Each is unfolded and judged by
+the IPv4 address it carries, against the IPv4 row above, so it is exactly as
+reachable as that address — `64:ff9b::10.0.0.1` is `10.0.0.1`:
+
+| Form | Carries |
+|---|---|
+| IPv4-mapped `::ffff:a.b.c.d` | the last 32 bits |
+| IPv4-compatible `::a.b.c.d` (deprecated) | the last 32 bits |
+| NAT64 `64:ff9b::/96` | the last 32 bits |
+| 6to4 `2002::/16` | bits 16–47 |
+| Teredo `2001::/32` | two addresses, both checked: the server in bits 32–63, the client in the last 32 bits with every bit inverted |
+
+The mapped and compatible forms sit outside `2000::/3`, which alone would
+refuse them. They are judged by the IPv4 address instead, like the other
+three: `::ffff:93.184.216.34` and `::5db8:d822` carry the public 93.184.216.34
+and are fetched from, because that address is where the socket ends up; one
+carrying a private or special-purpose address is refused.
 
 ---
 
@@ -446,6 +568,10 @@ sequenceDiagram
 
 The consent page requires the `VIGIL_AUTH_PASSWORD` every time. There is no
 session cookie after login — it happens rarely enough.
+
+A code that could not be stored is not redirected to the client: the consent
+answers with `error=temporarily_unavailable` instead, the RFC 6749 §4.1.2.1
+code for exactly that, and the client starts over.
 
 Every redirect back to the client carries `iss`, the issuer identifier of
 RFC 9207, next to `code` (or `error`) and the `state` the client sent. See the
@@ -522,7 +648,10 @@ carrying the `grant_id` minted with the code.
 ### `grant_type=refresh_token`
 
 **Rotation is mandatory** for a public client: the old refresh token is marked
-spent and a new pair is issued.
+spent and a new pair is issued. The pair is stored first and the spend second,
+and the pair is handed out only once both are stored: a write that fails
+part-way leaves the presented token live, so the client's retry is a retry
+and not a replay that revokes its grant (see "Storage and cleanup").
 
 Checks run in this order:
 
@@ -543,7 +672,7 @@ flow again, consent page included.
 ### Error format
 
 Every refusal is a JSON object with one field, `{"error": "..."}`. Apart from
-the rate limit below, it comes with HTTP 400:
+the two departures below, it comes with HTTP 400:
 
 | `error` | When |
 |---|---|
@@ -560,10 +689,10 @@ What RFC 6749 §5.2 permits is wider. A response may carry `error_description`
 and `error_uri`; `invalid_client` answers a failed client authentication, with
 401 when the client authenticated through the `Authorization` header; and
 `unauthorized_client` and `invalid_scope` are defined too. `invalid_target` is
-RFC 8707's. Apart from the departure below, vigil sends the four codes above
-and nothing else.
+RFC 8707's. Apart from the two departures below, vigil sends the four codes
+above and nothing else.
 
-**A rate-limited request is the one deliberate departure**: HTTP 429,
+**A rate-limited request is one deliberate departure**: HTTP 429,
 `{"error": "temporarily_unavailable"}`, and a `Retry-After` carrying the
 window. §5.2 lists neither — it mandates 400 for the token endpoint, and
 `temporarily_unavailable` is §4.1.2.1's code, defined for the authorization
@@ -573,6 +702,23 @@ for rate" rather than "your request was malformed"; and a client that renews
 reactively on a 401 has to tell those two apart or it will retry a malformed
 request forever. `Retry-After` comes from the window itself, so the wait is a
 fact rather than a guess.
+
+**A write that did not persist is the other**: HTTP 503,
+`{"error": "temporarily_unavailable"}`, when a token could not be stored — a
+full disk, the `:dets` size limit. Registration answers the same when its
+client could not be stored or the client table is full. Nothing is handed out in that case; see
+"Storage and cleanup". The code is the same one, for the reason its
+definition gives — the server is "unable to handle the request due to a
+temporary overloading or maintenance" — and 503 is the status that says so.
+
+What a retry finds differs between the two grants. A refresh token stays live
+when its rotation fails part-way (the new pair is stored before the old token
+is spent), so the client's retry is a retry. An authorization code does not:
+redeeming takes it out of the table before the pair is written, as a one-time
+code must be, so a code whose redemption failed to store is spent, the retry
+answers `invalid_grant`, and the client has to send its user through consent
+again. Putting the code back would make a failed write the one way a code is
+redeemed twice.
 
 ---
 
@@ -597,8 +743,25 @@ what makes audience mismatch, expiry, refresh-presented-as-access and the
 old-record defaults answerable in a test with no `Plug.Conn`
 (`test/vigil/oauth/token_test.exs`).
 
-Scope decides what the token may call: `vault` allows everything, `vault:read`
-rejects every write tool with an explicit error rather than an HTTP-level 403.
+Scope decides what the token may call, as an allow-list: `vault` allows
+everything, and a token with any other scope — `vault:read`, or anything else
+a record might hold — is shown only the tools it may call on `tools/list`, and
+has every write tool rejected with an explicit error rather than an
+HTTP-level 403.
+
+**vigil never answers `insufficient_scope`.** RFC 6750 and the MCP
+authorization spec's step-up flow would have a read-only token that calls a
+write tool answered 403 with `error="insufficient_scope", scope="vault"`, and
+a client then asks the user to grant the wider scope on the spot. That is the
+prompt the read-only scope exists to avoid: a `vault:read` token is not shown
+the write tools at all, so the only way to reach one is to call a tool it was
+never offered, and answering that with a consent screen is how users learn to
+approve whatever is asked. The refusal stays a tool error the model reads, and
+widening a client's access stays a decision made by connecting it again with
+`vault`. An empty `scope` is accepted at the authorization endpoint as
+"no scope asked for", and the token endpoint issues `vault` for it — for a
+code and for a refresh token alike, so a family redeemed before that rule
+carries `vault` from its next rotation on.
 A record written before scopes existed names none, and is read as the full
 `vault` scope — it was minted when that was the only thing a token could be,
 and reading it as `vault:read` would silently take write access away from a
@@ -609,34 +772,77 @@ client that has it.
 ## Storage and cleanup
 
 Three `:dets` files under `VIGIL_STATE_DIR`, mode `0600`, owned by `vigil`:
-`oauth_clients.dets`, `oauth_codes.dets`, `oauth_tokens.dets`.
+`oauth_clients.dets`, `oauth_codes.dets`, `oauth_tokens.dets` — and a fourth,
+`oauth_meta.dets`, holding the schema version of the other three
+(`Vigil.OAuth.Store.schema_version/0`, currently 2: codes and tokens under
+their digest). The store reads it before it opens anything: a state dir
+without one, or with an older one, is migrated and marked; one marked newer
+than the release knows is refused, and left as it is
+([compatibility](compatibility.md#the-oauth-state)).
 `:dets.sync/1` after every write — the write rate is low enough that it does
 not matter, and a token lost to a crash costs one re-authorization.
 
-`Vigil.OAuth.Janitor` runs every five minutes and sweeps five tables, which is
-every table that holds something with an expiry. `oauth_clients.dets` is not
-among them and is deliberately not swept: a registration has no expiry to read,
-and a client stays until it is deleted.
+**The files hold digests, not credentials.** Every row is `{key, attrs}`:
+
+| File | Key | Attrs |
+|---|---|---|
+| `oauth_clients.dets` | the `client_id` itself — public, it grants nothing | `Vigil.OAuth.Client`'s record |
+| `oauth_codes.dets` | `{:sha256, <<32 bytes>>}`, the SHA-256 of the code | `Vigil.OAuth.Code`'s record |
+| `oauth_tokens.dets` | `{:sha256, <<32 bytes>>}`, the SHA-256 of the token | `Vigil.OAuth.Token`'s record |
+
+`Vigil.OAuth.Token.digest/1` makes the key, and `Vigil.OAuth.Store` applies it
+before every write, lookup and delete, so a backup or a container snapshot of
+the state dir holds nothing a caller could present. No salt and no slow KDF:
+every value is 256 random bits, so there is no dictionary to precompute. No
+attrs carry a value either. The `/mcp` rate limiter counts a token under the
+same digest, so its table holds none.
+
+State written before this change keyed codes and tokens by the raw value. The
+first boot **migrates it**: every binary key is rehashed in place and the file
+is rewritten from its live rows, since `:dets` does not zero what it deletes.
+Whether to rewrite is decided by the schema version the state dir carries
+(none, or 1), not by whether a raw key is left: the version is written last,
+so a boot stopped after the rehash and before the rewrite is followed by one
+that still rewrites.
+The journal says how many rows moved (`rekeyed 4 oauth_tokens rows to their
+digests`), never which. Every client connected before the upgrade stays
+connected. `test/vigil/oauth/store_compatibility_test.exs` holds the
+migration to the frozen pre-seam fixture.
+
+**A write that does not persist fails the request.** `:dets.insert/2` answers
+`{:error, reason}` on a full disk or at the size limit, and the adapter hands
+that back instead of dropping it. `Vigil.OAuth.Persistence.stored!/1` turns it
+into a refusal wherever a value is about to leave the server: the token
+endpoint and registration answer 503 `temporarily_unavailable`, the consent
+redirects with the same code, and `mix vigil.seed_token` dies without printing a token. A value
+that was never stored is never handed out.
+
+`Vigil.OAuth.Janitor` runs every five minutes and sweeps seven tables, which is
+every table that holds something with an expiry. `oauth_clients.dets` is among
+them for one kind of row only: a client that received no code within 24 hours
+of registering. A client that did stays until it is deleted.
 
 | Swept | Owner | Reclaimed when |
 |---|---|---|
+| registered clients | OAuth persistence | `Vigil.OAuth.Client` says it received no code within 24 h of registering |
 | authorization codes | OAuth persistence | `Vigil.OAuth.Code` says the code has expired |
 | access and refresh tokens | OAuth persistence | `Vigil.OAuth.Token` says the record has expired — spent ones included, since a rotated refresh token is marked rather than deleted |
 | consent-failure counters | OAuth persistence | the 15-minute lockout window has elapsed |
 | CIMD cache entries | OAuth persistence | the cached hour is up |
 | request-limit windows | `Vigil.RateLimit` | the one-minute window has elapsed |
+| MCP sessions | `Vigil.MCP.Session`, in the table `Vigil.MCP.Envelope` owns | an hour has passed without a request in the session |
 
-The first four are one question — persistence's `sweep_expired` — asked
+The first five are one question — persistence's `sweep_expired` — asked
 through the value the janitor holds; `Vigil.OAuth.Store` is the adapter that
 answers it today.
 
 No cron, no job library — just `Process.send_after/3`.
 
-The last row is both request limiters, not one of them: `Vigil.RateLimit`
-holds a single table for `/mcp` keyed by access token *and* the OAuth endpoints
-keyed by client address, so one sweep covers both. Only the third row is the
-15-minute consent lockout, and it covers wrong passwords on the consent form
-and nothing else.
+The request-limit row is both request limiters, not one of them: `Vigil.RateLimit`
+holds a single table for `/mcp` keyed by the access token's digest *and* the
+OAuth endpoints keyed by client address, so one sweep covers both. Only the
+fourth row is the 15-minute consent lockout, and it covers wrong passwords on
+the consent form and nothing else.
 
 The janitor's list is its own rather than the OAuth store's inventory. It was
 that inventory in effect until #89, and the one swept table that store does
@@ -665,6 +871,37 @@ production defaults, so a test can drive one sweep rather than wait five
 minutes for it, and drive it against an adapter of its own. The instant is a
 function, not a value: the janitor outlives any single one.
 
+### Revoking a grant
+
+A grant is the unit of revocation, and the operator revokes on the host with
+`scripts/grants.sh` (`docs/guide.md`, "Revoking access"): one grant, every
+grant, or a client with every grant it holds. The script goes through
+`bin/vigil rpc` into the running node and calls `Vigil.OAuth.Grants`, which
+asks persistence four questions nothing on a request path asks:
+`list_tokens`, `list_clients`, `delete_client` and `revoke_all`.
+
+- **A grant is read off its tokens.** Every token record carries its
+  `grant_id` and `granted_at` — when the grant began, handed on unchanged by
+  each rotation — and a refresh token names its client. An access token names
+  none, and a seeded token has no client at all, which is how the list tells
+  a seeded grant apart. The list is built from the records alone: the store
+  keeps no token value, and the digest never leaves the adapter.
+- **Revoking is deleting**, the same `revoke_grant` a replay uses. Nothing is
+  cached: `/mcp` and the refresh grant look the record up on every request, so
+  a revoked token is refused on the next one.
+- **Revoke-all** deletes every token and every authorization code not yet
+  redeemed — a code minted a moment earlier would otherwise redeem into a
+  fresh pair. It reaches tokens from before grants existed, which no
+  `revoke_grant` does.
+- **Deleting a client** deletes its record and its codes, then revokes every
+  grant whose refresh token names it. Redemption and refresh check the code
+  and the token, not the client, so the codes and grants have to go with it.
+
+Seeded tokens live 90 days by default, not ten years: a bearer token nobody
+rotates is bounded by its lifetime, and by revocation. `init.sh --keep-token`
+mints none for the owner; the two its acceptance check needs live 15
+minutes, like the pair `update.sh` mints for its check.
+
 > **Note:** `:dets` is not safe for concurrent access from multiple OS
 > processes. Seeding a token while the service is running must go through
 > `bin/vigil rpc` in the running node, not a second `mix` process. See
@@ -679,11 +916,19 @@ VIGIL_ISSUER=https://vault.example.org
 VIGIL_RESOURCE=https://vault.example.org/mcp
 VIGIL_AUTH_PASSWORD=<secret, min. 12 characters>
 VIGIL_STATE_DIR=/var/lib/vigil
+# VIGIL_ALLOWED_ORIGINS=https://claude.ai
 ```
+
+The consent password is the consent page's and nothing else's. The SkillKey is
+keyed with `VIGIL_SKILLKEY_SECRET`, a random secret of its own (see
+[the guide](guide.md#configuration)), so changing the password leaves every
+SkillKey valid and nothing handed to a client is derived from it.
 
 **Startup check:** if `VIGIL_AUTH_PASSWORD` is missing or shorter than 12
 characters the application refuses to start. A publicly reachable authorization
-server without a strong password is an open door to the vault.
+server without a strong password is an open door to the vault. In prod the
+same check (`Vigil.Settings.Check`) refuses an issuer or resource that is not
+`https`, and a resource that is not on the issuer's origin.
 
 A broken OAuth store deliberately takes the whole service down: a service that
 cannot authenticate anyone is worse than no service.
@@ -697,8 +942,9 @@ cannot authenticate anyone is worse than no service.
 - No JWT, no signing keys, no JWKS
 - No `client_credentials` grant
 - No `client_secret` — every client is public and uses PKCE
-- No revocation *endpoint* — a replayed refresh token revokes its grant from
-  the inside, but there is nothing for a client to call (delete the `.dets`
-  file)
+- No revocation *endpoint* (RFC 7009) — a replayed refresh token revokes its
+  grant from the inside, and the operator revokes from the host with
+  `scripts/grants.sh` (see "Revoking a grant" above), but there is nothing for
+  a client to call
 - No OpenID Connect discovery
 - No session cookie after login

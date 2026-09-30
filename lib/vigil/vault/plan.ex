@@ -14,8 +14,10 @@ defmodule Vigil.Vault.Plan do
 
     * `{:write, path, content}` — the six content-shaped operations, which
       differ only in the bytes they produce.
-    * `{:delete, path}` and `{:move, from, to}` — the two git-level
-      operations, which produce no content at all.
+    * `{:delete, path}` and `{:move, from, to, rewrites}` — the two git-level
+      operations. A move produces no content of its own; `rewrites` is the
+      `{path, content}` of every note whose links `update_links` rewrote,
+      committed with it, and empty without it.
 
   A plan performs no effect: it reads no file, touches no git, and knows
   nothing about `Vigil.Store`'s state. `Vigil.Store` reads the note, hands the
@@ -27,23 +29,27 @@ defmodule Vigil.Vault.Plan do
   A plan's `report` carries what only this operation knows about its own
   result — `path_normalized_from` on a create whose path was normalized, the
   backlinks a delete is about to break — merged into the success map by
-  whoever executes it. What only the *effect* knows stays with the executor.
+  whoever executes it. What only the *effect* knows stays with the executor;
+  `observe` names such a question when the operation, not the action, is what
+  asks it — `:broken_chunk_links` on a `rewrite_note`, whose action is the same
+  `{:write, path, content}` every content-shaped operation has.
   """
 
-  alias Vigil.{Markdown, Vault.Decision, Vault.Edit}
+  alias Vigil.{Markdown, Parser, Vault.Decision, Vault.Edit}
 
   @enforce_keys [:action, :message]
-  defstruct [:action, :message, report: %{}]
+  defstruct [:action, :message, report: %{}, observe: nil]
 
   @type action ::
           {:write, String.t(), String.t()}
           | {:delete, String.t()}
-          | {:move, String.t(), String.t()}
+          | {:move, String.t(), String.t(), [{String.t(), String.t()}]}
 
   @type t :: %__MODULE__{
           action: action,
           message: String.t(),
-          report: map()
+          report: map(),
+          observe: nil | :broken_chunk_links
         }
 
   @type op ::
@@ -60,7 +66,10 @@ defmodule Vigil.Vault.Plan do
   Builds the plan for `op` from the policy's `decision`, the caller's
   `request`, and `current` — the note's content as it stands on disk, or `nil`
   for the operations that do not read it: `:create`, which has no current
-  content by definition, and the two git-level ones, which never look at it.
+  content by definition, and `:delete_note`, which never looks at it. A
+  `:move_note` with `update_links` is handed, in place of one note's content,
+  every linking note's: a list of `{path, content, relinks}`, where `relinks`
+  is `Vigil.Index.relinks/3`'s answer for that note — and `nil` without it.
 
   Each clause matches the `Vigil.Vault.Decision` shape its operation is
   decided in, rather than reaching into the keys it hopes are there: an
@@ -69,15 +78,35 @@ defmodule Vigil.Vault.Plan do
 
   Returns `{:ok, plan}`, or `{:error, message}` when the content cannot be
   shaped: an edit whose chunk is gone, a note whose frontmatter block never
-  closes, or a rewrite of a note that has no block to preserve. Each is the
-  caller's message to hand back verbatim.
-  """
-  @spec build(op, Decision.t(), map, String.t() | nil) :: {:ok, t} | {:error, String.t()}
-  def build(op, decision, request, current)
+  closes, a rewrite of a note that has no block to preserve, or a block
+  `update_frontmatter` cannot edit without losing the keys it does not own.
+  Each is the caller's message to hand back verbatim.
 
-  def build(:create, %Decision.Create{} = resolved, request, _current) do
+  A note's `current` content is shaped as `Vigil.Markdown.decode/1` reads it,
+  and what comes back is written in the note's own style — the byte order mark
+  and the line endings it had (docs/design.md, "How a file is written"). A
+  note that is not UTF-8 at all is refused: the load skipped it, and a write
+  would hand the index a note it cannot parse.
+  """
+  @spec build(op, Decision.t(), map, String.t() | list | nil) ::
+          {:ok, t} | {:error, String.t()}
+  def build(op, decision, request, current) when is_binary(current) do
+    if String.valid?(current) do
+      {text, style} = Markdown.decode(current)
+
+      with {:ok, plan} <- shape(op, decision, request, text) do
+        {:ok, in_style(plan, style)}
+      end
+    else
+      {:error, not_utf8(decision.path)}
+    end
+  end
+
+  def build(op, decision, request, current), do: shape(op, decision, request, current)
+
+  defp shape(:create, %Decision.Create{} = resolved, request, _current) do
     content = Map.fetch!(request, :content)
-    frontmatter = frontmatter(resolved.type, resolved.starts, resolved.ends)
+    frontmatter = block(Edit.owned_block(owned(resolved)))
 
     {:ok,
      %__MODULE__{
@@ -88,7 +117,7 @@ defmodule Vigil.Vault.Plan do
      }}
   end
 
-  def build(:append, %Decision.Append{} = resolved, request, current) do
+  defp shape(:append, %Decision.Append{} = resolved, request, current) do
     content = Map.fetch!(request, :content)
 
     with {:ok, new_content} <- Edit.append(current, resolved.target, content) do
@@ -96,7 +125,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:replace_section, %Decision.Section{} = resolved, request, current) do
+  defp shape(:replace_section, %Decision.Section{} = resolved, request, current) do
     chunk = resolved.chunk
 
     with {:ok, new_content} <- Edit.replace_body(current, chunk, Map.fetch!(request, :content)) do
@@ -104,7 +133,7 @@ defmodule Vigil.Vault.Plan do
     end
   end
 
-  def build(:delete_section, %Decision.Section{} = resolved, _request, current) do
+  defp shape(:delete_section, %Decision.Section{} = resolved, _request, current) do
     chunk = resolved.chunk
 
     with {:ok, new_content} <- Edit.delete_section(current, chunk) do
@@ -119,17 +148,19 @@ defmodule Vigil.Vault.Plan do
   # The split does not end there when the note has no block. A rewrite has no
   # type to write and preserves the block it finds, so it has nothing to
   # preserve and refuses, naming the tool that can give the note one.
-  def build(:rewrite_note, %Decision.RewriteNote{} = resolved, request, current) do
+  defp shape(:rewrite_note, %Decision.RewriteNote{} = resolved, request, current) do
     case Markdown.split_frontmatter(current) do
       {:ok, frontmatter, _old_body} ->
         content = frontmatter <> Map.fetch!(request, :content)
 
-        {:ok,
-         plan(
-           resolved.path,
-           Markdown.normalize_trailing_newline(content),
-           "rewrite_note: #{resolved.path}"
-         )}
+        plan =
+          plan(
+            resolved.path,
+            Markdown.normalize_trailing_newline(content),
+            "rewrite_note: #{resolved.path}"
+          )
+
+        {:ok, %{plan | observe: :broken_chunk_links}}
 
       :none ->
         {:error,
@@ -145,17 +176,21 @@ defmodule Vigil.Vault.Plan do
   # front of it. That is an explicit call to write frontmatter, not the server
   # repairing a note on its own initiative (docs/design.md, "Frontmatter —
   # exactly one required field").
-  def build(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
+  #
+  # With a block, only the keys vigil owns change; the lines around them are
+  # the human's. A block that cannot be edited without losing one of them is
+  # refused, and nothing is written.
+  defp shape(:update_frontmatter, %Decision.UpdateFrontmatter{} = resolved, _request, current) do
     case Markdown.split_frontmatter(current) do
-      {:ok, _old_frontmatter, body} -> {:ok, frontmatter_plan(resolved, body)}
-      :none -> {:ok, frontmatter_plan(resolved, current)}
+      {:ok, block, body} -> update_frontmatter(resolved, block, body)
+      :none -> {:ok, frontmatter_plan(resolved, Edit.owned_block(owned(resolved)), current)}
       :unterminated -> unterminated(resolved.path)
     end
   end
 
   # The backlinks are the policy's answer, looked up before anything is
   # deleted — after the effect there is nothing left to ask about.
-  def build(:delete_note, %Decision.DeleteNote{} = resolved, _request, _current) do
+  defp shape(:delete_note, %Decision.DeleteNote{} = resolved, _request, _current) do
     {:ok,
      %__MODULE__{
        action: {:delete, resolved.path},
@@ -165,17 +200,53 @@ defmodule Vigil.Vault.Plan do
   end
 
   # Which references the move actually broke is a diff across the effect, so
-  # it belongs to whoever performs it, not here.
-  def build(:move_note, %Decision.MoveNote{} = resolved, _request, _current) do
+  # it belongs to whoever performs it, not here. Which links it rewrites is
+  # not: every linking note's content and what to write in place of each
+  # target are in hand, and a note that links to itself is rewritten where it
+  # lands.
+  defp shape(:move_note, %Decision.MoveNote{} = resolved, _request, current) do
+    %Decision.MoveNote{from: from, to: to} = resolved
+    rewrites = rewrites(current || [], from, to)
+
     {:ok,
      %__MODULE__{
-       action: {:move, resolved.from, resolved.to},
-       message: "move: #{resolved.from} -> #{resolved.to}"
+       action: {:move, from, to, rewrites},
+       message: "move: #{from} -> #{to}",
+       report: updated_links(resolved.update_links, rewrites)
      }}
   end
 
-  defp frontmatter_plan(resolved, body) do
-    content = frontmatter(resolved.type, resolved.starts, resolved.ends) <> body
+  # Each linking note is rewritten in its own style, as `build/4` writes the
+  # one note it is handed.
+  defp rewrites(linking, from, to) do
+    for {path, content, relinks} <- linking,
+        {text, style} = Markdown.decode(content),
+        rewritten = Parser.rewrite_links(text, &Map.get(relinks, &1.raw)),
+        rewritten != text,
+        do: {if(path == from, do: to, else: path), Markdown.encode(rewritten, style)}
+  end
+
+  defp updated_links(false, _rewrites), do: %{}
+  defp updated_links(true, rewrites), do: %{updated_links: Enum.map(rewrites, &elem(&1, 0))}
+
+  # `block` is the whole block, both markers and its final newline.
+  defp update_frontmatter(resolved, block, body) do
+    yaml_lines = block |> String.split("\n") |> Enum.slice(1..-3//1)
+
+    case Edit.set_frontmatter(yaml_lines, owned(resolved)) do
+      {:ok, lines} ->
+        {:ok, frontmatter_plan(resolved, lines, body)}
+
+      {:error, reason} ->
+        {:error,
+         "The frontmatter of #{resolved.path} was not changed: #{reason}. " <>
+           "update_frontmatter keeps every key it does not own, so it will not rewrite " <>
+           "a block it cannot edit line by line. Fix the block by hand, then try again."}
+    end
+  end
+
+  defp frontmatter_plan(resolved, yaml_lines, body) do
+    content = block(yaml_lines) <> body
 
     plan(
       resolved.path,
@@ -193,6 +264,14 @@ defmodule Vigil.Vault.Plan do
        "with ---, so where the body starts is unknown."}
   end
 
+  defp in_style(%__MODULE__{action: {:write, path, content}} = plan, style),
+    do: %{plan | action: {:write, path, Markdown.encode(content, style)}}
+
+  defp not_utf8(path) do
+    "#{path} is not valid UTF-8, so vigil does not index or edit it. " <>
+      "Re-save it as UTF-8, then reload."
+  end
+
   defp plan(path, content, message) do
     %__MODULE__{action: {:write, path, content}, message: message}
   end
@@ -200,18 +279,18 @@ defmodule Vigil.Vault.Plan do
   defp normalized_from(nil), do: %{}
   defp normalized_from(from), do: %{path_normalized_from: from}
 
-  defp frontmatter(type, starts, ends) do
-    lines = ["---", "type: #{type}"]
-
-    lines =
-      if type == :event do
-        lines ++ ["starts: #{DateTime.to_iso8601(starts)}", "ends: #{DateTime.to_iso8601(ends)}"]
-      else
-        lines
-      end
-
-    Enum.join(lines ++ ["---", ""], "\n")
+  # The keys vigil owns, as the block states them.
+  defp owned(%{type: :event, starts: starts, ends: ends}) do
+    [
+      {"type", "event"},
+      {"starts", DateTime.to_iso8601(starts)},
+      {"ends", DateTime.to_iso8601(ends)}
+    ]
   end
+
+  defp owned(%{type: type}), do: [{"type", to_string(type)}]
+
+  defp block(yaml_lines), do: Enum.join(["---" | yaml_lines] ++ ["---", ""], "\n")
 
   # What the commit message quotes back: the first line with anything on it,
   # capped so a commit subject stays a subject.

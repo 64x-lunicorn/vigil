@@ -15,9 +15,9 @@ defmodule Vigil.MCP.ToolsTest do
   @write_tools ~w(create append replace_section rewrite_note delete_section update_frontmatter delete_note move_note skill_write)
 
   describe "definitions/0 is derived from the declaration table" do
-    test "seventeen tools, matching write_tool?/1 to the write: flag" do
+    test "twenty tools, matching write_tool?/1 to the write: flag" do
       definitions = Tools.definitions()
-      assert length(definitions) == 17
+      assert length(definitions) == 20
 
       for %{name: name} <- definitions do
         assert Tools.write_tool?(name) == name in @write_tools
@@ -29,7 +29,14 @@ defmodule Vigil.MCP.ToolsTest do
       props = search.inputSchema.properties
 
       assert search.inputSchema.required == ["query"]
-      assert props.query == %{type: "string", description: "Exact search phrase.", minLength: 1}
+
+      assert props.query == %{
+               type: "string",
+               description: "Words or a phrase to search for.",
+               minLength: 1,
+               maxLength: 1_024
+             }
+
       assert props.domain.type == "string"
       refute Map.has_key?(props.domain, :minLength)
       assert props.type.enum == ["reference", "decision", "event"]
@@ -41,6 +48,28 @@ defmodule Vigil.MCP.ToolsTest do
                maximum: 25,
                description: "Maximum number of hits (default 10)."
              }
+    end
+
+    test "list: nothing required, read-only, sort carries its enum, limit its range" do
+      [list] = Enum.filter(Tools.definitions(), &(&1.name == "list"))
+      props = list.inputSchema.properties
+
+      refute Map.has_key?(list.inputSchema, :required)
+      assert list.title == "List notes"
+
+      assert list.annotations == %{
+               readOnlyHint: true,
+               destructiveHint: false,
+               idempotentHint: true,
+               openWorldHint: false
+             }
+
+      assert props.sort.enum == ["updated", "title"]
+      assert props.type.enum == ["reference", "decision", "event"]
+      assert %{type: "integer", minimum: 1, maximum: 100} = props.limit
+      assert %{type: "string", maxLength: 1_024} = props.domain
+      assert %{type: "string", maxLength: 1_024} = props.cursor
+      refute Map.has_key?(props.cursor, :minLength)
     end
 
     test "links: direction carries the out/in/both enum, depth publishes its range" do
@@ -83,6 +112,18 @@ defmodule Vigil.MCP.ToolsTest do
       assert move_note.inputSchema.properties.confirm.description =~ "rejected"
     end
 
+    # A new skill needs no confirm, so the parameter is optional and says when
+    # it is required — replacing one that exists.
+    test "skill_write keeps confirm out of required and says it is for replacing" do
+      [skill_write] = Enum.filter(Tools.definitions(), &(&1.name == "skill_write"))
+
+      refute "confirm" in skill_write.inputSchema.required
+      assert skill_write.inputSchema.properties.confirm.type == "boolean"
+      assert skill_write.inputSchema.properties.confirm.description =~ "rejected"
+      assert skill_write.description =~ "requires confirm: true"
+      assert skill_write.description =~ "vigil-vault-conventions is protected"
+    end
+
     # No row declares `skill_key`: a tool takes one because it writes, and the
     # row already says `write: true`. What the derivation replaces is nine
     # identical blocks, each free to drift in its description or its
@@ -93,6 +134,7 @@ defmodule Vigil.MCP.ToolsTest do
           assert schema.properties.skill_key == %{
                    type: "string",
                    minLength: 1,
+                   maxLength: 1_024,
                    description: "Current key from skill_read."
                  }
 
@@ -104,12 +146,136 @@ defmodule Vigil.MCP.ToolsTest do
       end
     end
 
+    # docs/design.md, "A retried write is applied once". Derived from
+    # `write: true` like skill_key, and optional: a caller that sends no id
+    # writes exactly as it always did.
+    test "every write tool publishes an optional request_id, and no read tool publishes one" do
+      for %{name: name, inputSchema: schema} <- Tools.definitions() do
+        if name in @write_tools do
+          assert %{type: "string", description: description} = schema.properties.request_id
+          assert description =~ "already_applied"
+          refute "request_id" in schema.required
+        else
+          refute Map.has_key?(schema.properties, :request_id)
+        end
+      end
+    end
+
+    test "the two section edits take an optional if_match, and nothing else does" do
+      for %{name: name, inputSchema: schema} <- Tools.definitions() do
+        if name in ~w(replace_section delete_section) do
+          assert %{type: "string", description: description} = schema.properties.if_match
+          assert description =~ "hash"
+          refute "if_match" in schema.required
+        else
+          refute Map.has_key?(schema.properties, :if_match)
+        end
+      end
+    end
+
+    # docs/design.md, "Input sizes are bounded". A string with no bound is a
+    # parameter a caller can make as large as the body limit, and every note
+    # it carries is parsed inside the single writer.
+    test "every string parameter publishes a maxLength; content is the long one" do
+      for %{name: tool, inputSchema: %{properties: props}} <- Tools.definitions(),
+          {name, %{type: "string"} = schema} <- props,
+          not Map.has_key?(schema, :enum) do
+        expected = if name == :content, do: 1_000_000, else: 1_024
+
+        assert schema[:maxLength] == expected,
+               "#{tool}.#{name} publishes maxLength #{inspect(schema[:maxLength])}"
+      end
+    end
+
     test "parameterless tools declare no required key" do
       for name <- ~w(lint current reload skill_list) do
         [tool] = Enum.filter(Tools.definitions(), &(&1.name == name))
         refute Map.has_key?(tool.inputSchema, :required)
         assert tool.inputSchema.properties == %{}
       end
+    end
+  end
+
+  describe "every tool says what it does" do
+    # The seven writes that can take away what is already in the vault. The
+    # other two, `create` and `append`, only add to it.
+    @destructive ~w(delete_note move_note rewrite_note delete_section replace_section update_frontmatter skill_write)
+
+    # Under the MCP spec's defaults a tool that declares nothing is destructive
+    # and open-world, so every hint is stated, on every tool.
+    test "every tool publishes a title and all four hints" do
+      for tool <- Tools.definitions() do
+        assert is_binary(tool.title) and tool.title != "", "#{tool.name} has no title"
+
+        assert Map.keys(tool.annotations) |> Enum.sort() ==
+                 [:destructiveHint, :idempotentHint, :openWorldHint, :readOnlyHint],
+               "#{tool.name} does not state all four hints"
+
+        assert Enum.all?(Map.values(tool.annotations), &is_boolean/1)
+      end
+    end
+
+    test "exactly the seven writes that can take something away are destructive" do
+      destructive =
+        for %{name: name, annotations: %{destructiveHint: true}} <- Tools.definitions(),
+            do: name
+
+      assert Enum.sort(destructive) == Enum.sort(@destructive)
+    end
+
+    test "the read tools are read-only; every write, and reload, is not" do
+      for %{name: name, annotations: annotations} <- Tools.definitions() do
+        expected = name not in @write_tools and name != "reload"
+        assert annotations.readOnlyHint == expected, "#{name}: readOnlyHint"
+      end
+    end
+
+    # reload stays callable with vault:read (#177), yet it moves the vault to
+    # whatever the remote holds: not read-only, and the one tool that reaches
+    # outside the vault's own state.
+    # docs/design.md, "No audit log": history reads what git already holds.
+    test "history is read-only, idempotent and closed-world, with a bounded limit" do
+      [history] = Enum.filter(Tools.definitions(), &(&1.name == "history"))
+
+      assert history.annotations == %{
+               readOnlyHint: true,
+               destructiveHint: false,
+               idempotentHint: true,
+               openWorldHint: false
+             }
+
+      refute Tools.write_tool?("history")
+      assert history.inputSchema.required == ["path"]
+      assert %{minimum: 1, maximum: 100} = history.inputSchema.properties.limit
+      assert history.inputSchema.properties.path.maxLength == 1_024
+    end
+
+    test "reload is neither read-only nor closed-world" do
+      [reload] = Enum.filter(Tools.definitions(), &(&1.name == "reload"))
+
+      assert reload.annotations.readOnlyHint == false
+      assert reload.annotations.openWorldHint == true
+      assert reload.annotations.destructiveHint == false
+      refute Tools.write_tool?("reload")
+
+      open_world =
+        for %{name: n, annotations: %{openWorldHint: true}} <- Tools.definitions(), do: n
+
+      assert open_world == ["reload"]
+    end
+  end
+
+  describe "definitions/1" do
+    test "without writes, no write tool is listed and every other tool is" do
+      names = for %{name: name} <- Tools.definitions(writes: false), do: name
+
+      assert Enum.filter(names, &(&1 in @write_tools)) == []
+      assert length(names) == length(Tools.definitions()) - length(@write_tools)
+      assert "reload" in names
+    end
+
+    test "with writes, it is the whole list" do
+      assert Tools.definitions(writes: true) == Tools.definitions()
     end
   end
 
@@ -168,6 +334,13 @@ defmodule Vigil.MCP.ToolsTest do
       end
     end
 
+    test "a list limit outside 1..100 is refused rather than clamped" do
+      for out_of_range <- [101, 0] do
+        assert {:error, message} = Tools.dispatch("list", %{"limit" => out_of_range}, @now, @key)
+        assert message =~ "Invalid parameter limit: expected an integer between 1 and 100"
+      end
+    end
+
     test "a depth outside 1..2 is refused before the Store is reached" do
       assert {:error, message} =
                Tools.dispatch("links", %{"id" => "bike/x.md", "depth" => 3}, @now, @key)
@@ -200,6 +373,43 @@ defmodule Vigil.MCP.ToolsTest do
                )
 
       assert message =~ "Invalid parameter direction"
+    end
+
+    test "a string over its maxLength is refused, naming the parameter" do
+      query = String.duplicate("a", 1_025)
+
+      assert {:error, "Invalid parameter query: expected at most 1024 characters"} =
+               Tools.dispatch("search", %{"query" => query}, @now, @key)
+    end
+
+    test "a note's content over its maxLength is refused before the writer is reached" do
+      args = %{
+        "path" => "bike/x.md",
+        "type" => "reference",
+        "content" => "# X\n" <> String.duplicate("a", 1_000_000),
+        "skill_key" => Vigil.SkillKey.current(@key)
+      }
+
+      assert {:error, message} = Tools.dispatch("create", args, @now, @key)
+      assert message == "Invalid parameter content: expected at most 1000000 characters"
+    end
+
+    # JSON Schema counts characters, and so does the bound: 1,024 umlauts are
+    # 2,048 bytes and still within it. The off-range limit is there so the
+    # call fails in validation, naming only what is wrong.
+    test "the bound counts characters, not bytes" do
+      query = String.duplicate("ü", 1_024)
+
+      assert {:error, message} =
+               Tools.dispatch("search", %{"query" => query, "limit" => 0}, @now, @key)
+
+      refute message =~ "query"
+      assert message =~ "limit"
+
+      assert {:error, message} =
+               Tools.dispatch("search", %{"query" => query <> "ü", "limit" => 0}, @now, @key)
+
+      assert message =~ "Invalid parameter query: expected at most 1024 characters"
     end
 
     test "every violation is reported in one message, not only the first" do
