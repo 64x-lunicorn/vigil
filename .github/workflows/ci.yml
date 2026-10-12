@@ -219,12 +219,15 @@ jobs:
       - name: Sobelow
         run: mix sobelow
 
-      # The same scan again as SARIF, for the Security tab. --exit none: the
-      # step above is the one that decides, and this one has to produce the
-      # file whether or not it found something.
+      # The same scan again as SARIF, for the Security tab. The step above is
+      # the one that decides, and this one has to produce the file whether or
+      # not it found something. Sobelow 0.16 dropped `--exit none` and the
+      # exit threshold comes from .sobelow-conf, so a finding exits non-zero
+      # here too: that passes as long as the report was written, and a scan
+      # that crashed before writing it still fails.
       - name: Sobelow (SARIF)
         if: ${{ !cancelled() }}
-        run: mix sobelow --format sarif --out sobelow.sarif --exit none
+        run: mix sobelow --format sarif --out sobelow.sarif || test -s sobelow.sarif
 
       # A pull request from a fork gets a read-only token whatever the job
       # asks for, so its upload could only fail; the gate above still ran.

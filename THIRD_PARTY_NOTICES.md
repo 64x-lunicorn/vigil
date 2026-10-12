@@ -68,7 +68,7 @@ the scope of the redistribution note below.
 | [erlex](https://hex.pm/packages/erlex/0.2.9) | 0.2.9 | Apache-2.0 |
 | [file_system](https://hex.pm/packages/file_system/1.1.1) | 1.1.1 | Apache-2.0 |
 | [mix_audit](https://hex.pm/packages/mix_audit/2.1.5) | 2.1.5 | BSD-3-Clause |
-| [sobelow](https://hex.pm/packages/sobelow/0.15.0) | 0.15.0 | Apache-2.0 |
+| [sobelow](https://hex.pm/packages/sobelow/0.16.0) | 0.16.0 | Apache-2.0 |
 
 Dependencies are fetched by Mix and are not vendored into the source
 repository. This table is an attribution inventory, not a replacement for
