@@ -219,18 +219,21 @@ jobs:
       - name: Sobelow
         run: mix sobelow
 
-      # The same scan again as SARIF, for the Security tab. --exit none: the
-      # step above is the one that decides, and this one has to produce the
-      # file whether or not it found something.
+      # The same scan again as SARIF, for the Security tab. The step above is
+      # the one that decides, and this one has to produce the file whether or
+      # not it found something. Sobelow 0.16 dropped `--exit none` and the
+      # exit threshold comes from .sobelow-conf, so a finding exits non-zero
+      # here too: that passes as long as the report was written, and a scan
+      # that crashed before writing it still fails.
       - name: Sobelow (SARIF)
         if: ${{ !cancelled() }}
-        run: mix sobelow --format sarif --out sobelow.sarif --exit none
+        run: mix sobelow --format sarif --out sobelow.sarif || test -s sobelow.sarif
 
       # A pull request from a fork gets a read-only token whatever the job
       # asks for, so its upload could only fail; the gate above still ran.
       - name: Upload to code scanning
         if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
           sarif_file: sobelow.sarif
           category: sobelow
@@ -329,7 +332,7 @@ jobs:
       # test job checks the Elixir against test/fixtures/slug_examples.json;
       # this checks the copy against the same table. Node is pinned like
       # every other tool here rather than taken from the runner image.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           package-manager-cache: false

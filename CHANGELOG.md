@@ -251,6 +251,9 @@ read it afterwards.
 
 ### Security
 
+- bandit 1.13.1, for CVE-2026-105659 (an HTTP/1 request-target authority
+  chose `conn.host` and `conn.port`) and CVE-2026-105660 (HTTP/2 send
+  deadlines reset by every `WINDOW_UPDATE`) in 1.12.5.
 - OAuth codes and tokens are stored as SHA-256 digests, never as themselves,
   and the rate limiter counts under the digest too.
 - The SkillKey is keyed with its own random secret, so a key handed to a

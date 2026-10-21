@@ -37,14 +37,14 @@ you redistribute a build.
 
 | Package | Locked version | Declared license |
 | :--- | :--- | :--- |
-| [bandit](https://hex.pm/packages/bandit/1.12.5) | 1.12.5 | MIT |
-| [hpax](https://hex.pm/packages/hpax/1.0.4) | 1.0.4 | Apache-2.0 |
+| [bandit](https://hex.pm/packages/bandit/1.13.1) | 1.13.1 | MIT |
+| [hpax](https://hex.pm/packages/hpax/1.1.0) | 1.1.0 | Apache-2.0 |
 | [jason](https://hex.pm/packages/jason/1.4.5) | 1.4.5 | Apache-2.0 |
 | [mime](https://hex.pm/packages/mime/2.0.7) | 2.0.7 | Apache-2.0 |
 | [plug](https://hex.pm/packages/plug/1.20.3) | 1.20.3 | Apache-2.0 |
 | [plug_crypto](https://hex.pm/packages/plug_crypto/2.2.0) | 2.2.0 | Apache-2.0 |
 | [telemetry](https://hex.pm/packages/telemetry/1.4.2) | 1.4.2 | Apache-2.0 |
-| [thousand_island](https://hex.pm/packages/thousand_island/1.5.0) | 1.5.0 | MIT |
+| [thousand_island](https://hex.pm/packages/thousand_island/1.6.0) | 1.6.0 | MIT |
 | [tz](https://hex.pm/packages/tz/0.28.4) | 0.28.4 | Apache-2.0 |
 | [websock](https://hex.pm/packages/websock/0.5.3) | 0.5.3 | MIT |
 | [yamerl](https://hex.pm/packages/yamerl/0.10.0) | 0.10.0 | BSD-2-Clause |
@@ -68,7 +68,7 @@ the scope of the redistribution note below.
 | [erlex](https://hex.pm/packages/erlex/0.2.9) | 0.2.9 | Apache-2.0 |
 | [file_system](https://hex.pm/packages/file_system/1.1.1) | 1.1.1 | Apache-2.0 |
 | [mix_audit](https://hex.pm/packages/mix_audit/2.1.5) | 2.1.5 | BSD-3-Clause |
-| [sobelow](https://hex.pm/packages/sobelow/0.15.0) | 0.15.0 | Apache-2.0 |
+| [sobelow](https://hex.pm/packages/sobelow/0.16.0) | 0.16.0 | Apache-2.0 |
 
 Dependencies are fetched by Mix and are not vendored into the source
 repository. This table is an attribution inventory, not a replacement for
