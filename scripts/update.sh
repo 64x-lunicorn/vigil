@@ -4,7 +4,7 @@
 # the systemd unit only with --update-unit.
 #
 # Usage: sudo ./scripts/update.sh [--to <ref>] [--skip-tests --force]
-#            [--update-unit] [--rollback]
+#            [--update-unit] [--rollback] [--allow-unprotected]
 #            [--dry-run] [--non-interactive] [--verbose] [--help]
 
 # shellcheck source=scripts/lib.sh
@@ -15,6 +15,7 @@ SKIP_TESTS=0
 FORCE=0
 UPDATE_UNIT=0
 ROLLBACK=0
+ALLOW_UNPROTECTED=0
 
 usage() {
   cat <<'EOF'
@@ -25,6 +26,8 @@ scripts/update.sh — switch code revision.
   --force              allows --skip-tests
   --update-unit         adopt a changed systemd unit
   --rollback            go back to the previous release without building
+  --allow-unprotected   skip the Cloudflare Access check in verify(), for a
+                        host whose /mcp is bypassed in Access or has no Access
   --dry-run             log changes with [DRY RUN] instead of applying them
   --non-interactive     run through without any prompts
   --verbose             extra debug output (set -x)
@@ -59,6 +62,10 @@ while [ $# -gt 0 ]; do
       ;;
     --rollback)
       ROLLBACK=1
+      shift
+      ;;
+    --allow-unprotected)
+      ALLOW_UNPROTECTED=1
       shift
       ;;
     --dry-run)
@@ -148,7 +155,13 @@ if [ "${VIGIL_UPDATE_TEST_STUBS:-0}" = "1" ]; then
   # property of the release that was switched to — which is how the test drives
   # both outcomes, and both attempts of the rollback path independently: a
   # release directory holding .verify-fails is one that does not come up.
-  verify() { [ ! -f "$(readlink -f "$CURRENT")/.verify-fails" ]; }
+  #
+  # It also records whether the Access check would have run, which is the
+  # one thing about verify() that update.sh's own flags decide.
+  verify() {
+    echo "${VIGIL_ALLOW_UNPROTECTED:-}" >"${PREFIX}/.verify-allow-unprotected"
+    [ ! -f "$(readlink -f "$CURRENT")/.verify-fails" ]
+  }
 fi
 
 ## ── Helper: load VIGIL_* variables for verify() from the env file ────────
@@ -167,7 +180,10 @@ source_env_for_verify() {
   # shellcheck disable=SC2034
   VIGIL_GIT_REMOTE="${VIGIL_GIT_REMOTE:-github}"
   # shellcheck disable=SC2034
-  VIGIL_ALLOW_UNPROTECTED=0
+  VIGIL_ALLOW_UNPROTECTED="$ALLOW_UNPROTECTED"
+  if [ "$ALLOW_UNPROTECTED" = "1" ]; then
+    warn "--allow-unprotected: Cloudflare Access check (verify check 2) skipped. vigil's own 401 is the only protection of /mcp."
+  fi
   # shellcheck disable=SC2034
   VIGIL_RW_TOKEN="$(vigil_seed_token "$VIGIL_RESOURCE" vault 900)"
   # shellcheck disable=SC2034

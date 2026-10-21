@@ -268,7 +268,7 @@ build_fake_mix
 
 ## ── 1. The happy path ────────────────────────────────────────────────────
 
-section "1/7  A healthy release is switched to"
+section "1/8  A healthy release is switched to"
 
 build_host
 RC="$(run_update --to "$NEW_SHA" --non-interactive)"
@@ -290,7 +290,7 @@ fi
 
 ## ── 2. A release that does not come up is rolled back ────────────────────
 
-section "2/7  A red verify() rolls back automatically"
+section "2/8  A red verify() rolls back automatically"
 
 build_host
 # The release update.sh is about to build is the one that will not come up.
@@ -308,7 +308,7 @@ assert_eq "the service was cycled twice, ending on the old release" \
 
 ## ── 3. When the rollback does not come up either ─────────────────────────
 
-section "3/7  A rollback that is also red is reported as such"
+section "3/8  A rollback that is also red is reported as such"
 
 build_host
 rm -rf "${PREFIX}/releases/v0"
@@ -329,7 +329,7 @@ fi
 
 ## ── 4. --rollback ────────────────────────────────────────────────────────
 
-section "4/7  --rollback returns to the recorded release"
+section "4/8  --rollback returns to the recorded release"
 
 # `.previous_release` is produced by a real update rather than written by hand,
 # so the round trip an operator actually performs is the one under test.
@@ -367,7 +367,7 @@ fi
 
 ## ── 5. Refusals leave the running service alone ──────────────────────────
 
-section "5/7  A red suite does not reach the switchover"
+section "5/8  A red suite does not reach the switchover"
 
 build_host
 FAKE_MIX_TEST_FAILS="${WORK}/tests-are-red"
@@ -421,7 +421,7 @@ assert_eq "the tables are byte-identical after the rollback" "$BEFORE" "$(state_
 
 ## ── 6. Cleanup keeps current, previous and one more ──────────────────────
 
-section "6/7  Cleanup keeps three releases and never the running one"
+section "6/8  Cleanup keeps three releases and never the running one"
 
 build_host
 for old in old1 old2 old3; do
@@ -471,7 +471,7 @@ fi
 
 ## ── 7. A prefix reached through a symlink ────────────────────────────────
 
-section "7/7  Cleanup keeps the running release behind a symlinked prefix"
+section "7/8  Cleanup keeps the running release behind a symlinked prefix"
 
 # The regression this pins: the cleanup compared `readlink -f` output against
 # the unresolved directory listing, so with any symlink in the prefix nothing
@@ -496,6 +496,30 @@ if [ -d "${PREFIX}/releases/v0" ]; then
   pass "the previous release survived the cleanup"
 else
   fail "the previous release survived the cleanup"
+fi
+
+## ── 8. --allow-unprotected ──────────────────────────────────────────────
+
+section "8/8  --allow-unprotected reaches verify(), and only when given"
+
+# A host whose /mcp is bypassed in Access, or that has no Access, answers the
+# anonymous GET of check 2 with vigil's own 401. Without a way to say so, every
+# update on such a host was rolled back.
+build_host
+RC="$(run_update --to "$NEW_SHA" --non-interactive)"
+assert_eq "exits 0 without the flag" "0" "$RC"
+assert_eq "the Access check runs without the flag" "0" \
+  "$(cat "${PREFIX}/.verify-allow-unprotected")"
+
+build_host
+RC="$(run_update --to "$NEW_SHA" --non-interactive --allow-unprotected)"
+assert_eq "exits 0 with the flag" "0" "$RC"
+assert_eq "the Access check is skipped with the flag" "1" \
+  "$(cat "${PREFIX}/.verify-allow-unprotected")"
+if grep -q "allow-unprotected: Cloudflare Access check (verify check 2) skipped" "${WORK}/out.log"; then
+  pass "the skip is announced"
+else
+  fail "the skip is announced"
 fi
 
 ## ── Summary ──────────────────────────────────────────────────────────────

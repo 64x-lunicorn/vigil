@@ -513,6 +513,12 @@ sudo ./scripts/update.sh --rollback      # back to the previous release
 If that fails it **rolls back automatically**, restarts, and checks again —
 exiting 3 with `Update rolled back to <old-sha>. The service is running again.`
 
+The acceptance check expects Cloudflare Access in front of `/mcp` and wants a
+403 from an anonymous request. A host whose `/mcp` is bypassed in Access for
+cloud connectors, or that has no Access at all, answers with vigil's own 401
+instead, and every update rolls back. Pass `--allow-unprotected` there, as
+`init.sh` takes it: the Access check is skipped, every other check still runs.
+
 - **Logs:** `journalctl -u vigil -f`
 - **Vault state:** `git -C /var/lib/vigil/vault log --oneline -5`
 - **Health check:** `sudo ./scripts/init.sh --check-only` — safe against a
