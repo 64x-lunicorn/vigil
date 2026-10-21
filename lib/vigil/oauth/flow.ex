@@ -148,10 +148,12 @@ defmodule Vigil.OAuth.Flow do
       not (is_nil(params["resource"]) or params["resource"] == settings.resource) ->
         {:error, {:redirect, redirect_uri, "invalid_target", state}}
 
-      params["scope"] not in [nil, "", OAuth.scope(), OAuth.read_scope()] ->
+      requested_scope(params["scope"]) == :error ->
         {:error, {:redirect, redirect_uri, "invalid_scope", state}}
 
       true ->
+        {:ok, scope} = requested_scope(params["scope"])
+
         {:ok,
          %{
            client: client,
@@ -159,8 +161,25 @@ defmodule Vigil.OAuth.Flow do
            code_challenge: params["code_challenge"],
            state: state,
            resource: settings.resource,
-           scope: params["scope"] || OAuth.scope()
+           scope: scope
          }}
+    end
+  end
+
+  # RFC 6749 §3.3: `scope` is a space-delimited list, and Claude Code asks for
+  # every scope the metadata publishes, `vault vault:read`. `vault` includes
+  # `vault:read`, so a list naming it is a request for `vault`; nothing asked
+  # for is a request for the default. A list naming any scope this server does
+  # not issue is refused whole rather than narrowed to the ones it knows.
+  defp requested_scope(nil), do: {:ok, OAuth.scope()}
+
+  defp requested_scope(scope) do
+    names = String.split(scope, " ", trim: true)
+
+    cond do
+      Enum.any?(names, &(&1 not in OAuth.scopes())) -> :error
+      names == [] or OAuth.scope() in names -> {:ok, OAuth.scope()}
+      true -> {:ok, OAuth.read_scope()}
     end
   end
 
