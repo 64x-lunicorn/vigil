@@ -285,6 +285,32 @@ defmodule Vigil.OAuth.FlowTest do
       assert {:ok, %{scope: "vault:read"}} =
                Flow.authorize_request(server(persistence), params)
     end
+
+    # RFC 6749 §3.3: `scope` is a space-delimited list. Claude Code asks for
+    # every scope the metadata publishes, `vault vault:read`.
+    test "a scope list naming vault is a request for vault", %{persistence: persistence} do
+      client_id = client!(persistence)
+
+      for scope <- ["vault vault:read", "vault:read vault", "vault  vault:read", "vault vault"] do
+        params = authorize_params(client_id, %{"scope" => scope})
+
+        assert {:ok, %{scope: "vault"}} = Flow.authorize_request(server(persistence), params)
+      end
+    end
+
+    test "a scope list naming only vault:read stays read-only", %{persistence: persistence} do
+      params = authorize_params(client!(persistence), %{"scope" => "vault:read vault:read"})
+
+      assert {:ok, %{scope: "vault:read"}} =
+               Flow.authorize_request(server(persistence), params)
+    end
+
+    test "a scope list naming an unknown scope is refused whole", %{persistence: persistence} do
+      params = authorize_params(client!(persistence), %{"scope" => "vault vault:admin"})
+
+      assert {:error, {:redirect, _, "invalid_scope", _}} =
+               Flow.authorize_request(server(persistence), params)
+    end
   end
 
   describe "grant/3 — authorization_code" do

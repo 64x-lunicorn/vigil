@@ -223,6 +223,10 @@ read it afterwards.
 
 ### Fixed
 
+- An authorization request whose `scope` lists more than one scope, as
+  Claude Code's `vault vault:read` does, is granted `vault` when the list
+  names it and `vault:read` otherwise; it was refused with `invalid_scope`,
+  which left Claude Code no way to sign in.
 - A failed commit leaves the working tree and the index as they were, for
   every write, including `delete_note` and `move_note`.
 - `init.sh` and `init_vault.sh` take a vault that is a git worktree (`.git` a
