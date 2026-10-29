@@ -274,6 +274,38 @@ read it afterwards.
 - `skill_write` cannot replace the conventions skill every session reads.
 - CI runs Sobelow as a security scan, and verifies every tool it downloads.
 
+## [0.2.1] - 2026-10-21
+
+A patch release on 0.2.0, cut from its tag on the `release/0.2.1` branch: it
+carries none of the work above and none of its OAuth state migration. The
+scope fix and the bandit bump are on `main` as well; `update.sh
+--allow-unprotected` is not, since the setting #230 asks for replaces it there.
+
+### Upgrading
+
+- On a host whose `/mcp` is bypassed in Access for cloud connectors, or that
+  has no Access, check out `v0.2.1` in the code checkout first, so `update.sh`
+  runs with the new flag, then `sudo ./scripts/update.sh --to v0.2.1
+  --allow-unprotected`. Without the flag the update rolls back, as every one
+  on such a host did before.
+
+### Added
+
+- `update.sh --allow-unprotected` skips the Cloudflare Access check in
+  `verify()`, as `init.sh` takes it; every other check still runs. The
+  setting that names the expected front (#230) is to replace it.
+
+### Fixed
+
+- An authorization request whose `scope` lists more than one scope, as
+  Claude Code's `vault vault:read` does, is granted `vault` when the list
+  names it and `vault:read` otherwise; it was refused with `invalid_scope`,
+  which left Claude Code no way to sign in.
+
+### Security
+
+- bandit 1.13.1, for CVE-2026-105659 and CVE-2026-105660 in 1.12.5.
+
 ## [0.2.0] - 2026-09-29
 
 Write-path hardening, deployment fixes and cleanup.
@@ -377,6 +409,7 @@ Git-backed Markdown vault into long-term memory for an assistant.
   host behind a Cloudflare tunnel, with automatic rollback.
 
 [Unreleased]: https://github.com/64x-lunicorn/vigil/compare/v0.2.0...HEAD
+[0.2.1]: https://github.com/64x-lunicorn/vigil/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/64x-lunicorn/vigil/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/64x-lunicorn/vigil/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/64x-lunicorn/vigil/releases/tag/v0.1.0
